@@ -133,8 +133,16 @@ const STORED_STATUS = {
 /** The compact badge label for each status. Read on a phone; keep them short. */
 const CALC_STATUS_LABEL = {
   [CALC_STATUS.NOT_CALCULATED]: "Not calculated",
-  [CALC_STATUS.ATTENDANCE_PENDING]: "Attendance pending",
-  [CALC_STATUS.CALCULATED]: "Calculated",
+  /* Same words as Payrun Initialization's card. The rule is unchanged. */
+  [CALC_STATUS.ATTENDANCE_PENDING]: "Attendance needs action",
+  /*
+   * CALCULATED IS "CALCULATED, NOT READY": a current calculation on accepted
+   * attendance with at least one approval blocker still standing (see
+   * `deriveStatus`). An employee with none is READY_FOR_APPROVAL instead, so
+   * a bare "Calculated" read as if it were the stage before Ready - which is
+   * why the screen's 223 and 220 looked unexplained.
+   */
+  [CALC_STATUS.CALCULATED]: "Calculated, not ready",
   [CALC_STATUS.RECALCULATION_REQUIRED]: "Recalculation required",
   [CALC_STATUS.READY_FOR_APPROVAL]: "Ready for approval",
   [CALC_STATUS.APPROVED_LOCKED]: "Approved & Locked",
@@ -151,6 +159,36 @@ const CALC_STATUS_LABEL = {
  * came through overnight - those are three different conversations with three
  * different people.
  */
+/**
+ * THE CALCULATION & REVIEW SUMMARY CARDS - each one a filter, and each one's
+ * membership decided by ONE function (`utils/payrun_calculation.js#inCard`)
+ * that both the counts and the filter use, so a card's number and the rows it
+ * opens cannot disagree.
+ *
+ *   ALL                      every initialized employee in scope
+ *   ATTENDANCE_NEEDS_ACTION  not locked, and the attendance the month is (or
+ *                            would be) priced from is neither settled nor
+ *                            closed for payroll - `attendance_needs_action`.
+ *                            OVERLAPS the payroll status: a Recalculation
+ *                            Required or Not Calculated employee can be here
+ *   CALCULATED               a CURRENT calculation on accepted attendance, not
+ *                            yet approved: CALCULATED + READY_FOR_APPROVAL
+ *   CALCULATED_NOT_READY     status CALCULATED: in Calculated, NOT approvable,
+ *                            and every row carries its blockers
+ *   RECALCULATION_REQUIRED / READY_FOR_APPROVAL / APPROVED_LOCKED / PUBLISHED
+ *                            exactly that status
+ */
+const CALC_CARD = {
+  ALL: "ALL",
+  ATTENDANCE_NEEDS_ACTION: "ATTENDANCE_NEEDS_ACTION",
+  CALCULATED: "CALCULATED",
+  CALCULATED_NOT_READY: "CALCULATED_NOT_READY",
+  RECALCULATION_REQUIRED: "RECALCULATION_REQUIRED",
+  READY_FOR_APPROVAL: "READY_FOR_APPROVAL",
+  APPROVED_LOCKED: "APPROVED_LOCKED",
+  PUBLISHED: "PUBLISHED",
+};
+
 const RECALC_REASON = {
   SALARY_CHANGED: "SALARY_CHANGED",
   ATTENDANCE_CHANGED: "ATTENDANCE_CHANGED",
@@ -382,6 +420,7 @@ module.exports = {
   CALC_STATUS,
   STORED_STATUS,
   CALC_STATUS_LABEL,
+  CALC_CARD,
   RECALC_REASON,
   RECALC_REASON_LABEL,
   RECALC_REASON_MESSAGE,

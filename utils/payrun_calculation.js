@@ -9,6 +9,7 @@ const {
   CALCULATION_VERSION,
   CALC_STATUS,
   CALC_STATUS_LABEL,
+  CALC_CARD,
   RECALC_REASON,
   RECALC_REASON_LABEL,
   RECALC_REASON_MESSAGE,
@@ -1192,6 +1193,7 @@ function deriveStatus(input = {}) {
        * off would hide what they signed.
        */
       attendance_pending: false,
+      attendance_needs_action: false,
       calculable: false,
       /*
        * PUBLISH IS THE RELEASE GATE: approved & locked is internally final,
@@ -1225,6 +1227,11 @@ function deriveStatus(input = {}) {
        * is the more informative thing to say about this employee.
        */
       attendance_pending: false,
+      /*
+       * NOT CALCULATED, BUT THE ATTENDANCE IT WOULD BE PRICED FROM STILL
+       * NEEDS SOMEBODY - the same answer the gate below gives.
+       */
+      attendance_needs_action: !attendanceAccepted,
       calculable,
       payslip_eligible: false,
     };
@@ -1265,6 +1272,7 @@ function deriveStatus(input = {}) {
        * their zeroes as results would be the same lie with a warning over it.
        */
       attendance_pending: !attendanceAccepted,
+      attendance_needs_action: !attendanceAccepted,
       calculable,
       payslip_eligible: false,
     };
@@ -1351,9 +1359,36 @@ function deriveStatus(input = {}) {
      * it has to be visible before anybody approves it.
      */
     attendance_pending: !attendanceAccepted,
+    attendance_needs_action: !attendanceAccepted,
     calculable,
     payslip_eligible: false,
   };
+}
+
+/**
+ * IS THIS ROW IN THIS SUMMARY CARD? The one membership rule for every card -
+ * the counts below and the month read's `card` filter both call it. See
+ * `constants/payrun_calculation.js#CALC_CARD`. Unknown card: everybody.
+ */
+function inCard(row = {}, card = CALC_CARD.ALL) {
+  switch (card) {
+    case CALC_CARD.ATTENDANCE_NEEDS_ACTION:
+      return row.attendance_needs_action === true;
+    case CALC_CARD.CALCULATED:
+      return row.status === CALC_STATUS.CALCULATED || row.status === CALC_STATUS.READY_FOR_APPROVAL;
+    case CALC_CARD.CALCULATED_NOT_READY:
+      return row.status === CALC_STATUS.CALCULATED;
+    case CALC_CARD.RECALCULATION_REQUIRED:
+      return row.status === CALC_STATUS.RECALCULATION_REQUIRED;
+    case CALC_CARD.READY_FOR_APPROVAL:
+      return row.status === CALC_STATUS.READY_FOR_APPROVAL;
+    case CALC_CARD.APPROVED_LOCKED:
+      return row.status === CALC_STATUS.APPROVED_LOCKED;
+    case CALC_CARD.PUBLISHED:
+      return row.status === CALC_STATUS.PUBLISHED;
+    default:
+      return true;
+  }
 }
 
 /**
@@ -1410,6 +1445,11 @@ function summarize(rows = []) {
     else if (row.status === CALC_STATUS.APPROVED_LOCKED) summary.approved_locked += 1;
     else if (row.status === CALC_STATUS.PUBLISHED) summary.published += 1;
     if (row.payslip_eligible === true) summary.payslip_eligible += 1;
+  });
+  /* EVERY CARD'S COUNT, by the same rule its filter uses. */
+  summary.cards = {};
+  Object.values(CALC_CARD).forEach((card) => {
+    summary.cards[card] = rows.filter((row) => inCard(row, card)).length;
   });
   return summary;
 }
@@ -1470,6 +1510,7 @@ module.exports = {
   calculationHash,
   deriveStatus,
   summarize,
+  inCard,
   recalcReasonOf,
   blockerOf,
   SOURCE_KEYS,

@@ -1481,7 +1481,7 @@ describe("attendance that is not settled is shown as pending, not as zero", () =
 
     const row = await rowOf(1952);
     assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
-    assert.equal(row.status_label, "Attendance pending");
+    assert.equal(row.status_label, "Attendance needs action");
     assert.equal(row.attendance_pending, true);
     // The exact reason, not a generic "Attendance incomplete".
     assert.ok(row.blockers.some((b) => b.code === "ATTENDANCE_MONTH_NOT_CALCULATED"));
@@ -3031,5 +3031,183 @@ describe("Payslip Publish", () => {
       calculation.getPayslip({ ...MONTH, employee_id: 1, store_ids: [42] }),
       (e) => e.name === "NotFoundError"
     );
+  });
+});
+
+/* ============================================== the summary cards (filters) */
+
+/**
+ * CALCULATION & REVIEW CARDS. Every card's count and the rows its filter
+ * returns come from ONE membership rule (`utils/payrun_calculation.js#inCard`),
+ * and "Calculated, not ready" is the backend's own CALCULATED status - a
+ * current calculation on accepted attendance with an approval blocker - not a
+ * subtraction done in a browser.
+ */
+describe("Calculation & Review summary cards", () => {
+  const CARDS = [
+    "ALL", "ATTENDANCE_NEEDS_ACTION", "CALCULATED", "CALCULATED_NOT_READY",
+    "RECALCULATION_REQUIRED", "READY_FOR_APPROVAL", "APPROVED_LOCKED", "PUBLISHED",
+  ];
+  const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
+  const card = (c, extra = {}) => calculation.getMonth({ ...MONTH, card: c, ...extra });
+
+  it("REGRESSION: Calculated 223 vs Ready for Approval 220 - the 3 are exactly Calculated, not ready, with their reasons", async () => {
+    for (let id = 1; id <= 223; id += 1) world.add(id);
+    // 221: nobody has confirmed the Adjustments stage for them.
+    world.states.delete(221);
+    // 222: PF applies but no UAN or PF number.
+    world.employees.get(222).uan = null;
+    world.employees.get(222).pf_number = null;
+    // 223: both.
+    world.states.delete(223);
+    world.employees.get(223).uan = null;
+    world.employees.get(223).pf_number = null;
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+
+    const all = await monthView();
+    assert.equal(all.summary.cards.CALCULATED, 223);
+    assert.equal(all.summary.cards.READY_FOR_APPROVAL, 220);
+    assert.equal(all.summary.cards.CALCULATED_NOT_READY, 3);
+    // The same numbers the screen used to show, from the existing fields.
+    assert.equal(all.summary.calculated + all.summary.ready_for_approval, 223);
+
+    const notReady = await card("CALCULATED_NOT_READY");
+    assert.deepEqual(ids(notReady), [221, 222, 223]);
+    const reasons = Object.fromEntries(notReady.rows.map((r) => [r.employee_id, codesOf(r).sort()]));
+    assert.deepEqual(reasons, {
+      221: ["ADJUSTMENT_PENDING_CONFIRMATION"],
+      222: ["STATUTORY_SETUP_INCOMPLETE"],
+      223: ["ADJUSTMENT_PENDING_CONFIRMATION", "STATUTORY_SETUP_INCOMPLETE"],
+    });
+    notReady.rows.forEach((r) => {
+      assert.equal(r.status, CALC_STATUS.CALCULATED);
+      assert.equal(r.status_label, "Calculated, not ready");
+      r.blockers.forEach((b) => assert.ok(b.label && b.message, "every reason is labelled"));
+    });
+    // Ready is exactly the other 220, and none of them carries a blocker.
+    const ready = await card("READY_FOR_APPROVAL");
+    assert.equal(ready.rows.length, 220);
+    assert.ok(ready.rows.every((r) => r.blockers.length === 0));
+  });
+
+  it("every card's count equals the rows its filter returns", async () => {
+    world.add(1).add(2).add(3).add(4).add(5).add(6);
+    world.states.delete(2); // calculated, not ready
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    world.salaries.get(3).monthly_gross = 30000; // recalculation required
+    world.salaries.get(3).salary_id = 9003;
+    await calculation.approve({ ...MONTH, employee_ids: [4, 5], actor: ACTOR });
+    await calculation.lifecycle({ ...MONTH, action: "PUBLISH", employee_ids: [5], mode: "INDIVIDUAL", actor: ACTOR });
+
+    const all = await monthView();
+    for (const c of CARDS) {
+      assert.equal((await card(c)).rows.length, all.summary.cards[c], `${c} count and rows disagree`);
+    }
+    assert.deepEqual(ids(await card("CALCULATED")), [1, 2, 6]);
+    assert.deepEqual(ids(await card("CALCULATED_NOT_READY")), [2]);
+    assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [1, 6]);
+    assert.deepEqual(ids(await card("RECALCULATION_REQUIRED")), [3]);
+    assert.deepEqual(ids(await card("APPROVED_LOCKED")), [4]);
+    assert.deepEqual(ids(await card("PUBLISHED")), [5]);
+    assert.deepEqual(ids(await card("ALL")), [1, 2, 3, 4, 5, 6]);
+  });
+
+  it("Recalculation Required is its own state - a stale calculation is NOT counted as Calculated", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    world.salaries.get(1).monthly_gross = 30000;
+    world.salaries.get(1).salary_id = 9001;
+    const view = await monthView();
+    assert.equal(view.rows[0].status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal(view.summary.cards.RECALCULATION_REQUIRED, 1);
+    assert.equal(view.summary.cards.CALCULATED, 0);
+    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 0);
+    assert.ok(codesOf(view.rows[0]).includes("RECALCULATION_REQUIRED"));
+  });
+
+  it("Attendance Needs Action overlaps the payroll state: a Recalculation Required employee on unsettled attendance is in both", async () => {
+    world.add(1).add(2);
+    world.attendance.get(1).is_final = 0;
+    await calculateUnderPreviousRule(1); // calculated on unsettled attendance
+    await calculation.calculate({ ...MONTH, employee_ids: [2], actor: ACTOR });
+    world.salaries.get(1).monthly_gross = 30000;
+    world.salaries.get(1).salary_id = 9001;
+
+    const view = await monthView();
+    const row1 = view.rows.find((r) => r.employee_id === 1);
+    assert.equal(row1.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal(row1.attendance_needs_action, true);
+    assert.deepEqual(ids(await card("ATTENDANCE_NEEDS_ACTION")), [1]);
+    assert.deepEqual(ids(await card("RECALCULATION_REQUIRED")), [1]);
+    // The settled employee is in neither.
+    assert.equal(view.rows.find((r) => r.employee_id === 2).attendance_needs_action, false);
+  });
+
+  it("Attendance Needs Action includes the ATTENDANCE_PENDING status, labelled in the new words", async () => {
+    world.add(1);
+    world.attendance.get(1).is_final = 0;
+    await calculateUnderPreviousRule(1);
+    const row = (await card("ATTENDANCE_NEEDS_ACTION")).rows[0];
+    assert.equal(row.status, CALC_STATUS.ATTENDANCE_PENDING);
+    assert.equal(row.status_label, "Attendance needs action");
+  });
+
+  it("search works together with the selected card; the summary stays the month's", async () => {
+    world.add(1).add(2).add(3);
+    world.employees.get(2).employee_name = "Priya One";
+    world.employees.get(3).employee_name = "Priya Two";
+    world.states.delete(1);
+    world.states.delete(2);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    const view = await card("CALCULATED_NOT_READY", { search: "priya" });
+    assert.deepEqual(ids(view), [2]);
+    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 2, "search never changes the counts");
+  });
+
+  it("location scope changes the counts and the rows together", async () => {
+    world.add(1).add(2, { employee: { store_id: 2 } }).add(3, { employee: { store_id: 2 } });
+    world.states.delete(3);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    const one = await calculation.getMonth({ ...MONTH, store_ids: [1] });
+    const two = await calculation.getMonth({ ...MONTH, store_ids: [2], card: "CALCULATED_NOT_READY" });
+    assert.deepEqual([one.summary.cards.ALL, one.summary.cards.READY_FOR_APPROVAL, one.summary.cards.CALCULATED_NOT_READY], [1, 1, 0]);
+    assert.deepEqual([two.summary.cards.ALL, two.summary.cards.READY_FOR_APPROVAL, two.summary.cards.CALCULATED_NOT_READY], [2, 1, 1]);
+    assert.deepEqual(ids(two), [3]);
+  });
+
+  it("filtering by any card writes nothing", async () => {
+    world.add(1).add(2);
+    world.states.delete(2);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    const before = JSON.stringify([...world.calculations.values()]);
+    const auditBefore = world.audit.length;
+    for (const c of CARDS) await card(c, { search: "Employee" });
+    assert.equal(JSON.stringify([...world.calculations.values()]), before);
+    assert.equal(world.audit.length, auditBefore);
+  });
+
+  it("Approve All Ready approves exactly the backend-ready population, whatever card was being viewed", async () => {
+    world.add(1).add(2).add(3);
+    world.states.delete(3); // calculated, not ready
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await card("CALCULATED_NOT_READY"); // looking at the not-ready card changes nothing
+    const out = await calculation.approve({ ...MONTH, all_ready: true, actor: ACTOR });
+    assert.equal(out.approved_count, 2);
+    const view = await monthView();
+    assert.equal(view.rows.find((r) => r.employee_id === 3).status, CALC_STATUS.CALCULATED);
+    // ...and naming the not-ready employee explicitly is still refused.
+    const refused = await calculation.approve({ ...MONTH, employee_ids: [3], actor: ACTOR });
+    assert.equal(refused.approved_count, 0);
+  });
+
+  it("Publish All publishes only Approved & Locked employees", async () => {
+    world.add(1).add(2).add(3);
+    world.states.delete(3);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.publishAllApproved({ ...MONTH, actor: ACTOR });
+    assert.deepEqual(ids(await card("PUBLISHED")), [1]);
+    assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [2]);
+    assert.deepEqual(ids(await card("CALCULATED_NOT_READY")), [3]);
   });
 });

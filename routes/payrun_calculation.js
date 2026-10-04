@@ -5,6 +5,7 @@ const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const {
   CALC_STATUS,
+  CALC_CARD,
   MAX_BULK_EMPLOYEES,
   RESET_REASON,
   RESET_MODE,
@@ -163,6 +164,8 @@ class PayrunCalculationRoutes {
             ...this._month(),
             store_ids: Joi.any().optional(),
             status: Joi.string().valid(...Object.values(CALC_STATUS)).optional(),
+            /* A summary card; the server decides who is in it. */
+            card: Joi.string().valid(...Object.values(CALC_CARD)).optional(),
             search: Joi.string().trim().max(120).allow("").optional(),
           });
           if (isValid.error !== null) throw isValid.error;
@@ -177,6 +180,7 @@ class PayrunCalculationRoutes {
               month: Number(req.query.month),
               store_ids: scoped.store_ids,
               status: req.query.status,
+              card: req.query.card,
               search: req.query.search,
             })),
           });

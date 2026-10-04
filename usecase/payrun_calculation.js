@@ -2,6 +2,7 @@ const { PERIOD_STATUS } = require("../constants/payrun");
 const { ADJUSTMENT_STATE, COMPONENT_KEYS } = require("../constants/payrun_adjustments");
 const {
   CALC_STATUS,
+  CALC_CARD,
   CALCULATION_VERSION,
   ROW_RESULT,
   STORED_STATUS,
@@ -513,6 +514,13 @@ class PayrunCalculationUsecase {
          */
         attendance_pending: verdict.attendance_pending,
         /*
+         * WHETHER THE ATTENDANCE THIS MONTH IS (OR WOULD BE) PRICED FROM
+         * STILL NEEDS SOMEBODY - the same gate as above, extended to the
+         * not-calculated. The Attendance Needs Action card reads it, so it
+         * overlaps the payroll status rather than replacing it.
+         */
+        attendance_needs_action: verdict.attendance_needs_action === true,
+        /*
          * CLOSED IS NOT THE SAME AS SETTLED, and the row says which. An
          * employee whose attendance was accepted with known gaps must be
          * distinguishable from one whose month genuinely finished - the
@@ -585,7 +593,7 @@ class PayrunCalculationUsecase {
    * still need calculating" and "how many are ready to approve", which are the
    * two things somebody will act on.
    */
-  async getMonth({ year, month, store_ids = null, status = null, search = null }) {
+  async getMonth({ year, month, store_ids = null, status = null, card = null, search = null }) {
     const context = await this._assemble({ year, month, store_ids });
     const presented = context.population.map((employee) => this._present(context, employee));
     const rows = presented.map((p) => p.row);
@@ -596,9 +604,15 @@ class PayrunCalculationUsecase {
         ? String(status).toUpperCase()
         : null;
     const text = search === null || search === undefined ? "" : String(search).trim().toLowerCase();
+    /* A SUMMARY CARD - decided by the same `inCard` the card's count uses. */
+    const wantedCard =
+      card && Object.values(CALC_CARD).includes(String(card).toUpperCase())
+        ? String(card).toUpperCase()
+        : null;
 
     const filtered = rows.filter((row) => {
       if (wantedStatus && row.status !== wantedStatus) return false;
+      if (wantedCard && !calc.inCard(row, wantedCard)) return false;
       if (text !== "") {
         const haystack = `${row.employee_name || ""} ${row.employee_id}`.toLowerCase();
         if (!haystack.includes(text)) return false;

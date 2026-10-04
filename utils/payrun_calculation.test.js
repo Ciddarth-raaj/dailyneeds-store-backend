@@ -643,7 +643,8 @@ describe("the month's counts", () => {
       // Not calculated, but Calculate would reject it: not eligible.
       { status: CALC_STATUS.NOT_CALCULATED, payslip_eligible: false, calculable: false, attendance_processable: true },
     ]);
-    assert.deepEqual(summary, {
+    const { cards, ...counts } = summary;
+    assert.deepEqual(counts, {
       initialized: 8,
       not_calculated: 2,
       attendance_pending: 1,
@@ -657,6 +658,18 @@ describe("the month's counts", () => {
       not_calculated_blocked: 1,
       recalculation_ready: 1,
       attendance_processable: 1,
+    });
+    // The cards, by the one membership rule. Calculated = Calculated, not
+    // ready + Ready for Approval; nothing here carries the attendance flag.
+    assert.deepEqual(cards, {
+      ALL: 8,
+      ATTENDANCE_NEEDS_ACTION: 0,
+      CALCULATED: 2,
+      CALCULATED_NOT_READY: 1,
+      RECALCULATION_REQUIRED: 1,
+      READY_FOR_APPROVAL: 1,
+      APPROVED_LOCKED: 1,
+      PUBLISHED: 1,
     });
   });
 });
@@ -1030,5 +1043,28 @@ describe("Net Pay is rounded to the whole rupee in the engine", () => {
   it("is engine version 2, which is not a source marker - approved months do not go stale", () => {
     assert.equal(run().calculation_version, 2);
     assert.ok(!calc.SOURCE_KEYS.includes("calculation_version"));
+  });
+});
+
+describe("the month read's card filter", () => {
+  it("is validated against CALC_CARD and passed to the usecase", () => {
+    const route = require("fs").readFileSync(require("path").join(__dirname, "..", "routes/payrun_calculation.js"), "utf8");
+    assert.match(route, /card: Joi\.string\(\)\.valid\(\.\.\.Object\.values\(CALC_CARD\)\)\.optional\(\)/);
+    assert.match(route, /card: req\.query\.card/);
+  });
+
+  it("inCard: Calculated is CALCULATED + READY_FOR_APPROVAL; Calculated, not ready is CALCULATED only", () => {
+    const { CALC_CARD } = require("../constants/payrun_calculation");
+    const row = (status, extra = {}) => ({ status, ...extra });
+    assert.equal(calc.inCard(row(CALC_STATUS.CALCULATED), CALC_CARD.CALCULATED), true);
+    assert.equal(calc.inCard(row(CALC_STATUS.READY_FOR_APPROVAL), CALC_CARD.CALCULATED), true);
+    assert.equal(calc.inCard(row(CALC_STATUS.RECALCULATION_REQUIRED), CALC_CARD.CALCULATED), false);
+    assert.equal(calc.inCard(row(CALC_STATUS.ATTENDANCE_PENDING), CALC_CARD.CALCULATED), false);
+    assert.equal(calc.inCard(row(CALC_STATUS.APPROVED_LOCKED), CALC_CARD.CALCULATED), false);
+    assert.equal(calc.inCard(row(CALC_STATUS.READY_FOR_APPROVAL), CALC_CARD.CALCULATED_NOT_READY), false);
+    assert.equal(
+      calc.inCard(row(CALC_STATUS.RECALCULATION_REQUIRED, { attendance_needs_action: true }), CALC_CARD.ATTENDANCE_NEEDS_ACTION),
+      true
+    );
   });
 });
