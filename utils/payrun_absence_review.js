@@ -28,7 +28,8 @@
  *                                   which of its dates were working days. It is
  *                                   NOT assumed that every date is one.
  *   ATTENDANCE_NOT_REQUIRED         skipped - exempt, not expected to attend
- *   NOT_JOINED                      skipped - not employed yet (never stored)
+ *   NOT_JOINED / EXITED             skipped - outside the employment period
+ *                                   (never stored; listed for completeness)
  *   rest day                        skipped - the shift's own weekly schedule,
  *                                   as snapshotted by the engine for that date
  *                                   (`is_working_day = 0`), says it is not a
@@ -67,7 +68,7 @@ const NOT_EVALUABLE_REASON = {
 };
 
 /** Stored verdicts for a date the employee was not expected to attend. */
-const NOT_EXPECTED = new Set(["ATTENDANCE_NOT_REQUIRED", "NOT_JOINED"]);
+const NOT_EXPECTED = new Set(["ATTENDANCE_NOT_REQUIRED", "NOT_JOINED", "EXITED"]);
 const NO_SHIFT = new Set(["NO_SHIFT_FOR_DATE", "NO_SCHEDULE_ROW"]);
 
 /** `true` / `false` / `null` from whatever the JSON column handed back. */
