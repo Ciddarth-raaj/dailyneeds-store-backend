@@ -17,7 +17,7 @@ const {
   summarize,
   attendanceStatusOf,
 } = require("../utils/payrun_eligibility");
-const { absenceReview } = require("../utils/payrun_absence_review");
+const { absenceReview, reviewWindow } = require("../utils/payrun_absence_review");
 const { latestReportableDate } = require("../utils/attendance_missing");
 const { istToday } = require("../utils/istDate");
 
@@ -456,14 +456,17 @@ class PayrunUsecase {
    *     warning exists to find exits nobody has recorded; somebody whose exit
    *     is already recorded is not one.
    *
-   * WHAT COUNTS IS THE ENGINE'S STORED DAYS, walked by the pure rule in
-   * `utils/payrun_absence_review.js`, up to the last COMPLETED attendance date
-   * - the same "yesterday in IST" the Missing Attendance report uses.
+   * WHAT COUNTS IS THE ENGINE'S STORED DAYS AS OF TODAY, walked by the pure
+   * rule in `utils/payrun_absence_review.js` back from the last COMPLETED
+   * attendance date - the same "yesterday in IST" the Missing Attendance
+   * report uses - ACROSS month boundaries. The selected month decides who is
+   * reviewed; it does not decide which dates are read.
    *
    * IT READS AND NEVER WRITES.
    */
   async _absenceReview(period, rows) {
-    const { from, to } = monthWindow(period.year, period.month);
+    const latest_completed = latestReportableDate(this.today());
+    const window = reviewWindow(latest_completed);
     const notExited = rows.filter((row) => row.exited_in_month !== true);
 
     const exits = await this.repo.listExitRecords(notExited.map((row) => row.employee_id));
@@ -489,11 +492,13 @@ class PayrunUsecase {
       }
     });
 
-    const days = await this.repo.listAttendanceDays(
-      candidates.map((row) => row.employee_id),
-      from,
-      to
-    );
+    const days = window
+      ? await this.repo.listAttendanceDays(
+          candidates.map((row) => row.employee_id),
+          window.from,
+          window.to
+        )
+      : [];
     const daysOf = new Map();
     (days || []).forEach((day) => {
       const id = Number(day.employee_id);
@@ -501,14 +506,11 @@ class PayrunUsecase {
       daysOf.get(id).push(day);
     });
 
-    const latest_completed = latestReportableDate(this.today());
     const verdicts = new Map();
     candidates.forEach((row) => {
       verdicts.set(
         row.employee_id,
         absenceReview(daysOf.get(Number(row.employee_id)) || [], {
-          from,
-          to,
           joined_on: row.date_of_joining,
           latest_completed,
         })
@@ -522,7 +524,7 @@ class PayrunUsecase {
         return v.three_day_absent && !v.last_present_date;
       })
       .map((row) => row.employee_id);
-    const earlier = await this.repo.listLastPresentDates(missingLastPresent, to);
+    const earlier = window ? await this.repo.listLastPresentDates(missingLastPresent, window.to) : [];
     const earlierOf = new Map((earlier || []).map((r) => [Number(r.employee_id), r.last_present_date]));
 
     candidates.forEach((row) => {

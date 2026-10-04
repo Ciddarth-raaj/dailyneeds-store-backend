@@ -1536,9 +1536,11 @@ describe("the month summary's two dimensions", () => {
  * infers an absence from a missing calculation, never assumes a Present/Absent
  * Only date is a working day, and changes nothing about anybody.
  *
- * "Today" is fixed at 2026-09-15, so every August date is completed.
+ * "Today" is fixed at 2026-09-01, so the latest completed attendance date -
+ * where the walk starts - is 2026-08-31. The rule reads the latest days AS OF
+ * TODAY; the selected month only decides who is reviewed.
  */
-const TODAY = () => "2026-09-15";
+const TODAY = () => "2026-09-01";
 const build = (repo) => buildUsecase(repo, null, { today: TODAY });
 
 /** One stored engine day: a settled ABSENT working day unless told otherwise. */
@@ -1708,15 +1710,17 @@ describe("the 3-Day Absent review", () => {
     assert.equal(review(await read(presentPa)).evaluation, "NOT_ABSENT");
   });
 
-  it("a month that has not finished is not evaluable - its last dates are not completed", async () => {
+  it("today itself is never read - the walk starts at yesterday (IST)", async () => {
+    // Today is 31 Aug: 31 Aug is not complete, so it is ignored even though it
+    // is stored; the walk reads 30, 29 and then the worked 28th.
     const usecase = buildUsecase(
       fakeRepo({ days: lastWeek({ "2026-08-29": day("x"), "2026-08-30": day("x"), "2026-08-31": day("x") }) }),
       null,
       { today: () => "2026-08-31" }
     );
     const r = review(await read(usecase));
-    assert.equal(r.three_day_absent, false);
-    assert.equal(r.not_evaluable_reason, "DATE_NOT_COMPLETED");
+    assert.equal(r.evaluation, "NOT_ABSENT");
+    assert.equal(r.last_present_date, "2026-08-28");
   });
 
   it("the walk never goes before the joining date", async () => {
@@ -1846,10 +1850,11 @@ describe("the 3-Day Absent review", () => {
     assert.equal(repo.dayReads.length, 0);
   });
 
-  it("reads only the selected month's days, for the scoped population", async () => {
+  it("reads the latest completed days as of TODAY, for the scoped population - not the selected month", async () => {
     const repo = fakeRepo({ population: [employee({ store_id: 3 })] });
-    await read(build(repo));
-    assert.deepEqual(repo.dayReads[0], { employeeIds: [42], from: "2026-08-01", to: "2026-08-31" });
+    await read(buildUsecase(repo, null, { today: () => "2026-10-04" }));
+    // August is selected; the read is the 31 days ending yesterday.
+    assert.deepEqual(repo.dayReads[0], { employeeIds: [42], from: "2026-09-03", to: "2026-10-03" });
   });
 });
 
@@ -1916,14 +1921,15 @@ describe("every top card's count and filter agree", () => {
     assert.deepEqual([two.summary.exited, two.summary.three_day_absent, two.summary.blocked], [0, 1, 1]);
   });
 
-  it("the month changes the counts - EXITED is dated to the selected month", async () => {
+  it("the month changes the population and EXITED; 3-Day Absent reads the latest days either way", async () => {
     const usecase = build(twoLocations());
     const july = await usecase.getMonth({ year: YEAR, month: 7, include_absence_review: true });
     const aug = await usecase.getMonth({ year: YEAR, month: MONTH, include_absence_review: true });
     assert.equal(july.summary.exited, 0, "somebody who left in August had not left by July's end");
     assert.equal(aug.summary.exited, 1);
-    // July has no stored days in the fake: uncalculated, so nobody is flagged.
-    assert.equal(july.summary.three_day_absent, 0);
+    // The warning is about NOW: the same latest days, whichever month's
+    // population the employee is reviewed in.
+    assert.equal(july.summary.three_day_absent, 1);
     assert.equal(aug.summary.three_day_absent, 1);
   });
 
@@ -1935,5 +1941,133 @@ describe("every top card's count and filter agree", () => {
     assert.ok(needs.rows.some((r) => r.employee_id === 44));
     // And the block reason is the REAL one - attendance is never a blocker.
     assert.deepEqual(reasonCodes(blocked.rows[0]), [BLOCK_REASON.STATUTORY_SETUP_INCOMPLETE]);
+  });
+});
+
+/* =========================== as of TODAY, across the payroll month boundary */
+
+/**
+ * SEPTEMBER PAYROLL, REVIEWED ON 4 OCTOBER. The population is September's; the
+ * warning reads the latest completed days - 3 Oct backwards - across the
+ * boundary. This is the production case that prompted the correction.
+ */
+describe("3-Day Absent reads the latest days as of today, across the month boundary", () => {
+  const SEPT = 9;
+  const build4Oct = (repo) => buildUsecase(repo, null, { today: () => "2026-10-04" });
+  const readSept = (usecase, extra = {}) =>
+    usecase.getMonth({ year: YEAR, month: SEPT, include_absence_review: true, ...extra });
+  const devi = (over = {}) => employee({ employee_id: 1759, employee_name: "Devi G", ...over });
+  const d = (date, over = {}) => day(date, { employee_id: 1759, ...over });
+  const p = (date, over = {}) => worked(date, { employee_id: 1759, ...over });
+  const reviewOf = (view) => view.rows.find((r) => r.employee_id === 1759).absence_review;
+  const sepTail = [p("2026-09-27"), d("2026-09-28"), d("2026-09-29"), d("2026-09-30")];
+
+  it("REGRESSION (Devi G, 1759): Sep 28-30 absent, Oct 1-2 absent, Oct 3 PRESENT -> NOT in 3-Day Absent", async () => {
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [...sepTail, d("2026-10-01"), d("2026-10-02"), p("2026-10-03")] })
+    );
+    const view = await readSept(usecase);
+    const r = reviewOf(view);
+    assert.equal(r.three_day_absent, false);
+    assert.equal(r.evaluation, "NOT_ABSENT");
+    assert.equal(r.last_present_date, "2026-10-03");
+    assert.equal(view.summary.three_day_absent, 0);
+    assert.deepEqual((await readSept(usecase, { absence: "THREE_DAY_ABSENT" })).rows, []);
+  });
+
+  it("the latest 3 working days all absent across the boundary -> included, with the October dates", async () => {
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [...sepTail, d("2026-10-01"), d("2026-10-02"), d("2026-10-03")] })
+    );
+    const view = await readSept(usecase);
+    const r = reviewOf(view);
+    assert.equal(r.three_day_absent, true);
+    assert.deepEqual(r.absent_dates, ["2026-10-01", "2026-10-02", "2026-10-03"]);
+    assert.equal(r.last_present_date, "2026-09-27");
+    assert.equal(view.summary.three_day_absent, 1);
+  });
+
+  it("straddling the boundary: Sep 30, Oct 1, Oct 2 absent with Oct 3 a rest day -> included", async () => {
+    const usecase = build4Oct(
+      fakeRepo({
+        population: [devi()],
+        days: [...sepTail, d("2026-10-01"), d("2026-10-02"), d("2026-10-03", { is_working_day: "false" })],
+      })
+    );
+    const r = reviewOf(await readSept(usecase));
+    assert.equal(r.three_day_absent, true);
+    assert.deepEqual(r.absent_dates, ["2026-09-30", "2026-10-01", "2026-10-02"]);
+  });
+
+  it("the latest day present -> excluded", async () => {
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [d("2026-09-30"), d("2026-10-01"), d("2026-10-02"), p("2026-10-03")] })
+    );
+    assert.equal(reviewOf(await readSept(usecase)).three_day_absent, false);
+  });
+
+  it("the middle day present -> excluded", async () => {
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [d("2026-09-30"), d("2026-10-01"), p("2026-10-02"), d("2026-10-03")] })
+    );
+    const r = reviewOf(await readSept(usecase));
+    assert.equal(r.three_day_absent, false);
+    assert.equal(r.last_present_date, "2026-10-02");
+  });
+
+  it("a weekly off between the latest days is skipped", async () => {
+    const usecase = build4Oct(
+      fakeRepo({
+        population: [devi()],
+        days: [p("2026-09-30"), d("2026-10-01"), d("2026-10-02", { is_working_day: "false" }), d("2026-10-03"), d("2026-09-29")],
+      })
+    );
+    const r = reviewOf(await readSept(usecase));
+    // 3 Oct absent, 2 Oct rest (skipped), 1 Oct absent, 30 Sep present -> only two.
+    assert.equal(r.three_day_absent, false);
+    assert.equal(r.evaluation, "NOT_ABSENT");
+
+    const three = build4Oct(
+      fakeRepo({
+        population: [devi()],
+        days: [d("2026-09-30"), d("2026-10-01"), d("2026-10-02", { is_working_day: "false" }), d("2026-10-03")],
+      })
+    );
+    const r3 = reviewOf(await readSept(three));
+    assert.equal(r3.three_day_absent, true);
+    assert.deepEqual(r3.absent_dates, ["2026-09-30", "2026-10-01", "2026-10-03"]);
+  });
+
+  it("the latest applicable day uncalculated -> not evaluable; September's absences do not count instead", async () => {
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [...sepTail, d("2026-10-01"), d("2026-10-02")] })
+    );
+    const r = reviewOf(await readSept(usecase));
+    assert.equal(r.three_day_absent, false);
+    assert.equal(r.evaluation, "NOT_EVALUABLE");
+    assert.equal(r.not_evaluable_reason, "NOT_CALCULATED");
+    assert.equal(r.not_evaluable_date, "2026-10-03");
+  });
+
+  it("an existing exit record -> excluded, even with three October absences", async () => {
+    const usecase = build4Oct(
+      fakeRepo({
+        population: [devi({ resignation_date: "2026-10-05" })],
+        days: [d("2026-10-01"), d("2026-10-02"), d("2026-10-03")],
+      })
+    );
+    const view = await readSept(usecase);
+    const r = reviewOf(view);
+    assert.equal(r.evaluation, "EXIT_RECORDED");
+    assert.equal(r.three_day_absent, false);
+    assert.equal(rowFor(view, 1759).exited_in_month, false, "the Exited card is unchanged");
+  });
+
+  it("the selected month decides only the population - a September-only search finds no stale September answer", async () => {
+    // Absent on the last three days of September, present every day since.
+    const usecase = build4Oct(
+      fakeRepo({ population: [devi()], days: [...sepTail, p("2026-10-01"), p("2026-10-02"), p("2026-10-03")] })
+    );
+    assert.equal(reviewOf(await readSept(usecase)).three_day_absent, false);
   });
 });

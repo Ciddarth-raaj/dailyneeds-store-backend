@@ -5,9 +5,19 @@
  */
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { absenceReview, workingFlag, EVALUATION, NOT_EVALUABLE_REASON: R } = require("./payrun_absence_review");
+const {
+  absenceReview,
+  reviewWindow,
+  workingFlag,
+  LOOKBACK_DAYS,
+  EVALUATION,
+  NOT_EVALUABLE_REASON: R,
+} = require("./payrun_absence_review");
 
-const SEP = { from: "2026-09-01", to: "2026-09-30", latest_completed: "2026-10-03" };
+/* A review whose latest completed date is 30 Sep (made on 1 Oct). */
+const SEP = { latest_completed: "2026-09-30" };
+/* A review made on 4 Oct: the walk starts at 3 Oct. */
+const OCT4 = { latest_completed: "2026-10-03" };
 const day = (date, over = {}) => ({
   attendance_date: date,
   status: "ABSENT",
@@ -87,9 +97,70 @@ test("only genuinely non-applicable dates are skipped", () => {
   assert.equal(unknown.not_evaluable_reason, R.WORKING_DAY_UNKNOWN);
 });
 
-test("dates not yet completed are not evaluable", () => {
-  const r = absenceReview([day("2026-09-28"), day("2026-09-29"), day("2026-09-30")], { ...SEP, latest_completed: "2026-09-29" });
-  assert.equal(r.not_evaluable_reason, R.DATE_NOT_COMPLETED);
+test("dates after the latest completed date are never read", () => {
+  // Latest completed 29 Sep: the stored 30 Sep row is ignored, 29/28 absent, 27 worked.
+  const r = absenceReview(
+    [worked("2026-09-27"), day("2026-09-28"), day("2026-09-29"), day("2026-09-30")],
+    { latest_completed: "2026-09-29" }
+  );
+  assert.equal(r.evaluation, EVALUATION.NOT_ABSENT);
+  assert.equal(r.last_present_date, "2026-09-27");
+});
+
+/* --------------------------------------------- as of today, across months */
+
+test("REGRESSION (Devi G): Sep 28-30 absent, Oct 1-2 absent, Oct 3 present, reviewed 4 Oct -> false", () => {
+  const r = absenceReview(
+    [day("2026-09-28"), day("2026-09-29"), day("2026-09-30"), day("2026-10-01"), day("2026-10-02"), worked("2026-10-03")],
+    OCT4
+  );
+  assert.equal(r.three_day_absent, false);
+  assert.equal(r.evaluation, EVALUATION.NOT_ABSENT);
+  assert.equal(r.last_present_date, "2026-10-03");
+});
+
+test("Oct 1-3 absent, reviewed 4 Oct -> true, with the October dates", () => {
+  const r = absenceReview([worked("2026-09-30"), day("2026-10-01"), day("2026-10-02"), day("2026-10-03")], OCT4);
+  assert.equal(r.three_day_absent, true);
+  assert.deepEqual(r.absent_dates, ["2026-10-01", "2026-10-02", "2026-10-03"]);
+});
+
+test("across the boundary: Sep 30 + Oct 1 + Oct 3 absent, Oct 2 weekly off -> true", () => {
+  const r = absenceReview(
+    [day("2026-09-30"), day("2026-10-01"), day("2026-10-02", { is_working_day: "false" }), day("2026-10-03")],
+    OCT4
+  );
+  assert.deepEqual(r.absent_dates, ["2026-09-30", "2026-10-01", "2026-10-03"]);
+});
+
+test("latest day present / middle day present -> false", () => {
+  assert.equal(absenceReview([day("2026-10-01"), day("2026-10-02"), worked("2026-10-03")], OCT4).three_day_absent, false);
+  assert.equal(
+    absenceReview([day("2026-09-30"), day("2026-10-01"), worked("2026-10-02"), day("2026-10-03")], OCT4).three_day_absent,
+    false
+  );
+});
+
+test("latest applicable day uncalculated -> not evaluable, never stepping back into September", () => {
+  const r = absenceReview([day("2026-09-28"), day("2026-09-29"), day("2026-09-30"), day("2026-10-01"), day("2026-10-02")], OCT4);
+  assert.equal(r.not_evaluable_reason, R.NOT_CALCULATED);
+  assert.equal(r.not_evaluable_date, "2026-10-03");
+});
+
+test("the read window is the LOOKBACK_DAYS ending at the latest completed date", () => {
+  assert.equal(LOOKBACK_DAYS, 31);
+  assert.deepEqual(reviewWindow("2026-10-03"), { from: "2026-09-03", to: "2026-10-03" });
+  assert.equal(reviewWindow(null), null);
+  assert.equal(absenceReview([], {}).not_evaluable_reason, R.NO_REVIEW_DATE);
+});
+
+test("a whole window of rest days is not evaluable rather than reaching further back", () => {
+  const rests = [];
+  for (let i = 0; i < LOOKBACK_DAYS; i += 1) {
+    const d = new Date(Date.UTC(2026, 9, 3 - i)).toISOString().slice(0, 10);
+    rests.push(day(d, { is_working_day: "false" }));
+  }
+  assert.equal(absenceReview(rests, OCT4).not_evaluable_reason, R.LOOKBACK_EXHAUSTED);
 });
 
 test("fewer than three applicable days since joining is not absent", () => {
