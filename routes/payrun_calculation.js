@@ -700,6 +700,59 @@ class PayrunCalculationRoutes {
       }
     );
 
+    /**
+     * EPFO 2026 WAGE CEILING REVISION - THE AFFECTED-EMPLOYEE REPORT.
+     * READ-ONLY: three SELECTs and a pure classification. It shows salary and
+     * statutory membership, so it takes the month screen's three keys AND
+     * `view_employee_sensitive`.
+     */
+    this.router.get(
+      "/payrun/calculation/pf-ceiling-impact",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, { store_ids: Joi.any().optional() });
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.query.store_ids);
+          if (!scoped) return;
+          res.json({ code: 200, ...(await this.usecase.getPfCeilingImpact({ store_ids: scoped.store_ids })) });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * THE EPFO ECR FOR A MONTH, built from the STORED, APPROVED calculations
+     * only. READ-ONLY. The text carries full UANs, so it takes
+     * `view_employee_sensitive` as well. There is no unapproved preview.
+     */
+    this.router.get(
+      "/payrun/calculation/ecr",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.VIEW_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(req.query, {
+            ...this._month(),
+            store_ids: Joi.any().optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.query.store_ids);
+          if (!scoped) return;
+          res.json({
+            code: 200,
+            ...(await this.usecase.getEcr({
+              year: Number(req.query.year),
+              month: Number(req.query.month),
+              store_ids: scoped.store_ids,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
     /** Who calculated, recalculated and approved one employee's month, and when. */
     this.router.get(
       "/payrun/calculation/history",

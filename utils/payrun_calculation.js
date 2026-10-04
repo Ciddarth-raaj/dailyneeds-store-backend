@@ -2,6 +2,7 @@ const crypto = require("crypto");
 
 const CONFIG = require("../config/statutory");
 const engine = require("../utils/salary_engine");
+const pfPeriod = require("./pf_period");
 const { computeContract } = require("./payrun_adjustments");
 const { COMPONENT } = require("../constants/payrun_adjustments");
 const { ADJUSTMENT_STATE } = require("../constants/payrun_adjustments");
@@ -294,6 +295,17 @@ function sourceMarkers({
     esi_applicable: statutory.esi_applicable ?? null,
 
     /**
+     * THE REST OF THE STATUTORY SETUP THE PF / EPS RULES READ - the Form 11
+     * facts, the dates, the UAN, the coverage start and the contribution
+     * basis - as ONE marker. HR completing or correcting any of them after a
+     * month was calculated makes that calculation RECALCULATION_REQUIRED
+     * (reason "Statutory setup changed") rather than leaving a figure on the
+     * screen that was decided on the old answer. An approved month is locked
+     * and is never marked.
+     */
+    statutory_setup_marker: statutorySetupMarker(statutory),
+
+    /**
      * THE ESI CONTRIBUTION-PERIOD BASIS IS A SOURCE IN ITS OWN RIGHT.
      *
      * Coverage is decided from the APPROVED SALARY IN FORCE AT THE PERIOD'S
@@ -309,6 +321,26 @@ function sourceMarkers({
     esi_coverage_entry_salary_id: coverage.entry_salary_id ?? null,
     esi_coverage_entry_gross: coverage.entry_gross ?? null,
   };
+}
+
+/** The statutory setup facts as one stable md5 (see `sourceMarkers`). */
+function statutorySetupMarker(statutory = {}) {
+  const v = (x) => (x === null || x === undefined ? "" : String(x).trim());
+  return crypto
+    .createHash("md5")
+    .update(
+      [
+        v(statutory.previous_pf_member),
+        v(statutory.previous_eps_member),
+        v(statutory.dob),
+        v(statutory.date_of_joining),
+        v(statutory.uan).replace(/\s+/g, ""),
+        v(statutory.pf_number),
+        v(statutory.pf_applicable_from),
+        v(statutory.pf_contribution_basis),
+      ].join("|")
+    )
+    .digest("hex");
 }
 
 /** An md5 over the markers, in a fixed key order. The order is the contract. */
@@ -330,6 +362,7 @@ const SOURCE_KEYS = [
   "ot_groups",
   "pf_applicable",
   "esi_applicable",
+  "statutory_setup_marker",
   "esi_coverage_entry_date",
   "esi_coverage_entry_salary_id",
   "esi_coverage_entry_gross",
@@ -451,7 +484,7 @@ function detectChanges(stored = {}, current = {}) {
   ) {
     reasons.push(RECALC_REASON.EFFECTIVE_NRM_CHANGED);
   }
-  if (differs("pf_applicable") || differs("esi_applicable")) {
+  if (differs("pf_applicable") || differs("esi_applicable") || differs("statutory_setup_marker")) {
     reasons.push(RECALC_REASON.STATUTORY_CONTEXT_CHANGED);
   }
   /*
@@ -564,6 +597,14 @@ function computeCalculation(input = {}, config = CONFIG) {
      * date the engine names. See the ESI section below.
      */
     coverage_entry_salary = null,
+    /**
+     * THE MONTH'S ATTENDANCE DAY ROWS (`attendance_date`,
+     * `attendance_day_count`), used ONLY to place loss-of-pay days in the PF
+     * period they fell in when an effective-dated ceiling change splits the
+     * month - see `utils/pf_period.js`. Absent, every employed day counts as
+     * paid. They never change Salary Days or the earned Basic.
+     */
+    day_rows = null,
   } = input;
 
   const errors = [];
@@ -759,10 +800,56 @@ function computeCalculation(input = {}, config = CONFIG) {
     employer_pf_total: 0,
     employer_epf: 0,
     employer_eps: 0,
+    edli: 0,
+    pf_admin_charge: 0,
+    eps_wage: 0,
+    edli_wage: 0,
+    ceiling_version: null,
+    split: false,
+    segments: [],
     unresolved: [],
   };
+  /*
+   * THE EFFECTIVE-DATED CEILING. `utils/pf_period.js` cuts the month at any
+   * ceiling change inside it (01-16 / 17-30 September 2026) and charges each
+   * period through `calculatePf` with its own ceiling. An ordinary month is
+   * one period and is charged exactly as before. The month comes from `as_of`,
+   * which is always the month end here.
+   */
+  const asOfDate = engine.toDateOnly(as_of);
+
+  /*
+   * NCP DAYS for the ECR: the month's base days the employee was not paid
+   * for. Base days and Salary Days are the attendance engine's; this is their
+   * difference and nothing more. The same figure anchors where a split
+   * month's loss of pay is placed.
+   */
+  const ncpDays =
+    attendance.base_days === undefined || attendance.base_days === null
+      ? null
+      : Math.max(0, intOr0(attendance.base_days) - salaryDays);
   if (earnedBasicPaise === null) {
     errors.push("No Basic is recorded on this month's snapshot, so PF cannot be calculated");
+  } else if (asOfDate) {
+    pf = pfPeriod.calculatePfForMonth(
+      {
+        year: Number(asOfDate.slice(0, 4)),
+        month: Number(asOfDate.slice(5, 7)),
+        monthly_basic: snapshot.basic,
+        earned_basic: toRupees(earnedBasicPaise),
+        pf_applicable: snapshot.pf_applicable,
+        pf_applicable_from: statutory.pf_applicable_from ?? null,
+        pf_contribution_basis: statutory.pf_contribution_basis ?? null,
+        dob: statutory.dob ?? null,
+        date_of_joining: snapshot.date_of_joining ?? statutory.date_of_joining ?? null,
+        resignation_date: snapshot.resignation_date ?? null,
+        previous_eps_member: statutory.previous_eps_member ?? null,
+        day_rows: Array.isArray(day_rows) ? day_rows : null,
+        month_lop_days: ncpDays,
+      },
+      config
+    );
+    (pf.unresolved || []).forEach((u) => unresolved.push({ ...u, stage: "pf" }));
   } else {
     pf = engine.calculatePf(
       {
@@ -771,12 +858,15 @@ function computeCalculation(input = {}, config = CONFIG) {
         dob: statutory.dob ?? null,
         date_of_joining: snapshot.date_of_joining ?? statutory.date_of_joining ?? null,
         previous_eps_member: statutory.previous_eps_member ?? null,
+        eps_test_wage: snapshot.basic,
         as_of,
       },
       config
     );
     (pf.unresolved || []).forEach((u) => unresolved.push({ ...u, stage: "pf" }));
   }
+
+
 
   /* ------------------------------------------------------------ THE ESI */
 
@@ -1040,6 +1130,31 @@ function computeCalculation(input = {}, config = CONFIG) {
     employer_pf_total: pf.employer_pf_total,
     employer_epf: pf.employer_epf,
     employer_eps: pf.employer_eps,
+    eps_wage: pf.eps_wage ?? null,
+    edli_wage: pf.edli_wage ?? null,
+    edli: pf.edli ?? null,
+    pf_admin_charge: pf.pf_admin_charge ?? null,
+    ncp_days: ncpDays,
+    /**
+     * THE AUDIT TRAIL OF THE STATUTORY RULE. Which ceiling version(s) charged
+     * this month, the statutory configuration version, and - for a month cut
+     * by a ceiling change - each period's wages and contributions. A
+     * September 2026 figure has to be able to show its two halves.
+     */
+    pf_ceiling_version: pf.ceiling_version ?? null,
+    /**
+     * WHICH CASE THIS MONTH WAS - each period's status (excluded / EPF only /
+     * EPF + EPS) and the contribution basis, e.g.
+     * `FAQ_B:EPF_ONLY>EPF_EPS|ACTUAL_WAGE` for September 2026 - and the
+     * month's EXACT (paisa) statutory figures before the once-only rounding.
+     */
+    pf_scenario: pf.pf_scenario ?? null,
+    pf_contribution_basis: pf.pf_contribution_basis ?? null,
+    pf_exact: pf.exact ?? null,
+    pf_total_remittance: pf.total_remittance ?? null,
+    statutory_config_version: config.configVersion || null,
+    pf_split: pf.split === true,
+    pf_segments: pf.segments || [],
 
     esi_status: esi.status,
     esi_wage: esi.esi_wage,
@@ -1128,12 +1243,18 @@ function deriveStatus(input = {}) {
      * older summary-flag rule below applies unchanged.
      */
     readiness = null,
+    /**
+     * THE STATUTORY SETUP HOLD (`payroll_readiness.statutoryHoldReason`), for
+     * the case where no readiness was evaluated. With readiness it is already
+     * one of readiness's reasons and is not added twice.
+     */
+    statutory_hold = null,
   } = input;
 
   const blockers = [];
   const recalcReasons = [];
-  const readinessReasons = readiness ? readiness.reasons || [] : [];
-  const calculable = readiness ? readiness.calculable === true : true;
+  const readinessReasons = readiness ? readiness.reasons || [] : statutory_hold ? [statutory_hold] : [];
+  const calculable = readiness ? readiness.calculable === true : !statutory_hold;
 
   /*
    * IS THE ATTENDANCE THIS MONTH WAS PRICED FROM SETTLED?
@@ -1441,6 +1562,10 @@ function calculationHash(result = {}) {
     result.employee_pf,
     result.employer_epf,
     result.employer_eps,
+    result.eps_wage === undefined ? null : result.eps_wage,
+    result.edli_wage === undefined ? null : result.edli_wage,
+    result.pf_ceiling_version === undefined ? null : result.pf_ceiling_version,
+    result.pf_scenario === undefined ? null : result.pf_scenario,
     result.esi_wage,
     result.employee_esi,
     result.employer_esi,
@@ -1474,5 +1599,6 @@ module.exports = {
   blockerOf,
   SOURCE_KEYS,
   ATTENDANCE_SOURCE_KEYS,
+  statutorySetupMarker,
   attendanceSourceChanges,
 };

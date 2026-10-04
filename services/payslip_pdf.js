@@ -156,7 +156,7 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
   <tr class="tot"><td>Total Earnings</td><td class="num">${esc(inr(s.earnings && s.earnings.total))}</td><td>Total Deductions</td><td class="num">${esc(inr(s.deductions && s.deductions.total))}</td></tr>
 </table>
 ${st.pf_applicable || st.esi_applicable ? `<h3>Statutory</h3><table class="kv wide">
-  ${st.pf_applicable ? `${row("UAN", st.uan_masked)}${row("PF Number", st.pf_number_masked)}${row("PF Wage", st.pf_wage ? inr(st.pf_wage) : null)}` : ""}
+  ${st.pf_applicable ? `${row("UAN", st.uan_masked)}${row("PF Number", st.pf_number_masked)}${row("PF Wage", st.pf_wage ? inr(st.pf_wage) : null)}${(Array.isArray(st.pf_periods) ? st.pf_periods : []).map((p) => row(`PF ${p.from ? p.from.slice(8, 10) : ""}-${p.to ? p.to.slice(8, 10) : ""} (ceiling ${inr(p.monthly_wage_ceiling)})`, `Wage ${inr(p.pf_wage)} / PF ${inr(p.employee_pf)}`)).join("")}` : ""}
   ${st.esi_applicable ? `${row("ESI Number", st.esi_number_masked)}${row("ESI Wage", st.esi_wage ? inr(st.esi_wage) : null)}` : ""}
   ${row("PF Establishment Code", st.pf_applicable && s.company ? s.company.pf_establishment_code : null)}
   ${row("ESI Establishment Code", st.esi_applicable && s.company ? s.company.esi_establishment_code : null)}

@@ -374,8 +374,18 @@ function resolveEpsEligibility(context = {}, config = CONFIG) {
    * is only an unresolved answer for the people it can actually change, which
    * in this structure means a Basic above the ceiling.
    */
+  /*
+   * THE CEILING THIS TEST IS AGAINST is the one in force for the period being
+   * charged - `eps_eligibility_ceiling` when the caller has resolved it from
+   * the effective-dated schedule (September 2026 has two) - and the configured
+   * pension ceiling otherwise.
+   */
   const pfWage = toPaise(context.pf_wage);
-  const epsCeiling = toPaise(cfg.epsWageCeiling);
+  const epsCeiling = toPaise(
+    context.eps_eligibility_ceiling !== undefined && context.eps_eligibility_ceiling !== null
+      ? context.eps_eligibility_ceiling
+      : cfg.epsWageCeiling
+  );
   if (pfWage !== null && pfWage <= epsCeiling) {
     return { eligible: true, reason: "Pension wage is at or below the EPS ceiling" };
   }
@@ -405,6 +415,68 @@ function resolveEpsEligibility(context = {}, config = CONFIG) {
   return {
     eligible: false,
     reason: "Not an EPS member before the cutoff, above the EPS wage ceiling",
+  };
+}
+
+/**
+ * THE CEILING ROW IN FORCE ON A DATE, from `config.pf.ceilingSchedule`.
+ *
+ * Null when there is no schedule or no date - the caller then falls back to
+ * the flat configured ceilings, which is what every record written before the
+ * schedule existed was calculated on.
+ */
+function pfCeilingOn(dateValue, config = CONFIG) {
+  const schedule = config && config.pf && Array.isArray(config.pf.ceilingSchedule) ? config.pf.ceilingSchedule : null;
+  const on = toDateOnly(dateValue);
+  if (!schedule || schedule.length === 0 || !on) return null;
+  let found = null;
+  schedule.forEach((row) => {
+    if (toDateOnly(row.effectiveFrom) <= on) found = row;
+  });
+  return found;
+}
+
+/**
+ * THE CEILINGS ONE PF CALCULATION IS CHARGED ON.
+ *
+ *   1. `context.ceilings`, when the caller has already resolved them - the
+ *      September 2026 split passes each period's own, prorated, ceilings.
+ *   2. the schedule row in force on `as_of` / `effective_from`.
+ *   3. the flat configured ceilings.
+ *
+ * `epsEligibilityCeiling` is the MONTHLY pension ceiling the membership test
+ * compares a monthly wage against; it is never prorated.
+ */
+function resolvePfCeilings(context = {}, config = CONFIG) {
+  const cfg = config.pf;
+  if (context.ceilings && typeof context.ceilings === "object") {
+    const c = context.ceilings;
+    return {
+      wageCeiling: Number(c.wageCeiling),
+      epsWageCeiling: Number(c.epsWageCeiling),
+      edliWageCeiling: Number(c.edliWageCeiling),
+      epsEligibilityCeiling: Number(
+        c.epsEligibilityCeiling !== undefined ? c.epsEligibilityCeiling : c.epsWageCeiling
+      ),
+      version: c.version || null,
+    };
+  }
+  const row = pfCeilingOn(context.as_of || context.effective_from, config);
+  if (row) {
+    return {
+      wageCeiling: row.wageCeiling,
+      epsWageCeiling: row.epsWageCeiling,
+      edliWageCeiling: row.edliWageCeiling,
+      epsEligibilityCeiling: row.epsWageCeiling,
+      version: row.version,
+    };
+  }
+  return {
+    wageCeiling: cfg.wageCeiling,
+    epsWageCeiling: cfg.epsWageCeiling,
+    edliWageCeiling: cfg.edliWageCeiling,
+    epsEligibilityCeiling: cfg.epsWageCeiling,
+    version: null,
   };
 }
 
@@ -453,7 +525,8 @@ function calculatePf(context = {}, config = CONFIG) {
     };
   }
 
-  const ceiling = toPaise(cfg.wageCeiling);
+  const ceilings = resolvePfCeilings(context, config);
+  const ceiling = toPaise(ceilings.wageCeiling);
   const pfWage = cfg.applyCeilingToWage ? Math.min(basic, ceiling) : basic;
 
   const employeePf = roundContribution(percentOf(pfWage, cfg.employeeRatePercent), config.rounding.contributionRounding);
@@ -462,18 +535,45 @@ function calculatePf(context = {}, config = CONFIG) {
     config.rounding.contributionRounding
   );
 
-  const edliWage = Math.min(pfWage, toPaise(cfg.edliWageCeiling));
+  const edliWage =
+    ceilings.edliWageCeiling === Infinity ? pfWage : Math.min(pfWage, toPaise(ceilings.edliWageCeiling));
   const edli = roundContribution(percentOf(edliWage, cfg.edliRatePercent), config.rounding.contributionRounding);
   const admin = roundContribution(percentOf(pfWage, cfg.adminRatePercent), config.rounding.contributionRounding);
 
-  const eps = resolveEpsEligibility({ ...context, pf_wage: toRupees(pfWage) }, config);
+  /*
+   * EPS ELIGIBILITY IS TESTED ON THE WAGE THE EMPLOYEE IS PAID AT, NOT ON THE
+   * CAPPED CONTRIBUTION WAGE. The capped wage can never exceed the ceiling, so
+   * testing it made "a post-cutoff joiner above the ceiling who was never an
+   * EPS member" unreachable and put every such employee into EPS. The test
+   * wage is the caller's `eps_test_wage` (a payrun passes the month's
+   * contractual Basic, so a loss-of-pay month does not change membership) and
+   * otherwise the uncapped Basic this function was given.
+   */
+  const epsTestWage =
+    cfg.epsEligibilityOnUncappedWage === false
+      ? pfWage // LEGACY: the capped wage - reproduces the pre-correction behaviour exactly
+      : context.eps_test_wage !== undefined && context.eps_test_wage !== null && toPaise(context.eps_test_wage) !== null
+      ? toPaise(context.eps_test_wage)
+      : basic;
+  const eps = resolveEpsEligibility(
+    {
+      ...context,
+      pf_wage: toRupees(epsTestWage),
+      eps_eligibility_ceiling:
+        context.eps_eligibility_ceiling !== undefined && context.eps_eligibility_ceiling !== null
+          ? context.eps_eligibility_ceiling
+          : ceilings.epsEligibilityCeiling,
+    },
+    config
+  );
 
   const unresolved = [];
   let employerEps = null;
   let employerEpf = null;
+  let epsWage = null;
 
   if (eps.eligible === true) {
-    const epsWage = Math.min(pfWage, toPaise(cfg.epsWageCeiling));
+    epsWage = Math.min(pfWage, toPaise(ceilings.epsWageCeiling));
     employerEps = roundContribution(percentOf(epsWage, cfg.epsRatePercent), config.rounding.contributionRounding);
     /*
      * EPF IS THE REMAINDER, NEVER ITS OWN PERCENTAGE. Computing it as
@@ -483,6 +583,7 @@ function calculatePf(context = {}, config = CONFIG) {
      */
     employerEpf = employerTotal - employerEps;
   } else if (eps.eligible === false) {
+    epsWage = 0;
     employerEps = 0;
     employerEpf = employerTotal;
   } else {
@@ -499,6 +600,10 @@ function calculatePf(context = {}, config = CONFIG) {
     employer_eps: toRupees(employerEps),
     edli: toRupees(edli),
     pf_admin_charge: toRupees(admin),
+    eps_wage: toRupees(epsWage),
+    edli_wage: toRupees(edliWage),
+    wage_ceiling: ceilings.wageCeiling,
+    ceiling_version: ceilings.version,
     eps_eligibility: eps,
   };
 }
@@ -1314,6 +1419,13 @@ function calculateSalary(input = {}, config = CONFIG) {
       pf_admin_rate_percent: config.pf.adminRatePercent,
       pf_wage_ceiling: config.pf.wageCeiling,
       pf_eps_wage_ceiling: config.pf.epsWageCeiling,
+      /*
+       * THE CEILING ROW THIS RECORD WAS ACTUALLY CHARGED ON, from the
+       * effective-dated schedule. The two flat ceilings above are the
+       * pre-revision configuration and stay for compatibility.
+       */
+      pf_applied_wage_ceiling: pf.wage_ceiling ?? null,
+      pf_ceiling_version: pf.ceiling_version ?? null,
       pf_eps_exit_age_years: config.pf.epsExitAgeYears,
       pf_new_member_cutoff_date: config.pf.newMemberCutoffDate,
       pf_apply_ceiling_to_wage: config.pf.applyCeilingToWage,
@@ -1357,6 +1469,8 @@ module.exports = {
   dailySalary,
   validateManualBreakup,
   resolveEpsEligibility,
+  pfCeilingOn,
+  resolvePfCeilings,
   calculatePf,
   statutoryWages,
   contributionPeriodFor,
@@ -1371,6 +1485,8 @@ module.exports = {
   // exported for tests and for callers that need the same date handling
   toDateOnly,
   ageYearsOn,
+  /** Paise in, paise out: a contribution rounded by the configured convention. */
+  roundContributionPaise: roundContribution,
   laterOf,
   triState,
 };

@@ -13,15 +13,17 @@ const {
   LIFECYCLE_ACTION,
   LIFECYCLE_REASON_MIN,
 } = require("../constants/payrun_calculation");
-const { monthWindow, statutorySetupComplete } = require("../utils/payrun_eligibility");
+const { monthWindow, statutorySetupComplete, statutorySetupGaps } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
 const calc = require("../utils/payrun_calculation");
 const engine = require("../utils/salary_engine");
-const { evaluatePayrollReadiness } = require("../utils/payroll_readiness");
+const { evaluatePayrollReadiness, statutoryHoldReason } = require("../utils/payroll_readiness");
 const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
 const crypto = require("crypto");
 const payslipSnapshot = require("../utils/payslip_snapshot");
+const pfCeilingImpact = require("../utils/pf_ceiling_impact");
+const epfoEcr = require("../utils/epfo_ecr");
 const { resolvePayslipCompany } = require("../utils/payslip_company");
 const {
   SNAPSHOT_SCHEMA_VERSION,
@@ -355,6 +357,31 @@ class PayrunCalculationUsecase {
      */
     const entryDate = context.entryDateOf.get(id) || null;
     const entrySalary = context.entrySalaryOf.get(id) || null;
+
+    /*
+     * ========================== THE STATUTORY SETUP HOLD ==================
+     *
+     * Judged on the snapshot's applicability (what the month is calculated
+     * on - changing it needs a Reset and re-initialisation) and on the LIVE
+     * identifiers and Form 11 facts, so the hold lifts on the next read once
+     * HR records them. A held employee is not calculable: Calculate refuses
+     * them by name and approval is blocked; nothing is assumed for them.
+     */
+    const setupView = {
+      ...employee,
+      uan: statutory.uan !== undefined && statutory.uan !== null && String(statutory.uan).trim() !== "" ? statutory.uan : employee.uan,
+      pf_number:
+        statutory.pf_number !== undefined && statutory.pf_number !== null && String(statutory.pf_number).trim() !== ""
+          ? statutory.pf_number
+          : employee.pf_number,
+      previous_pf_member: statutory.previous_pf_member,
+      previous_eps_member: statutory.previous_eps_member,
+      dob: statutory.dob,
+      date_of_joining: employee.date_of_joining || statutory.date_of_joining || null,
+    };
+    const statutoryGaps = statutorySetupGaps(setupView, context.period);
+    const statutoryHold = statutoryHoldReason(statutoryGaps);
+
     const currentMarkers = calc.sourceMarkers({
       salary: salary || {},
       attendance: attendance || {},
@@ -384,6 +411,7 @@ class PayrunCalculationUsecase {
         statutory,
         as_of: context.window.to,
         coverage_entry_salary: entrySalary,
+        day_rows: context.dayRowsOf ? context.dayRowsOf.get(id) || [] : null,
       });
       readiness = evaluatePayrollReadiness({
         year: context.period.year,
@@ -396,6 +424,7 @@ class PayrunCalculationUsecase {
         closed_for_payroll: Number(employee.attendance_closed_for_payroll) === 1,
         latest_closed_date: context.latestClosedDate,
         calculation_errors: dryRun.errors,
+        statutory_gaps: statutoryGaps,
       });
     }
 
@@ -422,7 +451,8 @@ class PayrunCalculationUsecase {
       pending_regularizations: Number(counts.pending_regularizations || 0),
       pending_ot: Number(counts.pending_ot || 0),
       adjustment_state: adjustmentState,
-      statutory_setup_complete: statutorySetupComplete(employee),
+      statutory_setup_complete: statutorySetupComplete(employee) && statutoryGaps.length === 0,
+      statutory_hold: statutoryHold,
       /*
        * THE ACCEPTED ATTENDANCE BASIS, read from the snapshot rather than
        * inferred from anything on this screen. It satisfies the attendance
@@ -476,6 +506,20 @@ class PayrunCalculationUsecase {
         employee_id: id,
         payrun_employee_id: employee.payrun_employee_id,
         employee_name: employee.employee_name,
+        /**
+         * THE STATUTORY SETUP HOLD, when there is one: the payroll user sees
+         * why this employee cannot be calculated and exactly which fields HR
+         * must complete. NULL when the setup is complete.
+         */
+        statutory_hold: statutoryHold
+          ? {
+              code: statutoryHold.code,
+              label: statutoryHold.label,
+              message: statutoryHold.message,
+              missing_fields: statutoryHold.missing_fields || statutoryGaps.map((g) => g.field),
+              missing_labels: statutoryGaps.map((g) => g.label),
+            }
+          : null,
         location: employee.store_name,
         store_id: employee.store_id,
         designation_name: employee.designation_name,
@@ -760,6 +804,21 @@ class PayrunCalculationUsecase {
               employer_epf: provisional(stored.employer_epf),
               employer_eps: provisional(stored.employer_eps),
               employer_pf_total: provisional(stored.employer_pf_total),
+              /*
+               * THE EFFECTIVE-DATED PF CEILING EVIDENCE. NULL / empty on a
+               * row calculated before version 3. `pf_segments` has two entries
+               * for September 2026 (01-16 on 15,000, 17-30 on 25,000).
+               */
+              eps_wage: provisional(stored.eps_wage === undefined ? null : stored.eps_wage),
+              edli_wage: provisional(stored.edli_wage === undefined ? null : stored.edli_wage),
+              edli: provisional(stored.edli === undefined ? null : stored.edli),
+              pf_admin_charge: provisional(stored.pf_admin_charge === undefined ? null : stored.pf_admin_charge),
+              ncp_days: stored.ncp_days === undefined ? null : stored.ncp_days,
+              pf_ceiling_version: stored.pf_ceiling_version || null,
+              statutory_config_version: stored.statutory_config_version || null,
+              pf_segments: pending ? [] : this._json(stored.pf_segments),
+              pf_scenario: stored.pf_scenario || null,
+              pf_exact: pending || !stored.pf_exact ? null : typeof stored.pf_exact === "string" ? JSON.parse(stored.pf_exact) : stored.pf_exact,
               esi_status: stored.esi_status,
               esi_wage: provisional(stored.esi_wage),
               esi_wage_basis: stored.esi_wage_basis,
@@ -950,7 +1009,9 @@ class PayrunCalculationUsecase {
        * eligible and then failing inside the calculation.
        */
       if (!presented.row.calculable) {
-        const reasons = (presented.internals.readiness && presented.internals.readiness.reasons) || [];
+        const reasons =
+          (presented.internals.readiness && presented.internals.readiness.reasons) ||
+          (presented.row.statutory_hold ? [presented.row.statutory_hold] : []);
         results.push({
           employee_id: employeeId,
           result: ROW_RESULT.BLOCKED,
@@ -1179,6 +1240,12 @@ class PayrunCalculationUsecase {
        * and runs inside `computeCalculation`.
        */
       coverage_entry_salary: entrySalary,
+      /*
+       * THE DAY ROWS, so a month cut by a PF ceiling change places loss-of-pay
+       * days in the period they fell in. Read in `_assemble` with everything
+       * else; null when the repository cannot read them.
+       */
+      day_rows: context.dayRowsOf ? context.dayRowsOf.get(Number(employee.employee_id)) || [] : null,
     });
 
     const hash = calc.calculationHash(result);
@@ -1245,6 +1312,17 @@ class PayrunCalculationUsecase {
         employer_pf_total: result.employer_pf_total,
         employer_epf: result.employer_epf,
         employer_eps: result.employer_eps,
+        eps_wage: result.eps_wage,
+        edli_wage: result.edli_wage,
+        edli: result.edli,
+        pf_admin_charge: result.pf_admin_charge,
+        ncp_days: result.ncp_days,
+        pf_ceiling_version: result.pf_ceiling_version,
+        statutory_config_version: result.statutory_config_version,
+        pf_segments: JSON.stringify(result.pf_segments || []),
+        pf_scenario: result.pf_scenario,
+        statutory_setup_marker: markers.statutory_setup_marker,
+        pf_exact: result.pf_exact ? JSON.stringify(result.pf_exact) : null,
 
         esi_status: result.esi_status,
         esi_wage: result.esi_wage,
@@ -2146,6 +2224,95 @@ class PayrunCalculationUsecase {
       notifications,
       versions,
     };
+  }
+
+  /**
+   * THE EPFO 2026 WAGE CEILING REVISION - THE AFFECTED-EMPLOYEE REPORT.
+   *
+   * READ-ONLY. Three SELECTs - the September 2026 population, the approved
+   * salary in force on 30-09-2026 and the statutory context - and a pure
+   * classification (`utils/pf_ceiling_impact.js`). Nothing is written, no
+   * employee is enrolled and no flag is changed: it is the list a person
+   * reviews BEFORE September's payroll is run.
+   */
+  async getPfCeilingImpact({ store_ids = null } = {}) {
+    const population = await this.payrunRepo.listPopulation({ year: 2026, month: 9, store_ids });
+    const ids = population.map((r) => Number(r.employee_id));
+    const [salaries, statutory] = await Promise.all([
+      this.payrunRepo.listApprovedSalaries(ids, "2026-09-30"),
+      this.repo.listStatutoryContext(ids),
+    ]);
+    const first = (rows) => {
+      const map = new Map();
+      (rows || []).forEach((r) => {
+        if (!map.has(Number(r.employee_id))) map.set(Number(r.employee_id), r);
+      });
+      return map;
+    };
+    const salaryOf = first(salaries);
+    const statutoryOf = first(statutory);
+    const rows = population.map((p) => {
+      const id = Number(p.employee_id);
+      const sal = salaryOf.get(id) || {};
+      const st = statutoryOf.get(id) || {};
+      return {
+        employee_id: id,
+        employee_name: p.employee_name,
+        store_name: p.store_name,
+        date_of_joining: p.date_of_joining,
+        resignation_date: p.resignation_date,
+        dob: st.dob || null,
+        monthly_gross: sal.monthly_gross === undefined ? null : sal.monthly_gross,
+        basic: sal.basic === undefined ? null : sal.basic,
+        pf_applicable: p.pf_applicable,
+        pf_applicable_from: st.pf_applicable_from || null,
+        pf_contribution_basis: st.pf_contribution_basis || null,
+        uan: p.uan,
+        previous_pf_member: st.previous_pf_member === undefined ? null : st.previous_pf_member,
+        previous_eps_member: st.previous_eps_member === undefined ? null : st.previous_eps_member,
+      };
+    });
+    return pfCeilingImpact.assessPopulation(rows);
+  }
+
+  /**
+   * THE ECR FOR ONE MONTH, FROM THE STORED CALCULATIONS. READ-ONLY.
+   *
+   * One line per member; September 2026 is one ECR with each member's two
+   * periods already summed in the stored calculation. Members that cannot be
+   * filed (pending PF, missing UAN, incomplete, not approved) are returned in
+   * `errors` and left out of the file - see `utils/epfo_ecr.js`.
+   */
+  async getEcr({ year, month, store_ids = null }) {
+    const period = normalizeMonth(year, month);
+    const population = await this.repo.listInitialized({ year: period.year, month: period.month, store_ids });
+    const ids = population.map((r) => Number(r.employee_id));
+    const [calculations, statutory] = await Promise.all([
+      this.repo.listCalculations({ year: period.year, month: period.month, employee_ids: ids }),
+      this.repo.listStatutoryContext(ids),
+    ]);
+    const calcOf = new Map((calculations || []).map((c) => [Number(c.employee_id), c]));
+    /*
+     * THE UAN IS THE MEMBER'S CURRENT ONE. The month's snapshot froze the
+     * UAN at initialization; one HR records afterwards (an existing member
+     * whose UAN was missing in DNDS) is the same member's identity, so the
+     * live value is used when the snapshot has none. Figures are never taken
+     * from anywhere but the stored, APPROVED calculation.
+     */
+    const liveUan = new Map((statutory || []).map((r) => [Number(r.employee_id), r.uan]));
+    const ecr = epfoEcr.buildEcr({
+      rows: population.map((employee) => {
+        const snap = String(employee.uan || "").trim();
+        const uan = snap !== "" ? employee.uan : liveUan.get(Number(employee.employee_id)) || null;
+        return { employee: { ...employee, uan }, calculation: calcOf.get(Number(employee.employee_id)) || null };
+      }),
+      // APPROVED PAYROLL ONLY - there is no preview of an unapproved month.
+      require_approved: true,
+    });
+    const validation = ecr.members
+      .map((m) => ({ employee_id: m.employee_id, problems: epfoEcr.validateEcrMember(m) }))
+      .filter((v) => v.problems.length > 0);
+    return { period, ...ecr, validation };
   }
 
   async getHistory({ year, month, employee_id }) {

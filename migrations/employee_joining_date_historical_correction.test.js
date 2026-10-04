@@ -21,10 +21,14 @@ const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "
 const KEY = "employee_joining_date_historical_correction";
 
 describe("the migration", () => {
-  it("is unique, sorts last, and its runner reads its own files", () => {
+  it("is unique, sorts after every migration that existed when it was written, and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, ""));
     assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
-    assert.equal(all.sort()[all.length - 1], NAME);
+    // The only migrations after it are the ones added since, named here so a
+    // new one is a deliberate addition (the convention of
+    // attendance_device_time_correction.test.js).
+    const LATER = ["20261120120000-epfo-wage-ceiling-2026"];
+    assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });

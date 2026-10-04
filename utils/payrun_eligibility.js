@@ -132,6 +132,62 @@ function statutorySetupComplete(employee = {}) {
 }
 
 /**
+ * WHAT IS MISSING FROM AN EMPLOYEE'S STATUTORY SETUP FOR THIS PAYROLL MONTH -
+ * by name, so a payroll user can be told exactly what HR must complete.
+ *
+ * TWO TIERS, AND THE SECOND IS NEW JOINERS ONLY.
+ *
+ *   Everybody: the rule `statutorySetupComplete` has always applied -
+ *   applicability answered, and an identifier where the scheme applies.
+ *
+ *   A PF member who JOINED IN THIS PAYROLL MONTH must also have the Form 11
+ *   facts and the dates the PF / EPS rules read, because for a new joiner
+ *   there is no earlier filed month to show what they are: Previous PF
+ *   Member, Previous EPS Member, DOB and DOJ. A joiner who WAS a PF member
+ *   before must bring their existing UAN; a first-time member may still be
+ *   awaiting UAN generation, so a PF number satisfies it for them.
+ *
+ * NOTHING IS INFERRED. A missing Previous EPS Member is never derived from
+ * Basic or gross, and a missing fact is reported, not defaulted. Existing
+ * members are not newly held here: their statutory questions are the
+ * engine's, which reports them as unresolved exactly where they change the
+ * money.
+ *
+ * @param {object} employee  the payrun snapshot merged with the LIVE master
+ *                           fields (previous_pf_member, previous_eps_member, dob)
+ * @param {object} period    { year, month }
+ * @returns {Array<{ field, label }>}
+ */
+function statutorySetupGaps(employee = {}, { year = null, month = null } = {}) {
+  const answered = (v) => v === 0 || v === 1 || v === "0" || v === "1" || v === true || v === false;
+  const truthy = (v) => v === 1 || v === "1" || v === true;
+  const present = (v) => v !== null && v !== undefined && String(v).trim() !== "";
+  const gaps = [];
+  const gap = (field, label) => gaps.push({ field, label });
+
+  if (!answered(employee.pf_applicable)) gap("pf_applicable", "PF Applicable");
+  if (!answered(employee.esi_applicable)) gap("esi_applicable", "ESI Applicable");
+  if (truthy(employee.pf_applicable) && !present(employee.uan) && !present(employee.pf_number)) {
+    gap("uan", "UAN (or PF Number)");
+  }
+  if (truthy(employee.esi_applicable) && !present(employee.esi_number)) gap("esi_number", "ESI Number");
+
+  const doj = toDateOnly(employee.date_of_joining);
+  const window = year && month ? monthWindow(year, month) : null;
+  const joinedThisMonth = Boolean(window && doj && doj >= window.from && doj <= window.to);
+  if (truthy(employee.pf_applicable) && (joinedThisMonth || (window && !doj))) {
+    if (!doj) gap("date_of_joining", "Date of Joining");
+    if (!present(employee.dob)) gap("dob", "Date of Birth");
+    if (!answered(employee.previous_pf_member)) gap("previous_pf_member", "Previous PF Member");
+    if (!answered(employee.previous_eps_member)) gap("previous_eps_member", "Previous EPS Member");
+    if (truthy(employee.previous_pf_member) && !/^\d{12}$/.test(String(employee.uan || "").replace(/\s+/g, ""))) {
+      if (!gaps.some((g) => g.field === "uan")) gap("uan", "UAN (existing PF member - their current 12-digit UAN)");
+    }
+  }
+  return gaps;
+}
+
+/**
  * THE PAY TYPE A NEWLY INITIALIZED ROW STARTS ON.
  *
  * THE EMPLOYEE MASTER DECIDES, AND NOTHING ELSE DOES.
@@ -564,6 +620,7 @@ module.exports = {
   monthWindow,
   employedInMonth,
   statutorySetupComplete,
+  statutorySetupGaps,
   defaultPayType,
   exitedByMonthEnd,
   evaluateEmployee,

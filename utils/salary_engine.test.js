@@ -266,9 +266,15 @@ test("a post-cutoff joiner above the EPS ceiling who was never an EPS member get
       pf_applicable: 1,
     })
   );
-  // The ceiling test resolves first: the PF wage is capped to 15000, which is
-  // AT the EPS ceiling, so this employee is eligible either way.
-  assert.equal(pf.employer_eps, 1250);
+  // EPFO wage-ceiling revision: membership is tested on the wage the employee
+  // is PAID AT (25000), not on the capped contribution wage (15000). The
+  // capped wage can never exceed the ceiling, so testing it put every
+  // post-cutoff non-member into EPS. Above the 15000 pension ceiling, joined
+  // after 01-09-2014 and never an EPS member: no EPS, the whole 12% is EPF.
+  assert.equal(pf.pf_wage, 15000);
+  assert.equal(pf.employer_eps, 0);
+  assert.equal(pf.employer_epf, pf.employer_pf_total);
+  assert.equal(pf.eps_eligibility.eligible, false);
 });
 
 test("with the ceiling lifted, a post-cutoff non-EPS-member above the ceiling gets no EPS", () => {

@@ -59,6 +59,7 @@ class World {
     this.telegramFailFor = new Set();// employee ids whose Telegram send throws
     this.telegramSent = [];          // what the fake bot sent
     this.extras = new Map();         // employee_id -> { account_no, pan_no, bank_name, department_name }
+    this.statutory = new Map();      // employee_id -> LIVE Employee Master statutory overrides
     this.companies = [{ company_id: 1, company_name: "Daily Needs Departmental Store", reg_address: "188/1 Iyyanar Koil Street", pf_number: "TN/MAS/0012345", esi_number: "51000123450001001", status: 1 }];
     this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
@@ -210,9 +211,13 @@ class FakeCalculationRepo {
       employee_id: id,
       dob: "1990-06-15",
       previous_eps_member: 0,
-      date_of_joining: "2018-04-01",
+      previous_pf_member: 1,
+      date_of_joining: this.world.employees.get(id).date_of_joining || "2018-04-01",
       pf_applicable: this.world.employees.get(id).pf_applicable,
       esi_applicable: this.world.employees.get(id).esi_applicable,
+      uan: this.world.employees.get(id).uan,
+      pf_number: this.world.employees.get(id).pf_number,
+      ...(this.world.statutory.get(id) || {}),
     }));
   }
 
@@ -2734,7 +2739,7 @@ describe("Unlock, Publish and Unpublish", () => {
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
     const stored = world.calculations.get(1);
     assert.equal(Number(stored.net_pay) % 1, 0);
-    assert.equal(stored.calculation_version, 2);
+    assert.equal(stored.calculation_version, 3);
     assert.equal((await rowOf(1)).net_pay, stored.net_pay);
     assert.equal(
       Math.round(stored.net_pay * 100),
@@ -3031,5 +3036,141 @@ describe("Payslip Publish", () => {
       calculation.getPayslip({ ...MONTH, employee_id: 1, store_ids: [42] }),
       (e) => e.name === "NotFoundError"
     );
+  });
+});
+
+/* ======================= EPFO 2026: the statutory setup hold and its safeguards */
+
+describe("STATUTORY_SETUP_INCOMPLETE - a joiner this month is held until HR completes the setup", () => {
+  // The world's month is August 2026; a joiner is anybody whose DOJ falls in it.
+  const JOINER = { employee: { date_of_joining: "2026-08-10" } };
+
+  it("a joiner with complete statutory data is calculated normally", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, dob: "1998-01-01" });
+    const row = await rowOf(1);
+    assert.equal(row.statutory_hold, null);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.CALCULATED);
+  });
+
+  it("a joiner missing Previous EPS Member and DOB is ON HOLD: refused by name, nothing written, nothing assumed", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: null, dob: null });
+    const row = await rowOf(1);
+    assert.deepEqual(row.statutory_hold.missing_labels, ["Date of Birth", "Previous EPS Member"]);
+    assert.match(row.statutory_hold.message, /^On hold - statutory setup incomplete/);
+    assert.ok(row.blockers.some((b) => b.code === "STATUTORY_SETUP_INCOMPLETE"));
+    assert.equal(row.calculable, false);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.BLOCKED);
+    assert.match(res.results[0].message, /Previous EPS Member/);
+    assert.equal(world.calculations.has(1), false, "no figure is stored for a held employee");
+  });
+
+  it("'Calculate All Eligible' leaves the held joiner out and calculates everybody else - one hold corrupts nobody", async () => {
+    world.add(1, JOINER).add(2);
+    world.statutory.set(1, { previous_eps_member: null });
+    const res = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.deepEqual(res.results.map((r) => [r.employee_id, r.result]), [[2, ROW_RESULT.CALCULATED]]);
+    assert.equal(world.calculations.has(1), false);
+    assert.equal(world.calculations.get(2).is_complete, 1);
+  });
+
+  it("an existing PF member who joined before the month must bring their UAN; a first-time member may use the PF number", async () => {
+    world.add(1, { employee: { date_of_joining: "2026-08-10", uan: null, pf_number: "TN/MAS/1/1" } });
+    world.statutory.set(1, { previous_pf_member: 1, previous_eps_member: 1, uan: null });
+    assert.ok((await rowOf(1)).statutory_hold.missing_fields.includes("uan"));
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, uan: null });
+    assert.equal((await rowOf(1)).statutory_hold, null);
+  });
+
+  it("HR completing the fields releases the hold on the next read; the joiner can then be calculated and approved", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_eps_member: null });
+    assert.notEqual((await rowOf(1)).statutory_hold, null);
+    world.statutory.set(1, { previous_eps_member: 0 });
+    assert.equal((await rowOf(1)).statutory_hold, null);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const approval = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approval.results[0].result, ROW_RESULT.APPROVED);
+  });
+
+  it("an existing member (joined before the month) with Previous EPS Member missing is NOT held - the engine decides where it matters", async () => {
+    world.add(1);
+    world.statutory.set(1, { previous_eps_member: null });
+    const row = await rowOf(1);
+    assert.equal(row.statutory_hold, null);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    // Basic 13,000 is within the ceiling: EPS applies whatever the history, so nothing is unresolved.
+    assert.equal(res.results[0].result, ROW_RESULT.CALCULATED);
+    assert.equal(world.calculations.get(1).is_complete, 1);
+  });
+
+  it("approval refuses an employee whose setup became incomplete after calculation", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_eps_member: 0 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    world.statutory.set(1, { previous_eps_member: null });
+    const approval = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.notEqual(approval.results[0].result, ROW_RESULT.APPROVED);
+    assert.equal(world.calculations.get(1).status, "CALCULATED");
+  });
+});
+
+describe("HR changes statutory master data after a month was calculated", () => {
+  it("the calculation becomes RECALCULATION_REQUIRED with 'Statutory setup changed' - never approved stale", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.RECALCULATION_REQUIRED);
+    world.statutory.set(1, { previous_eps_member: 1 });
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(row.recalculation_reasons.some((r) => r.code === "STATUTORY_CONTEXT_CHANGED"));
+  });
+
+  it("an APPROVED, LOCKED month is never marked and never rewritten", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const before = { ...world.calculations.get(1) };
+    world.statutory.set(1, { previous_eps_member: 1, dob: "1960-01-01" });
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.APPROVED_LOCKED);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.LOCKED);
+    assert.deepEqual(world.calculations.get(1), before);
+  });
+});
+
+describe("the ECR, from approved payroll only", () => {
+  it("a calculated but unapproved month files nothing; once approved it files one line from the stored figures", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    let ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 0);
+    assert.equal(ecr.errors[0].code, "NOT_APPROVED");
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    ecr = await calculation.getEcr({ ...MONTH });
+    const stored = world.calculations.get(1);
+    assert.equal(ecr.lines.length, 1);
+    assert.equal(ecr.members[0].ee_share, Math.round(Number(stored.employee_pf)));
+    assert.equal(ecr.members[0].eps_share, Math.round(Number(stored.employer_eps)));
+  });
+
+  it("an existing 58+ member whose UAN was missing at initialization: EPS 0 by the age rule, and the UAN HR adds later is used", async () => {
+    world.add(1, { employee: { uan: null, pf_number: "TN/MAS/1/1" } });
+    world.statutory.set(1, { dob: "1960-03-01", previous_eps_member: 1, uan: null });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const stored = world.calculations.get(1);
+    assert.equal(Number(stored.employer_eps), 0);
+    assert.equal(Number(stored.employer_epf), Number(stored.employer_pf_total));
+    let ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.errors[0].code, "UAN_MISSING");
+    world.statutory.set(1, { dob: "1960-03-01", previous_eps_member: 1, uan: "100200300499" });
+    ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 1);
+    assert.ok(ecr.lines[0].startsWith("100200300499#~#"));
   });
 });

@@ -1027,8 +1027,8 @@ describe("Net Pay is rounded to the whole rupee in the engine", () => {
     assert.equal(base.net_pay_rounding, 0);
   });
 
-  it("is engine version 2, which is not a source marker - approved months do not go stale", () => {
-    assert.equal(run().calculation_version, 2);
+  it("is engine version 3, which is not a source marker - approved months do not go stale", () => {
+    assert.equal(run().calculation_version, 3);
     assert.ok(!calc.SOURCE_KEYS.includes("calculation_version"));
   });
 });

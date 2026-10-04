@@ -38,7 +38,11 @@ const dir = path.join(__dirname, "mysql/migrations/sqls");
 const CREATE = "20261023120000-payrun-calculation-up.sql";
 const DRIFT = "20261024120000-payrun-calculation-column-drift-up.sql";
 /* Every later migration that adds a column to the table, in order. */
-const LATER_COLUMN_MIGRATIONS = [DRIFT, "20261111120000-payrun-lifecycle-up.sql"];
+const LATER_COLUMN_MIGRATIONS = [
+  DRIFT,
+  "20261111120000-payrun-lifecycle-up.sql",
+  "20261120120000-epfo-wage-ceiling-2026-up.sql",
+];
 
 /** Comments may NAME a column to explain it; only statements declare one. */
 const statementsOf = (file) =>

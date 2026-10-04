@@ -168,7 +168,95 @@ const pf = {
    * arithmetic.
    */
   applyCeilingToWage: bool("PF_APPLY_CEILING_TO_WAGE", true),
+
+  /**
+   * THE EPS ELIGIBILITY CORRECTION - A SEPARATE SWITCH FROM THE 2026 CEILING.
+   *
+   * The engine as first written tested "is the pension wage at or below the
+   * EPS ceiling?" on the ALREADY-CAPPED PF wage, which can never exceed the
+   * ceiling - so every post-01-09-2014 joiner above the ceiling who was never
+   * an EPS member was charged EPS. `true` (the corrected rule) tests the
+   * uncapped wage the employee is paid at. `false` reproduces the old
+   * behaviour exactly, for comparison and rollback; it cannot produce the
+   * EPFO FAQ's Scenario B, whose Period 1 EPS wage is NIL.
+   * See docs/epfo-wage-ceiling-2026.md, "EPS eligibility correction".
+   */
+  epsEligibilityOnUncappedWage: bool("PF_EPS_ELIGIBILITY_ON_UNCAPPED_WAGE", true),
+
+  /**
+   * A HIGHER-WAGE CONTRIBUTOR'S EDLI WAGE. The EPFO wage-ceiling FAQ's
+   * Scenario B (an EPF + EDLI member contributing on 20,000) charges EDLI and
+   * admin on the full 20,000. `true` follows the FAQ: for an employee whose
+   * contribution basis is ACTUAL_WAGE the EDLI wage is the EPF wage. `false`
+   * caps the EDLI wage at the statutory ceiling for everybody.
+   */
+  higherWageEdliOnActualWage: bool("PF_HIGHER_WAGE_EDLI_ON_ACTUAL_WAGE", true),
 };
+
+/**
+ * THE EFFECTIVE-DATED PF / EPS / EDLI WAGE CEILING.
+ *
+ * `wageCeiling`, `epsWageCeiling` and `edliWageCeiling` above answer "what was
+ * the ceiling before the revision" and stay exactly as they were, so a stored
+ * record and every caller that never passes a date behave as before. This
+ * schedule answers "which ceiling was in force ON A DATE", and it is what a
+ * payrun reads: EPFO revised the ceiling from 15,000 to 25,000 with effect
+ * from 17-09-2026, part-way through a wage month, and September 2026 has to be
+ * charged on the old ceiling for 01-16 and on the new one for 17-30.
+ *
+ * ONE ROW PER VERSION, IN DATE ORDER. Each row runs from its `effectiveFrom`
+ * to the day before the next row's. The next revision is a new row (or the
+ * `PF_WAGE_CEILING_SCHEDULE` environment JSON) and not a change to payroll
+ * arithmetic. `version` is stamped on every payrun calculation so that a
+ * contribution can say which rule produced it.
+ */
+const pfCeilingSchedule = (() => {
+  const fallback = [
+    {
+      effectiveFrom: "1900-01-01",
+      wageCeiling: pf.wageCeiling,
+      epsWageCeiling: pf.epsWageCeiling,
+      edliWageCeiling: pf.edliWageCeiling,
+      version: process.env.PF_CEILING_VERSION_BEFORE_REVISION || "EPFO-CEILING-15000-2014-09-01",
+    },
+    {
+      effectiveFrom: date("PF_REVISED_CEILING_EFFECTIVE_FROM", "2026-09-17"),
+      wageCeiling: num("PF_REVISED_WAGE_CEILING", 25000),
+      epsWageCeiling: num("PF_REVISED_EPS_WAGE_CEILING", 25000),
+      edliWageCeiling: num("PF_REVISED_EDLI_WAGE_CEILING", 25000),
+      version: process.env.PF_REVISED_CEILING_VERSION || "EPFO-CEILING-25000-2026-09-17",
+    },
+  ];
+  const raw = process.env.PF_WAGE_CEILING_SCHEDULE;
+  if (raw === undefined || String(raw).trim() === "") return fallback;
+  try {
+    const rows = JSON.parse(raw);
+    const valid =
+      Array.isArray(rows) &&
+      rows.length > 0 &&
+      rows.every(
+        (r) =>
+          r &&
+          /^\d{4}-\d{2}-\d{2}$/.test(String(r.effectiveFrom)) &&
+          [r.wageCeiling, r.epsWageCeiling, r.edliWageCeiling].every((n) => Number.isFinite(Number(n))) &&
+          typeof r.version === "string" &&
+          r.version.trim() !== ""
+      );
+    if (!valid) return fallback;
+    return rows
+      .map((r) => ({
+        effectiveFrom: r.effectiveFrom,
+        wageCeiling: Number(r.wageCeiling),
+        epsWageCeiling: Number(r.epsWageCeiling),
+        edliWageCeiling: Number(r.edliWageCeiling),
+        version: r.version.trim(),
+      }))
+      .sort((a, b) => (a.effectiveFrom < b.effectiveFrom ? -1 : 1));
+  } catch (err) {
+    return fallback;
+  }
+})();
+pf.ceilingSchedule = pfCeilingSchedule;
 
 /**
  * Employees' State Insurance.
@@ -278,6 +366,6 @@ const rounding = {
  * findable when a rate change turns out to have been wrong. Bump it whenever
  * a committed default above changes.
  */
-const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-04-01-CODE-WAGES-ESI-PERIODS";
+const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-09-17-PF-CEILING-25000";
 
 module.exports = { salary, pf, esi, wages, rounding, configVersion };

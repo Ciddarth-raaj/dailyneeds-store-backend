@@ -30,8 +30,14 @@
  * 2: Net Pay is rounded to the whole rupee (half away from zero), with the
  * difference stored as `net_pay_rounding`. Rows calculated under version 1
  * keep their figures until somebody recalculates them.
+ *
+ * 3: PF is charged on the EFFECTIVE-DATED wage ceiling (15,000 up to
+ * 16-09-2026, 25,000 from 17-09-2026), with September 2026 split into two
+ * periods; EPS membership is tested on the uncapped Basic; EPS / EDLI wages,
+ * EDLI, admin, NCP days and the ceiling version are stored. Rows calculated
+ * under version 2 keep their figures until somebody recalculates them.
  */
-const CALCULATION_VERSION = 2;
+const CALCULATION_VERSION = 3;
 
 /**
  * THE STATE OF ONE EMPLOYEE'S CALCULATION, and the five values are exclusive
@@ -201,7 +207,7 @@ const RECALC_REASON_MESSAGE = {
   [RECALC_REASON.EFFECTIVE_NRM_CHANGED]:
     "The effective NRM attendance resolved for this employee has changed. Recalculate to price OT on the current one.",
   [RECALC_REASON.STATUTORY_CONTEXT_CHANGED]:
-    "PF or ESI applicability has changed for this employee since this calculation. Recalculate to apply the current statutory setup.",
+    "This employee's statutory setup (PF / ESI applicability, UAN, Previous PF / EPS Member, DOB, DOJ, PF coverage start or contribution basis) has changed since this calculation. Recalculate to apply the current setup; a change to PF / ESI applicability also needs the employee reset and re-initialised, because the month's snapshot holds it.",
   [RECALC_REASON.ESI_COVERAGE_CHANGED]:
     "The approved salary in force when this ESI contribution period began is not the one this calculation resolved coverage from. Recalculate to decide coverage on the current history.",
   [RECALC_REASON.ADJUSTMENTS_CHANGED]:

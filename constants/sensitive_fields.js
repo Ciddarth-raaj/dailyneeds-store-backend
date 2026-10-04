@@ -63,6 +63,11 @@ const SENSITIVE_EMPLOYEE_FIELDS = [
   // above it, and for one more: it is the fact that decides where a third of
   // somebody's employer contribution is filed.
   "previous_eps_member",
+  // EPFO 2026 ceiling revision: when PF coverage started, for somebody brought
+  // into the scheme part-way through employment. Same section, same reason.
+  "pf_applicable_from",
+  // EPFO 2026: whether EPF is charged on the capped or the actual wage.
+  "pf_contribution_basis",
 ];
 
 /** The same list as a lower-cased Set, for lookups. */

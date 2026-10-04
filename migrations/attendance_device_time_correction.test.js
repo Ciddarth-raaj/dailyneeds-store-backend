@@ -39,6 +39,7 @@ describe(NAME, () => {
       "20261111120000-payrun-lifecycle.js",
       "20261112120000-payrun-payslip.js",
       "20261113120000-employee-joining-date-historical-correction.js",
+      "20261120120000-epfo-wage-ceiling-2026.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

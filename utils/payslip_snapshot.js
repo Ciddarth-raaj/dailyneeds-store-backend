@@ -350,6 +350,28 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
       uan_masked: pfApplicable ? maskTail(employee.uan) : null,
       pf_number_masked: pfApplicable ? maskTail(employee.pf_number) : null,
       pf_wage: pfApplicable ? moneyOf(c.pf_wage) : null,
+      /*
+       * A MONTH CUT BY A PF CEILING CHANGE SHOWS ITS PERIODS. September 2026
+       * was charged on the 15,000 ceiling for 01-16 and on 25,000 for 17-30;
+       * the employee's single PF deduction above is the sum of the two, and
+       * the payslip says so rather than showing one figure nobody can check.
+       * Empty for an ordinary month.
+       */
+      pf_periods: pfApplicable
+        ? (() => {
+            const periods = parseJsonList(c.pf_segments);
+            return periods.length > 1
+              ? periods.map((p) => ({
+                  from: textOrNull(p.from),
+                  to: textOrNull(p.to),
+                  monthly_wage_ceiling: moneyOf(p.monthly_wage_ceiling),
+                  pf_wage: moneyOf(p.pf_wage),
+                  employee_pf: moneyOf(p.employee_pf),
+                }))
+              : [];
+          })()
+        : [],
+      pf_ceiling_version: pfApplicable ? textOrNull(c.pf_ceiling_version) : null,
       esi_applicable: esiApplicable,
       esi_number_masked: esiApplicable ? maskTail(employee.esi_number) : null,
       esi_wage: esiApplicable ? moneyOf(c.esi_wage) : null,
