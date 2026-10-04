@@ -3,6 +3,7 @@ const { closePendingPermissionsForLock } = require("./lib/attendance_permission_
 const logger = require("../utils/logger");
 const { activeOverrideCondition } = require("../utils/shift_override_active");
 const { JOINED_ON } = require("../utils/joining_date");
+const { effectiveAttendanceMonth } = require("../utils/attendance_month_effective");
 const {
   getConnectionAsync,
   beginTransactionAsync,
@@ -157,9 +158,10 @@ class PayrunCalculationRepository {
    */
   async listAttendanceMonths(employeeIds, year, month, conn = null) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
-    return this._read(
+    const rows = await this._read(
       "LIST-ATTENDANCE-MONTHS",
       `SELECT attendance_monthly_payroll_id, employee_id, is_final, payroll_version,
+              held_dates, available_from,
               salary_days, extra_days, base_days,
               monthly_gross, daily_rate,
               salary_day_earnings, extra_day_earnings,
@@ -172,6 +174,9 @@ class PayrunCalculationRepository {
       [employeeIds, year, month],
       conn
     );
+    // Dates before the joining date never hold a month - even on a summary
+    // stored before that boundary was enforced. See the util.
+    return (rows || []).map(effectiveAttendanceMonth);
   }
 
   /**

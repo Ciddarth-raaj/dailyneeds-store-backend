@@ -149,6 +149,12 @@ describe("the engine: a date before the joining date", () => {
     assert.equal(day.is_final, true);
     assert.deepEqual(day.review_reasons, []);
     assert.equal(day.work_shift_id, null);
+    // No late, no early exit: nothing was expected of them that day.
+    assert.equal(day.late_minutes, null);
+    assert.equal(day.early_exit_minutes, null);
+    assert.equal(day.late_charged_minutes, 0);
+    assert.equal(day.early_exit_charged_minutes, 0);
+    assert.equal(day.excess_ot_minutes, 0);
     for (const f of ["attendance_day_count", "nrm_minutes", "worked_minutes", "shortage_minutes", "candidate_ot_minutes", "approved_ot_minutes", "permission_minutes", "payable_minutes"]) {
       assert.equal(day[f], 0, `${f} must be 0 before joining`);
     }
@@ -338,5 +344,37 @@ describe("no attendance request before the joining date", () => {
       regularization().raiseShiftChangeRequest({ actor: { employee_id: EMP }, attendance_date: sep(5), work_shift_id: 8, reason: "covering", today: "2026-09-20" }),
       /before this employee's joining date/
     );
+  });
+});
+
+describe("payroll reads a stored summary with the same boundary (no re-process needed)", () => {
+  const { effectiveAttendanceMonth } = require("../utils/attendance_month_effective");
+  const { attendanceStatusOf } = require("../utils/payrun_eligibility");
+  const stale = {
+    employee_id: EMP, is_final: 0, available_from: JOINED,
+    held_dates: JSON.stringify(SEP_1_TO_8),
+  };
+
+  it("a summary held ONLY by 1-8 Sep reads final, and payroll needs no manual close", () => {
+    const row = effectiveAttendanceMonth(stale);
+    assert.equal(row.is_final, 1);
+    assert.deepEqual(row.pre_joining_held_dates, SEP_1_TO_8);
+    assert.equal(attendanceStatusOf({ attendance: stale }).status, "PENDING", "as stored, it needed a close");
+    assert.equal(attendanceStatusOf({ attendance: row }).status, "READY");
+  });
+
+  it("a held date on or after 9 Sep keeps it non-final", () => {
+    assert.equal(effectiveAttendanceMonth({ ...stale, held_dates: JSON.stringify([sep(3), sep(9)]) }).is_final, 0);
+    assert.equal(effectiveAttendanceMonth({ ...stale, held_dates: JSON.stringify([sep(15)]) }).is_final, 0);
+  });
+
+  it("a whole-month employee is never affected, and an unreadable row is left as stored", () => {
+    assert.equal(effectiveAttendanceMonth({ ...stale, available_from: sep(1), held_dates: JSON.stringify([sep(3)]) }).is_final, 0);
+    assert.equal(effectiveAttendanceMonth({ ...stale, held_dates: "not json" }).is_final, 0);
+    assert.equal(effectiveAttendanceMonth({ ...stale, held_dates: "[]" }).is_final, 0);
+    assert.equal(effectiveAttendanceMonth({ ...stale, available_from: null }).is_final, 0);
+    assert.equal(effectiveAttendanceMonth(null), null);
+    const final = { is_final: 1, available_from: JOINED, held_dates: "[]" };
+    assert.equal(effectiveAttendanceMonth(final), final);
   });
 });
