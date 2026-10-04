@@ -74,6 +74,15 @@ const EMPLOYEE_MASTER_COLUMNS = [
   "new_employee.esi_applicable",
   "new_employee.previous_pf_member",
   "new_employee.previous_eps_member",
+  // EPFO 2026 ceiling revision. The date PF coverage starts when somebody is
+  // brought into the scheme part-way through their employment - an employee
+  // excluded above 15,000 who is covered from 17-09-2026. NULL = from joining.
+  // Read-only until the enrolment step is approved; the payrun reads it.
+  "new_employee.pf_applicable_from",
+  // EPFO 2026: CEILING (EPF capped at the statutory ceiling) or ACTUAL_WAGE
+  // (an existing higher-wage contributor). NULL = the configured default.
+  // Read-only until approved; the payrun reads it.
+  "new_employee.pf_contribution_basis",
   "new_employee.special_break_override_minutes",
   // Employment Details shows and edits it; attendance adds it to the allowed
   // break on a four-or-more-punch day.

@@ -710,6 +710,20 @@ const FIELDS = [
     filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
     history_backed: false, enabled: true },
 
+  { key: "pf_applicable_from", label: "PF Applicable From", group: "Statutory",
+    select: "DATE_FORMAT(new_employee.pf_applicable_from, '%Y-%m-%d')",
+    filter_select: "new_employee.pf_applicable_from",
+    join_footprint: "base", transform: asDate,
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    filter: { type: FILTER.DATE },
+    history_backed: false, enabled: true },
+
+  { key: "pf_contribution_basis", label: "PF Contribution Basis", group: "Statutory",
+    select: "new_employee.pf_contribution_basis", join_footprint: "base",
+    permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
+    filter: { type: FILTER.ENUM, options: [{ value: "CEILING", label: "Ceiling" }, { value: "ACTUAL_WAGE", label: "Actual wage" }] },
+    history_backed: false, enabled: true },
+
   { key: "esi_applicable", label: "ESI Applicable", group: "Statutory",
     select: "new_employee.esi_applicable", join_footprint: "base",
     permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,

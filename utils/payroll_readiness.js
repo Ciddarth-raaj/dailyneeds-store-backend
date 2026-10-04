@@ -52,6 +52,14 @@ const REASON = Object.freeze({
   PENDING_ATTENDANCE_REGULARIZATION: "PENDING_ATTENDANCE_REGULARIZATION",
   PENDING_OT_APPROVAL: "PENDING_OT_APPROVAL",
   SALARY_NOT_READY: "SALARY_NOT_READY",
+  /*
+   * A PAYROLL HOLD, not an attendance problem: the employee's statutory setup
+   * is incomplete (see `utils/payrun_eligibility.js#statutorySetupGaps`), so
+   * PF / EPS cannot be calculated without guessing. Never accepted by Close
+   * Attendance for Payroll and never cleared by Process Attendance - only by
+   * HR completing the named fields in the Employee Master.
+   */
+  STATUTORY_SETUP_INCOMPLETE: "STATUTORY_SETUP_INCOMPLETE",
   CALCULATION_REJECTED: "CALCULATION_REJECTED",
 });
 
@@ -65,6 +73,7 @@ const LABEL = Object.freeze({
   [REASON.PENDING_ATTENDANCE_REGULARIZATION]: "Pending attendance request",
   [REASON.PENDING_OT_APPROVAL]: "Pending OT approval",
   [REASON.SALARY_NOT_READY]: "Salary not ready",
+  [REASON.STATUTORY_SETUP_INCOMPLETE]: "Statutory setup incomplete - on hold",
   [REASON.CALCULATION_REJECTED]: "Calculation would be rejected",
 });
 
@@ -117,6 +126,23 @@ function datesBetween(from, to) {
   return out;
 }
 
+/**
+ * THE STATUTORY SETUP HOLD as a readiness reason, or null when nothing is
+ * missing. One builder, so the list, Calculate's refusal and the approval
+ * blocker all say the same thing.
+ */
+function statutoryHoldReason(gaps) {
+  const list = Array.isArray(gaps) ? gaps : [];
+  if (list.length === 0) return null;
+  return reason(
+    REASON.STATUTORY_SETUP_INCOMPLETE,
+    `On hold - statutory setup incomplete: ${list.map((g) => g.label).join(", ")} not recorded. ` +
+      "HR must complete these in Employee Master (Statutory details); the hold lifts on the next refresh and the employee can then be calculated. " +
+      "Nothing is assumed in the meantime.",
+    { missing_fields: list.map((g) => g.field) }
+  );
+}
+
 function reason(code, message, extra = {}) {
   return {
     code,
@@ -157,6 +183,8 @@ function evaluatePayrollReadiness(input = {}) {
     closed_for_payroll = false,
     latest_closed_date = null,
     calculation_errors = [],
+    /** `statutorySetupGaps` for this employee: what HR has still to record. */
+    statutory_gaps = [],
   } = input;
 
   const reasons = [];
@@ -308,6 +336,10 @@ function evaluatePayrollReadiness(input = {}) {
     );
   }
 
+  /* ----------------------------------------- the statutory setup hold */
+  const hold = statutoryHoldReason(statutory_gaps);
+  if (hold) reasons.push(hold);
+
   /* ---------------------------------- the calculation's own verdict */
   const errors = (Array.isArray(calculation_errors) ? calculation_errors : []).filter(Boolean);
   const explained = reasons.some((r) =>
@@ -335,6 +367,7 @@ function evaluatePayrollReadiness(input = {}) {
 }
 
 module.exports = {
+  statutoryHoldReason,
   READINESS_REASON: REASON,
   READINESS_LABEL: LABEL,
   evaluatePayrollReadiness,

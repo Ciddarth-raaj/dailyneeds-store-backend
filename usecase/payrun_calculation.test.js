@@ -59,6 +59,7 @@ class World {
     this.telegramFailFor = new Set();// employee ids whose Telegram send throws
     this.telegramSent = [];          // what the fake bot sent
     this.extras = new Map();         // employee_id -> { account_no, pan_no, bank_name, department_name }
+    this.statutory = new Map();      // employee_id -> LIVE Employee Master statutory overrides
     this.companies = [{ company_id: 1, company_name: "Daily Needs Departmental Store", reg_address: "188/1 Iyyanar Koil Street", pf_number: "TN/MAS/0012345", esi_number: "51000123450001001", status: 1 }];
     this.legacy = false;             // read as the pre-readiness code did
     this.failResetFor = new Set();   // employee ids whose reset transaction throws
@@ -210,9 +211,13 @@ class FakeCalculationRepo {
       employee_id: id,
       dob: "1990-06-15",
       previous_eps_member: 0,
-      date_of_joining: "2018-04-01",
+      previous_pf_member: 1,
+      date_of_joining: this.world.employees.get(id).date_of_joining || "2018-04-01",
       pf_applicable: this.world.employees.get(id).pf_applicable,
       esi_applicable: this.world.employees.get(id).esi_applicable,
+      uan: this.world.employees.get(id).uan,
+      pf_number: this.world.employees.get(id).pf_number,
+      ...(this.world.statutory.get(id) || {}),
     }));
   }
 
@@ -2734,7 +2739,7 @@ describe("Unlock, Publish and Unpublish", () => {
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
     const stored = world.calculations.get(1);
     assert.equal(Number(stored.net_pay) % 1, 0);
-    assert.equal(stored.calculation_version, 2);
+    assert.equal(stored.calculation_version, 3);
     assert.equal((await rowOf(1)).net_pay, stored.net_pay);
     assert.equal(
       Math.round(stored.net_pay * 100),
@@ -3051,43 +3056,46 @@ describe("Calculation & Review summary cards", () => {
   const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
   const card = (c, extra = {}) => calculation.getMonth({ ...MONTH, card: c, ...extra });
 
-  it("REGRESSION: Calculated 223 vs Ready for Approval 220 - the 3 are exactly Calculated, not ready, with their reasons", async () => {
-    for (let id = 1; id <= 223; id += 1) world.add(id);
-    // 221: nobody has confirmed the Adjustments stage for them.
-    world.states.delete(221);
-    // 222: PF applies but no UAN or PF number.
-    world.employees.get(222).uan = null;
-    world.employees.get(222).pf_number = null;
-    // 223: both.
-    world.states.delete(223);
-    world.employees.get(223).uan = null;
-    world.employees.get(223).pf_number = null;
+  it("REGRESSION: the gap between Calculated and Ready for Approval is exactly the Calculated, Not Ready card, with reasons", async () => {
+    // A production-shaped month: 220 clean, 3 calculated but blocked, and -
+    // since the EPFO 2026 statutory setup hold - 2 who cannot be calculated.
+    for (let id = 1; id <= 225; id += 1) world.add(id);
+    [221, 222, 223].forEach((id) => world.states.delete(id)); // Adjustments not confirmed
+    [224, 225].forEach((id) => {
+      world.employees.get(id).uan = null; // PF applies, no UAN or PF number: HELD
+      world.employees.get(id).pf_number = null;
+    });
     await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
 
     const all = await monthView();
-    assert.equal(all.summary.cards.CALCULATED, 223);
-    assert.equal(all.summary.cards.READY_FOR_APPROVAL, 220);
-    assert.equal(all.summary.cards.CALCULATED_NOT_READY, 3);
-    // The same numbers the screen used to show, from the existing fields.
-    assert.equal(all.summary.calculated + all.summary.ready_for_approval, 223);
+    const c = all.summary.cards;
+    // THE INVARIANT, whatever the numbers are.
+    assert.equal(c.CALCULATED - c.READY_FOR_APPROVAL, c.CALCULATED_NOT_READY);
+    assert.deepEqual([c.CALCULATED, c.READY_FOR_APPROVAL, c.CALCULATED_NOT_READY], [223, 220, 3]);
 
+    const calculated = new Set(ids(await card("CALCULATED")));
+    const ready = new Set(ids(await card("READY_FOR_APPROVAL")));
     const notReady = await card("CALCULATED_NOT_READY");
+    assert.deepEqual(ids(notReady), [...calculated].filter((id) => !ready.has(id)).sort((a, b) => a - b));
     assert.deepEqual(ids(notReady), [221, 222, 223]);
-    const reasons = Object.fromEntries(notReady.rows.map((r) => [r.employee_id, codesOf(r).sort()]));
-    assert.deepEqual(reasons, {
-      221: ["ADJUSTMENT_PENDING_CONFIRMATION"],
-      222: ["STATUTORY_SETUP_INCOMPLETE"],
-      223: ["ADJUSTMENT_PENDING_CONFIRMATION", "STATUTORY_SETUP_INCOMPLETE"],
-    });
     notReady.rows.forEach((r) => {
       assert.equal(r.status, CALC_STATUS.CALCULATED);
       assert.equal(r.status_label, "Calculated, not ready");
+      assert.deepEqual(codesOf(r), ["ADJUSTMENT_PENDING_CONFIRMATION"]);
       r.blockers.forEach((b) => assert.ok(b.label && b.message, "every reason is labelled"));
     });
-    // Ready is exactly the other 220, and none of them carries a blocker.
-    const ready = await card("READY_FOR_APPROVAL");
-    assert.equal(ready.rows.length, 220);
-    assert.ok(ready.rows.every((r) => r.blockers.length === 0));
+    const readyRows = await card("READY_FOR_APPROVAL");
+    assert.ok(readyRows.rows.every((r) => r.blockers.length === 0));
+
+    // THE HELD ARE OUTSIDE THAT RELATIONSHIP: never calculated, so in neither
+    // Calculated nor Ready - only All Employees - each saying why.
+    [224, 225].forEach((id) => {
+      assert.ok(!calculated.has(id) && !ready.has(id));
+      const row = all.rows.find((r) => r.employee_id === id);
+      assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+      assert.ok(codesOf(row).includes("STATUTORY_SETUP_INCOMPLETE"));
+    });
+    assert.equal(c.ALL, 225);
   });
 
   it("every card's count equals the rows its filter returns", async () => {
@@ -3209,5 +3217,237 @@ describe("Calculation & Review summary cards", () => {
     assert.deepEqual(ids(await card("PUBLISHED")), [1]);
     assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [2]);
     assert.deepEqual(ids(await card("CALCULATED_NOT_READY")), [3]);
+  });
+});
+
+/* ======================= EPFO 2026: the statutory setup hold and its safeguards */
+
+describe("STATUTORY_SETUP_INCOMPLETE - a joiner this month is held until HR completes the setup", () => {
+  // The world's month is August 2026; a joiner is anybody whose DOJ falls in it.
+  const JOINER = { employee: { date_of_joining: "2026-08-10" } };
+
+  it("a joiner with complete statutory data is calculated normally", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, dob: "1998-01-01" });
+    const row = await rowOf(1);
+    assert.equal(row.statutory_hold, null);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.CALCULATED);
+  });
+
+  it("a joiner missing Previous EPS Member and DOB is ON HOLD: refused by name, nothing written, nothing assumed", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: null, dob: null });
+    const row = await rowOf(1);
+    assert.deepEqual(row.statutory_hold.missing_labels, ["Date of Birth", "Previous EPS Member"]);
+    assert.match(row.statutory_hold.message, /^On hold - statutory setup incomplete/);
+    assert.ok(row.blockers.some((b) => b.code === "STATUTORY_SETUP_INCOMPLETE"));
+    assert.equal(row.calculable, false);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.BLOCKED);
+    assert.match(res.results[0].message, /Previous EPS Member/);
+    assert.equal(world.calculations.has(1), false, "no figure is stored for a held employee");
+  });
+
+  it("'Calculate All Eligible' leaves the held joiner out and calculates everybody else - one hold corrupts nobody", async () => {
+    world.add(1, JOINER).add(2);
+    world.statutory.set(1, { previous_eps_member: null });
+    const res = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.deepEqual(res.results.map((r) => [r.employee_id, r.result]), [[2, ROW_RESULT.CALCULATED]]);
+    assert.equal(world.calculations.has(1), false);
+    assert.equal(world.calculations.get(2).is_complete, 1);
+  });
+
+  it("an existing PF member who joined before the month must bring their UAN; a first-time member may use the PF number", async () => {
+    world.add(1, { employee: { date_of_joining: "2026-08-10", uan: null, pf_number: "TN/MAS/1/1" } });
+    world.statutory.set(1, { previous_pf_member: 1, previous_eps_member: 1, uan: null });
+    assert.ok((await rowOf(1)).statutory_hold.missing_fields.includes("uan"));
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, uan: null });
+    assert.equal((await rowOf(1)).statutory_hold, null);
+  });
+
+  it("HR completing the fields releases the hold on the next read; the joiner can then be calculated and approved", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_eps_member: null });
+    assert.notEqual((await rowOf(1)).statutory_hold, null);
+    world.statutory.set(1, { previous_eps_member: 0 });
+    assert.equal((await rowOf(1)).statutory_hold, null);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const approval = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(approval.results[0].result, ROW_RESULT.APPROVED);
+  });
+
+  it("an existing member (joined before the month) with Previous EPS Member missing is NOT held - the engine decides where it matters", async () => {
+    world.add(1);
+    world.statutory.set(1, { previous_eps_member: null });
+    const row = await rowOf(1);
+    assert.equal(row.statutory_hold, null);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    // Basic 13,000 is within the ceiling: EPS applies whatever the history, so nothing is unresolved.
+    assert.equal(res.results[0].result, ROW_RESULT.CALCULATED);
+    assert.equal(world.calculations.get(1).is_complete, 1);
+  });
+
+  it("approval refuses an employee whose setup became incomplete after calculation", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_eps_member: 0 });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    world.statutory.set(1, { previous_eps_member: null });
+    const approval = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.notEqual(approval.results[0].result, ROW_RESULT.APPROVED);
+    assert.equal(world.calculations.get(1).status, "CALCULATED");
+  });
+});
+
+describe("HR changes statutory master data after a month was calculated", () => {
+  it("the calculation becomes RECALCULATION_REQUIRED with 'Statutory setup changed' - never approved stale", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.notEqual((await rowOf(1)).status, CALC_STATUS.RECALCULATION_REQUIRED);
+    world.statutory.set(1, { previous_eps_member: 1 });
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(row.recalculation_reasons.some((r) => r.code === "STATUTORY_CONTEXT_CHANGED"));
+  });
+
+  it("an APPROVED, LOCKED month is never marked and never rewritten", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const before = { ...world.calculations.get(1) };
+    world.statutory.set(1, { previous_eps_member: 1, dob: "1960-01-01" });
+    const row = await rowOf(1);
+    assert.equal(row.status, CALC_STATUS.APPROVED_LOCKED);
+    const res = await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(res.results[0].result, ROW_RESULT.LOCKED);
+    assert.deepEqual(world.calculations.get(1), before);
+  });
+});
+
+describe("the ECR, from approved payroll only", () => {
+  it("a calculated but unapproved month files nothing; once approved it files one line from the stored figures", async () => {
+    world.add(1);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    let ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 0);
+    assert.equal(ecr.errors[0].code, "NOT_APPROVED");
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    ecr = await calculation.getEcr({ ...MONTH });
+    const stored = world.calculations.get(1);
+    assert.equal(ecr.lines.length, 1);
+    assert.equal(ecr.members[0].ee_share, Math.round(Number(stored.employee_pf)));
+    assert.equal(ecr.members[0].eps_share, Math.round(Number(stored.employer_eps)));
+  });
+
+  it("an existing 58+ member whose UAN was missing at initialization: EPS 0 by the age rule, and the UAN HR adds later is used", async () => {
+    world.add(1, { employee: { uan: null, pf_number: "TN/MAS/1/1" } });
+    world.statutory.set(1, { dob: "1960-03-01", previous_eps_member: 1, uan: null });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    const stored = world.calculations.get(1);
+    assert.equal(Number(stored.employer_eps), 0);
+    assert.equal(Number(stored.employer_epf), Number(stored.employer_pf_total));
+    let ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.errors[0].code, "UAN_MISSING");
+    world.statutory.set(1, { dob: "1960-03-01", previous_eps_member: 1, uan: "100200300499" });
+    ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 1);
+    assert.ok(ecr.lines[0].startsWith("100200300499#~#"));
+  });
+});
+
+/* ============== the EPFO statutory setup hold, through the summary cards */
+
+/**
+ * A HELD EMPLOYEE (`payroll_readiness.statutoryHoldReason`) IS NOT
+ * CALCULABLE. Never calculated, they are NOT_CALCULATED and sit only under All
+ * Employees; calculated before the hold appeared, the statutory marker moves
+ * and they are RECALCULATION_REQUIRED. In neither case are they Calculated,
+ * Calculated, Not Ready or Ready for Approval, and no card lets them through.
+ */
+describe("the EPFO statutory setup hold, through the Calculation & Review cards", () => {
+  const JOINER = { employee: { date_of_joining: "2026-08-10" } };
+  const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
+  const card = (c, extra = {}) => calculation.getMonth({ ...MONTH, card: c, ...extra });
+  const holdOf = (row) => row.blockers.find((b) => b.code === "STATUTORY_SETUP_INCOMPLETE");
+
+  it("a held employee is not calculated, sits only under All Employees, and the row says exactly what is missing", async () => {
+    world.add(1, JOINER).add(2);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: null, dob: null });
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+
+    const view = await monthView();
+    const row = view.rows.find((r) => r.employee_id === 1);
+    assert.equal(row.status, CALC_STATUS.NOT_CALCULATED);
+    assert.equal(row.calculable, false);
+    const hold = holdOf(row);
+    assert.equal(hold.label, "Statutory setup incomplete - on hold");
+    assert.match(hold.message, /^On hold - statutory setup incomplete: Date of Birth, Previous EPS Member not recorded\./);
+    for (const c of ["CALCULATED", "CALCULATED_NOT_READY", "READY_FOR_APPROVAL", "RECALCULATION_REQUIRED", "ATTENDANCE_NEEDS_ACTION"]) {
+      assert.ok(!ids(await card(c)).includes(1), `a held employee must not be in ${c}`);
+    }
+    assert.ok(ids(await card("ALL")).includes(1));
+    assert.equal(view.summary.not_calculated_blocked, 1);
+  });
+
+  it("Approve All Ready - and naming the held employee - never approves them, whatever card is being viewed", async () => {
+    world.add(1, JOINER).add(2);
+    world.statutory.set(1, { previous_eps_member: null });
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await card("CALCULATED_NOT_READY");
+    const all = await calculation.approve({ ...MONTH, all_ready: true, actor: ACTOR });
+    assert.equal(all.approved_count, 1);
+    assert.deepEqual(ids(await card("APPROVED_LOCKED")), [2]);
+    const named = await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(named.approved_count, 0);
+    assert.equal(world.calculations.has(1), false, "nothing was written for the held employee");
+  });
+
+  it("resolving the setup releases the hold: calculate, and the employee moves into Calculated and Ready for Approval", async () => {
+    world.add(1, JOINER);
+    world.statutory.set(1, { previous_eps_member: null });
+    assert.equal((await monthView()).summary.cards.CALCULATED, 0);
+    world.statutory.set(1, { previous_eps_member: 0 });
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [1]);
+    assert.deepEqual(ids(await card("CALCULATED")), [1]);
+    assert.equal(holdOf((await monthView()).rows[0]), undefined);
+  });
+
+  it("a hold that appears AFTER calculation makes the row Recalculation Required, shows the hold, and refuses approval and recalculation", async () => {
+    world.add(1, JOINER).add(2);
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, dob: "1998-01-01" });
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [1, 2]);
+
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: null, dob: "1998-01-01" });
+    const row = (await card("RECALCULATION_REQUIRED")).rows[0];
+    assert.equal(row.employee_id, 1);
+    assert.ok(row.recalculation_reasons.some((r) => r.code === "STATUTORY_CONTEXT_CHANGED"));
+    assert.ok(holdOf(row), "the hold is shown on the stale row");
+    assert.ok(!ids(await card("CALCULATED")).includes(1));
+    assert.ok(!ids(await card("CALCULATED_NOT_READY")).includes(1));
+
+    const approved = await calculation.approve({ ...MONTH, all_ready: true, actor: ACTOR });
+    assert.equal(approved.approved_count, 1); // employee 2 only
+    const recalc = await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.notEqual(recalc.results[0].result, ROW_RESULT.RECALCULATED);
+
+    // Completing the setup lets the recalculation through, back to Ready.
+    world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: 0, dob: "1998-01-01" });
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [1]);
+  });
+
+  it("every card's count still equals the rows its filter returns with held employees in the month", async () => {
+    world.add(1, JOINER).add(2).add(3);
+    world.statutory.set(1, { previous_eps_member: null });
+    world.states.delete(3);
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    const all = await monthView();
+    for (const c of Object.keys(all.summary.cards)) {
+      assert.equal((await card(c)).rows.length, all.summary.cards[c], `${c} count and rows disagree`);
+    }
+    assert.equal(all.summary.cards.CALCULATED - all.summary.cards.READY_FOR_APPROVAL, all.summary.cards.CALCULATED_NOT_READY);
   });
 });
