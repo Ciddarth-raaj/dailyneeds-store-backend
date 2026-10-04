@@ -429,3 +429,14 @@ test("the 3-day absent review only READS the attendance engine's stored days", (
   assert.ok(!/require\(/.test(rule), "the rule is pure");
   assert.ok(!/resignation_date|new_employee/.test(rule), "the rule decides no exit");
 });
+
+test("the exit-record check for 3-Day Absent only READS the lifecycle tables", () => {
+  assert.match(REPO_CODE, /LEFT JOIN v_employee_current_period/);
+  assert.match(REPO_CODE, /r\.voided_at IS NULL/);
+  for (const table of ["resignation", "employee_employment_period", "new_employee"]) {
+    assert.ok(
+      !new RegExp(`(UPDATE|INSERT\\s+INTO|DELETE\\s+FROM)\\s+\`?${table}\\b`, "i").test(REPO_CODE),
+      `the payrun writes ${table}`
+    );
+  }
+});

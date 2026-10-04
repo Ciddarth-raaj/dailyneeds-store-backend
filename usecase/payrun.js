@@ -18,6 +18,8 @@ const {
   attendanceStatusOf,
 } = require("../utils/payrun_eligibility");
 const { absenceReview } = require("../utils/payrun_absence_review");
+const { latestReportableDate } = require("../utils/attendance_missing");
+const { istToday } = require("../utils/istDate");
 
 /**
  * Payrun Initialization - Non-Initialized -> Initialize -> Calculated, and
@@ -115,6 +117,22 @@ function normalizeEmployeeIds(value) {
   return ids;
 }
 
+/**
+ * DOES THIS EMPLOYEE ALREADY HAVE AN EXIT ON RECORD? One row of
+ * `repository/payrun.js#listExitRecords`; any one of the four sources is
+ * enough, and which one is reported so HR can see why somebody was left out.
+ */
+function exitRecordOf(record) {
+  if (!record) return { recorded: false, source: null };
+  if (record.resignation_date) return { recorded: true, source: "RESIGNATION_DATE" };
+  if (record.status !== null && record.status !== undefined && Number(record.status) === 0) {
+    return { recorded: true, source: "EMPLOYEE_INACTIVE" };
+  }
+  if (record.current_period_state === "closed") return { recorded: true, source: "EMPLOYMENT_PERIOD_CLOSED" };
+  if (Number(record.current_resignations) > 0) return { recorded: true, source: "RESIGNATION_RECORD" };
+  return { recorded: false, source: null };
+}
+
 /** Row-level outcome codes. Stable strings; the screen keys off them. */
 const ROW_RESULT = {
   INITIALIZED: "INITIALIZED",
@@ -165,9 +183,11 @@ class PayrunUsecase {
    *                           Absent means nobody is locked, which is the
    *                           truth before the calculation stage is wired.
    */
-  constructor(payrunRepo, calculationLocks = null) {
+  constructor(payrunRepo, calculationLocks = null, { today = null } = {}) {
     this.repo = payrunRepo;
     this.calculationLocks = calculationLocks;
+    /* The business date (IST), injectable so a test can fix "today". */
+    this.today = today || (() => istToday());
   }
 
   /**
@@ -426,23 +446,54 @@ class PayrunUsecase {
   }
 
   /**
-   * THE 3-DAY ABSENT REVIEW FOR EVERY ROW, in two batched reads.
+   * THE 3-DAY ABSENT REVIEW FOR EVERY ROW, in batched reads.
    *
-   * WHO IS REVIEWED: the month's population, minus anybody already EXITED by
-   * the month end - the same dated `exited_in_month` the Exited card counts.
-   * Their exit is recorded; there is nothing for HR to discover. Somebody
-   * whose recorded exit falls AFTER the month is still reviewed, and the row
-   * says the exit is recorded.
+   * WHO IS REVIEWED: the month's population, minus
+   *   - anybody EXITED by the month end (`exited_in_month`, the Exited card's
+   *     own dated rule, unchanged), and
+   *   - anybody with ANY exit record for their current employment spell,
+   *     whatever its date - see `repository/payrun.js#listExitRecords`. The
+   *     warning exists to find exits nobody has recorded; somebody whose exit
+   *     is already recorded is not one.
    *
-   * IT READS AND NEVER WRITES. Nothing here can reach `new_employee`, the
-   * payrun row or any attendance table except through a SELECT.
+   * WHAT COUNTS IS THE ENGINE'S STORED DAYS, walked by the pure rule in
+   * `utils/payrun_absence_review.js`, up to the last COMPLETED attendance date
+   * - the same "yesterday in IST" the Missing Attendance report uses.
+   *
+   * IT READS AND NEVER WRITES.
    */
   async _absenceReview(period, rows) {
     const { from, to } = monthWindow(period.year, period.month);
-    const candidates = rows.filter((row) => row.exited_in_month !== true);
-    const ids = candidates.map((row) => row.employee_id);
+    const notExited = rows.filter((row) => row.exited_in_month !== true);
 
-    const days = await this.repo.listAttendanceDays(ids, from, to);
+    const exits = await this.repo.listExitRecords(notExited.map((row) => row.employee_id));
+    const exitOf = new Map((exits || []).map((r) => [Number(r.employee_id), r]));
+
+    const out = new Map();
+    const candidates = [];
+    notExited.forEach((row) => {
+      const exit = exitRecordOf(exitOf.get(Number(row.employee_id)));
+      if (exit.recorded) {
+        out.set(row.employee_id, {
+          evaluation: "EXIT_RECORDED",
+          three_day_absent: false,
+          absent_dates: [],
+          last_present_date: null,
+          exit_recorded: true,
+          exit_record: exit.source,
+          not_evaluable_reason: null,
+          not_evaluable_date: null,
+        });
+      } else {
+        candidates.push(row);
+      }
+    });
+
+    const days = await this.repo.listAttendanceDays(
+      candidates.map((row) => row.employee_id),
+      from,
+      to
+    );
     const daysOf = new Map();
     (days || []).forEach((day) => {
       const id = Number(day.employee_id);
@@ -450,9 +501,18 @@ class PayrunUsecase {
       daysOf.get(id).push(day);
     });
 
+    const latest_completed = latestReportableDate(this.today());
     const verdicts = new Map();
     candidates.forEach((row) => {
-      verdicts.set(row.employee_id, absenceReview(daysOf.get(Number(row.employee_id)) || []));
+      verdicts.set(
+        row.employee_id,
+        absenceReview(daysOf.get(Number(row.employee_id)) || [], {
+          from,
+          to,
+          joined_on: row.date_of_joining,
+          latest_completed,
+        })
+      );
     });
 
     /* Somebody absent all month last attended in an earlier one. */
@@ -465,15 +525,13 @@ class PayrunUsecase {
     const earlier = await this.repo.listLastPresentDates(missingLastPresent, to);
     const earlierOf = new Map((earlier || []).map((r) => [Number(r.employee_id), r.last_present_date]));
 
-    const out = new Map();
     candidates.forEach((row) => {
       const v = verdicts.get(row.employee_id);
       out.set(row.employee_id, {
-        three_day_absent: v.three_day_absent,
-        absent_dates: v.three_day_absent ? v.absent_dates : [],
+        ...v,
         last_present_date: v.last_present_date || earlierOf.get(Number(row.employee_id)) || null,
-        exit_recorded: Boolean(row.resignation_date),
-        exit_date: row.resignation_date || null,
+        exit_recorded: false,
+        exit_record: null,
       });
     });
     return out;
@@ -1009,8 +1067,8 @@ class PayrunUsecase {
   }
 }
 
-module.exports = (payrunRepo, calculationLocks = null) =>
-  new PayrunUsecase(payrunRepo, calculationLocks);
+module.exports = (payrunRepo, calculationLocks = null, options = {}) =>
+  new PayrunUsecase(payrunRepo, calculationLocks, options);
 module.exports.PayrunUsecase = PayrunUsecase;
 module.exports.ROW_RESULT = ROW_RESULT;
 module.exports.PAY_TYPE = PAY_TYPE;
@@ -1019,3 +1077,4 @@ module.exports.normalizeMonth = normalizeMonth;
 module.exports.normalizePayType = normalizePayType;
 module.exports.normalizeEmployeeIds = normalizeEmployeeIds;
 module.exports.matchesSearch = matchesSearch;
+module.exports.exitRecordOf = exitRecordOf;

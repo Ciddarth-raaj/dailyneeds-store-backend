@@ -307,11 +307,52 @@ class PayrunRepository {
       "LIST-ATTENDANCE-DAYS",
       `SELECT employee_id,
               DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
-              status, punch_count, attendance_day_count, attendance_calculation_mode,
+              status, is_final, punch_count, attendance_day_count, attendance_calculation_mode,
               JSON_UNQUOTE(JSON_EXTRACT(shift_snapshot, '$.is_working_day')) AS is_working_day
          FROM attendance_day_calculation
         WHERE employee_id IN (?) AND attendance_date >= ? AND attendance_date <= ?`,
       [employeeIds, from, to]
+    );
+  }
+
+  /**
+   * WHICH EMPLOYEES ALREADY HAVE AN EXIT ON RECORD, for the 3-Day Absent
+   * review only - the payroll population and the Exited card do not read it.
+   *
+   * ANY OF THESE, FOR THE CURRENT EMPLOYMENT SPELL, IS AN EXIT RECORD,
+   * whatever date it carries (before, during or after the month):
+   *
+   *   new_employee.resignation_date   the date the Resign action records
+   *   new_employee.status = 0         marked Inactive in the Employee Master
+   *   current period closed           the latest employment period
+   *                                   (`v_employee_current_period`) is closed,
+   *                                   dated or not
+   *   a resignation row               linked to this employee and to their
+   *                                   current period, and not voided
+   *
+   * A REJOIN STARTS A NEW SPELL: it clears `resignation_date`, opens a new
+   * period and so leaves the earlier resignation behind - which is why the
+   * resignation row must belong to the CURRENT period. The legacy
+   * `resignation` rows keyed only by employee NAME cannot be matched to an
+   * employee reliably and are not read.
+   */
+  async listExitRecords(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-EXIT-RECORDS",
+      `SELECT ne.employee_id,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
+              ne.status,
+              cur.period_state AS current_period_state,
+              DATE_FORMAT(cur.ended_on, '%Y-%m-%d') AS current_period_ended_on,
+              (SELECT COUNT(*) FROM resignation r
+                WHERE r.employee_id = ne.employee_id
+                  AND r.period_id = cur.period_id
+                  AND r.voided_at IS NULL) AS current_resignations
+         FROM new_employee ne
+         LEFT JOIN v_employee_current_period cur ON cur.employee_id = ne.employee_id
+        WHERE ne.employee_id IN (?)`,
+      [employeeIds]
     );
   }
 
