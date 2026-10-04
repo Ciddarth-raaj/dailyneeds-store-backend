@@ -172,6 +172,11 @@ const CALC_STATUS_LABEL = {
  * opens cannot disagree.
  *
  *   ALL                      every initialized employee in scope
+ *   NOT_CALCULATED           status NOT_CALCULATED: no calculation yet. Each
+ *                            row's `calculable` says whether Calculate would
+ *                            accept them now; when it would not (the EPFO
+ *                            statutory setup hold, or another readiness
+ *                            reason), `blockers` say why
  *   ATTENDANCE_NEEDS_ACTION  not locked, and the attendance the month is (or
  *                            would be) priced from is neither settled nor
  *                            closed for payroll - `attendance_needs_action`.
@@ -187,6 +192,7 @@ const CALC_STATUS_LABEL = {
 const CALC_CARD = {
   ALL: "ALL",
   ATTENDANCE_NEEDS_ACTION: "ATTENDANCE_NEEDS_ACTION",
+  NOT_CALCULATED: "NOT_CALCULATED",
   CALCULATED: "CALCULATED",
   CALCULATED_NOT_READY: "CALCULATED_NOT_READY",
   RECALCULATION_REQUIRED: "RECALCULATION_REQUIRED",

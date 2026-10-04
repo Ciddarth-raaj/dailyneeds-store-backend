@@ -664,6 +664,7 @@ describe("the month's counts", () => {
     assert.deepEqual(cards, {
       ALL: 8,
       ATTENDANCE_NEEDS_ACTION: 0,
+      NOT_CALCULATED: 2,
       CALCULATED: 2,
       CALCULATED_NOT_READY: 1,
       RECALCULATION_REQUIRED: 1,
@@ -1062,6 +1063,11 @@ describe("the month read's card filter", () => {
     assert.equal(calc.inCard(row(CALC_STATUS.ATTENDANCE_PENDING), CALC_CARD.CALCULATED), false);
     assert.equal(calc.inCard(row(CALC_STATUS.APPROVED_LOCKED), CALC_CARD.CALCULATED), false);
     assert.equal(calc.inCard(row(CALC_STATUS.READY_FOR_APPROVAL), CALC_CARD.CALCULATED_NOT_READY), false);
+    // Not Calculated is exactly the NOT_CALCULATED status - calculable or held.
+    assert.equal(calc.inCard(row(CALC_STATUS.NOT_CALCULATED, { calculable: false }), CALC_CARD.NOT_CALCULATED), true);
+    assert.equal(calc.inCard(row(CALC_STATUS.NOT_CALCULATED), CALC_CARD.NOT_CALCULATED), true);
+    assert.equal(calc.inCard(row(CALC_STATUS.NOT_CALCULATED), CALC_CARD.CALCULATED), false);
+    assert.equal(calc.inCard(row(CALC_STATUS.RECALCULATION_REQUIRED), CALC_CARD.NOT_CALCULATED), false);
     assert.equal(
       calc.inCard(row(CALC_STATUS.RECALCULATION_REQUIRED, { attendance_needs_action: true }), CALC_CARD.ATTENDANCE_NEEDS_ACTION),
       true

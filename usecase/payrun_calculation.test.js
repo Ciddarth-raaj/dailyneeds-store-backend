@@ -3050,7 +3050,7 @@ describe("Payslip Publish", () => {
  */
 describe("Calculation & Review summary cards", () => {
   const CARDS = [
-    "ALL", "ATTENDANCE_NEEDS_ACTION", "CALCULATED", "CALCULATED_NOT_READY",
+    "ALL", "ATTENDANCE_NEEDS_ACTION", "NOT_CALCULATED", "CALCULATED", "CALCULATED_NOT_READY",
     "RECALCULATION_REQUIRED", "READY_FOR_APPROVAL", "APPROVED_LOCKED", "PUBLISHED",
   ];
   const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
@@ -3089,6 +3089,8 @@ describe("Calculation & Review summary cards", () => {
 
     // THE HELD ARE OUTSIDE THAT RELATIONSHIP: never calculated, so in neither
     // Calculated nor Ready - only All Employees - each saying why.
+    assert.deepEqual(ids(await card("NOT_CALCULATED")), [224, 225]);
+    assert.equal(c.NOT_CALCULATED, 2);
     [224, 225].forEach((id) => {
       assert.ok(!calculated.has(id) && !ready.has(id));
       const row = all.rows.find((r) => r.employee_id === id);
@@ -3371,7 +3373,7 @@ describe("the EPFO statutory setup hold, through the Calculation & Review cards"
   const card = (c, extra = {}) => calculation.getMonth({ ...MONTH, card: c, ...extra });
   const holdOf = (row) => row.blockers.find((b) => b.code === "STATUTORY_SETUP_INCOMPLETE");
 
-  it("a held employee is not calculated, sits only under All Employees, and the row says exactly what is missing", async () => {
+  it("held + never calculated -> Not Calculated card, and the row says exactly what is missing", async () => {
     world.add(1, JOINER).add(2);
     world.statutory.set(1, { previous_pf_member: 0, previous_eps_member: null, dob: null });
     await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
@@ -3387,7 +3389,13 @@ describe("the EPFO statutory setup hold, through the Calculation & Review cards"
       assert.ok(!ids(await card(c)).includes(1), `a held employee must not be in ${c}`);
     }
     assert.ok(ids(await card("ALL")).includes(1));
+    assert.deepEqual(ids(await card("NOT_CALCULATED")), [1]);
+    assert.equal(view.summary.cards.NOT_CALCULATED, 1);
     assert.equal(view.summary.not_calculated_blocked, 1);
+    // Calculate refuses them by name; nothing is written.
+    const refused = await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    assert.equal(refused.results[0].result, ROW_RESULT.BLOCKED);
+    assert.equal(world.calculations.has(1), false);
   });
 
   it("Approve All Ready - and naming the held employee - never approves them, whatever card is being viewed", async () => {
@@ -3407,10 +3415,16 @@ describe("the EPFO statutory setup hold, through the Calculation & Review cards"
     world.add(1, JOINER);
     world.statutory.set(1, { previous_eps_member: null });
     assert.equal((await monthView()).summary.cards.CALCULATED, 0);
+    assert.deepEqual(ids(await card("NOT_CALCULATED")), [1]);
     world.statutory.set(1, { previous_eps_member: 0 });
+    // The hold lifts on the next read: still Not Calculated, but calculable.
+    const released = (await card("NOT_CALCULATED")).rows[0];
+    assert.equal(released.calculable, true);
+    assert.equal(holdOf(released), undefined);
     await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
     assert.deepEqual(ids(await card("READY_FOR_APPROVAL")), [1]);
     assert.deepEqual(ids(await card("CALCULATED")), [1]);
+    assert.deepEqual(ids(await card("NOT_CALCULATED")), []);
     assert.equal(holdOf((await monthView()).rows[0]), undefined);
   });
 
@@ -3449,5 +3463,51 @@ describe("the EPFO statutory setup hold, through the Calculation & Review cards"
       assert.equal((await card(c)).rows.length, all.summary.cards[c], `${c} count and rows disagree`);
     }
     assert.equal(all.summary.cards.CALCULATED - all.summary.cards.READY_FOR_APPROVAL, all.summary.cards.CALCULATED_NOT_READY);
+  });
+});
+
+describe("the Not Calculated card: awaiting calculation vs blocked from it", () => {
+  const JOINER = { employee: { date_of_joining: "2026-08-10" } };
+  const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
+
+  it("holds every NOT_CALCULATED employee; `calculable` and the blockers tell ordinary from held", async () => {
+    world.add(1).add(2, JOINER).add(3);
+    world.statutory.set(2, { previous_pf_member: 0, previous_eps_member: null, dob: null });
+    await calculation.calculate({ ...MONTH, employee_ids: [3], actor: ACTOR });
+
+    const view = await calculation.getMonth({ ...MONTH, card: "NOT_CALCULATED" });
+    assert.deepEqual(ids(view), [1, 2]);
+    const ordinary = view.rows.find((r) => r.employee_id === 1);
+    const held = view.rows.find((r) => r.employee_id === 2);
+    // Ordinary: Calculate would accept them; the only "reason" is that it has not run.
+    assert.equal(ordinary.calculable, true);
+    assert.equal(ordinary.statutory_hold, null);
+    assert.deepEqual(codesOf(ordinary), ["NOT_CALCULATED"]);
+    // Held: Calculate would refuse them, and the hold names the fields.
+    assert.equal(held.calculable, false);
+    assert.deepEqual(held.statutory_hold.missing_labels, ["Date of Birth", "Previous EPS Member"]);
+    assert.ok(codesOf(held).includes("STATUTORY_SETUP_INCOMPLETE"));
+    // Calculate All Eligible takes the ordinary one only.
+    assert.equal(view.summary.eligible_to_calculate, 1);
+    assert.equal(view.summary.not_calculated_blocked, 1);
+    assert.equal(view.summary.cards.NOT_CALCULATED, 2);
+    const run = await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    assert.deepEqual(run.results.map((r) => [r.employee_id, r.result]), [[1, ROW_RESULT.CALCULATED]]);
+    assert.deepEqual(ids(await calculation.getMonth({ ...MONTH, card: "NOT_CALCULATED" })), [2]);
+  });
+
+  it("Not Calculated and Recalculation Required stay outside Calculated = Not Ready + Ready", async () => {
+    world.add(1).add(2).add(3).add(4);
+    world.states.delete(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [2, 3, 4], actor: ACTOR });
+    world.salaries.get(4).monthly_gross = 30000;
+    world.salaries.get(4).salary_id = 9004;
+    const c = (await monthView()).summary.cards;
+    assert.deepEqual(
+      [c.NOT_CALCULATED, c.CALCULATED, c.CALCULATED_NOT_READY, c.READY_FOR_APPROVAL, c.RECALCULATION_REQUIRED],
+      [1, 2, 1, 1, 1]
+    );
+    assert.equal(c.CALCULATED, c.CALCULATED_NOT_READY + c.READY_FOR_APPROVAL);
+    assert.equal(c.ALL, c.NOT_CALCULATED + c.CALCULATED + c.RECALCULATION_REQUIRED);
   });
 });

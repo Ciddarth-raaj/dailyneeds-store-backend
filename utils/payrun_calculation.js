@@ -1495,6 +1495,8 @@ function inCard(row = {}, card = CALC_CARD.ALL) {
   switch (card) {
     case CALC_CARD.ATTENDANCE_NEEDS_ACTION:
       return row.attendance_needs_action === true;
+    case CALC_CARD.NOT_CALCULATED:
+      return row.status === CALC_STATUS.NOT_CALCULATED;
     case CALC_CARD.CALCULATED:
       return row.status === CALC_STATUS.CALCULATED || row.status === CALC_STATUS.READY_FOR_APPROVAL;
     case CALC_CARD.CALCULATED_NOT_READY:
