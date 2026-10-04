@@ -63,7 +63,15 @@ const SCHEMA = [
   `CREATE TABLE attendance_monthly_payroll (
      attendance_monthly_payroll_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
      ${MONTHLY_PAYROLL_COLUMNS.map((c) =>
-       ["employee_id", "period_year", "period_month"].includes(c) ? `${c} INT NOT NULL` : `\`${c}\` TEXT NULL`
+       ["employee_id", "period_year", "period_month"].includes(c)
+         ? `${c} INT NOT NULL`
+         : // The production types (20260918120000-attendance-v2-calculation),
+           // so payroll's reads meet DATE / JSON exactly as the driver returns them.
+           ["available_from", "available_to"].includes(c)
+         ? `\`${c}\` DATE NULL`
+         : c === "held_dates"
+         ? `\`${c}\` JSON NULL`
+         : `\`${c}\` TEXT NULL`
      ).join(",\n     ")},
      calculated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
      UNIQUE KEY uq_amp (employee_id, period_year, period_month)
@@ -277,7 +285,7 @@ describe("a Sep 9 joiner through the real repositories, as SQL", { skip: !URL &&
       assert.equal(dates.length, 22);
       assert.equal(dates[0], JOINED);
 
-      const [m] = await q(pool, "SELECT * FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]);
+      const [m] = await q(pool, "SELECT *, DATE_FORMAT(available_from, '%Y-%m-%d') AS available_from, DATE_FORMAT(available_to, '%Y-%m-%d') AS available_to FROM attendance_monthly_payroll WHERE employee_id = ?", [EMP]);
       assert.equal(m.available_from, JOINED);
       assert.equal(String(m.available_dates), "22");
       assert.equal(String(m.attendance_days), "22");

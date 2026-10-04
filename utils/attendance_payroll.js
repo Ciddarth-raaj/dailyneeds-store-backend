@@ -343,12 +343,17 @@ function computeMonthlyAttendancePayroll(input = {}) {
   // ABSENT row stored before the boundary was enforced - it adds no day, no
   // shortage, no OT, and above all is never HELD, because a held pre-joining
   // date would keep a mid-month joiner's month from ever becoming final.
+  //
+  // THE LAST WORKING DATE IS THE UPPER BOUNDARY, by the same reasoning: a
+  // date after it (EXITED, or a stale ABSENT / NO_SHIFT row) is not theirs.
   const joinedOn = toDateOnly(joined_on);
+  const endedOn = toDateOnly(ended_on);
   (days || []).forEach((day) => {
     if (!day) return;
     const dayDate = toDateOnly(day.attendance_date);
     if (joinedOn !== null && dayDate !== null && dayDate < joinedOn) return;
-    if (day.status === "NOT_JOINED") return;
+    if (endedOn !== null && dayDate !== null && dayDate > endedOn) return;
+    if (day.status === "NOT_JOINED" || day.status === "EXITED") return;
     attendedDays += Math.max(0, Math.trunc(day.attendance_day_count || 0));
 
     // A date that is not final is PRESENT but not settled. Its day still

@@ -1,6 +1,11 @@
 /**
- * THE STORED MONTHLY SUMMARY, AS PAYROLL MUST READ IT: dates before the
- * joining date never hold a month.
+ * THE STORED MONTHLY SUMMARY, AS PAYROLL MUST READ IT: dates outside the
+ * employment period - before the joining date, or after the last working
+ * date - never hold a month.
+ *
+ * The upper side uses `available_to` exactly as the lower side uses
+ * `available_from`: it is stored on the row by `availableDates`, the earlier
+ * of the month's last day and `new_employee.resignation_date` (inclusive).
  *
  * WHY THIS EXISTS. `attendance_monthly_payroll.is_final` is derived by
  * `utils/attendance_payroll.js` as "no date was held out" (`held_dates` is
@@ -46,6 +51,23 @@ function parseHeldDates(value) {
 const isFinalFlag = (v) => v === 1 || v === true || v === "1";
 
 /**
+ * A stored bound as `YYYY-MM-DD`, or null. The columns are DATE, and the
+ * production pool does not set `dateStrings`, so an unformatted read hands
+ * back a JS Date at LOCAL midnight - its local parts are the stored calendar
+ * date (the same rule `utils/joining_date_window.js#storedIsoDate` applies).
+ * The repositories format the columns in SQL; this is the second guard.
+ */
+function storedDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return null;
+    return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+  }
+  const m = String(value).trim().match(/^(\d{4}-\d{2}-\d{2})/);
+  return m ? m[1] : null;
+}
+
+/**
  * @param {object|null} row  an `attendance_monthly_payroll` row carrying
  *        `is_final`, `held_dates` and `available_from`
  * @returns {object|null} the same row, with `is_final` corrected where only
@@ -53,20 +75,24 @@ const isFinalFlag = (v) => v === 1 || v === true || v === "1";
  */
 function effectiveAttendanceMonth(row) {
   if (!row || isFinalFlag(row.is_final)) return row;
-  const from = row.available_from ? String(row.available_from).slice(0, 10) : null;
-  if (!from || !DATE_RE.test(from)) return row;
+  const from = storedDate(row.available_from);
+  const to = storedDate(row.available_to);
+  if (!from && !to) return row;
   const held = parseHeldDates(row.held_dates);
-  // Unreadable or empty: nothing can be PROVEN pre-joining, so nothing changes.
+  // Unreadable or empty: nothing can be PROVEN outside employment, so
+  // nothing changes.
   if (!held || held.length === 0) return row;
 
-  const preJoining = held.filter((d) => DATE_RE.test(d) && d < from);
-  if (preJoining.length !== held.length) return row;
+  const preJoining = from ? held.filter((d) => DATE_RE.test(d) && d < from) : [];
+  const postExit = to ? held.filter((d) => DATE_RE.test(d) && d > to) : [];
+  if (preJoining.length + postExit.length !== held.length) return row;
 
   return {
     ...row,
     is_final: 1,
     pre_joining_held_dates: preJoining,
+    post_exit_held_dates: postExit,
   };
 }
 
-module.exports = { effectiveAttendanceMonth, parseHeldDates };
+module.exports = { effectiveAttendanceMonth, parseHeldDates, storedDate };

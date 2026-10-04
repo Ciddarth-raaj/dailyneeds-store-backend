@@ -292,16 +292,29 @@ module.exports = (
    * recalculated.
    */
   /**
-   * NO REQUEST FOR A DATE BEFORE THE JOINING DATE. Such a date is not an
-   * attendance day (`NOT_JOINED`): there is no punch to correct, no overtime
-   * and no shift to change on it.
+   * NO REQUEST FOR A DATE OUTSIDE THE EMPLOYMENT PERIOD. A date before the
+   * joining date (`NOT_JOINED`) or after the last working date (`EXITED`) is
+   * not an attendance day: there is no punch to correct, no shortage to
+   * excuse, no overtime and no shift to change on it. Both bounds are the
+   * columns payroll's `available_from` / `available_to` are built from.
+   * Existing requests are untouched - this only refuses new ones.
    */
-  const assertJoinedBy = async (employeeId, date, what) => {
-    if (typeof attendanceCalculationUsecase.joiningDateFor !== "function") return;
-    const joinedOn = await attendanceCalculationUsecase.joiningDateFor(employeeId);
-    if (joinedOn && date < joinedOn) {
+  const assertEmployedOn = async (employeeId, date, what) => {
+    let window = null;
+    if (typeof attendanceCalculationUsecase.employmentWindowFor === "function") {
+      window = await attendanceCalculationUsecase.employmentWindowFor(employeeId);
+    } else if (typeof attendanceCalculationUsecase.joiningDateFor === "function") {
+      window = { joined_on: await attendanceCalculationUsecase.joiningDateFor(employeeId), ended_on: null };
+    }
+    if (!window) return;
+    if (window.joined_on && date < window.joined_on) {
       throw validationError(
-        `${date} is before this employee's joining date (${joinedOn}) - ${what} cannot be raised for a date they had not joined`
+        `${date} is before this employee's joining date (${window.joined_on}) - ${what} cannot be raised for a date they had not joined`
+      );
+    }
+    if (window.ended_on && date > window.ended_on) {
+      throw validationError(
+        `Attendance is not applicable after the employee's last working date. ${date} is after ${window.ended_on} - ${what} cannot be raised for it`
       );
     }
   };
@@ -326,7 +339,7 @@ module.exports = (
       throw validationError("requested_for_employee_id must be an employee id");
     }
 
-    await assertJoinedBy(forEmployeeId, date, "an attendance correction");
+    await assertEmployedOn(forEmployeeId, date, "an attendance correction");
 
     const open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
     if (open) {
@@ -563,7 +576,7 @@ module.exports = (
       throw validationError(`OT can be requested for the last ${MAX_BACKDATE_DAYS} days only`);
     }
 
-    await assertJoinedBy(employeeId, date, "an OT request");
+    await assertEmployedOn(employeeId, date, "an OT request");
 
     // The employee must exist; the chain needs their identity anyway.
     const identity = await resolveIdentity(employeeId);
@@ -760,7 +773,7 @@ module.exports = (
 
     const businessToday = istToday(today);
 
-    await assertJoinedBy(employeeId, date, "a shift change request");
+    await assertEmployedOn(employeeId, date, "a shift change request");
 
     // The Attendance Calculation Type FOR THIS DATE, resolved first: on a
     // Present/Absent Only date the request is refused whatever else is true.
@@ -1019,6 +1032,8 @@ module.exports = (
     if (date > addDays(businessToday, MAX_FORWARD_DAYS)) {
       throw validationError(`A permission can be requested at most ${MAX_FORWARD_DAYS} days ahead`);
     }
+
+    await assertEmployedOn(forId, date, "a permission request");
 
     // PAYROLL LOCK, BEFORE THE REQUEST EXISTS - a permission against a
     // settled month could never be approved.

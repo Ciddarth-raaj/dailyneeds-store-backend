@@ -211,6 +211,14 @@ const CALC_STATUS = Object.freeze({
    * or a payrun as a row. See `utils/attendance_eligibility.js`.
    */
   NOT_JOINED: "NOT_JOINED",
+  /**
+   * The date is AFTER the employee's last working date
+   * (`new_employee.resignation_date`, inclusive - the same bound payroll's
+   * `available_to` uses). The mirror of NOT_JOINED, and kept distinct from
+   * it: settled, every minute and the day count zero, no shift, no review
+   * reason, and NEVER STORED.
+   */
+  EXITED: "EXITED",
 });
 
 /** Why a date needs a human. Empty on a clean day. */
@@ -826,6 +834,9 @@ function calculateAttendanceDay(input = {}) {
     // The date is before the employee's joining date. Decided by the caller
     // from `utils/attendance_eligibility.js`; see CALC_STATUS.NOT_JOINED.
     before_joining = false,
+    // The date is after the employee's last working date. See
+    // CALC_STATUS.EXITED.
+    after_exit = false,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -962,12 +973,14 @@ function calculateAttendanceDay(input = {}) {
     attendance_calculation_mode: ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   };
 
-  // NOT EMPLOYED YET - answered before everything else, the exemption
+  // OUTSIDE THE EMPLOYMENT PERIOD - not joined yet, or after the last
+  // working date - answered before everything else, the exemption
   // included. No shift is read (a roster or a backfilled assignment that
   // happens to cover the date is not evidence of employment), no punch is
   // counted, and nothing is owed in either direction. Raw punches stay on
   // the row as evidence only.
-  if (before_joining === true) {
+  if (before_joining === true || after_exit === true) {
+    const exited = before_joining !== true;
     return {
       ...base,
       work_shift_id: null,
@@ -978,10 +991,14 @@ function calculateAttendanceDay(input = {}) {
       ot_rate: null,
       effective_punches: [],
       punch_count: 0,
-      status: CALC_STATUS.NOT_JOINED,
+      status: exited ? CALC_STATUS.EXITED : CALC_STATUS.NOT_JOINED,
       is_final: true,
       review_reasons: [],
-      notes: ["Not joined yet - this date is before the employee's joining date"],
+      notes: [
+        exited
+          ? "Not applicable - this date is after the employee's last working date"
+          : "Not joined yet - this date is before the employee's joining date",
+      ],
     };
   }
 

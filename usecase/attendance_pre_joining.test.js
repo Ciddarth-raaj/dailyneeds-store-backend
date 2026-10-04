@@ -215,7 +215,7 @@ describe("Process Attendance (the month persist) and the monthly summary", () =>
     assert.equal(storedDates.length, 22);
     assert.ok(storedDates.every((d) => d >= JOINED), `stored: ${storedDates}`);
     assert.ok(write.rows.every((r) => r.status !== "NOT_JOINED"));
-    assert.deepEqual(write.pre_joining_dates, SEP_1_TO_8);
+    assert.deepEqual(write.outside_employment_dates, SEP_1_TO_8);
 
     // Eligibility starts on the joining date: 22 available dates, nothing held.
     assert.equal(write.monthly.available_from, JOINED);

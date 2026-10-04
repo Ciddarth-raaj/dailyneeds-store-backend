@@ -267,7 +267,8 @@ async function lockPayrollMonthsOnConnection(connection, rows) {
  * path but the monthly save, which holds the lock across two tables and calls
  * this directly rather than gating twice.
  */
-const CALC_STATUS_NOT_JOINED = "NOT_JOINED";
+// Statuses that describe a date OUTSIDE the employment period. Never rows.
+const OUTSIDE_EMPLOYMENT_STATUSES = new Set(["NOT_JOINED", "EXITED"]);
 
 /**
  * THE ONE DELETE this repository issues: derived day rows of ONE employee on
@@ -287,10 +288,11 @@ async function deleteCalculationDates(connection, employeeId, dates) {
 
 async function upsertCalculationRows(connection, rows) {
   if (!Array.isArray(rows) || rows.length === 0) return { written: 0 };
-  // A PRE-JOINING DATE IS NEVER MATERIALISED. The usecase already drops
-  // NOT_JOINED days before persisting; this is the last line, so no caller -
-  // present or future - can store a date somebody did not work here.
-  rows = rows.filter((row) => !row || row.status !== CALC_STATUS_NOT_JOINED);
+  // A DATE OUTSIDE THE EMPLOYMENT PERIOD IS NEVER MATERIALISED. The usecase
+  // already drops NOT_JOINED / EXITED days before persisting; this is the
+  // last line, so no caller - present or future - can store a date somebody
+  // did not work here.
+  rows = rows.filter((row) => !row || !OUTSIDE_EMPLOYMENT_STATUSES.has(row.status));
   if (rows.length === 0) return { written: 0 };
 
   const values = rows.map((row) => CALCULATION_COLUMNS.map((column) => row[column]));
@@ -772,9 +774,12 @@ class AttendanceCalculationRepository {
       // included - knows the joining date, the hard lower boundary of
       // attendance (`utils/attendance_eligibility.js`). Parsed through the
       // one shared rule, never compared as text.
+      // `resignation_date` likewise: the last working date, INCLUSIVE - the
+      // same column and meaning payroll's `available_to` is built from.
       `SELECT ne.employee_id, ne.special_break_override_minutes, ne.extra_break_hours,
               ne.attendance_required,
-              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS joined_on
+              DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS joined_on,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
          FROM new_employee ne
         WHERE ne.employee_id = ?`,
       [employeeId]
@@ -1838,10 +1843,13 @@ class AttendanceCalculationRepository {
     period_month,
     rows = [],
     monthly = null,
-    // Dates of this month BEFORE THE JOINING DATE. Any row stored for one is
-    // stale by definition (it was written before the boundary was enforced)
-    // and is removed in this transaction, BEFORE the summary fingerprints the
-    // month's days - so the summary and its days agree that it does not exist.
+    // Dates of this month OUTSIDE THE EMPLOYMENT PERIOD - before the joining
+    // date or after the last working date. Any row stored for one is stale by
+    // definition (written before the boundary was enforced) and is removed in
+    // this transaction, BEFORE the summary fingerprints the month's days - so
+    // the summary and its days agree that it does not exist.
+    outside_employment_dates = [],
+    // The original name, still accepted: same meaning, joining side only.
     pre_joining_dates = [],
   }) {
     const employeeId = Number(employee_id);
@@ -1870,14 +1878,19 @@ class AttendanceCalculationRepository {
       const calculation = await upsertCalculationRows(connection, rows);
 
       const { from: monthFrom, to: monthTo } = monthWindow(year, month);
-      const doomed = [...new Set(Array.isArray(pre_joining_dates) ? pre_joining_dates : [])].filter(
+      const doomed = [
+        ...new Set([
+          ...(Array.isArray(outside_employment_dates) ? outside_employment_dates : []),
+          ...(Array.isArray(pre_joining_dates) ? pre_joining_dates : []),
+        ]),
+      ].filter(
         (date) => typeof date === "string" && date >= monthFrom && date <= monthTo
       );
-      let preJoiningRemoved = 0;
+      let outsideRemoved = 0;
       if (doomed.length > 0) {
         // Covered by the gate above: it locked this employee/month.
         const removed = await deleteCalculationDates(connection, employeeId, doomed);
-        preJoiningRemoved = removed ? Number(removed.affectedRows) || 0 : 0;
+        outsideRemoved = removed ? Number(removed.affectedRows) || 0 : 0;
       }
 
       let monthlyWritten = 0;
@@ -1895,7 +1908,13 @@ class AttendanceCalculationRepository {
       }
 
       await commitAsync(connection);
-      return { ...calculation, monthly_written: monthlyWritten, pre_joining_removed: preJoiningRemoved };
+      return {
+        ...calculation,
+        monthly_written: monthlyWritten,
+        outside_employment_removed: outsideRemoved,
+        // The original key, kept for callers that read it.
+        pre_joining_removed: outsideRemoved,
+      };
     } catch (err) {
       await rollbackAsync(connection);
       this._log("SAVE-MONTH-WITH-PAYROLL", err);

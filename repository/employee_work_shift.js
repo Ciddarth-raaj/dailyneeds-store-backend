@@ -568,6 +568,33 @@ class EmployeeWorkShiftRepository {
     return rows && rows[0] ? rows[0].joined_on || null : null;
   }
 
+  /**
+   * The last working date (`new_employee.resignation_date`, inclusive - the
+   * column payroll's `available_to` reads) as `YYYY-MM-DD`, or null.
+   */
+  async getLastWorkingDate(employeeId) {
+    const rows = await this._read(
+      "GET-LAST-WORKING-DATE",
+      `SELECT DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+         FROM new_employee ne
+        WHERE ne.employee_id = ?`,
+      [employeeId]
+    );
+    return rows && rows[0] ? rows[0].resignation_date || null : null;
+  }
+
+  /** The same, for a bulk selection: only employees who HAVE an end date. */
+  async listLastWorkingDates(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-LAST-WORKING-DATES",
+      `SELECT ne.employee_id, DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
+         FROM new_employee ne
+        WHERE ne.employee_id IN (?) AND ne.resignation_date IS NOT NULL`,
+      [employeeIds]
+    );
+  }
+
   async assignWorkShift(employeeIds, workShiftId, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {

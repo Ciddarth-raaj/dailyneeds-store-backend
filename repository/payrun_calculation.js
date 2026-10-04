@@ -161,7 +161,9 @@ class PayrunCalculationRepository {
     const rows = await this._read(
       "LIST-ATTENDANCE-MONTHS",
       `SELECT attendance_monthly_payroll_id, employee_id, is_final, payroll_version,
-              held_dates, available_from,
+              held_dates,
+              DATE_FORMAT(available_from, '%Y-%m-%d') AS available_from,
+              DATE_FORMAT(available_to, '%Y-%m-%d') AS available_to,
               salary_days, extra_days, base_days,
               monthly_gross, daily_rate,
               salary_day_earnings, extra_day_earnings,
@@ -174,8 +176,8 @@ class PayrunCalculationRepository {
       [employeeIds, year, month],
       conn
     );
-    // Dates before the joining date never hold a month - even on a summary
-    // stored before that boundary was enforced. See the util.
+    // Dates outside the employment period never hold a month - even on a
+    // summary stored before that boundary was enforced. See the util.
     return (rows || []).map(effectiveAttendanceMonth);
   }
 
@@ -234,9 +236,10 @@ class PayrunCalculationRepository {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
       "LIST-EFFECTIVE-NRM",
-      // THE JOINING DATE BOUNDS THE EVIDENCE: a row stored for a date before
-      // somebody joined (written before that boundary was enforced) is not
-      // a day of theirs and must not decide their NRM.
+      // THE EMPLOYMENT PERIOD BOUNDS THE EVIDENCE: a row stored for a date
+      // before somebody joined or after their last working date (written
+      // before those boundaries were enforced) is not a day of theirs and
+      // must not decide their NRM.
       `SELECT c.employee_id,
               c.nrm_minutes,
               c.break_allowance_source,
@@ -247,6 +250,7 @@ class PayrunCalculationRepository {
         WHERE c.employee_id IN (?)
           AND c.attendance_date >= ? AND c.attendance_date <= ?
           AND ((${JOINED_ON("ne")}) IS NULL OR c.attendance_date >= (${JOINED_ON("ne")}))
+          AND (ne.resignation_date IS NULL OR c.attendance_date <= ne.resignation_date)
           AND c.is_final = 1
           AND c.nrm_minutes > 0
         GROUP BY c.employee_id, c.nrm_minutes, c.break_allowance_source
