@@ -988,3 +988,39 @@ write gate.
   filters the SAME population by that mode - so the count and the list agree,
   a Shift Based employee with no shift stays in the No Shift gap, and a
   Present/Absent Only employee with a shift is in the Present/Absent Only row.
+
+## The joining date is the hard lower boundary
+
+A date before `new_employee.date_of_joining` (parsed by
+`utils/joining_date.js#JOINED_ON`) is **not an attendance day**. Regression:
+employee 2284 joined 09-09-2026 and Employee Attendance showed 01-09..08-09
+as *No Shift Assigned*; Process Attendance stored those dates as
+`NO_SHIFT_FOR_DATE` rows and left the monthly summary held (`is_final = 0`)
+until somebody closed it by hand.
+
+**Why they were materialised.** `calculateRange` - behind the screen's read,
+the month read and the month persist - calculated every date of the range with
+no employment bound. Recalculate clamped its window to the joining date, but
+`calculateMonth({ persist: true })` did not, and the A0 backfill dates shift
+history from 2026-09-01, so a pre-joining date could even resolve a shift.
+
+**The rule now, everywhere:**
+
+| Where | Behaviour before the joining date |
+|---|---|
+| Engine (`utils/attendance_engine.js`) | `CALC_STATUS.NOT_JOINED`: settled, every minute and the day count 0, no shift, no review reason. Answered before everything else. |
+| Read path (`calculateRange` / `readRange`) | Returns `NOT_JOINED` and ignores any stored row for the date. |
+| Month persist (`calculateMonth`) | Never stores the date; deletes a stale row for it inside the payroll-locked transaction, before the summary is fingerprinted. |
+| Any storage path | `upsertCalculationRows` drops a `NOT_JOINED` row - it is never materialised. |
+| Monthly payroll (`computeMonthlyAttendancePayroll`) | Pre-joining days add nothing and are never held; `available_dates` starts on the joining date, so a mid-month joiner's month becomes final on its own. |
+| Payrun NRM evidence (`listEffectiveNrm`) | Rows before the joining date are not read. |
+| Recalculate | Unchanged: clamps to the joining date and reconciles pre-joining rows away. |
+| Dashboard | Unchanged: `employedOn` per date; `NOT_JOINED` is never an issue. |
+| Shift assignment | Edit Shift Assignment and history corrections refuse an `effective_from` before the joining date; a bulk assignment made ahead of the first day applies from the joining date; single-date Edit Shift is refused. |
+| Requests | Correction, OT and one-day shift change requests are refused (Permission already was). |
+| Frontend | Badge *Not Joined*, a dash in every figure, no Edit Shift / Permission action, and not counted in any summary card (All included). |
+
+Existing stale rows are removed by the ordinary Process Attendance or
+Recalculate of the affected month once this is deployed (a payroll-locked month
+is refused, as for any attendance change). `scripts/hr/pre-joining-attendance-audit.sql`
+lists them read-only beforehand.

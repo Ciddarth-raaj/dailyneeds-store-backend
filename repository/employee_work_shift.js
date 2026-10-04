@@ -50,6 +50,17 @@ const ASSIGNMENT_STATUS = { ALL: "ALL", ASSIGNED: "ASSIGNED", UNASSIGNED: "UNASS
 /** Mirrors `pages/hr/employees`: 1 is employed, anything else is not. */
 const EMPLOYMENT_STATUS = { ACTIVE: "ACTIVE", INACTIVE: "INACTIVE", ALL: "ALL" };
 
+/**
+ * An assignment's effective date, never before the joining date: a shift
+ * assigned to somebody ahead of their first day applies FROM that first day,
+ * so no date before it ever resolves to a roster.
+ */
+function notBeforeJoining(effectiveFrom, joinedOn) {
+  const joined = typeof joinedOn === "string" && /^\d{4}-\d{2}-\d{2}$/.test(joinedOn) ? joinedOn : null;
+  if (!joined || !effectiveFrom) return effectiveFrom;
+  return String(effectiveFrom) < joined ? joined : effectiveFrom;
+}
+
 class EmployeeWorkShiftRepository {
   constructor(db) {
     this.db = db;
@@ -542,6 +553,21 @@ class EmployeeWorkShiftRepository {
     });
   }
 
+  /**
+   * The employee's joining date as `YYYY-MM-DD`, parsed by the one shared
+   * rule, or null when absent or unreadable (which is unbounded).
+   */
+  async getJoiningDate(employeeId) {
+    const rows = await this._read(
+      "GET-JOINING-DATE",
+      `SELECT DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS joined_on
+         FROM new_employee ne
+        WHERE ne.employee_id = ?`,
+      [employeeId]
+    );
+    return rows && rows[0] ? rows[0].joined_on || null : null;
+  }
+
   async assignWorkShift(employeeIds, workShiftId, options = {}) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -619,7 +645,7 @@ class EmployeeWorkShiftRepository {
               employeeId,
               workShiftId,
               hasHistory.has(Number(employeeId))
-                ? options.effective_from
+                ? notBeforeJoining(options.effective_from, joinedOn.get(Number(employeeId)))
                 : effectiveFromNotBeforeCutover(joinedOn.get(Number(employeeId))),
               employeeIds.length > 1 ? "BULK_ASSIGNMENT" : "ASSIGNMENT",
               options.note || null,
@@ -652,3 +678,4 @@ module.exports = (db) => new EmployeeWorkShiftRepository(db);
 module.exports.EmployeeWorkShiftRepository = EmployeeWorkShiftRepository;
 module.exports.ASSIGNMENT_STATUS = ASSIGNMENT_STATUS;
 module.exports.EMPLOYMENT_STATUS = EMPLOYMENT_STATUS;
+module.exports.notBeforeJoining = notBeforeJoining;

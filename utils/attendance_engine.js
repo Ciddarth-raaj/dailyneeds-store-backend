@@ -199,6 +199,18 @@ const CALC_STATUS = Object.freeze({
    * see why it carries no minutes.
    */
   ATTENDANCE_NOT_REQUIRED: "ATTENDANCE_NOT_REQUIRED",
+  /**
+   * The date is BEFORE the employee's joining date.
+   *
+   * Not an attendance verdict at all: they did not work here yet, so there
+   * is no shift to expect, nothing to be absent from and nothing to pay or
+   * deduct. Settled (`is_final`), with every minute and the day count at
+   * zero, no review reason and no shift - and it is NEVER STORED: the
+   * calculation usecase produces it for display only and the persistence
+   * paths drop it, so a pre-joining date can never reach a monthly summary
+   * or a payrun as a row. See `utils/attendance_eligibility.js`.
+   */
+  NOT_JOINED: "NOT_JOINED",
 });
 
 /** Why a date needs a human. Empty on a clean day. */
@@ -811,6 +823,9 @@ function calculateAttendanceDay(input = {}) {
     // (`utils/attendance_calculation_mode.js`). Absent means SHIFT_BASED,
     // which is every date that has no history row.
     attendance_calculation_mode = ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
+    // The date is before the employee's joining date. Decided by the caller
+    // from `utils/attendance_eligibility.js`; see CALC_STATUS.NOT_JOINED.
+    before_joining = false,
   } = input;
 
   const rawPunches = orderPunches(punches, attendance_date);
@@ -946,6 +961,29 @@ function calculateAttendanceDay(input = {}) {
     // still explains itself after the employee's setting changes again.
     attendance_calculation_mode: ATTENDANCE_CALCULATION_MODE.SHIFT_BASED,
   };
+
+  // NOT EMPLOYED YET - answered before everything else, the exemption
+  // included. No shift is read (a roster or a backfilled assignment that
+  // happens to cover the date is not evidence of employment), no punch is
+  // counted, and nothing is owed in either direction. Raw punches stay on
+  // the row as evidence only.
+  if (before_joining === true) {
+    return {
+      ...base,
+      work_shift_id: null,
+      work_shift_weekly_schedule_id: null,
+      shift_snapshot: null,
+      shift_snapshot_hash: null,
+      base_work_shift_id: null,
+      ot_rate: null,
+      effective_punches: [],
+      punch_count: 0,
+      status: CALC_STATUS.NOT_JOINED,
+      is_final: true,
+      review_reasons: [],
+      notes: ["Not joined yet - this date is before the employee's joining date"],
+    };
+  }
 
   // EXEMPT FROM BIOMETRIC ATTENDANCE, and therefore settled before any
   // other verdict - including the no-shift one below.

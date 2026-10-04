@@ -214,6 +214,24 @@ class EmployeeWorkShiftUsecase {
   }
 
 
+  /**
+   * THE JOINING DATE IS THE HARD LOWER BOUNDARY OF A ROSTER. A shift dated
+   * before somebody joined would make dates they did not work here resolve to
+   * a shift - so an explicit effective date earlier than the joining date is
+   * refused, naming both dates. An absent or unreadable joining date bounds
+   * nothing (the shared eligibility rule's treatment).
+   */
+  async _assertNotBeforeJoining(employeeId, effectiveFrom) {
+    if (typeof this.repo.getJoiningDate !== "function") return;
+    const joinedOn = toDateOnly(await this.repo.getJoiningDate(employeeId));
+    if (joinedOn !== null && effectiveFrom < joinedOn) {
+      throw validationError(
+        `effective_from ${effectiveFrom} is before this employee's joining date ${joinedOn} - ` +
+          `a shift cannot apply to dates before they joined. Use ${joinedOn} or later.`
+      );
+    }
+  }
+
   /** Never let re-derivation fail an assignment that has already committed. */
   async _redrive(employeeIds) {
     if (!this.punchRedriveService || typeof this.punchRedriveService.redriveUndated !== "function") {
@@ -514,6 +532,7 @@ class EmployeeWorkShiftUsecase {
     if (!existing || existing.length === 0) {
       return { code: 422, msg: `No employee exists for id ${employeeId}` };
     }
+    await this._assertNotBeforeJoining(employeeId, effectiveFrom);
 
     const shift = await this.repo.getActiveWorkShift(workShiftId);
     if (!shift) return { code: 404, msg: "Work shift not found" };
@@ -865,6 +884,7 @@ class EmployeeWorkShiftUsecase {
     if (!existing || existing.length === 0) {
       return { code: 422, msg: `No employee exists for id ${employeeId}` };
     }
+    await this._assertNotBeforeJoining(employeeId, effectiveFrom);
 
     const shift = await this.repo.getActiveWorkShift(workShiftId);
     if (!shift) return { code: 404, msg: "Work shift not found" };

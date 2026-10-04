@@ -853,6 +853,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // rule, so the two cannot disagree about which employee they describe.
       extra_break_minutes: extraBreakMinutes(employee),
       attendance_required: attendanceRequired(employee),
+      // THE JOINING DATE, the hard lower boundary: a date before it is not an
+      // attendance day (`CALC_STATUS.NOT_JOINED`). Null when absent or
+      // unreadable, which is unbounded - the shared rule's treatment.
+      joined_on: eligibility.joiningDateOf(employee),
       resolutionFor,
       baseResolutionFor,
       readCutoff,
@@ -1076,6 +1080,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // "live_calculation" in the read timing: the engine over every date, plus
     // the stored-or-live decision per date. No database access happens here.
     return readTiming.phaseSync("live_calculation", () => dates.map((date) => {
+      // BEFORE THE JOINING DATE nothing is resolved, overlaid or decorated:
+      // the date is NOT_JOINED whatever a roster, a backfilled assignment or
+      // a stale stored row says about it. This is what keeps the screen from
+      // showing "No Shift Assigned" for days somebody did not work here, and
+      // what keeps a month persist from storing them.
+      if (context.joined_on && date < context.joined_on) {
+        return notJoinedDay({ employee_id, date, punches: rawByDate.get(date) || [] });
+      }
       const resolution = context.resolutionFor(date);
       const mode = context.modeFor(date);
       const presentAbsentOnly = isPresentAbsentOnly(mode);
@@ -1239,6 +1251,35 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           : null,
       };
     }));
+  };
+
+  /**
+   * The day a date BEFORE THE JOINING DATE reads as. The engine's own verdict
+   * (so the output contract is the ordinary one), with the request claims
+   * empty - no correction, OT or shift request can belong to such a date.
+   */
+  const notJoinedDay = ({ employee_id, date, punches }) => {
+    // Always the live verdict: a stored row for a pre-joining date is stale
+    // by definition and is never what a read returns.
+    const day = asLivePreview(
+      calculateAttendanceDay({
+        employee_id,
+        attendance_date: date,
+        punches,
+        before_joining: true,
+      })
+    );
+    return {
+      ...day,
+      ...otClaimFor({ day, otRequest: null, otSettled: false }),
+      ...correctionClaimFor({ approval: null }),
+      ...shiftChangeClaimFor({ shiftRequest: null }),
+      permissions: [],
+      shift_resolution_status: CALC_STATUS.NOT_JOINED,
+      shift_name: null,
+      shift_source: null,
+      approval_request_id: null,
+    };
   };
 
   /**
@@ -1748,6 +1789,15 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     // What the date resolves to NOW, through the same resolver the
     // calculation uses (stored overrides included).
     const [before] = await calculateRange({ employee_id: employeeId, from_date: date, to_date: date });
+
+    // NO SHIFT BEFORE THE JOINING DATE. The date is not an attendance day, so
+    // there is nothing to roster - refused, rather than stored as an override
+    // that would make a NOT_JOINED date look like a worked one.
+    if (before && before.status === CALC_STATUS.NOT_JOINED) {
+      throw validationError(
+        `${date} is before this employee's joining date - a shift cannot be set for a date they had not joined`
+      );
+    }
     const previousShiftId = before && before.work_shift_id ? Number(before.work_shift_id) : null;
 
     // What the date looks like under the new shift. In memory only, so far.
@@ -2506,8 +2556,17 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // recalculated. The monthly roll-up is stored exactly as before - it
       // is the month's figure as of now, and was never final while any of
       // its days were open.
-      const { closed, skipped } = partitionClosedDays({ days, now: nowIs(now) });
+      // PRE-JOINING DATES ARE NEITHER STORED NOR LEFT BEHIND. They are
+      // NOT_JOINED days, never rows; and a row that exists for one (written
+      // before the boundary was enforced) is removed with this write.
+      const joinedOn = eligibility.joiningDateOf(employment);
+      const preJoiningDates = joinedOn ? dateRange(from, to).filter((date) => date < joinedOn) : [];
+      const employedDays = days.filter(
+        (day) => day.status !== CALC_STATUS.NOT_JOINED && !(joinedOn && day.attendance_date < joinedOn)
+      );
+      const { closed, skipped } = partitionClosedDays({ days: employedDays, now: nowIs(now) });
       result.skipped_open_dates = skipped;
+      result.pre_joining_dates = preJoiningDates;
 
       // ONE CALL, ONE TRANSACTION, ONE LOCK. The day rows and the monthly
       // roll-up are the same act of persistence: they used to be two calls,
@@ -2519,6 +2578,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         period_year: y,
         period_month: m,
         rows: closed.map(toStorageRow),
+        pre_joining_dates: preJoiningDates,
         monthly: {
           employee_id,
           period_year: y,
@@ -2823,7 +2883,18 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       ? attendanceCalculationRepo.findPayrollLockedPeriodsBulk(rows)
       : findPayrollLockedPeriods(rows);
 
+  /**
+   * The employee's joining date (`YYYY-MM-DD`), or null when absent or
+   * unreadable. For the request paths, which must refuse a date before it.
+   */
+  const joiningDateFor = async (employee_id) => {
+    if (typeof attendanceCalculationRepo.getEmploymentWindow !== "function") return null;
+    const employment = await attendanceCalculationRepo.getEmploymentWindow(Number(employee_id));
+    return eligibility.joiningDateOf(employment);
+  };
+
   return {
+    joiningDateFor,
     MAX_RANGE_DAYS,
     CALC_STATUS,
     RESOLUTION_STATUS,

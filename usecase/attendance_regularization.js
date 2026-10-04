@@ -291,6 +291,21 @@ module.exports = (
    * separate OT request once this one is finally approved and the date is
    * recalculated.
    */
+  /**
+   * NO REQUEST FOR A DATE BEFORE THE JOINING DATE. Such a date is not an
+   * attendance day (`NOT_JOINED`): there is no punch to correct, no overtime
+   * and no shift to change on it.
+   */
+  const assertJoinedBy = async (employeeId, date, what) => {
+    if (typeof attendanceCalculationUsecase.joiningDateFor !== "function") return;
+    const joinedOn = await attendanceCalculationUsecase.joiningDateFor(employeeId);
+    if (joinedOn && date < joinedOn) {
+      throw validationError(
+        `${date} is before this employee's joining date (${joinedOn}) - ${what} cannot be raised for a date they had not joined`
+      );
+    }
+  };
+
   const raiseRequest = async ({
     actor,
     requested_for_employee_id,
@@ -310,6 +325,8 @@ module.exports = (
     if (!Number.isInteger(forEmployeeId) || forEmployeeId <= 0) {
       throw validationError("requested_for_employee_id must be an employee id");
     }
+
+    await assertJoinedBy(forEmployeeId, date, "an attendance correction");
 
     const open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
     if (open) {
@@ -546,6 +563,8 @@ module.exports = (
       throw validationError(`OT can be requested for the last ${MAX_BACKDATE_DAYS} days only`);
     }
 
+    await assertJoinedBy(employeeId, date, "an OT request");
+
     // The employee must exist; the chain needs their identity anyway.
     const identity = await resolveIdentity(employeeId);
 
@@ -740,6 +759,8 @@ module.exports = (
     }
 
     const businessToday = istToday(today);
+
+    await assertJoinedBy(employeeId, date, "a shift change request");
 
     // The Attendance Calculation Type FOR THIS DATE, resolved first: on a
     // Present/Absent Only date the request is refused whatever else is true.

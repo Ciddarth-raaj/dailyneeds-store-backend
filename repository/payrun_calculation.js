@@ -229,18 +229,23 @@ class PayrunCalculationRepository {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
       "LIST-EFFECTIVE-NRM",
-      `SELECT employee_id,
-              nrm_minutes,
-              break_allowance_source,
+      // THE JOINING DATE BOUNDS THE EVIDENCE: a row stored for a date before
+      // somebody joined (written before that boundary was enforced) is not
+      // a day of theirs and must not decide their NRM.
+      `SELECT c.employee_id,
+              c.nrm_minutes,
+              c.break_allowance_source,
               COUNT(*) AS day_count,
-              SUM(approved_ot_minutes) AS approved_ot_minutes
-         FROM attendance_day_calculation
-        WHERE employee_id IN (?)
-          AND attendance_date >= ? AND attendance_date <= ?
-          AND is_final = 1
-          AND nrm_minutes > 0
-        GROUP BY employee_id, nrm_minutes, break_allowance_source
-        ORDER BY employee_id`,
+              SUM(c.approved_ot_minutes) AS approved_ot_minutes
+         FROM attendance_day_calculation c
+         JOIN new_employee ne ON ne.employee_id = c.employee_id
+        WHERE c.employee_id IN (?)
+          AND c.attendance_date >= ? AND c.attendance_date <= ?
+          AND ((${JOINED_ON("ne")}) IS NULL OR c.attendance_date >= (${JOINED_ON("ne")}))
+          AND c.is_final = 1
+          AND c.nrm_minutes > 0
+        GROUP BY c.employee_id, c.nrm_minutes, c.break_allowance_source
+        ORDER BY c.employee_id`,
       [employeeIds, from, to],
       conn
     );
