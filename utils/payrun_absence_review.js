@@ -1,6 +1,14 @@
 /**
- * Payrun Initialization - THE 3-DAY ABSENT REVIEW: who was absent on the last
- * three applicable attendance days of the payroll month.
+ * Payrun Initialization - THE 3-DAY ABSENT REVIEW: who has been absent on
+ * their LATEST three applicable working days, as of today.
+ *
+ * AS OF TODAY, NOT AS OF THE PAYROLL MONTH END. Payroll for September is run
+ * around 5 October, and the question HR needs answered then is "has this
+ * person stopped coming to work NOW?" - not "how did September end?". So the
+ * walk starts at the latest COMPLETED attendance date (yesterday in IST) and
+ * crosses month boundaries freely: September's payroll review on 4 October
+ * reads 3, 2 and 1 October first. The selected payroll month decides only WHO
+ * is reviewed (its payroll population), never which dates are read.
  *
  * A WARNING FOR HR AND NOTHING ELSE. It marks nobody exited, blocks nobody,
  * moves no pay type and writes nothing. Its purpose is to find people who may
@@ -14,10 +22,9 @@
  * verdict on each date is the engine's. This file walks those stored verdicts
  * backwards from the end of the month and refuses to guess.
  *
- * THE WALK, from the month's last date down to the later of the month start
- * and the joining date, one date at a time:
+ * THE WALK, from the latest completed date backwards - never before the
+ * joining date and never more than LOOKBACK_DAYS - one date at a time:
  *
- *   date not yet completed          NOT EVALUABLE - the day can still be worked
  *   no stored row                   NOT EVALUABLE - attendance not calculated.
  *                                   A missing calculation is not a rest day and
  *                                   not an absence, so the walk does NOT step
@@ -45,11 +52,19 @@
  *   review, not final)              NOT EVALUABLE - an absence somebody has
  *                                   claimed or that is unsettled is not one
  *
- * Three counted absences before any stop: THREE_DAY_ABSENT. Running out of
- * dates first: NOT_ABSENT (fewer than three applicable days in the month).
+ * Three counted absences before any stop: THREE_DAY_ABSENT. Reaching the
+ * joining date first: NOT_ABSENT (fewer than three applicable days since
+ * joining). Running through LOOKBACK_DAYS with no answer: NOT EVALUABLE.
  */
 
 const REVIEW_DAYS = 3;
+
+/**
+ * HOW FAR BACK THE WALK MAY GO. It bounds the one batched read; a roster with
+ * fewer than three working days in a whole month is not one this warning can
+ * judge, so it says so rather than reaching further.
+ */
+const LOOKBACK_DAYS = 31;
 
 const EVALUATION = {
   THREE_DAY_ABSENT: "THREE_DAY_ABSENT",
@@ -59,7 +74,8 @@ const EVALUATION = {
 
 /** Why an employee's last working days could not be established. */
 const NOT_EVALUABLE_REASON = {
-  DATE_NOT_COMPLETED: "DATE_NOT_COMPLETED",
+  NO_REVIEW_DATE: "NO_REVIEW_DATE",
+  LOOKBACK_EXHAUSTED: "LOOKBACK_EXHAUSTED",
   NOT_CALCULATED: "NOT_CALCULATED",
   NO_WORKING_DAY_SOURCE: "NO_WORKING_DAY_SOURCE",
   WORKING_DAY_UNKNOWN: "WORKING_DAY_UNKNOWN",
@@ -92,39 +108,52 @@ function previousDate(date) {
   return d.toISOString().slice(0, 10);
 }
 
+/** `YYYY-MM-DD` minus `n` days. */
+function minusDays(date, n) {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - n);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * THE DATES THE WALK MAY READ, for a review made with `latest_completed` as
+ * the last completed attendance date: `[latest_completed - (LOOKBACK_DAYS-1),
+ * latest_completed]`. The usecase reads exactly this range.
+ */
+function reviewWindow(latest_completed) {
+  const to = dateOnly(latest_completed);
+  if (!to) return null;
+  return { from: minusDays(to, LOOKBACK_DAYS - 1), to };
+}
+
 function dateOnly(value) {
   const m = value === null || value === undefined ? null : String(value).match(/^(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
 }
 
 /**
- * One employee's month.
+ * One employee, as of the latest completed attendance date.
  *
  * @param {object[]} days  stored day rows: attendance_date (YYYY-MM-DD),
  *                         status, is_final, punch_count, attendance_day_count,
  *                         attendance_calculation_mode, is_working_day
- * @param {object} window
- * @param {string} window.from, window.to   the payroll month
- * @param {string|null} window.joined_on     the walk never goes before it
- * @param {string|null} window.latest_completed  the last completed attendance
- *                         date; anything after it is not evaluable
+ * @param {object} options
+ * @param {string} options.latest_completed  the last completed attendance
+ *                         date (yesterday in IST); the walk starts here
+ * @param {string|null} options.joined_on     the walk never goes before it
  */
-function absenceReview(
-  days = [],
-  { from, to, joined_on = null, latest_completed = null, required = REVIEW_DAYS } = {}
-) {
+function absenceReview(days = [], { latest_completed = null, joined_on = null, required = REVIEW_DAYS } = {}) {
   const byDate = new Map();
   (days || []).forEach((d) => {
     const date = d && dateOnly(d.attendance_date);
     if (date) byDate.set(date, d);
   });
 
-  const presentDates = [...byDate.values()].filter(present).map((d) => dateOnly(d.attendance_date)).sort();
+  const window = reviewWindow(latest_completed);
+  const presentDates = [...byDate.keys()]
+    .filter((date) => present(byDate.get(date)) && (!window || date <= window.to))
+    .sort();
   const lastPresent = presentDates.length ? presentDates[presentDates.length - 1] : null;
-
-  const joined = dateOnly(joined_on);
-  const floor = joined && joined > from ? joined : from;
-  const completed = dateOnly(latest_completed);
   const absent = [];
 
   const outcome = (evaluation, extra = {}) => ({
@@ -139,8 +168,11 @@ function absenceReview(
   const notEvaluable = (reason, date) =>
     outcome(EVALUATION.NOT_EVALUABLE, { not_evaluable_reason: reason, not_evaluable_date: date });
 
-  for (let date = to; date >= floor; date = previousDate(date)) {
-    if (completed && date > completed) return notEvaluable(NOT_EVALUABLE_REASON.DATE_NOT_COMPLETED, date);
+  if (!window) return notEvaluable(NOT_EVALUABLE_REASON.NO_REVIEW_DATE, null);
+  const joined = dateOnly(joined_on);
+
+  for (let date = window.to; date >= window.from; date = previousDate(date)) {
+    if (joined && date < joined) return outcome(EVALUATION.NOT_ABSENT);
 
     const day = byDate.get(date);
     if (!day) return notEvaluable(NOT_EVALUABLE_REASON.NOT_CALCULATED, date);
@@ -163,11 +195,13 @@ function absenceReview(
     return notEvaluable(NOT_EVALUABLE_REASON.UNRESOLVED, date);
   }
 
-  return outcome(EVALUATION.NOT_ABSENT);
+  return notEvaluable(NOT_EVALUABLE_REASON.LOOKBACK_EXHAUSTED, window.from);
 }
 
 module.exports = {
   REVIEW_DAYS,
+  LOOKBACK_DAYS,
+  reviewWindow,
   EVALUATION,
   NOT_EVALUABLE_REASON,
   absenceReview,
