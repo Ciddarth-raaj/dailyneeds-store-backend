@@ -3158,6 +3158,46 @@ describe("the ECR, from approved payroll only", () => {
     assert.equal(ecr.members[0].eps_share, Math.round(Number(stored.employer_eps)));
   });
 
+  it("zero approved employees: no line, no text, and every member accounted for in `errors`", async () => {
+    let ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 0);
+    assert.equal(ecr.text, "");
+    assert.equal(ecr.totals.members, 0);
+
+    world.add(1);
+    world.add(2);
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    ecr = await calculation.getEcr({ ...MONTH });
+    assert.equal(ecr.lines.length, 0);
+    assert.deepEqual(
+      ecr.errors.map((e) => [e.employee_id, e.code]),
+      [
+        [1, "NOT_APPROVED"],
+        [2, "NOT_CALCULATED"],
+      ]
+    );
+  });
+
+  it("an incomplete or PF-pending calculation is never filed, even if its row reads approved", async () => {
+    world.add(1);
+    world.add(2);
+    world.add(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2, 3], actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1, 2, 3], actor: ACTOR });
+    Object.assign(world.calculations.get(1), { is_complete: 0 });
+    Object.assign(world.calculations.get(2), { pf_status: "PENDING" });
+    const ecr = await calculation.getEcr({ ...MONTH });
+    assert.deepEqual(
+      ecr.errors.map((e) => [e.employee_id, e.code]),
+      [
+        [1, "INCOMPLETE"],
+        [2, "PF_PENDING"],
+      ]
+    );
+    assert.equal(ecr.lines.length, 1);
+    assert.equal(ecr.members[0].employee_id, 3);
+  });
+
   it("an existing 58+ member whose UAN was missing at initialization: EPS 0 by the age rule, and the UAN HR adds later is used", async () => {
     world.add(1, { employee: { uan: null, pf_number: "TN/MAS/1/1" } });
     world.statutory.set(1, { dob: "1960-03-01", previous_eps_member: 1, uan: null });
