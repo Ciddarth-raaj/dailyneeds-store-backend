@@ -231,6 +231,9 @@ function dayIssueKey(day) {
     // Before the joining date: not an attendance day, so never an issue.
     case "NOT_JOINED":
       return null;
+    // After the last working date: likewise never an issue.
+    case "EXITED":
+      return null;
     case "ABSENT":
       return ISSUE_KEY.ABSENT;
     case "NO_SHIFT_FOR_DATE":

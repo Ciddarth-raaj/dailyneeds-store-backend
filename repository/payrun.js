@@ -241,14 +241,14 @@ class PayrunRepository {
     const rows = await this._read(
       "LIST-ATTENDANCE-MONTHS",
       `SELECT attendance_monthly_payroll_id, employee_id, is_final, payroll_version,
-              held_dates, available_from,
+              held_dates, available_from, available_to,
               DATE_FORMAT(calculated_at, '%Y-%m-%d %H:%i:%s.%f') AS calculated_at
          FROM attendance_monthly_payroll
         WHERE employee_id IN (?) AND period_year = ? AND period_month = ?`,
       [employeeIds, year, month]
     );
-    // Dates before the joining date never hold a month - even on a summary
-    // stored before that boundary was enforced. See the util.
+    // Dates outside the employment period never hold a month - even on a
+    // summary stored before that boundary was enforced. See the util.
     return (rows || []).map(effectiveAttendanceMonth);
   }
 

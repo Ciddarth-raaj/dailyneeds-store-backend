@@ -1,6 +1,11 @@
 /**
- * THE STORED MONTHLY SUMMARY, AS PAYROLL MUST READ IT: dates before the
- * joining date never hold a month.
+ * THE STORED MONTHLY SUMMARY, AS PAYROLL MUST READ IT: dates outside the
+ * employment period - before the joining date, or after the last working
+ * date - never hold a month.
+ *
+ * The upper side uses `available_to` exactly as the lower side uses
+ * `available_from`: it is stored on the row by `availableDates`, the earlier
+ * of the month's last day and `new_employee.resignation_date` (inclusive).
  *
  * WHY THIS EXISTS. `attendance_monthly_payroll.is_final` is derived by
  * `utils/attendance_payroll.js` as "no date was held out" (`held_dates` is
@@ -53,19 +58,27 @@ const isFinalFlag = (v) => v === 1 || v === true || v === "1";
  */
 function effectiveAttendanceMonth(row) {
   if (!row || isFinalFlag(row.is_final)) return row;
-  const from = row.available_from ? String(row.available_from).slice(0, 10) : null;
-  if (!from || !DATE_RE.test(from)) return row;
+  const bound = (v) => {
+    const d = v ? String(v).slice(0, 10) : null;
+    return d && DATE_RE.test(d) ? d : null;
+  };
+  const from = bound(row.available_from);
+  const to = bound(row.available_to);
+  if (!from && !to) return row;
   const held = parseHeldDates(row.held_dates);
-  // Unreadable or empty: nothing can be PROVEN pre-joining, so nothing changes.
+  // Unreadable or empty: nothing can be PROVEN outside employment, so
+  // nothing changes.
   if (!held || held.length === 0) return row;
 
-  const preJoining = held.filter((d) => DATE_RE.test(d) && d < from);
-  if (preJoining.length !== held.length) return row;
+  const preJoining = from ? held.filter((d) => DATE_RE.test(d) && d < from) : [];
+  const postExit = to ? held.filter((d) => DATE_RE.test(d) && d > to) : [];
+  if (preJoining.length + postExit.length !== held.length) return row;
 
   return {
     ...row,
     is_final: 1,
     pre_joining_held_dates: preJoining,
+    post_exit_held_dates: postExit,
   };
 }
 

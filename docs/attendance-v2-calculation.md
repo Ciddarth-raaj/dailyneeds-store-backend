@@ -1024,3 +1024,34 @@ Existing stale rows are removed by the ordinary Process Attendance or
 Recalculate of the affected month once this is deployed (a payroll-locked month
 is refused, as for any attendance change). `scripts/hr/pre-joining-attendance-audit.sql`
 lists them read-only beforehand.
+
+## The last working date is the hard upper boundary
+
+The mirror of the joining-date rule. Regression: employee 2284 joined
+09-09-2026 with last working date 13-09-2026; 14-09..30-09 were shown and
+stored as `ABSENT`, so the cards read All 22 / Present 3 / Absent 19 while
+payroll had already bounded the month to 09-09..13-09.
+
+**The source of the bound** is the one payroll uses for `available_to`:
+`new_employee.resignation_date`, set by the resign action as the employment
+period's `ended_on` and read **inclusively** (`availableDates`,
+`utils/attendance_eligibility.js#resignationDateOf` / `employedOn`). There is
+no separate last-working-date column.
+
+**Why the dates were materialised.** As with the lower bound, `calculateRange`
+(the read path and the month persist) had no upper employment bound, so a
+rostered post-exit date with no punch became an `ABSENT` day. Recalculate and
+the dashboard already used `employedOn` (both bounds).
+
+| Where | Behaviour after the last working date |
+|---|---|
+| Engine | `CALC_STATUS.EXITED` - distinct from `NOT_JOINED`; settled, all zero, no shift, no review reason. |
+| Read path | Returns `EXITED`; any stored row for the date is ignored. |
+| Month persist | Never stores the date; deletes a stale row inside the payroll-locked transaction (`outside_employment_dates`). |
+| Any storage path | `upsertCalculationRows` drops `EXITED` as it drops `NOT_JOINED`. |
+| Monthly payroll | Post-exit days add nothing and are never held. |
+| Stored summaries | `utils/attendance_month_effective.js` reads a summary whose held dates all fall outside `available_from`..`available_to` as final - no re-process needed. |
+| Payrun NRM evidence | Rows after `resignation_date` are not read. |
+| Shifts | Change / correction with `effective_from` after the last working date refused; bulk assign (effective today) refused for anybody whose employment already ended, naming them; single-date Edit Shift refused. Historical rows untouched. |
+| Requests | Correction, OT, one-day shift change and Permission requests refused: "Attendance is not applicable after the employee's last working date." Existing requests untouched. Permission requests now check the joining date too. |
+| Frontend | Badge *Exited*, a dash in every figure, no Edit Shift / Permission action, excluded from every card (All included). |

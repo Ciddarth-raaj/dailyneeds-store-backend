@@ -232,6 +232,23 @@ class EmployeeWorkShiftUsecase {
     }
   }
 
+  /**
+   * AND THE LAST WORKING DATE IS ITS UPPER BOUNDARY. A shift effective after
+   * somebody's employment ended applies to no attendance day at all, so an
+   * explicit effective date after it is refused. Historical rows are never
+   * touched; this only refuses new ones.
+   */
+  async _assertNotAfterExit(employeeId, effectiveFrom) {
+    if (typeof this.repo.getLastWorkingDate !== "function") return;
+    const endedOn = toDateOnly(await this.repo.getLastWorkingDate(employeeId));
+    if (endedOn !== null && effectiveFrom > endedOn) {
+      throw validationError(
+        `Attendance is not applicable after the employee's last working date. effective_from ${effectiveFrom} ` +
+          `is after ${endedOn} - a shift cannot apply to dates after their employment ended.`
+      );
+    }
+  }
+
   /** Never let re-derivation fail an assignment that has already committed. */
   async _redrive(employeeIds) {
     if (!this.punchRedriveService || typeof this.punchRedriveService.redriveUndated !== "function") {
@@ -451,8 +468,33 @@ class EmployeeWorkShiftUsecase {
       };
     }
 
+    /*
+     * NO COVERAGE AFTER EMPLOYMENT ENDS. This route has no date field: the
+     * assignment is effective TODAY, so for somebody whose last working date
+     * is already behind them it would append a history row that applies to
+     * no attendance day. Refused, naming them, rather than silently skipped -
+     * exactly as an unknown id is.
+     */
+    const effectiveFrom = effectiveFromToday(payload.today);
+    if (typeof this.repo.listLastWorkingDates === "function") {
+      const ended = (await this.repo.listLastWorkingDates(employeeIds)).filter(
+        (row) => row.resignation_date && String(row.resignation_date).slice(0, 10) < effectiveFrom
+      );
+      if (ended.length > 0) {
+        return {
+          code: 422,
+          msg:
+            "Attendance is not applicable after the employee's last working date. " +
+            `A shift cannot be assigned from ${effectiveFrom} to ` +
+            ended.map((r) => `${r.employee_id} (last working date ${String(r.resignation_date).slice(0, 10)})`).join(", ") +
+            ".",
+          rejected_employee_ids: ended.map((r) => Number(r.employee_id)),
+        };
+      }
+    }
+
     const result = await this.repo.assignWorkShift(employeeIds, workShiftId, {
-      effective_from: effectiveFromToday(payload.today),
+      effective_from: effectiveFrom,
       created_by: payload.actor_employee_id === undefined ? null : payload.actor_employee_id,
     });
     if (!result || result.code !== 200) return result;
@@ -533,6 +575,7 @@ class EmployeeWorkShiftUsecase {
       return { code: 422, msg: `No employee exists for id ${employeeId}` };
     }
     await this._assertNotBeforeJoining(employeeId, effectiveFrom);
+    await this._assertNotAfterExit(employeeId, effectiveFrom);
 
     const shift = await this.repo.getActiveWorkShift(workShiftId);
     if (!shift) return { code: 404, msg: "Work shift not found" };
@@ -885,6 +928,7 @@ class EmployeeWorkShiftUsecase {
       return { code: 422, msg: `No employee exists for id ${employeeId}` };
     }
     await this._assertNotBeforeJoining(employeeId, effectiveFrom);
+    await this._assertNotAfterExit(employeeId, effectiveFrom);
 
     const shift = await this.repo.getActiveWorkShift(workShiftId);
     if (!shift) return { code: 404, msg: "Work shift not found" };
