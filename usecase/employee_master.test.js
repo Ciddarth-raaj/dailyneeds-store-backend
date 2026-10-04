@@ -303,11 +303,37 @@ function makeLifecycleRepo(world) {
   };
 }
 
+/**
+ * THESE SUITES REPLAY 2022-2026 HISTORY, so each action is dated as if it
+ * were recorded on its own day: the clock follows the joining date being
+ * submitted to create, rejoin and correction. That keeps every lifecycle
+ * test about the lifecycle. The joining-date entry window - which judges a
+ * date against TODAY - has its own suite below with a pinned clock, and any
+ * test here that pins `uc.today` itself keeps that pin.
+ */
+function recordedOnItsDay(uc) {
+  let day = "2022-03-01";
+  uc.today = () => day;
+  for (const method of ["createEmployee", "rejoinEmployee", "correctJoiningDate"]) {
+    const original = uc[method].bind(uc);
+    uc[method] = (...args) => {
+      const input = method === "createEmployee" ? args[0] : args[1];
+      const date = input && input.date_of_joining;
+      if (uc.today() === day && typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        day = date;
+        uc.today = () => day;
+      }
+      return original(...args);
+    };
+  }
+  return uc;
+}
+
 function build() {
   const world = new World();
   const lifecycleRepo = makeLifecycleRepo(world);
   const lifecycle = lifecycleUsecase(lifecycleRepo, null);
-  const uc = masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo);
+  const uc = recordedOnItsDay(masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo));
   return { world, uc };
 }
 
@@ -389,10 +415,15 @@ describe("Create Employee", () => {
     await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: "2022-02-30" }), /not a real calendar date/);
   });
 
-  it("a future joining date is refused rather than silently applied", async () => {
+  it("a joining date more than 30 days ahead of today is refused; up to 30 is accepted", async () => {
     const { uc } = build();
-    const future = new Date(Date.now() + 86400000 * 30).toISOString().slice(0, 10);
-    await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: future }), /no scheduler/);
+    uc.today = () => "2026-10-04";
+    await assert.rejects(
+      () => uc.createEmployee({ ...VALID, date_of_joining: "2026-11-04" }),
+      /Joining date cannot be more than 30 days after today\./
+    );
+    const res = await uc.createEmployee({ ...VALID, date_of_joining: "2026-11-03" });
+    assert.equal(res.code, 200);
   });
 
   it("an employee_id offered by the caller is ignored, never honoured", async () => {
@@ -503,7 +534,11 @@ describe("Correct joining date", () => {
   it("refuses a future date, a malformed date, an unchanged date and an unknown employee", async () => {
     const { uc } = build();
     const { employee_id: id } = await uc.createEmployee(VALID);
-    await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2999-01-01" }), /in the future/);
+    uc.today = () => "2022-03-10";
+    await assert.rejects(
+      () => uc.correctJoiningDate(id, { date_of_joining: "2999-01-01" }),
+      /Joining date cannot be more than 30 days after today\./
+    );
     await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "01/02/2022" }), /YYYY-MM-DD/);
     await assert.rejects(() => uc.correctJoiningDate(id, {}), /date_of_joining is required/);
     await assert.rejects(() => uc.correctJoiningDate(id, { date_of_joining: "2022-03-01" }), /nothing to change/);
@@ -1031,7 +1066,7 @@ describe("Create with a verified Aadhaar", () => {
     const lifecycleRepo = makeLifecycleRepo(world);
     const lifecycle = lifecycleUsecase(lifecycleRepo, null);
     const aadhaar = makeAadhaar(world);
-    const uc = masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, aadhaar);
+    const uc = recordedOnItsDay(masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, aadhaar));
     return { world, uc, aadhaar };
   };
 
@@ -1309,7 +1344,7 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
     const world = new World();
     const lifecycleRepo = makeLifecycleRepo(world);
     const lifecycle = lifecycleUsecase(lifecycleRepo, null);
-    const uc = masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, null);
+    const uc = recordedOnItsDay(masterUsecaseFactory(makeMasterRepo(world), lifecycle, lifecycleRepo, null));
     return { world, uc };
   };
 
@@ -1568,5 +1603,273 @@ describe("checking for a possible duplicate before creating without Aadhaar", ()
       assert.equal(res.possible_duplicates, true);
       assert.equal(res.suggested_action, "contact_hr");
     });
+  });
+});
+
+/* ================================= the joining-date entry window ======== */
+/**
+ * A joining date being RECORDED must fall within 30 calendar days either side
+ * of today's IST business date - the guard against 03/10/2026 typed as
+ * 03/10/2006 (employee 2298). The clock is pinned to 2026-10-04, so:
+ *
+ *   earliest 2026-09-04          latest 2026-11-03
+ */
+describe("joining-date entry window (create, rejoin, correction, edit)", () => {
+  const TODAY = "2026-10-04";
+  const EARLY = /Joining date cannot be more than 30 days before today\./;
+  const LATE = /Joining date cannot be more than 30 days after today\./;
+
+  /** A fresh usecase on today's clock. */
+  const pinned = () => {
+    const built = build();
+    built.uc.today = () => TODAY;
+    return built;
+  };
+
+  /** An employee who really joined on 2015-06-15, then today's clock. */
+  const historical = async () => {
+    const built = build();
+    const { employee_id } = await built.uc.createEmployee({ ...VALID, date_of_joining: "2015-06-15" });
+    built.uc.today = () => TODAY;
+    return { ...built, employee_id };
+  };
+
+  const createOn = (uc, date) => uc.createEmployee({ ...VALID, date_of_joining: date });
+
+  it("1. today is allowed", async () => {
+    const { uc } = pinned();
+    assert.equal((await createOn(uc, "2026-10-04")).code, 200);
+  });
+  it("2. today - 1 day is allowed", async () => {
+    const { uc } = pinned();
+    assert.equal((await createOn(uc, "2026-10-03")).code, 200);
+  });
+  it("3. today - 30 days is allowed (inclusive bound)", async () => {
+    const { uc } = pinned();
+    assert.equal((await createOn(uc, "2026-09-04")).code, 200);
+    assert.equal((await createOn(uc, "2026-09-20")).code, 200);
+  });
+  it("4. today - 31 days is blocked", async () => {
+    const { uc } = pinned();
+    await assert.rejects(() => createOn(uc, "2026-09-03"), EARLY);
+    await assert.rejects(() => createOn(uc, "2026-08-03"), EARLY);
+  });
+  it("5. today + 1 day is allowed", async () => {
+    const { uc } = pinned();
+    assert.equal((await createOn(uc, "2026-10-05")).code, 200);
+  });
+  it("6. today + 30 days is allowed (inclusive bound)", async () => {
+    const { uc } = pinned();
+    assert.equal((await createOn(uc, "2026-11-03")).code, 200);
+  });
+  it("7. today + 31 days is blocked", async () => {
+    const { uc } = pinned();
+    await assert.rejects(() => createOn(uc, "2026-11-04"), LATE);
+  });
+  it("8. the 03/10/2006 typo is blocked, and nothing is written", async () => {
+    const { world, uc } = pinned();
+    await assert.rejects(() => createOn(uc, "2006-10-03"), EARLY);
+    assert.equal(world.employees.size, 0);
+    assert.equal(world.periods.length, 0);
+  });
+
+  it("9. a 2015 employee: editing the phone number is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.editEmployee(employee_id, { primary_contact_number: "9000000001" });
+    assert.equal(world.employees.get(employee_id).primary_contact_number, "9000000001");
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+  });
+  it("10. a 2015 employee: the unchanged joining date resent with the edit is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.editEmployee(employee_id, {
+      primary_contact_number: "9000000002",
+      date_of_joining: "2015-06-15",
+    });
+    assert.equal(world.employees.get(employee_id).primary_contact_number, "9000000002");
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+  });
+  it("10b. the unchanged joining date resent to the correction action is not judged by the window", async () => {
+    const { uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-15" }),
+      /nothing to change/
+    );
+  });
+  it("11. a 2015 employee: changing the joining date to 2010 is blocked, by edit and by correction", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.editEmployee(employee_id, { primary_contact_number: "9000000003", date_of_joining: "2010-01-01" }),
+      EARLY
+    );
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2010-01-01" }), EARLY);
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+    assert.notEqual(world.employees.get(employee_id).primary_contact_number, "9000000003");
+  });
+  it("11b. correcting the joining date to a date inside the window is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.correctJoiningDate(employee_id, { date_of_joining: "2026-10-03" });
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2026-10-03");
+  });
+  it("11c. a rejoin date follows the same window", async () => {
+    const { uc, employee_id } = await historical();
+    await uc.resignEmployee(employee_id, { resignation_date: "2026-01-31" });
+    await assert.rejects(() => uc.rejoinEmployee(employee_id, { date_of_joining: "2026-08-01" }), EARLY);
+    await assert.rejects(() => uc.rejoinEmployee(employee_id, { date_of_joining: "2026-11-04" }), LATE);
+    const res = await uc.rejoinEmployee(employee_id, { date_of_joining: "2026-10-01" });
+    assert.equal(res.code, 200);
+  });
+  it("the refusal carries the exact business wording", async () => {
+    const { uc } = pinned();
+    await assert.rejects(() => createOn(uc, "2026-09-03"), (err) => {
+      assert.equal(err.message, "Joining date cannot be more than 30 days before today.");
+      return true;
+    });
+    await assert.rejects(() => createOn(uc, "2026-11-04"), (err) => {
+      assert.equal(err.message, "Joining date cannot be more than 30 days after today.");
+      return true;
+    });
+  });
+});
+
+/* ======================== historical joining-date correction ============ */
+/**
+ * The one exception to the entry window, and only to the PAST: the dedicated
+ * joining-date correction, for a caller the route has found to hold
+ * `employee_joining_date_historical_correction`, with a stated reason, always
+ * audited on the period_corrected lifecycle event. Today is pinned to
+ * 2026-10-04 (window 2026-09-04 .. 2026-11-03).
+ */
+describe("historical joining-date correction", () => {
+  const TODAY = "2026-10-04";
+  const EARLY = /Joining date cannot be more than 30 days before today\./;
+  const LATE = /Joining date cannot be more than 30 days after today\./;
+  const NO_REASON = /A correction reason of at least 10 characters is required/;
+  const HR = { actorEmployeeId: 77, mayCorrectHistorically: true };
+  const NORMAL = { actorEmployeeId: 78 };
+  const REASON = "Appointment letter on file shows 01-Jun-2015";
+
+  const historical = async () => {
+    const built = build();
+    const { employee_id } = await built.uc.createEmployee({ ...VALID, date_of_joining: "2015-06-15" });
+    built.uc.today = () => TODAY;
+    return { ...built, employee_id };
+  };
+  const lastCorrection = (world, id) =>
+    world.events.filter((e) => e.employee_id === id && e.event_type === "period_corrected").pop();
+
+  it("new employee: today - 31 and today + 31 are blocked, even for the historical-correction holder", async () => {
+    const { uc } = build();
+    uc.today = () => TODAY;
+    await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: "2026-09-03" }), EARLY);
+    await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: "2026-11-04" }), LATE);
+  });
+
+  it("rejoin: today - 31 is blocked - a rejoin has no historical exception", async () => {
+    const { uc, employee_id } = await historical();
+    await uc.resignEmployee(employee_id, { resignation_date: "2026-01-31" });
+    await assert.rejects(() => uc.rejoinEmployee(employee_id, { date_of_joining: "2026-09-03" }), EARLY);
+  });
+
+  it("historical employee + unrelated edit is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.editEmployee(employee_id, { primary_contact_number: "9000000009" });
+    assert.equal(world.employees.get(employee_id).primary_contact_number, "9000000009");
+  });
+
+  it("a normal user changing a 2015 date to another 2015 date is blocked", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: REASON }, NORMAL),
+      EARLY
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+    assert.equal(lastCorrection(world, employee_id), undefined);
+  });
+
+  it("the authorised historical correction of a 2015 date is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    const res = await uc.correctJoiningDate(
+      employee_id,
+      { date_of_joining: "2015-06-01", correction_reason: REASON },
+      HR
+    );
+    assert.equal(res.code, 200);
+    assert.equal(res.historical_correction, true);
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-01");
+    assert.deepEqual(shapeOf(world, employee_id), [[1, "open", "2015-06-01", null]]);
+  });
+
+  it("a historical correction without a reason - or with a token one - is blocked, and writes nothing", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01" }, HR), NO_REASON);
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: "   " }, HR),
+      NO_REASON
+    );
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: "typo" }, HR),
+      NO_REASON
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+    assert.equal(lastCorrection(world, employee_id), undefined);
+  });
+
+  it("the audit records employee, old date, new date, acting user, reason, source and the override", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: REASON }, HR);
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.employee_id, employee_id);
+    assert.equal(event.actor_employee_id, 77);
+    assert.equal(event.detail.reason, "date_corrected");
+    assert.equal(event.detail.previous_date_of_joining, "2015-06-15");
+    assert.equal(event.detail.new_date_of_joining, "2015-06-01");
+    assert.equal(event.detail.previous_joined_on, "2015-06-15");
+    assert.equal(event.detail.joined_on, "2015-06-01");
+    assert.equal(event.detail.correction_reason, REASON);
+    assert.equal(event.detail.source, "joining_date_action");
+    assert.equal(event.detail.historical_correction, true);
+    // changed_at: the event row's own created_at, DEFAULT CURRENT_TIMESTAMP.
+  });
+
+  it("an ordinary in-window correction is audited too, flagged as not historical", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.correctJoiningDate(employee_id, { date_of_joining: "2026-10-01" }, NORMAL);
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.detail.historical_correction, false);
+    assert.equal(event.detail.correction_reason, null);
+    assert.equal(event.actor_employee_id, 78);
+  });
+
+  it("the authorised historical correction still cannot set today + 31", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2026-11-04", correction_reason: REASON }, HR),
+      LATE
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+  });
+
+  it("a legacy employee with no joining date can be given a genuine old one by an authorised correction", async () => {
+    const { world, uc, employee_id } = await historical();
+    // The legacy shape: no date on the master, and the backfilled period
+    // open with joined_on NULL, flagged for review.
+    world.employees.get(employee_id).date_of_joining = null;
+    const period = world.periods.find((p) => p.employee_id === employee_id);
+    period.joined_on = null;
+    period.needs_review = 1;
+
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2012-04-01" }, NORMAL), EARLY);
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2012-04-01" }, HR), NO_REASON);
+
+    const res = await uc.correctJoiningDate(
+      employee_id,
+      { date_of_joining: "2012-04-01", correction_reason: "Filled from the 2012 joining register" },
+      HR
+    );
+    assert.equal(res.historical_correction, true);
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2012-04-01");
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.detail.previous_date_of_joining, null);
+    assert.equal(event.detail.new_date_of_joining, "2012-04-01");
   });
 });

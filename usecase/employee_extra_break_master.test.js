@@ -32,12 +32,19 @@ function fakeRepo(store = {}) {
   };
 }
 
+// The fixtures record joining dates in early January 2026, so the clock is
+// pinned beside them for the 30-day joining-date entry window.
+const onFixtureDay = (uc) => {
+  uc.today = () => "2026-01-10";
+  return uc;
+};
+
 const usecase = (store) =>
-  build(fakeRepo(store), { reconcileEmployee: async () => ({ action: "open_initial" }) }, {
+  onFixtureDay(build(fakeRepo(store), { reconcileEmployee: async () => ({ action: "open_initial" }) }, {
     getLatestPeriod: async () => [],
     recordEvent: async () => {},
     insertEvent: async () => {},
-  }, null);
+  }, null));
 
 describe("the column exists everywhere an Employee Master field must", () => {
   it("is editable under the ordinary employee_edit path, with no permission of its own", () => {
@@ -123,11 +130,11 @@ describe("creating an employee with one", () => {
   };
 
   const createUsecase = (captured) =>
-    build(createRepo(captured), { reconcileEmployee: async () => ({ action: "open_initial" }) }, {
+    onFixtureDay(build(createRepo(captured), { reconcileEmployee: async () => ({ action: "open_initial" }) }, {
       getLatestPeriod: async () => [],
       recordEvent: async () => {},
       insertEvent: async () => {},
-    }, null);
+    }, null));
 
   it("stores the value the Add Employee form supplied", async () => {
     const captured = {};

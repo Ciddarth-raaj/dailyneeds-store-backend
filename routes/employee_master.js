@@ -473,11 +473,24 @@ class EmployeeMasterRoutes {
             res.end();
             return;
           }
-          const isValid = Joi.validate(req.body, { date_of_joining: Joi.string().required() });
+          const isValid = Joi.validate(req.body, {
+            date_of_joining: Joi.string().required(),
+            correction_reason: Joi.string().allow("").allow(null).max(500).optional(),
+          });
           if (isValid.error !== null) throw isValid.error;
 
+          // HISTORICAL CORRECTION IS THE SERVER'S DECISION, from the caller's
+          // own key - never from anything in the body. Without the key a date
+          // older than the 30-day entry window is refused as for anyone else.
+          const mayCorrectHistorically = await this.permissions.hasAll(
+            req,
+            P.EMPLOYEE_JOINING_DATE_HISTORICAL_CORRECTION
+          );
           res.json(
-            await this.usecase.correctJoiningDate(employeeId, req.body, { actorEmployeeId: this._actor(req) })
+            await this.usecase.correctJoiningDate(employeeId, req.body, {
+              actorEmployeeId: this._actor(req),
+              mayCorrectHistorically,
+            })
           );
         } catch (err) {
           this._fail(res, err);

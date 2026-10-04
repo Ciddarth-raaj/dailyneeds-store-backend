@@ -14,6 +14,14 @@ const {
   normaliseClassificationFields,
 } = require("../utils/employment_classification");
 const { parseExtraBreakHours } = require("../utils/employee_extra_break");
+const { istToday } = require("../utils/istDate");
+const {
+  checkJoiningDateWindow,
+  joiningDateChanged,
+  strictIsoDate,
+  correctionReason,
+  JOINING_DATE_ERROR,
+} = require("../utils/joining_date_window");
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
 
 /**
@@ -123,6 +131,23 @@ function rejectFutureDate(date, label) {
   }
 }
 
+/**
+ * A joining date being RECORDED - at create, rejoin, or a correction that
+ * actually changes it - must fall within 30 days either side of today's IST
+ * business date. See `utils/joining_date_window.js` for why, and for why a
+ * date already stored is never judged by it.
+ */
+/** Where a joining-date correction came from, as recorded on its audit. */
+const JOINING_DATE_SOURCE = Object.freeze({
+  ACTION: "joining_date_action",
+  BULK_UPDATE: "bulk_update",
+});
+
+function rejectOutsideJoiningWindow(date, today) {
+  const refusal = checkJoiningDateWindow(date, today);
+  if (refusal) throw new ValidationError(refusal.message);
+}
+
 const dateOnly = (value) => {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -173,6 +198,11 @@ class EmployeeMasterUsecase {
     // Optional: a deployment with no Aadhaar keys configured still creates
     // employees, it just cannot attach an identity.
     this.aadhaar = aadhaarUsecase || null;
+    /**
+     * Today's IST business date, for the joining-date entry window. A
+     * property so a test can pin the day; it is never read from a request.
+     */
+    this.today = () => istToday();
   }
 
   _log(level, code, description, ref = {}) {
@@ -246,7 +276,7 @@ class EmployeeMasterUsecase {
    */
   async createEmployee(input, { actorEmployeeId = null } = {}) {
     const joinedOn = effectiveDate(input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    rejectOutsideJoiningWindow(joinedOn, this.today());
 
     const fields = { ...input };
     // A key present with no value is not a value. The route's schema strips
@@ -560,6 +590,20 @@ class EmployeeMasterUsecase {
   }
 
   async editEmployee(employeeId, patch, { actorEmployeeId = null } = {}) {
+    /*
+     * AN UNCHANGED JOINING DATE RIDING ALONG IS NOT AN EDIT OF IT. A form that
+     * resends the whole record - including a 2015 joining date nobody touched
+     * - must save the phone number it was opened to change. The submitted
+     * date is set aside here and compared with the stored one under the row
+     * lock below: unchanged, it is dropped; changed, it is refused, because
+     * this path never writes it (see the message below).
+     */
+    let submittedJoining;
+    if (patch && Object.prototype.hasOwnProperty.call(patch, "date_of_joining")) {
+      submittedJoining = patch.date_of_joining;
+      patch = { ...patch };
+      delete patch.date_of_joining;
+    }
     const offered = Object.keys(patch || {});
     const forbidden = offered.filter((k) => LIFECYCLE_CONTROLLED_FIELDS.includes(k));
     if (forbidden.length) {
@@ -571,7 +615,7 @@ class EmployeeMasterUsecase {
     }
     const unknown = offered.filter((k) => !EDITABLE_FIELDS.includes(k));
     if (unknown.length) throw new ValidationError(`not an editable employee field: ${unknown.join(", ")}`);
-    if (offered.length === 0) throw new ValidationError("nothing to change");
+    if (offered.length === 0 && submittedJoining === undefined) throw new ValidationError("nothing to change");
 
     // The same check the create does, from the same module. Clearing either
     // field is allowed and stores NULL - "not recorded" is a state HR may
@@ -584,6 +628,18 @@ class EmployeeMasterUsecase {
     return this.repo.withTransaction(async (tx) => {
       const before = await this.repo.lockEmployee(tx, employeeId);
       if (!before) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      if (submittedJoining !== undefined && joiningDateChanged(submittedJoining, before.date_of_joining)) {
+        // A real date outside the entry window gets the window's own message,
+        // which is the useful one; anything else gets the pointer below. The
+        // date is never written here either way.
+        if (strictIsoDate(submittedJoining)) rejectOutsideJoiningWindow(submittedJoining, this.today());
+        throw new ValidationError(
+          "date_of_joining cannot be changed here. A wrongly recorded date_of_joining is " +
+            "corrected through the joining-date action."
+        );
+      }
+      if (Object.keys(patch).length === 0) throw new ValidationError("nothing to change");
 
       // PERSONAL DETAILS ARE MANDATORY WHEN THE SECTION IS SAVED - and only
       // then. A patch that names none of those fields (an Employment edit,
@@ -670,18 +726,49 @@ class EmployeeMasterUsecase {
    * `period_corrected` event with the old and new value. Nothing here opens
    * or closes a period; the reconciler is not called.
    *
-   * This layer checks the date's shape, that it is not in the future, and
-   * that it is not after a recorded resignation. The period-ordering rules
+   * This layer checks the date's shape, that a CHANGED date falls within the
+   * joining-date entry window (30 days either side of today, IST) - or, for
+   * an older date, that the caller may correct history and gave a reason -
+   * and that it is not after a recorded resignation. The period-ordering rules
    * (not after the spell's own end, after the previous spell ended) belong
    * to C1c and are applied there.
    */
-  async correctJoiningDate(employeeId, input, { actorEmployeeId = null } = {}) {
+  async correctJoiningDate(
+    employeeId,
+    input,
+    { actorEmployeeId = null, mayCorrectHistorically = false, source = JOINING_DATE_SOURCE.ACTION } = {}
+  ) {
     const joinedOn = effectiveDate(input && input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    const today = this.today();
+    // Recorded on the audit when given; REQUIRED for a historical correction.
+    const reasonText =
+      input && input.correction_reason !== undefined && input.correction_reason !== null
+        ? String(input.correction_reason).trim()
+        : "";
+    let historical = false;
 
     return this.repo.withTransaction(async (tx) => {
       const employee = await this.repo.lockEmployee(tx, employeeId);
       if (!employee) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      // THE WINDOW JUDGES A CHANGE, NOT THE STORED DATE. Resubmitting the
+      // master's own date (to repair a period that disagrees with it) is not
+      // recording a new joining date, so an old one is not refused here.
+      //
+      // HISTORICAL CORRECTION - the one exception, and only to the PAST. A
+      // date older than the window needs `mayCorrectHistorically` (the route
+      // sets it from `employee_joining_date_historical_correction`) AND a
+      // stated reason; it is then recorded, never silently, on the lifecycle
+      // event below. A date later than today + 30 has no exception at all.
+      if (joiningDateChanged(joinedOn, employee.date_of_joining)) {
+        const refusal = checkJoiningDateWindow(joinedOn, today);
+        if (refusal && refusal.code === "TOO_EARLY" && mayCorrectHistorically === true) {
+          if (!correctionReason(reasonText)) throw new ValidationError(JOINING_DATE_ERROR.REASON_REQUIRED);
+          historical = true;
+        } else if (refusal) {
+          throw new ValidationError(refusal.message);
+        }
+      }
 
       const resignedOn = dateOnly(employee.resignation_date);
       if (Number(employee.status) !== STATUS.ACTIVE && resignedOn !== null && joinedOn > resignedOn) {
@@ -698,16 +785,32 @@ class EmployeeMasterUsecase {
       // this action exists to repair.
       await this.repo.setJoiningDate(tx, employeeId, joinedOn);
 
-      const period = await this.lifecycle.correctJoinedOn(employeeId, joinedOn, { tx, actorEmployeeId });
+      const period = await this.lifecycle.correctJoinedOn(employeeId, joinedOn, {
+        tx,
+        actorEmployeeId,
+        // THE AUDIT. The period_corrected event already records the employee,
+        // the acting employee, the time and the period's old and new
+        // joined_on; this adds the master's previous date, the reason, the
+        // source and whether the entry window was overridden.
+        audit: {
+          source,
+          historical_correction: historical,
+          correction_reason: reasonText || null,
+          previous_date_of_joining: dateOnly(employee.date_of_joining),
+          new_date_of_joining: joinedOn,
+        },
+      });
       // The joining date is what `employedOn` reads, so moving it can change
       // whether somebody is required to be in any group at all.
       await this._enqueueMembership(tx, employeeId, JOB_REASON.JOINING_DATE_CORRECTED, actorEmployeeId);
 
-      this._log(logger.LEVEL.INFO, "JOINING-DATE", `employee ${employeeId} joining date corrected to ${joinedOn}`, {
-        employeeId,
-        actorEmployeeId,
-        previousJoinedOn: period.previous_joined_on,
-      });
+      this._log(
+        logger.LEVEL.INFO,
+        historical ? "JOINING-DATE-HISTORICAL" : "JOINING-DATE",
+        `employee ${employeeId} joining date corrected ${dateOnly(employee.date_of_joining)} -> ${joinedOn}` +
+          (historical ? " (historical correction)" : ""),
+        { employeeId, actorEmployeeId, previousJoinedOn: period.previous_joined_on, source }
+      );
       return {
         code: 200,
         employee_id: employeeId,
@@ -715,6 +818,7 @@ class EmployeeMasterUsecase {
         previous_joined_on: period.previous_joined_on,
         joined_on: joinedOn,
         needs_review: period.needs_review,
+        historical_correction: historical,
       };
     });
   }
@@ -805,7 +909,7 @@ class EmployeeMasterUsecase {
    */
   async rejoinEmployee(employeeId, input, { actorEmployeeId = null } = {}) {
     const joinedOn = effectiveDate(input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    rejectOutsideJoiningWindow(joinedOn, this.today());
 
     return this.repo.withTransaction(async (tx) => {
       const employee = await this.repo.lockEmployee(tx, employeeId);
@@ -1194,6 +1298,7 @@ module.exports = (employeeMasterRepo, lifecycleUsecase, lifecycleRepo, aadhaarUs
 module.exports.EmployeeMasterUsecase = EmployeeMasterUsecase;
 module.exports.effectiveDate = effectiveDate;
 module.exports.rejectFutureDate = rejectFutureDate;
+module.exports.JOINING_DATE_SOURCE = JOINING_DATE_SOURCE;
 module.exports.ValidationError = ValidationError;
 module.exports.ConflictError = ConflictError;
 module.exports.NotFoundError = NotFoundError;

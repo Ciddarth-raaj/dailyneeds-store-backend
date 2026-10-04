@@ -1,12 +1,64 @@
 const moment = require("moment");
 const passwordService = require("../services/password");
 const authConfig = require("../config/auth");
+const { istToday } = require("../utils/istDate");
+const { checkJoiningDateWindow, joiningDateChanged } = require("../utils/joining_date_window");
+
+/**
+ * The legacy routes answer a `ValidationError` as 422 with its message, so
+ * the joining-date refusal is raised in that shape.
+ */
+function joiningDateRefusal(message) {
+  const err = new Error(message);
+  err.name = "ValidationError";
+  return err;
+}
+
 class EmployeeUsecase {
   constructor(employeeRepo, documentUsecase, userRepo, resignationRepo) {
     this.employeeRepo = employeeRepo;
     this.documentUsecase = documentUsecase;
     this.userRepo = userRepo;
     this.resignationRepo = resignationRepo;
+    /** Today's IST business date for the joining-date window; a property so a test can pin it. */
+    this.today = () => istToday();
+  }
+
+  /**
+   * THE JOINING-DATE ENTRY WINDOW on the legacy writes - the same rule, from
+   * the same module, as `POST /hr/employee` (see
+   * `utils/joining_date_window.js`). A CREATE must carry a date inside the
+   * window, with no exception. An UPDATE may resend the stored date - a 2015
+   * employee whose form resends 2015 is untouched - but may not change it:
+   * that is the joining-date action's job, as on the Employee Master edit.
+   */
+  _requireJoiningDateForCreate(value) {
+    const refusal = checkJoiningDateWindow(value, this.today());
+    if (refusal) throw joiningDateRefusal(refusal.message);
+  }
+
+  async _requireJoiningDateForUpdate(employee_id, details) {
+    if (!details || !Object.prototype.hasOwnProperty.call(details, "date_of_joining")) return;
+    const stored = await this.employeeRepo.getJoiningDate(employee_id);
+    if (!stored.found) return; // the update itself matches no row
+    if (!joiningDateChanged(details.date_of_joining, stored.date_of_joining)) {
+      // Unchanged: not rewritten at all, so a stored DATE is never round-
+      // tripped through whatever text shape the form sent it back in.
+      delete details.date_of_joining;
+      return;
+    }
+    // A CHANGED DATE IS REFUSED HERE WHATEVER IT IS - the same answer the
+    // Employee Master edit gives. This route writes the master column alone,
+    // without the employment period, the lifecycle audit or the historical-
+    // correction permission and reason; letting it change the date would be
+    // the bypass around all four. A real date outside the window gets the
+    // window's own message, which is the useful one.
+    const refusal = checkJoiningDateWindow(details.date_of_joining, this.today());
+    if (refusal && refusal.code !== "INVALID") throw joiningDateRefusal(refusal.message);
+    throw joiningDateRefusal(
+      "date_of_joining cannot be changed here. A wrongly recorded date_of_joining is corrected " +
+        "through the joining-date action."
+    );
   }
 
   /**
@@ -173,6 +225,9 @@ class EmployeeUsecase {
     return new Promise(async (resolve, reject) => {
       try {
         const employee_id = employee.employee_id;
+        // Before ANY write - documents and the image included - so a refused
+        // joining date leaves the record exactly as it was.
+        await this._requireJoiningDateForUpdate(employee_id, employee.employee_details);
         if (
           employee.employee_details.docupdate &&
           employee.employee_details.docupdate.length !== 0
@@ -235,6 +290,7 @@ class EmployeeUsecase {
   create(employee) {
     return new Promise(async (resolve, reject) => {
       try {
+        this._requireJoiningDateForCreate(employee.date_of_joining);
         const { code, id } = await this.employeeRepo.create(employee);
         const id_card = employee?.files ? employee?.files[0]?.id_card : null;
 
@@ -286,6 +342,10 @@ class EmployeeUsecase {
 
   async bulkCreate(rows) {
     try {
+      // Every row, before the one statement that writes them all: this is an
+      // INSERT ... ON DUPLICATE KEY UPDATE, so a row is either a new employee
+      // or an overwrite of the stored date, and both are recording one.
+      for (const row of rows || []) this._requireJoiningDateForCreate(row && row.date_of_joining);
       const res = await this.employeeRepo.bulkCreate(rows);
 
       for (const item of rows) {

@@ -237,6 +237,9 @@ function hrHarness({ status = 1, joinedOn = "2015-04-01", designationId = 3, sto
 describe("which HR actions revoke sessions at all", () => {
   it("a joining-date correction revokes NOTHING - not the human, not the integration", async () => {
     const h = hrHarness();
+    // Dated beside the correction, so the 30-day joining-date entry window
+    // (which has its own tests) does not stand in front of what this tests.
+    h.hr.today = () => "2013-06-01";
     const out = await h.hr.correctJoiningDate(1, { date_of_joining: "2013-05-27" }, { actorEmployeeId: 1 });
     assert.equal(out.code, 200);
     assert.equal(h.period.joined_on, "2013-05-27");
