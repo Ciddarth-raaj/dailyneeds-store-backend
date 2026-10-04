@@ -161,7 +161,7 @@ class EmployeeBulkUpdateRoutes {
           if (!scope) return;
 
           const actor = await this.permissions.actorFor(req);
-          res.json(await this.usecase.preview(req.body, scope, actor));
+          res.json(await this.usecase.preview(req.body, scope, actor, await this._capabilities(req)));
         } catch (err) {
           this._fail(res, err);
         }
@@ -188,7 +188,7 @@ class EmployeeBulkUpdateRoutes {
           if (!scope) return;
 
           const actor = await this.permissions.actorFor(req);
-          res.json(await this.usecase.confirm(req.body, scope, actor));
+          res.json(await this.usecase.confirm(req.body, scope, actor, await this._capabilities(req)));
         } catch (err) {
           this._fail(res, err);
         }
@@ -219,9 +219,30 @@ class EmployeeBulkUpdateRoutes {
       .unknown(false);
   }
 
+  /**
+   * WHAT THE CALLER MAY DO BEYOND AN ORDINARY EDIT, decided here from their
+   * keys and never from the upload. Today one thing: record a joining date
+   * older than the 30-day entry window, with a reason, as a historical
+   * correction.
+   */
+  async _capabilities(req) {
+    return {
+      mayCorrectHistorically: await this.permissions.hasAll(
+        req,
+        P.EMPLOYEE_JOINING_DATE_HISTORICAL_CORRECTION
+      ),
+    };
+  }
+
   confirmSchema() {
     return Joi.object()
       .keys({
+        /**
+         * ONE reason for the file's historical joining-date corrections.
+         * Required by the usecase whenever the file has any; recorded on each
+         * corrected employee's lifecycle event and on the batch audit row.
+         */
+        joining_date_correction_reason: Joi.string().trim().max(500).allow("").allow(null).optional(),
         filename: Joi.string().trim().max(255).allow("").allow(null).optional(),
         headers: Joi.array().items(Joi.string().allow("")).min(1).max(64).required(),
         rows: Joi.array().items(Joi.object()).max(MAX_ROWS + 1).required(),

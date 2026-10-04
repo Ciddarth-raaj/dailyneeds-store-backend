@@ -28,8 +28,9 @@ class EmployeeUsecase {
    * THE JOINING-DATE ENTRY WINDOW on the legacy writes - the same rule, from
    * the same module, as `POST /hr/employee` (see
    * `utils/joining_date_window.js`). A CREATE must carry a date inside the
-   * window; an UPDATE is judged only when the date it carries differs from
-   * the stored one, so a 2015 employee whose form resends 2015 is untouched.
+   * window, with no exception. An UPDATE may resend the stored date - a 2015
+   * employee whose form resends 2015 is untouched - but may not change it:
+   * that is the joining-date action's job, as on the Employee Master edit.
    */
   _requireJoiningDateForCreate(value) {
     const refusal = checkJoiningDateWindow(value, this.today());
@@ -46,8 +47,18 @@ class EmployeeUsecase {
       delete details.date_of_joining;
       return;
     }
+    // A CHANGED DATE IS REFUSED HERE WHATEVER IT IS - the same answer the
+    // Employee Master edit gives. This route writes the master column alone,
+    // without the employment period, the lifecycle audit or the historical-
+    // correction permission and reason; letting it change the date would be
+    // the bypass around all four. A real date outside the window gets the
+    // window's own message, which is the useful one.
     const refusal = checkJoiningDateWindow(details.date_of_joining, this.today());
-    if (refusal) throw joiningDateRefusal(refusal.message);
+    if (refusal && refusal.code !== "INVALID") throw joiningDateRefusal(refusal.message);
+    throw joiningDateRefusal(
+      "date_of_joining cannot be changed here. A wrongly recorded date_of_joining is corrected " +
+        "through the joining-date action."
+    );
   }
 
   /**

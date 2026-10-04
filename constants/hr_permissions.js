@@ -199,6 +199,19 @@ module.exports = {
   // as well, and the M1 migration grants these only to designations that
   // already hold `add_employees` together with `edit_employee_sensitive` -
   // nobody's effective access changes on deploy.
+  // HISTORICAL JOINING-DATE CORRECTION. A joining date being recorded must be
+  // within 30 days either side of today (see `utils/joining_date_window.js`),
+  // which stops a year typed wrong. Holding THIS key lets the dedicated
+  // joining-date correction - and bulk update's joining-date column - record
+  // an OLDER date: a genuine historical correction, or a legacy employee's
+  // missing date filled in. Always with a stated reason, always audited on
+  // the lifecycle event. Never a later date than today + 30, and never on
+  // create or rejoin. Required IN ADDITION to `employee_edit`.
+  //
+  // Declared by its migration and granted to NOBODY, so administrators only
+  // (user_type 2 bypass) until a designation is granted it deliberately.
+  EMPLOYEE_JOINING_DATE_HISTORICAL_CORRECTION: "employee_joining_date_historical_correction",
+
   EDIT_PAYMENT_DETAILS: "edit_payment_details",
   EDIT_STATUTORY_DETAILS: "edit_statutory_details",
 

@@ -118,15 +118,27 @@ describe("POST /employee/updatedata (legacy update), called directly", () => {
     assert.equal(writes.image, undefined, "no image written either");
   });
 
-  it("a change inside the window is allowed", async () => {
+  it("even a change inside the window is refused here - it belongs to the joining-date action", async () => {
     const { uc, writes } = world();
-    await update(uc, { date_of_joining: "2026-10-03" });
-    assert.deepEqual(writes.updated[0].data, { date_of_joining: "2026-10-03" });
+    await assert.rejects(() => update(uc, { date_of_joining: "2026-10-03" }), /corrected through the joining-date action/);
+    assert.equal(writes.updated.length, 0);
   });
 
   it("clearing a stored joining date is a change, and is refused", async () => {
     const { uc, writes } = world();
-    await assert.rejects(() => update(uc, { date_of_joining: "" }), /YYYY-MM-DD/);
+    await assert.rejects(() => update(uc, { date_of_joining: "" }), /corrected through the joining-date action/);
+    assert.equal(writes.updated.length, 0);
+  });
+
+  it("legacy API cannot bypass the historical-correction permission: an old date for a missing DOJ is refused", async () => {
+    // This route has no permission, reason or audit for a historical
+    // correction, so it must not be a way to record one.
+    const { uc, writes } = world({ 1500: "2015-06-15", 1600: null });
+    await assert.rejects(() => update(uc, { date_of_joining: "2012-04-01" }, 1600), refusedWith(EARLY));
+    await assert.rejects(
+      () => update(uc, { date_of_joining: "2015-06-01", correction_reason: "HR file shows 1 June 2015" }),
+      refusedWith(EARLY)
+    );
     assert.equal(writes.updated.length, 0);
   });
 

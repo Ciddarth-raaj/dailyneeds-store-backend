@@ -13,6 +13,7 @@ const {
   checkJoiningDateWindow,
   joiningDateChanged,
   strictIsoDate,
+  correctionReason,
 } = require("./joining_date_window");
 const { istDateOf } = require("./istDate");
 
@@ -103,5 +104,15 @@ describe("what counts as a date, and as a change", () => {
     assert.equal(joiningDateChanged("2010-01-01", "2015-06-15"), true);
     assert.equal(joiningDateChanged("", "2015-06-15"), true);
     assert.equal(joiningDateChanged("2026-10-03", null), true);
+  });
+});
+
+describe("the historical-correction reason", () => {
+  it("must be at least 10 characters once trimmed, and at most 500", () => {
+    assert.equal(correctionReason(null), null);
+    assert.equal(correctionReason("   "), null);
+    assert.equal(correctionReason("typo fix"), null);
+    assert.equal(correctionReason("  Appointment letter  "), "Appointment letter");
+    assert.equal(correctionReason("x".repeat(501)), null);
   });
 });

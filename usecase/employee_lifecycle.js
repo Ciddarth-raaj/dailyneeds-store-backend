@@ -57,6 +57,21 @@ function toDateOnly(value) {
 
 const isActive = (employee) => Number(employee.status) === 1;
 
+/** The joining-date correction audit fields a caller may add to the event. */
+const AUDIT_FIELDS = [
+  "source",
+  "historical_correction",
+  "correction_reason",
+  "previous_date_of_joining",
+  "new_date_of_joining",
+];
+function pickAudit(audit) {
+  const out = {};
+  if (!audit || typeof audit !== "object") return out;
+  for (const k of AUDIT_FIELDS) if (audit[k] !== undefined) out[k] = audit[k];
+  return out;
+}
+
 /**
  * Is `candidate` credible as the start of a NEW period that follows `prev`?
  *
@@ -499,6 +514,10 @@ class EmployeeLifecycleUsecase {
           previous_joined_on: previousJoined,
           joined_on: joinedOn,
           ended_on: endedOn,
+          // The caller's audit facts - source, reason, the master's previous
+          // date, whether the entry window was overridden - by name only, so
+          // nothing else can ride into the event.
+          ...pickAudit(options.audit),
         },
       });
 

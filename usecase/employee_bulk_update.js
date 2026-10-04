@@ -1,6 +1,11 @@
 const logger = require("../utils/logger");
 const { istToday } = require("../utils/istDate");
-const { checkJoiningDateWindow } = require("../utils/joining_date_window");
+const {
+  checkJoiningDateWindow,
+  correctionReason,
+  JOINING_DATE_ERROR,
+} = require("../utils/joining_date_window");
+const { JOINING_DATE_SOURCE } = require("./employee_master");
 const {
   IDENTITY_FIELDS,
   UPDATE_FIELDS,
@@ -551,6 +556,7 @@ class EmployeeBulkUpdateUsecase {
     }
 
     const changes = [];
+    let historicalChange = false;
     for (const field of context.header.updateFields) {
       const resolved = this._resolveCell(field, entry.cells[field.key], context);
       if (resolved.skip) continue; // blank = leave the current value alone
@@ -572,7 +578,16 @@ class EmployeeBulkUpdateUsecase {
         // it lands on the preview with a row number rather than as the
         // hundredth row's failure at confirm time.
         const refusal = checkJoiningDateWindow(resolved.value, context.today);
-        if (refusal) {
+        if (refusal && refusal.code === "TOO_EARLY" && context.mayCorrectHistorically) {
+          // A HISTORICAL CORRECTION: allowed for this caller, but never
+          // silently. It is flagged on the change, counted in the summary,
+          // and the confirm refuses the whole file without a reason.
+          historicalChange = true;
+          warnings.push(
+            `Historical joining-date correction: ${resolved.display} is more than 30 days before today. ` +
+              `A correction reason is required to confirm, and the change is audited.`
+          );
+        } else if (refusal) {
           errors.push(refusal.message);
           continue;
         }
@@ -595,7 +610,9 @@ class EmployeeBulkUpdateUsecase {
         to: resolved.value,
         from_display: current.display,
         to_display: resolved.display,
+        ...(historicalChange ? { historical_correction: true } : {}),
       });
+      historicalChange = false;
     }
 
     return this._present(entry, {
@@ -638,7 +655,7 @@ class EmployeeBulkUpdateUsecase {
    * masters, the caller's branch scope, and the current state of exactly the
    * employees named in it.
    */
-  async _context(entries, header, scope) {
+  async _context(entries, header, scope, capabilities = {}) {
     const masters = await this.repo.getMasters();
     const index = {
       outlet: buildMasterIndex(masters.outlet),
@@ -659,6 +676,9 @@ class EmployeeBulkUpdateUsecase {
       inScope: scope.inScope,
       allBranches: scope.allBranches,
       today: this.today(),
+      // From the caller's `employee_joining_date_historical_correction` key,
+      // decided by the route - never by anything in the file.
+      mayCorrectHistorically: capabilities.mayCorrectHistorically === true,
     };
   }
 
@@ -673,11 +693,11 @@ class EmployeeBulkUpdateUsecase {
    * stopped at the first bad row would make fixing a file an exercise in
    * uploading it once per mistake.
    */
-  async preview({ headers, rows, filename }, scope, actor) {
+  async preview({ headers, rows, filename }, scope, actor, capabilities = {}) {
     const header = this._readHeader(headers);
     const entries = this._guardSize(rows, header);
 
-    const context = await this._context(entries, header, scope);
+    const context = await this._context(entries, header, scope, capabilities);
     const results = [];
     for (const entry of entries) {
       /* eslint-disable-next-line no-await-in-loop */
@@ -698,6 +718,7 @@ class EmployeeBulkUpdateUsecase {
        * (a name mismatch) never block - they are for a human to read.
        */
       can_confirm: summary.error_rows === 0 && summary.rows_with_changes > 0,
+      requires_correction_reason: summary.historical_corrections > 0,
       rows: results,
     };
   }
@@ -723,6 +744,11 @@ class EmployeeBulkUpdateUsecase {
       warning_rows: results.filter((r) => r.warnings.length > 0).length,
       rows_with_changes: results.filter((r) => r.has_changes).length,
       rows_without_changes: results.filter((r) => r.valid && !r.has_changes).length,
+      // Rows whose joining date moves to before the 30-day window. Non-zero
+      // means the confirm must carry `joining_date_correction_reason`.
+      historical_corrections: results.filter(
+        (r) => r.valid && r.changes.some((c) => c.historical_correction === true)
+      ).length,
       selected_fields: header.updateFields.map((f) => f.key),
     };
   }
@@ -742,11 +768,16 @@ class EmployeeBulkUpdateUsecase {
    * and a per-row best effort: the user approved a specific set of changes,
    * and a file that no longer means what it meant has not been approved.
    */
-  async confirm({ headers, rows, filename, expected_before: expectedByRow }, scope, actor) {
+  async confirm(
+    { headers, rows, filename, expected_before: expectedByRow, joining_date_correction_reason },
+    scope,
+    actor,
+    capabilities = {}
+  ) {
     const header = this._readHeader(headers);
     const entries = this._guardSize(rows, header);
 
-    const context = await this._context(entries, header, scope);
+    const context = await this._context(entries, header, scope, capabilities);
     const results = [];
     for (const entry of entries) {
       /* eslint-disable-next-line no-await-in-loop */
@@ -771,11 +802,40 @@ class EmployeeBulkUpdateUsecase {
       };
     }
 
+    /*
+     * ONE REASON FOR THE BATCH'S HISTORICAL CORRECTIONS, and none means
+     * nothing is applied. It travels with every joining-date change in this
+     * file onto that employee's lifecycle event, and onto the batch row.
+     */
+    const reasonText =
+      joining_date_correction_reason === undefined || joining_date_correction_reason === null
+        ? ""
+        : String(joining_date_correction_reason).trim();
+    if (summary.historical_corrections > 0 && !correctionReason(reasonText)) {
+      await this._audit("CONFIRM", {
+        filename, header, summary, results, actor, outcome: "REFUSED_NO_CORRECTION_REASON",
+      });
+      return {
+        code: 422,
+        applied: false,
+        msg: JOINING_DATE_ERROR.REASON_REQUIRED,
+        source_filename: filename || null,
+        ...summary,
+        can_confirm: true,
+        requires_correction_reason: true,
+        rows: results,
+      };
+    }
+
     const expected = this._expectedIndex(expectedByRow);
+    const joining = {
+      reason: reasonText || null,
+      mayCorrectHistorically: context.mayCorrectHistorically,
+    };
     const applied = [];
     for (const row of results) {
       /* eslint-disable-next-line no-await-in-loop */
-      applied.push(await this._applyRow(row, expected, actor));
+      applied.push(await this._applyRow(row, expected, actor, joining));
     }
 
     const counts = {
@@ -792,6 +852,7 @@ class EmployeeBulkUpdateUsecase {
       results: applied,
       actor,
       counts,
+      correctionReason: reasonText || null,
       outcome:
         counts.rows_conflicted + counts.rows_failed === 0
           ? "APPLIED"
@@ -837,7 +898,7 @@ class EmployeeBulkUpdateUsecase {
    * Joining is its OWN call to `correctJoiningDate`, because it is not an
    * ordinary field: it moves the employment period with it.
    */
-  async _applyRow(row, expected, actor) {
+  async _applyRow(row, expected, actor, joining = {}) {
     if (!row.has_changes) {
       return { ...row, outcome: OUTCOME.NO_CHANGE, applied_fields: [], failure_reason: null };
     }
@@ -879,8 +940,17 @@ class EmployeeBulkUpdateUsecase {
       if (joiningDate !== null) {
         await this.master.correctJoiningDate(
           row.employee_id,
-          { date_of_joining: joiningDate },
-          { actorEmployeeId: actor ? actor.employeeId : null }
+          {
+            date_of_joining: joiningDate,
+            ...(joining.reason ? { correction_reason: joining.reason } : {}),
+          },
+          {
+            actorEmployeeId: actor ? actor.employeeId : null,
+            // Re-decided by C2 against its own clock and window; this only
+            // carries the caller's key through, and C2 still demands the reason.
+            mayCorrectHistorically: joining.mayCorrectHistorically === true,
+            source: JOINING_DATE_SOURCE.BULK_UPDATE,
+          }
         );
         appliedFields.push("date_of_joining");
       }
@@ -952,7 +1022,7 @@ class EmployeeBulkUpdateUsecase {
    * the employees have already been changed, and throwing here would report a
    * write that happened as one that did not. It is logged loudly instead.
    */
-  async _audit(operation, { filename, header, summary, results, actor, counts = {}, outcome }) {
+  async _audit(operation, { filename, header, summary, results, actor, counts = {}, outcome, correctionReason: reason = null }) {
     try {
       await this.repo.recordBulkUpdate({
         operation,
@@ -978,7 +1048,12 @@ class EmployeeBulkUpdateUsecase {
             row_number: r.row_number,
             employee_id: r.employee_id,
             fields: r.changes.map((c) => c.field),
-            changes: r.changes.map((c) => ({ field: c.field, from: c.from, to: c.to })),
+            changes: r.changes.map((c) => ({
+              field: c.field,
+              from: c.from,
+              to: c.to,
+              ...(c.historical_correction ? { historical_correction: true, correction_reason: reason } : {}),
+            })),
             outcome: r.outcome || (r.valid ? null : OUTCOME.ERROR),
             errors: r.valid ? undefined : r.errors,
           })),

@@ -834,3 +834,90 @@ describe("bulk audit", () => {
     assert.equal(result.rows_applied, 1);
   });
 });
+
+/* ================================ historical joining-date corrections == */
+/**
+ * Bulk update's joining-date column under the 30-day entry window. A date
+ * older than the window is an error for an ordinary caller; for a caller the
+ * route found to hold `employee_joining_date_historical_correction` it is a
+ * flagged historical correction, and the confirm demands one reason for the
+ * batch and records it per employee. Today is pinned to 2026-10-04.
+ */
+describe("bulk historical joining-date corrections", () => {
+  const TODAY = "2026-10-04";
+  const HR_CAPS = { mayCorrectHistorically: true };
+  const REASON = "Corrected from the 2024 joining register";
+  const file = (cells) => ({ headers: HEADERS, rows: [row(cells)], filename: "bulk.xlsx" });
+  const OLD = { "Employee ID": "1865", "Date of Joining": "01/05/2024" }; // stored: 2024-06-01
+
+  it("a normal bulk update with an old joining date is blocked", async () => {
+    const { usecase } = make(undefined, { today: () => TODAY });
+    const p = await usecase.preview(file(OLD), ALL_BRANCHES, ACTOR);
+    assert.equal(p.rows[0].valid, false);
+    assert.equal(p.rows[0].errors[0], "Joining date cannot be more than 30 days before today.");
+    assert.equal(p.can_confirm, false);
+
+    const c = await usecase.confirm({ ...file(OLD), expected_before: echo(p), joining_date_correction_reason: REASON }, ALL_BRANCHES, ACTOR);
+    assert.equal(c.applied, false);
+  });
+
+  it("the holder's preview flags it as a historical correction that needs a reason", async () => {
+    const { usecase } = make(undefined, { today: () => TODAY });
+    const p = await usecase.preview(file(OLD), ALL_BRANCHES, ACTOR, HR_CAPS);
+    assert.equal(p.rows[0].valid, true);
+    assert.equal(p.rows[0].changes[0].historical_correction, true);
+    assert.match(p.rows[0].warnings[0], /Historical joining-date correction/);
+    assert.equal(p.historical_corrections, 1);
+    assert.equal(p.requires_correction_reason, true);
+  });
+
+  it("the holder's confirm without a reason applies nothing", async () => {
+    const { usecase, master } = make(undefined, { today: () => TODAY });
+    const p = await usecase.preview(file(OLD), ALL_BRANCHES, ACTOR, HR_CAPS);
+    const c = await usecase.confirm({ ...file(OLD), expected_before: echo(p) }, ALL_BRANCHES, ACTOR, HR_CAPS);
+    assert.equal(c.code, 422);
+    assert.equal(c.applied, false);
+    assert.match(c.msg, /correction reason/);
+    assert.equal(master.calls.joiningDate.length, 0);
+  });
+
+  it("an authorised bulk historical correction is applied through C2 with its reason, and audited", async () => {
+    const { usecase, master, repo } = make(undefined, { today: () => TODAY });
+    const p = await usecase.preview(file(OLD), ALL_BRANCHES, ACTOR, HR_CAPS);
+    const c = await usecase.confirm(
+      { ...file(OLD), expected_before: echo(p), joining_date_correction_reason: REASON },
+      ALL_BRANCHES,
+      ACTOR,
+      HR_CAPS
+    );
+    assert.equal(c.applied, true);
+    assert.equal(c.rows_applied, 1);
+    // Per employee: through correctJoiningDate, which writes the lifecycle
+    // event (old/new date, actor, reason, source) - C2 re-checks the window.
+    assert.deepEqual(master.calls.joiningDate[0].input, { date_of_joining: "2024-05-01", correction_reason: REASON });
+    assert.equal(master.calls.joiningDate[0].opts.mayCorrectHistorically, true);
+    assert.equal(master.calls.joiningDate[0].opts.source, "bulk_update");
+    assert.equal(master.calls.joiningDate[0].opts.actorEmployeeId, ACTOR.employeeId);
+    // The batch row carries the change, the flag and the reason as well.
+    const confirmAudit = repo.calls.audits.filter((a) => a.operation === "CONFIRM").pop();
+    assert.equal(confirmAudit.user_id, ACTOR.userId);
+    assert.deepEqual(confirmAudit.detail[0].changes[0], {
+      field: "date_of_joining",
+      from: "2024-06-01",
+      to: "2024-05-01",
+      historical_correction: true,
+      correction_reason: REASON,
+    });
+  });
+
+  it("the holder still cannot bulk-set a date beyond today + 30", async () => {
+    const { usecase } = make(undefined, { today: () => TODAY });
+    const p = await usecase.preview(
+      file({ "Employee ID": "1865", "Date of Joining": "04/11/2026" }),
+      ALL_BRANCHES,
+      ACTOR,
+      HR_CAPS
+    );
+    assert.equal(p.rows[0].errors[0], "Joining date cannot be more than 30 days after today.");
+  });
+});

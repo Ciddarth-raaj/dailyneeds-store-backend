@@ -45,6 +45,7 @@ const OUTLET_DESIGNATION = 8;
 const PF_DESIGNATION = 9; // holds view_aadhaar_full and nothing else
 const FINANCE_DESIGNATION = 10; // holds the two bank keys plus sensitive access
 const LIST_DESIGNATION = 11; // holds `view_employees` and nothing else
+const HISTORICAL_DESIGNATION = 12; // employee_edit + the historical joining-date key
 
 /** Only the HR designation holds the C2 keys. */
 const GRANTS = {
@@ -60,6 +61,7 @@ const GRANTS = {
   [OUTLET_DESIGNATION]: ["view_stores"],
   // C3: whoever can see the employee list, and nothing more.
   [LIST_DESIGNATION]: [P.VIEW_EMPLOYEES],
+  [HISTORICAL_DESIGNATION]: [P.EMPLOYEE_EDIT, P.EMPLOYEE_JOINING_DATE_HISTORICAL_CORRECTION],
   // Reading a full Aadhaar takes BOTH: sensitive access, and the specific key.
   [PF_DESIGNATION]: [P.VIEW_EMPLOYEE_SENSITIVE, P.VIEW_AADHAAR_FULL],
   // Running the paid check and accepting a near-miss name are both above
@@ -82,6 +84,7 @@ const usecase = {
   editEmployee: async (id, patch, opts) => (calls.push(["edit", id, patch, opts]), { code: 200, employee_id: id }),
   resignEmployee: async (id, input, opts) => (calls.push(["resign", id, input, opts]), { code: 200, employee_id: id }),
   rejoinEmployee: async (id, input, opts) => (calls.push(["rejoin", id, input, opts]), { code: 200, employee_id: id }),
+  correctJoiningDate: async (id, input, opts) => (calls.push(["joining-date", id, input, opts]), { code: 200, employee_id: id }),
   getLifecycleHistory: async (id) => ({
     employee_id: id, employee_name: "Someone", status: 1, is_active: true,
     current: { date_of_joining: "2022-03-01", designation_name: "Cashier" },
@@ -1385,5 +1388,40 @@ describe("GET /hr/employees/status-summary", () => {
     const r = await call("GET", "/hr/employee/1/lifecycle", tokenFor({ designationId: HR_DESIGNATION }));
     assert.equal(r.status, 200);
     assert.equal(r.body.employee_id, 1);
+  });
+});
+
+/* ============================== historical joining-date correction ====== */
+describe("POST /hr/employee/:id/joining-date - the historical-correction key", () => {
+  const lastJoiningCall = () => calls.filter((c) => c[0] === "joining-date").pop();
+  const BODY = { date_of_joining: "2015-06-01", correction_reason: "Appointment letter shows 1 June 2015" };
+
+  it("employee_edit alone: the usecase is told the caller may NOT correct history", async () => {
+    const r = await call("POST", "/hr/employee/42/joining-date", tokenFor(), BODY);
+    assert.equal(r.status, 200);
+    assert.equal(lastJoiningCall()[3].mayCorrectHistorically, false);
+    assert.deepEqual(lastJoiningCall()[2], BODY);
+  });
+
+  it("holding the historical key: the usecase is told the caller may", async () => {
+    await call("POST", "/hr/employee/42/joining-date", tokenFor({ designationId: HISTORICAL_DESIGNATION }), BODY);
+    assert.equal(lastJoiningCall()[3].mayCorrectHistorically, true);
+  });
+
+  it("an administrator holds it through the user_type 2 bypass", async () => {
+    await call("POST", "/hr/employee/42/joining-date", tokenFor({ designationId: LIST_DESIGNATION, userType: 2 }), BODY);
+    assert.equal(lastJoiningCall()[3].mayCorrectHistorically, true);
+  });
+
+  it("the body cannot claim the capability: an unknown key is refused before the usecase", async () => {
+    const before = calls.length;
+    const r = await call("POST", "/hr/employee/42/joining-date", tokenFor(), { ...BODY, mayCorrectHistorically: true });
+    assert.equal(r.body.code, 422);
+    assert.equal(calls.length, before);
+  });
+
+  it("the key alone does not open the route: employee_edit is still required", async () => {
+    const r = await call("POST", "/hr/employee/42/joining-date", tokenFor({ designationId: LIST_DESIGNATION }), BODY);
+    assert.equal(r.status, 403);
   });
 });

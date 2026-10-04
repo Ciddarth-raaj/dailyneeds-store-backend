@@ -33,7 +33,29 @@ const JOINING_DATE_ERROR = Object.freeze({
   TOO_EARLY: "Joining date cannot be more than 30 days before today.",
   TOO_LATE: "Joining date cannot be more than 30 days after today.",
   INVALID: "Joining date must be a real calendar date as YYYY-MM-DD.",
+  REASON_REQUIRED:
+    "A correction reason of at least 10 characters is required for a historical joining-date correction.",
 });
+
+/**
+ * THE ONE EXCEPTION, AND ONLY TO THE PAST. A joining date older than the
+ * window may be recorded by the dedicated joining-date correction (singly,
+ * or through bulk update) when the caller holds
+ * `employee_joining_date_historical_correction` AND states a reason - for a
+ * genuine old date, or for filling in one of the legacy employees who have
+ * none. Create and rejoin have no exception. A date beyond today + 30 has no
+ * exception anywhere: a historical correction corrects history.
+ */
+const CORRECTION_REASON_MIN = 10;
+const CORRECTION_REASON_MAX = 500;
+
+/** The trimmed reason if it is a usable one, else null. */
+function correctionReason(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (text.length < CORRECTION_REASON_MIN || text.length > CORRECTION_REASON_MAX) return null;
+  return text;
+}
 
 /** `YYYY-MM-DD` if `text` is exactly a real calendar date, else null. */
 function strictIsoDate(value) {
@@ -108,6 +130,9 @@ function joiningDateChanged(submitted, stored) {
 module.exports = {
   JOINING_DATE_WINDOW_DAYS,
   JOINING_DATE_ERROR,
+  CORRECTION_REASON_MIN,
+  CORRECTION_REASON_MAX,
+  correctionReason,
   strictIsoDate,
   storedIsoDate,
   joiningDateWindow,

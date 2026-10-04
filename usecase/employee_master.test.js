@@ -1730,3 +1730,146 @@ describe("joining-date entry window (create, rejoin, correction, edit)", () => {
     });
   });
 });
+
+/* ======================== historical joining-date correction ============ */
+/**
+ * The one exception to the entry window, and only to the PAST: the dedicated
+ * joining-date correction, for a caller the route has found to hold
+ * `employee_joining_date_historical_correction`, with a stated reason, always
+ * audited on the period_corrected lifecycle event. Today is pinned to
+ * 2026-10-04 (window 2026-09-04 .. 2026-11-03).
+ */
+describe("historical joining-date correction", () => {
+  const TODAY = "2026-10-04";
+  const EARLY = /Joining date cannot be more than 30 days before today\./;
+  const LATE = /Joining date cannot be more than 30 days after today\./;
+  const NO_REASON = /A correction reason of at least 10 characters is required/;
+  const HR = { actorEmployeeId: 77, mayCorrectHistorically: true };
+  const NORMAL = { actorEmployeeId: 78 };
+  const REASON = "Appointment letter on file shows 01-Jun-2015";
+
+  const historical = async () => {
+    const built = build();
+    const { employee_id } = await built.uc.createEmployee({ ...VALID, date_of_joining: "2015-06-15" });
+    built.uc.today = () => TODAY;
+    return { ...built, employee_id };
+  };
+  const lastCorrection = (world, id) =>
+    world.events.filter((e) => e.employee_id === id && e.event_type === "period_corrected").pop();
+
+  it("new employee: today - 31 and today + 31 are blocked, even for the historical-correction holder", async () => {
+    const { uc } = build();
+    uc.today = () => TODAY;
+    await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: "2026-09-03" }), EARLY);
+    await assert.rejects(() => uc.createEmployee({ ...VALID, date_of_joining: "2026-11-04" }), LATE);
+  });
+
+  it("rejoin: today - 31 is blocked - a rejoin has no historical exception", async () => {
+    const { uc, employee_id } = await historical();
+    await uc.resignEmployee(employee_id, { resignation_date: "2026-01-31" });
+    await assert.rejects(() => uc.rejoinEmployee(employee_id, { date_of_joining: "2026-09-03" }), EARLY);
+  });
+
+  it("historical employee + unrelated edit is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.editEmployee(employee_id, { primary_contact_number: "9000000009" });
+    assert.equal(world.employees.get(employee_id).primary_contact_number, "9000000009");
+  });
+
+  it("a normal user changing a 2015 date to another 2015 date is blocked", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: REASON }, NORMAL),
+      EARLY
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+    assert.equal(lastCorrection(world, employee_id), undefined);
+  });
+
+  it("the authorised historical correction of a 2015 date is allowed", async () => {
+    const { world, uc, employee_id } = await historical();
+    const res = await uc.correctJoiningDate(
+      employee_id,
+      { date_of_joining: "2015-06-01", correction_reason: REASON },
+      HR
+    );
+    assert.equal(res.code, 200);
+    assert.equal(res.historical_correction, true);
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-01");
+    assert.deepEqual(shapeOf(world, employee_id), [[1, "open", "2015-06-01", null]]);
+  });
+
+  it("a historical correction without a reason - or with a token one - is blocked, and writes nothing", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01" }, HR), NO_REASON);
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: "   " }, HR),
+      NO_REASON
+    );
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: "typo" }, HR),
+      NO_REASON
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+    assert.equal(lastCorrection(world, employee_id), undefined);
+  });
+
+  it("the audit records employee, old date, new date, acting user, reason, source and the override", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.correctJoiningDate(employee_id, { date_of_joining: "2015-06-01", correction_reason: REASON }, HR);
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.employee_id, employee_id);
+    assert.equal(event.actor_employee_id, 77);
+    assert.equal(event.detail.reason, "date_corrected");
+    assert.equal(event.detail.previous_date_of_joining, "2015-06-15");
+    assert.equal(event.detail.new_date_of_joining, "2015-06-01");
+    assert.equal(event.detail.previous_joined_on, "2015-06-15");
+    assert.equal(event.detail.joined_on, "2015-06-01");
+    assert.equal(event.detail.correction_reason, REASON);
+    assert.equal(event.detail.source, "joining_date_action");
+    assert.equal(event.detail.historical_correction, true);
+    // changed_at: the event row's own created_at, DEFAULT CURRENT_TIMESTAMP.
+  });
+
+  it("an ordinary in-window correction is audited too, flagged as not historical", async () => {
+    const { world, uc, employee_id } = await historical();
+    await uc.correctJoiningDate(employee_id, { date_of_joining: "2026-10-01" }, NORMAL);
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.detail.historical_correction, false);
+    assert.equal(event.detail.correction_reason, null);
+    assert.equal(event.actor_employee_id, 78);
+  });
+
+  it("the authorised historical correction still cannot set today + 31", async () => {
+    const { world, uc, employee_id } = await historical();
+    await assert.rejects(
+      () => uc.correctJoiningDate(employee_id, { date_of_joining: "2026-11-04", correction_reason: REASON }, HR),
+      LATE
+    );
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2015-06-15");
+  });
+
+  it("a legacy employee with no joining date can be given a genuine old one by an authorised correction", async () => {
+    const { world, uc, employee_id } = await historical();
+    // The legacy shape: no date on the master, and the backfilled period
+    // open with joined_on NULL, flagged for review.
+    world.employees.get(employee_id).date_of_joining = null;
+    const period = world.periods.find((p) => p.employee_id === employee_id);
+    period.joined_on = null;
+    period.needs_review = 1;
+
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2012-04-01" }, NORMAL), EARLY);
+    await assert.rejects(() => uc.correctJoiningDate(employee_id, { date_of_joining: "2012-04-01" }, HR), NO_REASON);
+
+    const res = await uc.correctJoiningDate(
+      employee_id,
+      { date_of_joining: "2012-04-01", correction_reason: "Filled from the 2012 joining register" },
+      HR
+    );
+    assert.equal(res.historical_correction, true);
+    assert.equal(world.employees.get(employee_id).date_of_joining, "2012-04-01");
+    const event = lastCorrection(world, employee_id);
+    assert.equal(event.detail.previous_date_of_joining, null);
+    assert.equal(event.detail.new_date_of_joining, "2012-04-01");
+  });
+});

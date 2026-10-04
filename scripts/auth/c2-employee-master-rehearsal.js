@@ -258,6 +258,21 @@ async function main() {
       ? require(path.join(ROOT, "usecase/employee_bank"))(bankRepo, sandboxBank, aadhaarRepo)
       : null;
     const hr = require(path.join(ROOT, "usecase/employee_master"))(masterRepo, lifecycle, lifecycleRepo, aadhaar);
+    // THIS REHEARSAL REPLAYS 2022-2026 HISTORY, so each create, rejoin and
+    // correction is dated as if recorded on its own day: the joining-date
+    // entry window (30 days either side of today) is judged against the date
+    // being written. Only THIS script's usecase instance is re-clocked - the
+    // rule itself, and every production path, are untouched - and the window
+    // has its own tests in usecase/employee_master.test.js.
+    for (const method of ["createEmployee", "rejoinEmployee", "correctJoiningDate"]) {
+      const original = hr[method].bind(hr);
+      hr[method] = (...args) => {
+        const input = method === "createEmployee" ? args[0] : args[1];
+        const date = input && input.date_of_joining;
+        if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date)) hr.today = () => date;
+        return original(...args);
+      };
+    }
     if (!bank) {
       console.log(`\n   NOTE: ${bankConfig.describe()} - the bank section is skipped`);
     }
@@ -331,7 +346,9 @@ async function main() {
       try {
         await hr.editEmployee(id, { [field]: value });
       } catch (err) {
-        refused = /cannot be changed here/.test(err.message);
+        // A changed joining date outside the 30-day entry window is refused
+        // with the window's own message; either way the edit does not write it.
+        refused = /cannot be changed here|cannot be more than 30 days/.test(err.message);
       }
       eq(`edit refuses ${field}`, refused, true);
     }
