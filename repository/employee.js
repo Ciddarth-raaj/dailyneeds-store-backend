@@ -848,6 +848,36 @@ class EmployeeRepository {
       );
     });
   }
+  /**
+   * The stored joining date alone, as `YYYY-MM-DD` or null - read so the
+   * legacy update can tell an unchanged date from a changed one before it
+   * applies the joining-date entry window to it.
+   */
+  getJoiningDate(employee_id) {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT DATE_FORMAT(date_of_joining, '%Y-%m-%d') AS date_of_joining
+           FROM new_employee WHERE employee_id = ?`,
+        [employee_id],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.EMPLOYEE",
+              code: "REPOSITORY.EMPLOYEE.GET-JOINING-DATE",
+              description: err.toString(),
+              category: "",
+              ref: { employee_id },
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows && rows[0] ? { found: true, date_of_joining: rows[0].date_of_joining } : { found: false });
+        }
+      );
+    });
+  }
+
   updateEmployeeDetails(data, employee_id) {
     delete data["files"];
     return new Promise((resolve, reject) => {

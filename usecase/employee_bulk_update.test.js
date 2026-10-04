@@ -87,6 +87,12 @@ function fakeMaster(behaviour = {}) {
   const calls = { edit: [], joiningDate: [] };
   return {
     calls,
+    /*
+     * The day these fixtures are "recorded" on. The joining-date entry window
+     * (30 days either side of today) is judged against the master's clock,
+     * and the fixtures move joining dates around June 2024.
+     */
+    today: behaviour.today || (() => "2024-06-20"),
     editEmployee: async (id, patch, opts) => {
       calls.edit.push({ id, patch, opts });
       if (behaviour.editThrows) throw behaviour.editThrows;
@@ -499,15 +505,35 @@ describe("bulk preview: rows", () => {
     assert.equal(p.rows[1].changes[0].to, "2024-06-15");
   });
 
-  it("refuses an invalid and a FUTURE Date of Joining", async () => {
-    const future = new Date(Date.now() + 40 * 86400000).toISOString().slice(0, 10);
-    const [, mm, dd] = future.split("-");
+  it("refuses an invalid Date of Joining, and one outside the 30-day entry window", async () => {
+    // today (the fake master's clock) is 2024-06-20: window 2024-05-21 .. 2024-07-20
     const { preview: p } = await preview([
       row({ "Employee ID": "1865", "Date of Joining": "31/02/2024" }),
-      row({ "Employee ID": "1900", "Date of Joining": `${dd}/${mm}/${future.slice(0, 4)}` }),
+      row({ "Employee ID": "1900", "Date of Joining": "21/07/2024" }),
     ]);
     assert.match(p.rows[0].errors[0], /is not a date this can read/);
-    assert.match(p.rows[1].errors[0], /is in the future/);
+    assert.equal(p.rows[1].errors[0], "Joining date cannot be more than 30 days after today.");
+
+    const { preview: q } = await preview([
+      row({ "Employee ID": "1865", "Date of Joining": "20/05/2024" }),
+      row({ "Employee ID": "1900", "Date of Joining": "15/06/2004" }),
+    ]);
+    assert.equal(q.rows[0].errors[0], "Joining date cannot be more than 30 days before today.");
+    assert.equal(q.rows[1].errors[0], "Joining date cannot be more than 30 days before today.");
+  });
+
+  it("13. the window judges only a joining date that CHANGES: an untouched historical date passes", async () => {
+    // EMPLOYEES[1865] is stored with 2024-06-01; under a 2026 clock it is
+    // far outside the window, and re-uploading it unchanged must not refuse.
+    const { usecase } = make(undefined, { today: () => "2026-10-04" });
+    const preview2026 = (rows) => usecase.preview({ headers: HEADERS, rows, filename: "bulk.xlsx" }, ALL_BRANCHES, ACTOR);
+    const p = await preview2026([row({ "Employee ID": "1865", "Date of Joining": "01/06/2024" })]);
+    assert.equal(p.rows[0].valid, true);
+    assert.deepEqual(p.rows[0].changes, []);
+
+    const changed = await preview2026([row({ "Employee ID": "1865", "Date of Joining": "03/10/2006" })]);
+    assert.equal(changed.rows[0].valid, false);
+    assert.equal(changed.rows[0].errors[0], "Joining date cannot be more than 30 days before today.");
   });
 
   it("raises a WARNING for a name mismatch, never an error and never a rename", async () => {

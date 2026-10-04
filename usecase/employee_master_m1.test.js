@@ -35,8 +35,15 @@ const lifecycleRepo = {
   insertEvent: async () => {},
 };
 
+// The fixtures record joining dates in early January 2026, so the clock is
+// pinned beside them for the 30-day joining-date entry window.
+const onFixtureDay = (uc) => {
+  uc.today = () => "2026-01-10";
+  return uc;
+};
+
 const usecaseWith = (store, workShifts) =>
-  build(fakeRepo(store), lifecycleUsecase, lifecycleRepo, null, workShifts);
+  onFixtureDay(build(fakeRepo(store), lifecycleUsecase, lifecycleRepo, null, workShifts));
 
 /**
  * A create that satisfies the Personal Details rules - creating an employee

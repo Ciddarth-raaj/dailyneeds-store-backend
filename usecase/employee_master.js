@@ -14,6 +14,8 @@ const {
   normaliseClassificationFields,
 } = require("../utils/employment_classification");
 const { parseExtraBreakHours } = require("../utils/employee_extra_break");
+const { istToday } = require("../utils/istDate");
+const { checkJoiningDateWindow, joiningDateChanged, strictIsoDate } = require("../utils/joining_date_window");
 const { EDITABLE_FIELDS, SECURITY_RELEVANT_FIELDS, LIFECYCLE_CONTROLLED_FIELDS, STATUS } = masterRepo;
 
 /**
@@ -123,6 +125,17 @@ function rejectFutureDate(date, label) {
   }
 }
 
+/**
+ * A joining date being RECORDED - at create, rejoin, or a correction that
+ * actually changes it - must fall within 30 days either side of today's IST
+ * business date. See `utils/joining_date_window.js` for why, and for why a
+ * date already stored is never judged by it.
+ */
+function rejectOutsideJoiningWindow(date, today) {
+  const refusal = checkJoiningDateWindow(date, today);
+  if (refusal) throw new ValidationError(refusal.message);
+}
+
 const dateOnly = (value) => {
   if (value === null || value === undefined) return null;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value.toISOString().slice(0, 10);
@@ -173,6 +186,11 @@ class EmployeeMasterUsecase {
     // Optional: a deployment with no Aadhaar keys configured still creates
     // employees, it just cannot attach an identity.
     this.aadhaar = aadhaarUsecase || null;
+    /**
+     * Today's IST business date, for the joining-date entry window. A
+     * property so a test can pin the day; it is never read from a request.
+     */
+    this.today = () => istToday();
   }
 
   _log(level, code, description, ref = {}) {
@@ -246,7 +264,7 @@ class EmployeeMasterUsecase {
    */
   async createEmployee(input, { actorEmployeeId = null } = {}) {
     const joinedOn = effectiveDate(input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    rejectOutsideJoiningWindow(joinedOn, this.today());
 
     const fields = { ...input };
     // A key present with no value is not a value. The route's schema strips
@@ -560,6 +578,20 @@ class EmployeeMasterUsecase {
   }
 
   async editEmployee(employeeId, patch, { actorEmployeeId = null } = {}) {
+    /*
+     * AN UNCHANGED JOINING DATE RIDING ALONG IS NOT AN EDIT OF IT. A form that
+     * resends the whole record - including a 2015 joining date nobody touched
+     * - must save the phone number it was opened to change. The submitted
+     * date is set aside here and compared with the stored one under the row
+     * lock below: unchanged, it is dropped; changed, it is refused, because
+     * this path never writes it (see the message below).
+     */
+    let submittedJoining;
+    if (patch && Object.prototype.hasOwnProperty.call(patch, "date_of_joining")) {
+      submittedJoining = patch.date_of_joining;
+      patch = { ...patch };
+      delete patch.date_of_joining;
+    }
     const offered = Object.keys(patch || {});
     const forbidden = offered.filter((k) => LIFECYCLE_CONTROLLED_FIELDS.includes(k));
     if (forbidden.length) {
@@ -571,7 +603,7 @@ class EmployeeMasterUsecase {
     }
     const unknown = offered.filter((k) => !EDITABLE_FIELDS.includes(k));
     if (unknown.length) throw new ValidationError(`not an editable employee field: ${unknown.join(", ")}`);
-    if (offered.length === 0) throw new ValidationError("nothing to change");
+    if (offered.length === 0 && submittedJoining === undefined) throw new ValidationError("nothing to change");
 
     // The same check the create does, from the same module. Clearing either
     // field is allowed and stores NULL - "not recorded" is a state HR may
@@ -584,6 +616,18 @@ class EmployeeMasterUsecase {
     return this.repo.withTransaction(async (tx) => {
       const before = await this.repo.lockEmployee(tx, employeeId);
       if (!before) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      if (submittedJoining !== undefined && joiningDateChanged(submittedJoining, before.date_of_joining)) {
+        // A real date outside the entry window gets the window's own message,
+        // which is the useful one; anything else gets the pointer below. The
+        // date is never written here either way.
+        if (strictIsoDate(submittedJoining)) rejectOutsideJoiningWindow(submittedJoining, this.today());
+        throw new ValidationError(
+          "date_of_joining cannot be changed here. A wrongly recorded date_of_joining is " +
+            "corrected through the joining-date action."
+        );
+      }
+      if (Object.keys(patch).length === 0) throw new ValidationError("nothing to change");
 
       // PERSONAL DETAILS ARE MANDATORY WHEN THE SECTION IS SAVED - and only
       // then. A patch that names none of those fields (an Employment edit,
@@ -670,18 +714,26 @@ class EmployeeMasterUsecase {
    * `period_corrected` event with the old and new value. Nothing here opens
    * or closes a period; the reconciler is not called.
    *
-   * This layer checks the date's shape, that it is not in the future, and
-   * that it is not after a recorded resignation. The period-ordering rules
+   * This layer checks the date's shape, that a CHANGED date falls within the
+   * joining-date entry window (30 days either side of today, IST), and that
+   * it is not after a recorded resignation. The period-ordering rules
    * (not after the spell's own end, after the previous spell ended) belong
    * to C1c and are applied there.
    */
   async correctJoiningDate(employeeId, input, { actorEmployeeId = null } = {}) {
     const joinedOn = effectiveDate(input && input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    const today = this.today();
 
     return this.repo.withTransaction(async (tx) => {
       const employee = await this.repo.lockEmployee(tx, employeeId);
       if (!employee) throw new NotFoundError(`employee ${employeeId} does not exist`);
+
+      // THE WINDOW JUDGES A CHANGE, NOT THE STORED DATE. Resubmitting the
+      // master's own date (to repair a period that disagrees with it) is not
+      // recording a new joining date, so an old one is not refused here.
+      if (joiningDateChanged(joinedOn, employee.date_of_joining)) {
+        rejectOutsideJoiningWindow(joinedOn, today);
+      }
 
       const resignedOn = dateOnly(employee.resignation_date);
       if (Number(employee.status) !== STATUS.ACTIVE && resignedOn !== null && joinedOn > resignedOn) {
@@ -805,7 +857,7 @@ class EmployeeMasterUsecase {
    */
   async rejoinEmployee(employeeId, input, { actorEmployeeId = null } = {}) {
     const joinedOn = effectiveDate(input.date_of_joining, "date_of_joining");
-    rejectFutureDate(joinedOn, "date_of_joining");
+    rejectOutsideJoiningWindow(joinedOn, this.today());
 
     return this.repo.withTransaction(async (tx) => {
       const employee = await this.repo.lockEmployee(tx, employeeId);

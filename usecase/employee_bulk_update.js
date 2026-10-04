@@ -1,4 +1,6 @@
 const logger = require("../utils/logger");
+const { istToday } = require("../utils/istDate");
+const { checkJoiningDateWindow } = require("../utils/joining_date_window");
 const {
   IDENTITY_FIELDS,
   UPDATE_FIELDS,
@@ -130,6 +132,13 @@ class EmployeeBulkUpdateUsecase {
   constructor(bulkRepo, employeeMasterUsecase) {
     this.repo = bulkRepo;
     this.master = employeeMasterUsecase;
+    /**
+     * Today's IST business date. The Employee Master's own clock where there
+     * is one, so the preview and the confirm - which applies a joining date
+     * through `correctJoiningDate` - judge the window against the same day.
+     */
+    this.today = () =>
+      this.master && typeof this.master.today === "function" ? this.master.today() : istToday();
   }
 
   _log(level, code, description, ref = {}) {
@@ -447,14 +456,10 @@ class EmployeeBulkUpdateUsecase {
             `Use a real Excel date or ${DATE_DISPLAY_FORMAT}.`,
         };
       }
-      if (parsed.date > context.today) {
-        // The same refusal `usecase/employee_master.js#rejectFutureDate`
-        // makes, made here so it lands on the preview with a row number
-        // rather than as the hundredth row's failure at confirm time.
-        return {
-          error: `${field.label} '${displayDate(parsed.date)}' is in the future`,
-        };
-      }
+      // The joining-date entry window is NOT judged here: it applies only to
+      // a date that CHANGES, and whether it changes is decided after this
+      // cell is read (see `_validateRow`). An export re-uploaded with every
+      // historical date untouched must not refuse a single row.
       return { value: parsed.date, display: displayDate(parsed.date) };
     }
 
@@ -561,6 +566,18 @@ class EmployeeBulkUpdateUsecase {
       // period as a side effect of somebody re-checking their work.
       if (String(current.value ?? "") === String(resolved.value ?? "")) continue;
 
+      if (field.key === "date_of_joining") {
+        // THE JOINING-DATE ENTRY WINDOW, for a date that is really changing -
+        // the same rule `correctJoiningDate` applies at confirm, made here so
+        // it lands on the preview with a row number rather than as the
+        // hundredth row's failure at confirm time.
+        const refusal = checkJoiningDateWindow(resolved.value, context.today);
+        if (refusal) {
+          errors.push(refusal.message);
+          continue;
+        }
+      }
+
       if (field.key === "store_id") {
         // BRANCH-TRANSFER PROTECTION, the same rule the edit route applies:
         // a branch-scoped caller may not move an employee to a branch they
@@ -641,7 +658,7 @@ class EmployeeBulkUpdateUsecase {
       hasName: header.hasName,
       inScope: scope.inScope,
       allBranches: scope.allBranches,
-      today: new Date().toISOString().slice(0, 10),
+      today: this.today(),
     };
   }
 

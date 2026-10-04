@@ -58,14 +58,21 @@ function fakeRepo(store = {}) {
   };
 }
 
+// The fixtures record joining dates in early January 2026, so the clock is
+// pinned beside them for the 30-day joining-date entry window.
+const onFixtureDay = (uc) => {
+  uc.today = () => "2026-01-10";
+  return uc;
+};
+
 const usecaseWith = (store) =>
-  build(
+  onFixtureDay(build(
     fakeRepo(store),
     { reconcileEmployee: async () => ({ action: "open_initial" }) },
     { getLatestPeriod: async () => [], recordEvent: async () => {}, insertEvent: async () => {} },
     null,
     { getActiveWorkShift: async (id) => ({ work_shift_id: id, active: 1 }) }
-  );
+  ));
 
 /** A create that satisfies the Personal Details rules. */
 const base = {
