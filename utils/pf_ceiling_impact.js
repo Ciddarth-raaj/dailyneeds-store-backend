@@ -52,13 +52,11 @@ const FLAG = {
   PF_EXCLUDED_ABOVE_CEILING: "PF_EXCLUDED_ABOVE_25000_NO_CHANGE",
   PF_EXCLUDED_BELOW_15000_REVIEW: "PF_NOT_APPLICABLE_AT_OR_BELOW_15000_REVIEW",
   PF_APPLICABILITY_NOT_RECORDED: "PF_APPLICABILITY_NOT_RECORDED",
-  EPS_HISTORY_NOT_RECORDED: "EPS_HISTORY_NOT_RECORDED",
   DOB_NOT_RECORDED: "DOB_NOT_RECORDED",
   AGE_58_PLUS: "AGE_58_PLUS_NO_EPS",
   UAN_MISSING: "UAN_MISSING",
   HIGHER_WAGE_CONTRIBUTOR: "EXISTING_HIGHER_WAGE_EPF_CONTRIBUTOR",
   SEPTEMBER_JOINER_CHECK: "SEPTEMBER_JOINER_ABOVE_15000_CHECK_PRE_17_09_COVERAGE",
-  EPS_CORRECTION_CHANGES_EPS: "EPS_ELIGIBILITY_CORRECTION_CHANGES_EPS",
 };
 
 const REVISION_DATE = "2026-09-17";
@@ -97,7 +95,6 @@ function monthFigures(row, year, month, overrides = {}, config = CONFIG) {
       pf_contribution_basis: row.pf_contribution_basis || null,
       dob: row.dob,
       date_of_joining: row.date_of_joining,
-      previous_eps_member: row.previous_eps_member,
       ...overrides,
     },
     config
@@ -121,16 +118,13 @@ const pick = (pf) => ({
   unresolved: (pf.unresolved || []).map((u) => u.code),
 });
 
-/** The configuration with the EPS correction switched OFF - the old behaviour, for comparison only. */
-const legacyEpsConfig = (config) => ({ ...config, pf: { ...config.pf, epsEligibilityOnUncappedWage: false } });
-
 /**
  * ONE EMPLOYEE, CLASSIFIED.
  *
  * @param {object} row  employee_id, employee_name, store_name, date_of_joining,
  *                      dob, resignation_date, monthly_gross, basic,
  *                      pf_applicable, pf_applicable_from, uan,
- *                      previous_pf_member, previous_eps_member
+ *                      previous_pf_member, previous_eps_member (reference columns only)
  */
 function assessEmployee(row = {}, config = CONFIG) {
   const category = categoryOf(row.basic);
@@ -170,21 +164,6 @@ function assessEmployee(row = {}, config = CONFIG) {
   const september = pick(monthFigures(row, 2026, 9, {}, config));
   const october = pick(monthFigures(row, 2026, 10, {}, config));
 
-  /*
-   * THE EPS ELIGIBILITY CORRECTION, SHOWN SEPARATELY FROM THE CEILING CHANGE.
-   * The same pre-revision month (August 2026) under the old rule (eligibility
-   * tested on the capped wage) and under the corrected rule. A difference
-   * here is caused by the correction alone, not by the 25,000 ceiling.
-   */
-  const legacyAug = pick(monthFigures(row, 2026, 8, {}, legacyEpsConfig(config)));
-  const epsCorrection = {
-    old_employer_eps: legacyAug.employer_eps,
-    corrected_employer_eps: current.employer_eps,
-    old_employer_epf: legacyAug.employer_epf,
-    corrected_employer_epf: current.employer_epf,
-    changes: toPaise(legacyAug.employer_eps) !== toPaise(current.employer_eps),
-  };
-  if (epsCorrection.changes) flags.push(FLAG.EPS_CORRECTION_CHANGES_EPS);
   if (base.pf_contribution_basis === pfPeriod.BASIS.ACTUAL_WAGE) flags.push(FLAG.HIGHER_WAGE_CONTRIBUTOR);
   if (
     pfApplicable === true &&
@@ -232,7 +211,6 @@ function assessEmployee(row = {}, config = CONFIG) {
     if (!/^\d{12}$/.test(String(row.uan || "").trim())) flags.push(FLAG.UAN_MISSING);
   }
   const allUnresolved = [...current.unresolved, ...september.unresolved, ...october.unresolved];
-  if (allUnresolved.includes(engine.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED)) flags.push(FLAG.EPS_HISTORY_NOT_RECORDED);
   if (allUnresolved.includes(engine.UNRESOLVED.EPS_DOB_NOT_RECORDED)) flags.push(FLAG.DOB_NOT_RECORDED);
   if (age !== null && age >= config.pf.epsExitAgeYears) flags.push(FLAG.AGE_58_PLUS);
 
@@ -253,7 +231,6 @@ function assessEmployee(row = {}, config = CONFIG) {
     october,
     if_enrolled: ifEnrolled,
     september_scenario: september.pf_scenario,
-    eps_correction: epsCorrection,
     monthly_employer_cost_increase: increase,
     potential_monthly_employer_cost_increase: potential,
   };
@@ -269,13 +246,11 @@ function reasonOf(flags, category) {
     [FLAG.PF_EXCLUDED_ABOVE_CEILING]: "PF not applicable and PF wage above 25,000: no change",
     [FLAG.PF_EXCLUDED_BELOW_15000_REVIEW]: "PF not applicable although PF wage is within 15,000: review the exclusion",
     [FLAG.PF_APPLICABILITY_NOT_RECORDED]: "PF applicability not recorded",
-    [FLAG.EPS_HISTORY_NOT_RECORDED]: "Previous EPS membership not recorded: EPS split unresolved",
     [FLAG.DOB_NOT_RECORDED]: "Date of birth not recorded: EPS age rule unresolved",
     [FLAG.AGE_58_PLUS]: "Age 58+: no EPS, the whole employer share goes to EPF",
     [FLAG.UAN_MISSING]: "UAN not recorded: cannot be filed in the ECR",
     [FLAG.HIGHER_WAGE_CONTRIBUTOR]: "Existing higher-wage contributor: EPF on actual wage (FAQ Scenario B pattern)",
     [FLAG.SEPTEMBER_JOINER_CHECK]: "Joined in September above 15,000 and recorded as PF from joining: confirm whether excluded until 16-09 (FAQ Scenario A)",
-    [FLAG.EPS_CORRECTION_CHANGES_EPS]: "EPS eligibility correction (separate from the ceiling change) changes this employee's EPS",
   };
   const parts = flags.map((f) => text[f]).filter(Boolean);
   return parts.length ? parts.join("; ") : CATEGORY_LABEL[category];
@@ -332,7 +307,6 @@ function assessPopulation(rows = [], config = CONFIG) {
       monthly_employer_cost_increase: toRupees(total),
       potential_monthly_employer_cost_if_enrolled: toRupees(potential),
       may_require_enrolment: employees.filter((e) => e.flags.includes(FLAG.MAY_REQUIRE_PF_ENROLMENT)).length,
-      eps_correction_affected: employees.filter((e) => e.eps_correction && e.eps_correction.changes).length,
       by_september_scenario: employees.reduce((acc, e) => {
         if (e.september_scenario) acc[e.september_scenario] = (acc[e.september_scenario] || 0) + 1;
         return acc;

@@ -364,8 +364,9 @@ class PayrunCalculationUsecase {
      *
      * Judged on the snapshot's applicability (what the month is calculated
      * on - changing it needs a Reset and re-initialisation) and on the LIVE
-     * identifiers and Form 11 facts, so the hold lifts on the next read once
-     * HR records them. A held employee is not calculable: Calculate refuses
+     * identifiers, so the hold lifts on the next read once HR records them.
+     * Previous PF / EPS Member and DOB are not hold facts (see
+     * `utils/payrun_eligibility.js#statutorySetupGaps`). A held employee is not calculable: Calculate refuses
      * them by name and approval is blocked; nothing is assumed for them.
      */
     const setupView = {
@@ -375,9 +376,6 @@ class PayrunCalculationUsecase {
         statutory.pf_number !== undefined && statutory.pf_number !== null && String(statutory.pf_number).trim() !== ""
           ? statutory.pf_number
           : employee.pf_number,
-      previous_pf_member: statutory.previous_pf_member,
-      previous_eps_member: statutory.previous_eps_member,
-      dob: statutory.dob,
       date_of_joining: employee.date_of_joining || statutory.date_of_joining || null,
     };
     const statutoryGaps = statutorySetupGaps(setupView, context.period);

@@ -50,17 +50,23 @@ Figures are exact to the paisa within each period, then summed. The month's tota
 
 Scenarios A and B need `pf_applicable_from` / `pf_contribution_basis` to be recorded. Both are read-only master fields until an edit path is approved. With nothing recorded, every member is on the ceiling basis.
 
-## EPS eligibility correction (separate switch)
+## PF / EPS eligibility: PF Applicable + age
 
-`PF_EPS_ELIGIBILITY_ON_UNCAPPED_WAGE`, default `true`.
+Every month, for every employee (existing or new joiner):
 
-- **Old behaviour:** EPS eligibility was tested on the already-capped PF wage. That wage can never exceed the ceiling, so `previous_eps_member` and the 01-09-2014 cutoff were never consulted.
-- **Corrected behaviour:** the test uses the contractual Basic.
-- **Who changes:** PF members under 58 on the ceiling basis, with Basic above the ceiling, who joined on or after 01-09-2014.
-  - With Previous EPS Member = No, EPS becomes 0 and the employer's 12% goes wholly to EPF.
-  - With Previous EPS Member not recorded, EPS becomes unresolved and approval is blocked until it is recorded.
-- **Unchanged:** employee PF and the employer total; only the split moves. Approved or locked months are never rewritten.
-- **Rollback:** set the variable to `false`, which reproduces the old behaviour exactly. Tests: `utils/eps_eligibility_correction.test.js`.
+| PF Applicable | Age | Result |
+|---|---|---|
+| No | any | no employee EPF, no employer EPF, no EPS |
+| Yes | below 58 | employee EPF; employer 12% split EPS / EPF |
+| Yes | 58 or over | employee EPF; EPS 0, employer 12% to EPF |
+| Yes | DOB not recorded | employee EPF and employer 12% calculated; only the EPS age decision is unresolved (`EPS_DOB_NOT_RECORDED`) and approval waits for the DOB |
+| not recorded | any | PF unresolved |
+
+- **Not used for payroll:** Previous PF Member and Previous EPS Member. They stay on the Employee Master as onboarding / Form 11 reference facts. A blank value never makes a month unresolved, never holds an employee, and a change to one never marks a calculation for recalculation.
+- **Not used for EPS eligibility:** wage and DOJ. The ceilings decide only how much wage EPS is charged on.
+- **Removed:** the earlier `PF_EPS_ELIGIBILITY_ON_UNCAPPED_WAGE` switch (Previous-EPS / post-2014 exclusion rule). Its tests are replaced by `utils/pf_eps_pf_applicable_age.test.js`.
+- **Onboarding decides EPS eligibility, and today it has no control for it (design gap, not resolved here).** Under EPFO rules, EPS eligibility can depend on the wage at joining against the ceiling in force at the time. The monthly engine does not re-decide that history. HR is meant to settle it at onboarding, before the first payroll. But the Employee Master has only **PF Applicable**: there is no separate "EPS applicable" status, and Previous PF / EPS Member are optional and unvalidated. So a future joiner who should be EPF-only (for example, wage above the EPS joining ceiling) cannot be recorded that way, and with PF Applicable = Yes they would be charged EPS. No current employee is in that position. A fix (an explicit EPS status set at onboarding, or a review flag for such joiners) needs approval before it is built.
+- **FAQ Scenario B is not produced.** Its Period 1 EPS is NIL because the member is EPS-excluded before 17-09. DNDS does not model EPS exclusion, so a B-type higher-wage member under 58 is charged EPS in both periods. Scenarios A and C are reproduced exactly.
 
 ## Statutory setup hold (`STATUTORY_SETUP_INCOMPLETE`)
 
@@ -69,22 +75,20 @@ Checked on every read of Calculation & Review (`utils/payrun_eligibility.js#stat
 | Who | Must be recorded |
 |---|---|
 | Everybody (the existing rule) | PF Applicable and ESI Applicable answered; UAN or PF Number where PF applies; ESI Number where ESI applies |
-| A PF member who **joined in the payroll month**, or has no DOJ at all | DOJ, DOB, Previous PF Member, Previous EPS Member. A previous PF member also needs their existing 12-digit UAN. A first-time member may use the PF number while the UAN is generated. |
+| A PF member who **joined in the payroll month**, or has no DOJ at all | DOJ |
 
 What a hold does:
 - **Calculation:** a held employee is **not calculable**. Calculate and Calculate All Eligible refuse them by name (`BLOCKED`), **store nothing**, and calculate everybody else normally.
 - **Approval:** approval is blocked.
 - **On screen:** the row shows an **On hold** banner naming the missing fields.
-- **No guessing:** nothing is inferred. A missing Previous EPS Member is never derived from Basic or gross.
+- **Not hold facts:** Previous PF / EPS Member (reference only) and DOB (a missing DOB leaves only the EPS split unresolved, see above).
 
-**Release:** HR completes the named fields in Employee Master → Statutory details. The identifiers and Form 11 facts are read **live**, so the hold lifts on the next refresh, and the employee can then be calculated and approved. A change to **PF / ESI Applicable** itself is frozen in the month's snapshot, so it needs **Reset → re-initialise** for that employee.
-
-**Existing members** are not newly held by the Form 11 facts. Their statutory questions are the engine's, reported as unresolved exactly where they change the money. An existing member whose UAN is missing in DNDS is calculated on the existing rule (UAN or PF number). The ECR refuses them (`UAN_MISSING`) until HR records the UAN; the ECR then uses that UAN without re-initialisation.
+**Release:** HR completes the named fields in Employee Master → Statutory details. They are read **live**, so the hold lifts on the next refresh. A change to **PF / ESI Applicable** itself is frozen in the month's snapshot, so it needs **Reset → re-initialise** for that employee.
 
 ## Safeguards
 
 - **Approved / locked months are never rewritten.** `saveCalculations` keeps every column of an `APPROVED_LOCKED` row (`IF(status='APPROVED_LOCKED', keep, new)`), and the usecase refuses with `LOCKED`.
-- **Statutory master changes after calculation** (UAN, Previous PF/EPS Member, DOB, DOJ, PF coverage start, contribution basis, PF/ESI applicability) make that calculation `RECALCULATION_REQUIRED`, "Statutory setup changed". A locked month is never marked. One-time effect on deploy: any month already calculated but **not approved** will show `RECALCULATION_REQUIRED` once, because the source marker is new.
+- **Statutory master changes after calculation** (UAN, PF number, DOB, DOJ, PF coverage start, contribution basis, PF/ESI applicability; not Previous PF/EPS Member) make that calculation `RECALCULATION_REQUIRED`, "Statutory setup changed". A locked month is never marked. One-time effect on deploy: any month already calculated but **not approved** will show `RECALCULATION_REQUIRED` once, because the statutory source marker changed (Previous PF / EPS Member removed from it).
 - **Unresolved statutory questions block approval** (`CALCULATION_INCOMPLETE`) and never become a zero.
 - **The payslip** is built from the stored approved calculation and shows each PF period of a split month.
 - **The ECR** (`GET /payrun/calculation/ecr`) is built from **approved** stored calculations only; there is no unapproved preview. It writes one line per member per month and refuses pending, incomplete, unapproved and UAN-missing members. It needs `view_employee_sensitive`.
@@ -111,5 +115,4 @@ The down-migration drops exactly these 13 columns, each guarded.
 |---|---|
 | Application code | Revert the merge commit(s) on `main-autodeploy` and redeploy. The added columns are NULLable and unread by the old code. |
 | Migration | Leave it in place (harmless to the old code). Only if no month was calculated on engine v3 should you run `db-migrate down -c 1`; it discards the stored PF audit trail of anything calculated since. |
-| EPS eligibility correction | `PF_EPS_ELIGIBILITY_ON_UNCAPPED_WAGE=false`, restart the API, recalculate any open (unapproved) month. |
 | Statutory holds | Complete the master data (the intended release). As an emergency only, revert the hold commit; held employees then calculate on the pre-existing rule. |
