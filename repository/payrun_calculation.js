@@ -125,6 +125,7 @@ class PayrunCalculationRepository {
       "LIST-INITIALIZED",
       `SELECT pe.payrun_employee_id, pe.employee_id, pe.employee_name,
               pe.store_id, pe.store_name, pe.designation_id, pe.designation_name,
+              pe.department_id,
               DATE_FORMAT(pe.date_of_joining, '%Y-%m-%d')  AS date_of_joining,
               DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS resignation_date,
               pe.salary_id,
@@ -140,6 +141,26 @@ class PayrunCalculationRepository {
         WHERE ${where.join(" AND ")}
         ORDER BY pe.employee_id`,
       params
+    );
+  }
+
+  /**
+   * THE DEPARTMENT NAMES FOR THE REVIEW SCREEN'S DEPARTMENT FILTER.
+   *
+   * The snapshot carries `department_id` and not the name, so the name is
+   * read from the Employee Master's own `department` table - the same table
+   * `repository/employee_master.js` joins. It is a separate read on purpose:
+   * joining it into `listInitialized` would put a second table into the read
+   * every calculation and approval is made from, for a label.
+   */
+  async listDepartmentNames(departmentIds) {
+    if (!Array.isArray(departmentIds) || departmentIds.length === 0) return [];
+    return this._read(
+      "LIST-DEPARTMENT-NAMES",
+      `SELECT department_id, department_name
+         FROM department
+        WHERE department_id IN (?)`,
+      [departmentIds]
     );
   }
 
