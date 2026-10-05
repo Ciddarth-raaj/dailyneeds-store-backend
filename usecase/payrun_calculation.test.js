@@ -3302,13 +3302,13 @@ describe("STATUTORY_SETUP_INCOMPLETE - held only for a real setup gap, never for
   });
 });
 
-describe("Vanitha / Desappan / Subash type: existing PF members, Basic above 15,000, Previous EPS Member blank", () => {
+describe("existing PF members, Basic above 15,000, post-2014 DOJ, Previous EPS Member blank", () => {
   // Post-2014 joiners above the old ceiling: under the old rule a blank
   // Previous EPS Member left their EPS unresolved and blocked approval.
   [
-    ["Vanitha-type", 18750, "2018-12-31"],
-    ["Desappan-type", 17500, "2018-01-22"],
-    ["Subash-type", 16000, "2020-09-18"],
+    ["case 8", 19000, "2017-06-01"],
+    ["case 9", 17200, "2019-03-01"],
+    ["case 10", 16400, "2021-02-01"],
   ].forEach(([label, basic, doj]) =>
     it(`${label}: Basic ${basic}, joined ${doj} - EPF + EPS calculated, complete, approvable`, async () => {
       world.add(1, { employee: { basic, monthly_gross: basic * 2, date_of_joining: doj } });

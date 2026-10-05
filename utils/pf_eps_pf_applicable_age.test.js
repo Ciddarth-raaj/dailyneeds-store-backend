@@ -15,8 +15,8 @@
  * effective-dated ceiling (15,000 to 16-09-2026, 25,000 from 17-09-2026) is
  * unchanged and still splits September 2026.
  *
- * The full payrun path (calculate -> complete -> approve) for the
- * Vanitha / Desappan / Subash types is in usecase/payrun_calculation.test.js.
+ * The full payrun path (calculate -> complete -> approve) for cases 8-10 is
+ * in usecase/payrun_calculation.test.js.
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
@@ -90,16 +90,15 @@ describe("PF / EPS eligibility is PF Applicable + age", () => {
 });
 
 /*
- * 8-10. Existing PF members filed with EPS in the August 2026 ECR, Basic above
- * 15,000, joined after 01-09-2014, Previous EPS Member blank in DNDS. Under the
- * old rule their September EPS was UNRESOLVED and approval was blocked.
- * (Synthetic DOBs; the Basic / DOJ shapes are the real cases'.)
+ * 8-10. Existing PF members filed with EPS, Basic above 15,000, joined after
+ * 01-09-2014, Previous EPS Member blank. Under the old rule their September
+ * EPS was UNRESOLVED and approval was blocked. (Synthetic values.)
  */
 describe("8-10. a blank Previous EPS Member does not block payroll", () => {
   [
-    ["8. Vanitha-type", 18750, "2018-12-31", [2010, 1395, 615], [[8000, 8000], [8750, 8750]]],
-    ["9. Desappan-type", 17500, "2018-01-22", [1940, 1347, 593], [[8000, 8000], [8166.67, 8166.67]]],
-    ["10. Subash-type", 16000, "2020-09-18", [1856, 1288, 568], [[8000, 8000], [7466.67, 7466.67]]],
+    ["8. existing member", 19000, "2017-06-01", [2024, 1405, 619], [[8000, 8000], [8866.67, 8866.67]]],
+    ["9. existing member", 17200, "2019-03-01", [1923, 1335, 588], [[8000, 8000], [8026.67, 8026.67]]],
+    ["10. existing member", 16400, "2021-02-01", [1878, 1304, 574], [[8000, 8000], [7653.33, 7653.33]]],
   ].forEach(([label, basic, doj, september, periods]) =>
     it(`${label}: Basic ${basic}, joined ${doj} - September EPF + EPS, resolved (Scenario C)`, () => {
       const r = month(9, basic, { date_of_joining: doj, previous_eps_member: null, previous_pf_member: null });
