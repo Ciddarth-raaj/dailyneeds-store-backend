@@ -693,6 +693,13 @@ class Server {
       this.mysql.connection,
       this.reportTemplateRepo
     );
+    // Payroll Reports: reads the FINALIZED payrun rows and reuses the same
+    // template table, template rules and export audit as the Employee Master
+    // reports. It owns only the month-wise layout and default-template tables.
+    this.payrollReportService = require("./usecase/payroll_report_service")(
+      require("./repository/payroll_report")(this.mysql.connection),
+      this.reportTemplateRepo
+    );
     // The employee-master repository is passed for one read - whether the PF
     // and ESI decision has been recorded - which is what lets the list say an
     // employee is still waiting on HR onboarding. No column value leaves it.
@@ -1606,6 +1613,11 @@ class Server {
       this.permissions,
       this.employeeBranchScope
     );
+    const payrollReportRouter = require("./routes/payroll_report")(
+      this.payrollReportService,
+      this.permissions,
+      this.employeeBranchScope
+    );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const workShiftRouter = require("./routes/work_shift")(
       this.workShiftUsecase,
@@ -2035,6 +2047,8 @@ class Server {
     // Mounted under /reports rather than /hr: the machinery is per-dataset
     // and Attendance and Payroll will mount beside this one, not inside HR.
     app.use("/reports/employee-master", employeeReportRouter.getRouter());
+    // Payroll Reports sit beside it, as that comment anticipated.
+    app.use("/reports/payroll", payrollReportRouter.getRouter());
     // Payrun Initialization. Claims only /payrun, which no other router defines.
     app.use("/", payrunRouter.getRouter());
     // The order of these two is immaterial: every path the adjustments router
