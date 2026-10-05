@@ -73,6 +73,14 @@ const usecase = {
   calculate: spy("calculate"),
   approve: spy("approve"),
   publishAllApproved: spy("publishAllApproved"),
+  exportPayslipPdfs: async (args) => {
+    seen.push({ name: "exportPayslipPdfs", ...args });
+    return { period_year: args.year, period_month: args.month, files: [], skipped: [] };
+  },
+  planPayslipExport: async (args) => {
+    seen.push({ name: "planPayslipExport", ...args });
+    return { employee_ids: [], count: 0, batch_size: 25 };
+  },
 };
 
 const sessionFor = (who) => ({
@@ -220,6 +228,48 @@ describe("a select-all carries the list's filters; explicit ids never do", () =>
       const res = await post(HQ_APPROVER, "approve", { ...MONTH, all_ready: true, department_id: 10, ...extra });
       assert.notEqual(res.status, 200, JSON.stringify(extra));
     }
+    assert.equal(seen.length, 0);
+  });
+});
+
+describe("bulk payslip export: the View Payslip keys, the list's filters, a batch limit", () => {
+  const FILTERS = { store_ids: MOOLAKULAM, department_id: 10, designation_id: 100, card: "PUBLISHED", search: "ani" };
+
+  it("plan: the filters and the caller's branch reach the usecase; a selection is optional", async () => {
+    const res = await post(VIEWER, "payslips/export/plan", { ...MONTH, ...FILTERS });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(seen[0].filters, { department_id: 10, designation_id: 100, card: "PUBLISHED", search: "ani" });
+    assert.deepEqual(seen[0].store_ids, [MOOLAKULAM]);
+    assert.equal(seen[0].employee_ids, null);
+  });
+
+  it("batch: the same filters ride along, so the server re-resolves every id", async () => {
+    const res = await post(VIEWER, "payslips/export", { ...MONTH, ...FILTERS, employee_ids: [11, 12] });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(seen[0].employee_ids, [11, 12]);
+    assert.deepEqual(seen[0].filters.department_id, 10);
+    assert.deepEqual(seen[0].store_ids, [MOOLAKULAM]);
+  });
+
+  it("refuses callers without the salary-reading keys", async () => {
+    for (const who of [CLERK, APPROVER, PUBLISHER]) {
+      assert.notEqual((await post(who, "payslips/export", { ...MONTH, employee_ids: [11] })).status, 200);
+      assert.notEqual((await post(who, "payslips/export/plan", { ...MONTH })).status, 200);
+    }
+    assert.equal(seen.length, 0);
+  });
+
+  it("refuses more than 25 per batch, no ids, a location outside the branch, or an unknown key", async () => {
+    for (const bad of [
+      { ...MONTH, employee_ids: Array.from({ length: 26 }, (_, i) => i + 1) },
+      { ...MONTH, employee_ids: [] },
+      { ...MONTH },
+      { ...MONTH, employee_ids: [11], store_ids: ECR },
+      { ...MONTH, employee_ids: [11], record_view: true },
+    ]) {
+      assert.notEqual((await post(VIEWER, "payslips/export", bad)).status, 200, JSON.stringify(bad));
+    }
+    assert.notEqual((await post(VIEWER, "payslips/export/plan", { ...MONTH, store_ids: ECR })).status, 200);
     assert.equal(seen.length, 0);
   });
 });

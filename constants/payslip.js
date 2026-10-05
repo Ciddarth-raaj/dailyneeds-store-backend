@@ -65,6 +65,13 @@ const NOTIFY_TIMEOUT_MS = 10000;
 
 /** Concurrent on-demand PDF renders across the whole process. */
 const PDF_RENDER_CONCURRENCY = 2;
+/*
+ * THE ADMIN BULK PAYSLIP EXPORT renders at most this many PDFs per request,
+ * in one browser. The screen asks batch after batch and zips them itself, so
+ * every request ends well inside a proxy's read timeout however many
+ * employees are exported.
+ */
+const MAX_PAYSLIP_EXPORT_BATCH = 25;
 
 /** Lifetime of a single-use Mini App PDF download link (Telegram downloadFile fetches it). */
 const PDF_LINK_TTL_SECONDS = 60;
@@ -83,5 +90,6 @@ module.exports = {
   NOTIFY_CONCURRENCY,
   NOTIFY_TIMEOUT_MS,
   PDF_RENDER_CONCURRENCY,
+  MAX_PAYSLIP_EXPORT_BATCH,
   PDF_LINK_TTL_SECONDS,
 };

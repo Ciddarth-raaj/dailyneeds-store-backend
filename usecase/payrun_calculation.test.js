@@ -3897,3 +3897,118 @@ describe("Department and Designation filters - narrow the month like the locatio
     assert.equal(out.approved_count, 1, "explicit ids are the selection itself; the filters are for select-all");
   });
 });
+
+/* ======================================== bulk payslip export (admin) ===== */
+
+describe("bulk payslip export - server-resolved, filtered, read-only", () => {
+  let renderCalls;
+  const stubRender = async (snapshots) => {
+    renderCalls.push(snapshots.length);
+    return snapshots.map((s) => Buffer.from(`PDF:${s.employee.employee_id}`));
+  };
+  const seed = async (n, publish, over = () => ({})) => {
+    for (let id = 1; id <= n; id += 1) world.add(id, over(id));
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: publish, actor: ACTOR });
+    await calculation.publishAllApproved({ ...MONTH, actor: ACTOR });
+    calculation.renderPdfs = stubRender;
+    renderCalls = [];
+  };
+  const decode = (out) => out.files.map((f) => Buffer.from(f.pdf_base64, "base64").toString());
+
+  it("1 employee: plan names them, the batch returns their PDF with a clean, deterministic name", async () => {
+    await seed(2, [1]);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.deepEqual([plan.employee_ids, plan.count, plan.batch_size], [[1], 1, 25]);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] });
+    assert.deepEqual(decode(out), ["PDF:1"]);
+    assert.equal(out.files[0].file_name, "1_Employee-1_August_2026.pdf");
+    assert.deepEqual(out.skipped, []);
+  });
+
+  it("25 employees: one batch, ONE render call (one browser session)", async () => {
+    const all = Array.from({ length: 25 }, (_, i) => i + 1);
+    await seed(25, all);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.equal(plan.count, 25);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids });
+    assert.equal(out.files.length, 25);
+    assert.deepEqual(renderCalls, [25]);
+    assert.equal(new Set(out.files.map((f) => f.file_name)).size, 25, "no two files share a name");
+  });
+
+  it("more than 25: the plan lists all of them; a single batch of 26 is refused; 25 + 5 covers everyone once", async () => {
+    const all = Array.from({ length: 30 }, (_, i) => i + 1);
+    await seed(30, all);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.deepEqual(plan.employee_ids, all);
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids }), /At most 25/);
+    const a = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids.slice(0, 25) });
+    const b = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids.slice(25) });
+    assert.deepEqual([...a.files, ...b.files].map((f) => f.employee_id), all);
+    assert.deepEqual(renderCalls, [25, 5]);
+  });
+
+  it("filtered: the plan is only the filtered, published employees; a batch cannot reach outside the filters", async () => {
+    await seed(6, [1, 2, 3, 4, 5], (id) => ({
+      employee: { department_id: id <= 3 ? 10 : 20, store_id: id % 2 ? 1 : 2, employee_name: id === 2 ? "Priya" : `Employee ${id}` },
+    }));
+    const filters = { department_id: 10 };
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters })).employee_ids, [1, 2, 3]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters, store_ids: [1] })).employee_ids, [1, 3]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters: { ...filters, search: "priya" } })).employee_ids, [2]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters: { card: "READY_FOR_APPROVAL" } })).employee_ids, [], "a card that holds no published row exports nothing");
+    // A selection only narrows.
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters, employee_ids: [3, 4, 6] })).employee_ids, [3]);
+    // The screen sends an id outside the filters (4), one not published (6), one unknown (99): none is exported.
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, filters, employee_ids: [1, 4, 6, 99] });
+    assert.deepEqual(decode(out), ["PDF:1"]);
+    assert.deepEqual(out.skipped.map((x) => [x.employee_id, x.reason]), [[4, "NOT_EXPORTABLE"], [6, "NOT_EXPORTABLE"], [99, "NOT_EXPORTABLE"]]);
+  });
+
+  it("permission scope: an employee outside the caller's branches is never planned or exported", async () => {
+    await seed(2, [1, 2], (id) => ({ employee: { store_id: id } }));
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, store_ids: [1] })).employee_ids, [1]);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [2], store_ids: [1] });
+    assert.deepEqual([out.files, out.skipped], [[], [{ employee_id: 2, reason: "NOT_EXPORTABLE" }]]);
+  });
+
+  it("VIEWED STAYS UNCHANGED: an export writes nothing - no viewed time, no view count, no calculation", async () => {
+    await seed(3, [1, 2, 3]);
+    world.payslips[1].first_viewed_at = "2026-10-05 08:44:10";
+    world.payslips[1].last_viewed_at = "2026-10-05 08:44:10";
+    world.payslips[1].view_count = 1;
+    const payslipsBefore = JSON.stringify(world.payslips);
+    const calcBefore = JSON.stringify([...world.calculations.values()]);
+    const auditBefore = world.audit.length;
+    await calculation.planPayslipExport({ ...MONTH });
+    await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1, 2, 3] });
+    assert.equal(JSON.stringify(world.payslips), payslipsBefore);
+    assert.equal(JSON.stringify([...world.calculations.values()]), calcBefore);
+    assert.equal(world.audit.length, auditBefore);
+    assert.deepEqual(world.payslips.map((p) => p.first_viewed_at), [null, "2026-10-05 08:44:10", null]);
+  });
+
+  it("a render failure fails the whole batch loudly - never a partial batch", async () => {
+    await seed(2, [1, 2]);
+    calculation.renderPdfs = async () => { throw new Error("chrome died"); };
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1, 2] }), /chrome died/);
+  });
+
+  it("a tampered snapshot is refused rather than exported; no renderer configured is refused", async () => {
+    await seed(1, [1]);
+    world.payslips[0].snapshot_json = world.payslips[0].snapshot_json.replace("Employee 1", "Employee X");
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] }), /integrity/i);
+    calculation.renderPdfs = null;
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] }), /not configured/);
+  });
+
+  it("file names are ASCII-safe: no path, no accents, id first", () => {
+    const { exportFilename } = require("./payrun_calculation");
+    const P = { year: 2026, month: 9 };
+    assert.equal(exportFilename({ employee: { employee_name: "C. Saravanan" } }, 101, P), "101_C-Saravanan_September_2026.pdf");
+    assert.equal(exportFilename({ employee: { employee_name: "../../etc/passwd" } }, 8, P), "8_etc-passwd_September_2026.pdf");
+    assert.equal(exportFilename({ employee: { employee_name: "Ñandú" } }, 7, P), "7_Nandu_September_2026.pdf");
+    assert.equal(exportFilename({ employee: {} }, 9, P), "9_September_2026.pdf");
+  });
+});
