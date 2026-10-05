@@ -47,6 +47,8 @@ const CLERK = { designation: 62, employee: 902 };           // calculates, one b
 const APPROVER = { designation: 63, employee: 903 };        // approves, one branch
 const HQ_APPROVER = { designation: 64, employee: 904 };     // approves, every branch
 const PUBLISHER = { designation: 65, employee: 905 };       // publishes, one branch
+const EXPORTER = { designation: 66, employee: 906 };        // payroll viewer + payroll_export_payslips, one branch
+const EXPORT_ONLY = { designation: 67, employee: 907 };     // payroll_export_payslips without the view keys
 
 const GRANTS = {
   [VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
@@ -54,9 +56,11 @@ const GRANTS = {
   [APPROVER.designation]: [P.VIEW_EMPLOYEES, P.APPROVE_PAYRUN],
   [HQ_APPROVER.designation]: [P.VIEW_EMPLOYEES, P.APPROVE_PAYRUN, P.EMPLOYEE_SCOPE_ALL_BRANCHES],
   [PUBLISHER.designation]: [P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN],
+  [EXPORTER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS],
+  [EXPORT_ONLY.designation]: [P.VIEW_EMPLOYEES, P.PAYROLL_EXPORT_PAYSLIPS],
 };
 
-const EMPLOYEES = [VIEWER, CLERK, APPROVER, HQ_APPROVER, PUBLISHER].map((who) => ({
+const EMPLOYEES = [VIEWER, CLERK, APPROVER, HQ_APPROVER, PUBLISHER, EXPORTER, EXPORT_ONLY].map((who) => ({
   employee_id: who.employee,
   store_id: MOOLAKULAM,
   status: 1,
@@ -76,6 +80,10 @@ const usecase = {
   exportPayslipPdfs: async (args) => {
     seen.push({ name: "exportPayslipPdfs", ...args });
     return { period_year: args.year, period_month: args.month, files: [], skipped: [] };
+  },
+  getPayslip: async (args) => {
+    seen.push({ name: "getPayslip", ...args });
+    return { employee_id: args.employee_id, payslip: null, versions: [] };
   },
   planPayslipExport: async (args) => {
     seen.push({ name: "planPayslipExport", ...args });
@@ -143,6 +151,7 @@ const call = async (who, method, url, body) => {
   return { status: res.status, body: await res.json().catch(() => ({})) };
 };
 const get = (who, query) => call(who, "GET", `/payrun/calculation/month?${new URLSearchParams(query)}`);
+const get2 = (who, path, query) => call(who, "GET", `${path}?${new URLSearchParams(query)}`);
 const post = (who, url, body) => call(who, "POST", `/payrun/calculation/${url}`, body);
 const MONTH = { year: 2026, month: 9 };
 
@@ -232,26 +241,48 @@ describe("a select-all carries the list's filters; explicit ids never do", () =>
   });
 });
 
-describe("bulk payslip export: the View Payslip keys, the list's filters, a batch limit", () => {
+describe("bulk payslip export: payroll_export_payslips on top of the View Payslip keys", () => {
   const FILTERS = { store_ids: MOOLAKULAM, department_id: 10, designation_id: 100, card: "PUBLISHED", search: "ani" };
 
-  it("plan: the filters and the caller's branch reach the usecase; a selection is optional", async () => {
-    const res = await post(VIEWER, "payslips/export/plan", { ...MONTH, ...FILTERS });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
+  it("1. a payroll viewer WITHOUT payroll_export_payslips can view one payslip but cannot bulk export", async () => {
+    const one = await get2(VIEWER, "/payrun/calculation/payslip", { ...MONTH, employee_id: 11 });
+    assert.equal(one.status, 200, JSON.stringify(one.body));
+    assert.equal(seen.filter((x) => x.name === "getPayslip").length, 1);
+    seen = [];
+    assert.equal((await post(VIEWER, "payslips/export/plan", { ...MONTH })).body.code, 403);
+    assert.equal((await post(VIEWER, "payslips/export", { ...MONTH, employee_ids: [11] })).body.code, 403);
+    assert.equal(seen.length, 0, "the usecase is not reached");
+  });
+
+  it("2. with payroll_export_payslips and the view keys: plan and batch run, inside the caller's branch", async () => {
+    const plan = await post(EXPORTER, "payslips/export/plan", { ...MONTH, ...FILTERS });
+    assert.equal(plan.status, 200, JSON.stringify(plan.body));
     assert.deepEqual(seen[0].filters, { department_id: 10, designation_id: 100, card: "PUBLISHED", search: "ani" });
     assert.deepEqual(seen[0].store_ids, [MOOLAKULAM]);
-    assert.equal(seen[0].employee_ids, null);
+    const batch = await post(EXPORTER, "payslips/export", { ...MONTH, ...FILTERS, employee_ids: [11, 12] });
+    assert.equal(batch.status, 200, JSON.stringify(batch.body));
+    assert.deepEqual([seen[1].employee_ids, seen[1].store_ids], [[11, 12], [MOOLAKULAM]]);
   });
 
-  it("batch: the same filters ride along, so the server re-resolves every id", async () => {
-    const res = await post(VIEWER, "payslips/export", { ...MONTH, ...FILTERS, employee_ids: [11, 12] });
-    assert.equal(res.status, 200, JSON.stringify(res.body));
-    assert.deepEqual(seen[0].employee_ids, [11, 12]);
-    assert.deepEqual(seen[0].filters.department_id, 10);
+  it("2b. with no location chosen, the export is still confined to the caller's own branch", async () => {
+    await post(EXPORTER, "payslips/export/plan", { ...MONTH });
     assert.deepEqual(seen[0].store_ids, [MOOLAKULAM]);
   });
 
-  it("refuses callers without the salary-reading keys", async () => {
+  it("3. crafting another branch into the request is refused, for the plan and the batch", async () => {
+    assert.notEqual((await post(EXPORTER, "payslips/export/plan", { ...MONTH, store_ids: ECR })).status, 200);
+    assert.notEqual((await post(EXPORTER, "payslips/export", { ...MONTH, store_ids: ECR, employee_ids: [11] })).status, 200);
+    assert.notEqual((await post(EXPORTER, "payslips/export", { ...MONTH, store_ids: `${MOOLAKULAM},${ECR}`, employee_ids: [11] })).status, 200);
+    assert.equal(seen.length, 0);
+  });
+
+  it("the export key alone - without the payroll view keys - grants nothing", async () => {
+    assert.notEqual((await post(EXPORT_ONLY, "payslips/export/plan", { ...MONTH })).status, 200);
+    assert.notEqual((await post(EXPORT_ONLY, "payslips/export", { ...MONTH, employee_ids: [11] })).status, 200);
+    assert.equal(seen.length, 0);
+  });
+
+  it("refuses the other payroll roles", async () => {
     for (const who of [CLERK, APPROVER, PUBLISHER]) {
       assert.notEqual((await post(who, "payslips/export", { ...MONTH, employee_ids: [11] })).status, 200);
       assert.notEqual((await post(who, "payslips/export/plan", { ...MONTH })).status, 200);
@@ -259,17 +290,15 @@ describe("bulk payslip export: the View Payslip keys, the list's filters, a batc
     assert.equal(seen.length, 0);
   });
 
-  it("refuses more than 25 per batch, no ids, a location outside the branch, or an unknown key", async () => {
+  it("refuses more than 25 per batch, no ids, or an unknown key", async () => {
     for (const bad of [
       { ...MONTH, employee_ids: Array.from({ length: 26 }, (_, i) => i + 1) },
       { ...MONTH, employee_ids: [] },
       { ...MONTH },
-      { ...MONTH, employee_ids: [11], store_ids: ECR },
       { ...MONTH, employee_ids: [11], record_view: true },
     ]) {
-      assert.notEqual((await post(VIEWER, "payslips/export", bad)).status, 200, JSON.stringify(bad));
+      assert.notEqual((await post(EXPORTER, "payslips/export", bad)).status, 200, JSON.stringify(bad));
     }
-    assert.notEqual((await post(VIEWER, "payslips/export/plan", { ...MONTH, store_ids: ECR })).status, 200);
     assert.equal(seen.length, 0);
   });
 });

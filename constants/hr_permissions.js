@@ -766,4 +766,12 @@ module.exports = {
   // payslip says it is from, so administrators hold it through the
   // user_type 2 bypass and anybody else only by a deliberate grant.
   MANAGE_COMPANY_DETAILS: "manage_company_details",
+
+  // Payroll → Calculation & Review → Download Payslips (migration
+  // 20261122120000-payroll-export-payslips-permission). The BULK ZIP export of
+  // published payslips. Needed on top of the View Payslip keys
+  // (view_employees + view_payroll + view_salary); it never widens the branch
+  // scope. Viewing or downloading one payslip does not need it. GRANTED TO
+  // NOBODY: administrators hold it through the user_type 2 bypass.
+  PAYROLL_EXPORT_PAYSLIPS: "payroll_export_payslips",
 };

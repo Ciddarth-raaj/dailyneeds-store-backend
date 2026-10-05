@@ -833,8 +833,10 @@ class PayrunCalculationRoutes {
     );
 
     /**
-     * BULK PAYSLIP EXPORT - the same keys as View Payslip: whoever may read a
-     * payslip here may download it.
+     * BULK PAYSLIP EXPORT - the View Payslip keys AND `payroll_export_payslips`.
+     * Reading one payslip does not grant exporting the month's: the export is
+     * its own key, granted to nobody by its migration (administrators hold it
+     * through the user_type 2 bypass). It never widens the branch scope.
      *
      *   POST /payrun/calculation/payslips/export/plan   who will be exported
      *   POST /payrun/calculation/payslips/export        one batch of PDFs
@@ -858,7 +860,7 @@ class PayrunCalculationRoutes {
     };
     this.router.post(
       "/payrun/calculation/payslips/export/plan",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
       async (req, res) => {
         try {
           const isValid = Joi.validate(
@@ -885,7 +887,7 @@ class PayrunCalculationRoutes {
     );
     this.router.post(
       "/payrun/calculation/payslips/export",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
       async (req, res) => {
         try {
           const isValid = Joi.validate(
