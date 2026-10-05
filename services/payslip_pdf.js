@@ -204,4 +204,32 @@ async function renderPayslipPdf(snapshot, deps = {}) {
   }
 }
 
-module.exports = { payslipHtml, renderPayslipPdf, inr, printable, esc, logoDataUri, LOGO_PATH };
+/**
+ * SEVERAL PAYSLIPS IN ONE CHROME - the admin bulk export.
+ *
+ * One launch for the whole batch rather than one per payslip, under ONE slot
+ * of the process-wide cap, so an export of twenty-five payslips costs one
+ * browser and leaves the other slot for employees opening theirs. Each page is
+ * the same `payslipHtml` the single download renders, so the PDFs are
+ * byte-for-byte the same document the employee gets.
+ *
+ * @param {object[]} snapshots  frozen payslip snapshots
+ * @returns {Promise<Buffer[]>}  one PDF per snapshot, in order
+ */
+async function renderPayslipPdfs(snapshots, deps = {}) {
+  const withBrowser = deps.withBrowser || require("./pdf_browser").withBrowser;
+  const pages = (snapshots || []).map((s) => payslipHtml(s));
+  if (pages.length === 0) return [];
+  await acquire();
+  try {
+    return await withBrowser(async (session) => {
+      const out = [];
+      for (const html of pages) out.push(await session.renderPdf(html, A4));
+      return out;
+    });
+  } finally {
+    release();
+  }
+}
+
+module.exports = { payslipHtml, renderPayslipPdf, renderPayslipPdfs, inr, printable, esc, logoDataUri, LOGO_PATH };

@@ -146,3 +146,33 @@ describe("header, wording and identifiers (final layout)", () => {
     assert.ok(!html.includes("100200300400"));
   });
 });
+
+describe("renderPayslipPdfs - the admin bulk export", () => {
+  const { renderPayslipPdfs } = require("./payslip_pdf");
+
+  it("renders every snapshot in ONE browser, in order, as the same payslipHtml", async () => {
+    let launches = 0;
+    const seen = [];
+    const withBrowser = async (fn) => {
+      launches += 1;
+      return fn({ renderPdf: async (html) => { seen.push(html); return Buffer.from(`pdf${seen.length}`); } });
+    };
+    const out = await renderPayslipPdfs([snapshot(), snapshot(), snapshot()], { withBrowser });
+    assert.equal(launches, 1);
+    assert.deepEqual(out.map((b) => b.toString()), ["pdf1", "pdf2", "pdf3"]);
+    assert.equal(seen[0], payslipHtml(snapshot()));
+  });
+
+  it("an empty batch launches nothing", async () => {
+    let launches = 0;
+    assert.deepEqual(await renderPayslipPdfs([], { withBrowser: async () => { launches += 1; } }), []);
+    assert.equal(launches, 0);
+  });
+
+  it("a failed batch releases its slot", async () => {
+    await assert.rejects(renderPayslipPdfs([snapshot()], { withBrowser: async () => { throw new Error("chrome died"); } }));
+    await assert.rejects(renderPayslipPdfs([snapshot()], { withBrowser: async () => { throw new Error("chrome died"); } }));
+    const ok = await renderPayslipPdfs([snapshot()], { withBrowser: async (fn) => fn({ renderPdf: async () => Buffer.from("z") }) });
+    assert.equal(ok[0].toString(), "z");
+  });
+});

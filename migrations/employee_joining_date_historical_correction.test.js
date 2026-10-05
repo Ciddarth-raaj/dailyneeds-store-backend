@@ -27,7 +27,11 @@ describe("the migration", () => {
     // The only migrations after it are the ones added since, named here so a
     // new one is a deliberate addition (the convention of
     // attendance_device_time_correction.test.js).
-    const LATER = ["20261120120000-epfo-wage-ceiling-2026", "20261121120000-company-details-permission"];
+    const LATER = [
+      "20261120120000-epfo-wage-ceiling-2026",
+      "20261121120000-company-details-permission",
+      "20261122120000-payroll-export-payslips-permission",
+    ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));

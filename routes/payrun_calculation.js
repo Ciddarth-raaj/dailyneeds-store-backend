@@ -12,6 +12,8 @@ const {
   RESET_REMARK_MAX,
   LIFECYCLE_ACTION,
 } = require("../constants/payrun_calculation");
+const { MAX_PAYSLIP_EXPORT_BATCH } = require("../constants/payslip");
+const logger = require("../utils/logger");
 
 /**
  * Payrun Calculation & Review - the API. A STAGE of /payrun, mounted under it.
@@ -32,6 +34,8 @@ const {
  *                                        it would clear a blocker
  *   GET  /payrun/calculation/history     who calculated and approved, when
  *   GET  /payrun/calculation/payslip-company   is a payslip company configured
+ *   POST /payrun/calculation/payslips/export/plan  who a bulk payslip export covers
+ *   POST /payrun/calculation/payslips/export  one batch of those payslips as PDFs
  *
  * THERE IS NO SINGLE-EMPLOYEE VARIANT OF ANY OF THE THREE WRITES, deliberately
  * and for the reason `routes/payrun.js` gives: one row posts a list of one, so
@@ -822,6 +826,96 @@ class PayrunCalculationRoutes {
       async (req, res) => {
         try {
           res.json({ code: 200, ...(await this.usecase.getPayslipCompanyStatus()) });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * BULK PAYSLIP EXPORT - the View Payslip keys AND `payroll_export_payslips`.
+     * Reading one payslip does not grant exporting the month's: the export is
+     * its own key, granted to nobody by its migration (administrators hold it
+     * through the user_type 2 bypass). It never widens the branch scope.
+     *
+     *   POST /payrun/calculation/payslips/export/plan   who will be exported
+     *   POST /payrun/calculation/payslips/export        one batch of PDFs
+     *
+     * BOTH TAKE THE LIST'S FILTERS and the server resolves the population
+     * from them (with the branch scope); `employee_ids` only narrows it - a
+     * selection on the plan, the batch on the export. Nothing is written,
+     * not even the employee's "viewed" record.
+     */
+    const exportBody = (idsSchema) => ({
+      ...this._month(),
+      ...this._listFilterSchema(),
+      employee_ids: idsSchema,
+    });
+    const exportFilters = (body) => {
+      const filters = {};
+      ["department_id", "designation_id", "status", "card", "search"].forEach((k) => {
+        if (body[k] !== undefined) filters[k] = body[k];
+      });
+      return filters;
+    };
+    this.router.post(
+      "/payrun/calculation/payslips/export/plan",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            exportBody(Joi.array().items(Joi.number().integer().positive()).min(1).max(MAX_BULK_EMPLOYEES).optional())
+          );
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.body.store_ids);
+          if (!scoped) return;
+          res.json({
+            code: 200,
+            ...(await this.usecase.planPayslipExport({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              store_ids: scoped.store_ids,
+              filters: exportFilters(req.body),
+              employee_ids: req.body.employee_ids || null,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+    this.router.post(
+      "/payrun/calculation/payslips/export",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            exportBody(Joi.array().items(Joi.number().integer().positive()).min(1).max(MAX_PAYSLIP_EXPORT_BATCH).required())
+          );
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.body.store_ids);
+          if (!scoped) return;
+
+          const out = await this.usecase.exportPayslipPdfs({
+            year: Number(req.body.year),
+            month: Number(req.body.month),
+            employee_ids: req.body.employee_ids,
+            store_ids: scoped.store_ids,
+            filters: exportFilters(req.body),
+          });
+          const actor = await this.permissions.actorFor(req);
+          logger.Log({
+            level: logger.LEVEL.INFO,
+            component: "ROUTES.PAYRUN_CALCULATION",
+            code: "PAYSLIP_EXPORT",
+            description: `Exported ${out.files.length} payslip PDF(s) for ${out.period_year}-${out.period_month}`,
+            category: "",
+            ref: { actor: actor && actor.employeeId, employee_ids: out.files.map((f) => f.employee_id) },
+          });
+          res.set("Cache-Control", "no-store");
+          res.json({ code: 200, ...out });
         } catch (err) {
           this._fail(res, err);
         }
