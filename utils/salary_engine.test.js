@@ -257,75 +257,53 @@ test("the day before the 58th birthday EPS still applies", () => {
   assert.equal(pf.employer_eps, 1250);
 });
 
-test("a post-cutoff joiner above the EPS ceiling who was never an EPS member gets no EPS", () => {
-  const pf = E.calculatePf(
-    pfCtx({
-      basic: 25000,
-      date_of_joining: "2020-01-01",
-      previous_eps_member: 0,
-      pf_applicable: 1,
+/*
+ * EPS IS PF APPLICABLE + AGE, NOTHING ELSE. Previous PF / EPS Member are
+ * onboarding reference facts: in no combination do they change, or block,
+ * a month's PF or EPS - not for a post-2014 joiner, not above the ceiling.
+ */
+const noCeilingCfg = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
+
+test("a post-2014 joiner above the ceiling with Previous EPS Member = No still gets EPS, capped at the pension ceiling", () => {
+  const pf = E.calculatePf(pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member: 0, pf_applicable: 1 }));
+  assert.equal(pf.pf_wage, 15000);
+  assert.equal(pf.employer_eps, 1250);
+  assert.equal(pf.employer_epf, 550);
+  assert.equal(pf.eps_eligibility.eligible, true);
+  assert.deepEqual(pf.unresolved, []);
+});
+
+test("with the ceiling lifted, EPS is still charged and still capped at the pension wage ceiling", () => {
+  for (const previous_eps_member of [0, 1, null]) {
+    const pf = E.calculatePf(pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member }), noCeilingCfg);
+    assert.equal(pf.pf_wage, 25000);
+    assert.equal(pf.employer_eps, 1250, `previous_eps_member=${previous_eps_member}`);
+    assert.equal(pf.employer_epf, 3000 - 1250);
+    assert.deepEqual(pf.unresolved, []);
+  }
+});
+
+test("a blank Previous EPS Member is never unresolved, at any wage", () => {
+  for (const basic of [12000, 25000]) {
+    const pf = E.calculatePf(pfCtx({ basic, date_of_joining: "2020-01-01", previous_eps_member: null }), noCeilingCfg);
+    assert.deepEqual(pf.unresolved, []);
+    assert.ok(pf.employer_eps > 0);
+  }
+});
+
+test("Previous PF / EPS Member, in every combination, give the same PF and EPS", () => {
+  const values = [0, 1, null];
+  const answers = new Set();
+  values.forEach((previous_pf_member) =>
+    values.forEach((previous_eps_member) => {
+      const pf = E.calculatePf(
+        pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_pf_member, previous_eps_member }),
+        noCeilingCfg
+      );
+      answers.add(JSON.stringify([pf.employee_pf, pf.employer_eps, pf.employer_epf, pf.unresolved]));
     })
   );
-  // EPFO wage-ceiling revision: membership is tested on the wage the employee
-  // is PAID AT (25000), not on the capped contribution wage (15000). The
-  // capped wage can never exceed the ceiling, so testing it put every
-  // post-cutoff non-member into EPS. Above the 15000 pension ceiling, joined
-  // after 01-09-2014 and never an EPS member: no EPS, the whole 12% is EPF.
-  assert.equal(pf.pf_wage, 15000);
-  assert.equal(pf.employer_eps, 0);
-  assert.equal(pf.employer_epf, pf.employer_pf_total);
-  assert.equal(pf.eps_eligibility.eligible, false);
-});
-
-test("with the ceiling lifted, a post-cutoff non-EPS-member above the ceiling gets no EPS", () => {
-  const noCeiling = {
-    ...CONFIG,
-    pf: { ...CONFIG.pf, applyCeilingToWage: false },
-  };
-  const pf = E.calculatePf(
-    pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member: 0 }),
-    noCeiling
-  );
-  assert.equal(pf.pf_wage, 25000);
-  assert.equal(pf.employer_eps, 0, "not eligible to join EPS");
-  assert.equal(pf.employer_epf, pf.employer_pf_total);
-});
-
-test("with the ceiling lifted, a previous EPS member above the ceiling keeps EPS on the capped wage", () => {
-  const noCeiling = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
-  const pf = E.calculatePf(
-    pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member: 1 }),
-    noCeiling
-  );
-  assert.equal(pf.employer_eps, 1250, "EPS is still capped at the pension wage ceiling");
-});
-
-test("an unrecorded previous-EPS-member is UNRESOLVED where it can change the answer", () => {
-  const noCeiling = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
-  const pf = E.calculatePf(
-    pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member: null }),
-    noCeiling
-  );
-  assert.equal(pf.employer_eps, null);
-  assert.equal(pf.employer_epf, null);
-  assert.equal(pf.unresolved[0].code, E.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED);
-  assert.equal(pf.employer_pf_total, 3000, "the employer total is still known; only the split is not");
-});
-
-test("an unrecorded previous-EPS-member is NOT unresolved when the wage cannot trigger the rule", () => {
-  const pf = E.calculatePf(pfCtx({ basic: 12000, previous_eps_member: null }));
-  assert.deepEqual(pf.unresolved, []);
-  assert.equal(pf.employer_eps, 1000, "8.33% of 12000 rounds to 1000");
-});
-
-test("a joiner from before the cutoff is eligible regardless of membership history", () => {
-  const noCeiling = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
-  const pf = E.calculatePf(
-    pfCtx({ basic: 25000, date_of_joining: "2010-06-01", previous_eps_member: null }),
-    noCeiling
-  );
-  assert.equal(pf.employer_eps, 1250);
-  assert.deepEqual(pf.unresolved, []);
+  assert.equal(answers.size, 1);
 });
 
 test("a missing date of birth leaves EPS unresolved rather than assumed", () => {
@@ -334,52 +312,7 @@ test("a missing date of birth leaves EPS unresolved rather than assumed", () => 
   assert.equal(pf.unresolved[0].code, E.UNRESOLVED.EPS_DOB_NOT_RECORDED);
 });
 
-/* ------------------------------- EPS membership is NOT the PF membership */
-
-/*
- * The review fix these four exist for. Form 11 asks about prior EPF membership
- * and prior EPS membership separately because the answers differ, and the
- * engine must not turn one into the other in EITHER direction: a recorded EPF
- * history may not create a pension entitlement, and an absent one may not
- * remove one.
- */
-const noCeilingCfg = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
-const epsCtx = (over = {}) =>
-  pfCtx({ basic: 25000, date_of_joining: "2020-01-01", previous_eps_member: null, ...over });
-
-test("previous_pf_member = 1 does NOT by itself make somebody an EPS member", () => {
-  const pf = E.calculatePf(epsCtx({ previous_pf_member: 1 }), noCeilingCfg);
-  assert.equal(pf.employer_eps, null, "a prior EPF membership is not a prior EPS membership");
-  assert.equal(pf.employer_epf, null);
-  assert.equal(pf.unresolved[0].code, E.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED);
-});
-
-test("previous_pf_member = 0 does NOT by itself rule EPS membership out", () => {
-  const pf = E.calculatePf(epsCtx({ previous_pf_member: 0 }), noCeilingCfg);
-  assert.equal(pf.employer_eps, null, "the EPS question is still unanswered");
-  assert.equal(pf.unresolved[0].code, E.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED);
-});
-
-test("the EPS answer decides it even when the PF answer contradicts it", () => {
-  // Was in a previous employer's EPF but never in EPS - an excluded employee,
-  // or somebody who joined above the pension ceiling after the cutoff.
-  const notInEps = E.calculatePf(
-    epsCtx({ previous_pf_member: 1, previous_eps_member: 0 }),
-    noCeilingCfg
-  );
-  assert.equal(notInEps.employer_eps, 0);
-  assert.equal(notInEps.employer_epf, notInEps.employer_pf_total, "the whole 12% goes to EPF");
-
-  // And the other way round: the EPS fact is recorded, the EPF one is not.
-  const inEps = E.calculatePf(
-    epsCtx({ previous_pf_member: null, previous_eps_member: 1 }),
-    noCeilingCfg
-  );
-  assert.equal(inEps.employer_eps, 1250, "capped at the pension wage ceiling");
-  assert.deepEqual(inEps.unresolved, []);
-});
-
-test("calculateSalary carries the EPS fact through, and does not read the PF one for it", () => {
+test("calculateSalary ignores Previous PF / EPS Member - the salary preview is PF Applicable + age", () => {
   const base = {
     monthly_gross: 50000,
     pf_applicable: 1,
@@ -388,16 +321,12 @@ test("calculateSalary carries the EPS fact through, and does not read the PF one
     date_of_joining: "2020-01-01",
     effective_from: "2026-04-01",
   };
-  const onlyPf = E.calculateSalary({ ...base, previous_pf_member: 1 }, noCeilingCfg);
-  assert.equal(onlyPf.pf.employer_eps, null);
-  assert.equal(onlyPf.unresolved[0].code, E.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED);
-
-  const withEps = E.calculateSalary(
-    { ...base, previous_pf_member: 1, previous_eps_member: 1 },
-    noCeilingCfg
-  );
-  assert.equal(withEps.pf.employer_eps, 1250);
-  assert.deepEqual(withEps.unresolved, []);
+  const blank = E.calculateSalary({ ...base, previous_pf_member: null, previous_eps_member: null }, noCeilingCfg);
+  const no = E.calculateSalary({ ...base, previous_pf_member: 1, previous_eps_member: 0 }, noCeilingCfg);
+  assert.equal(blank.pf.employer_eps, 1250);
+  assert.deepEqual(blank.unresolved, []);
+  assert.equal(no.pf.employer_eps, blank.pf.employer_eps);
+  assert.equal(no.pf.employer_epf, blank.pf.employer_epf);
 });
 
 /* --------------------------------------------- the statutory wage definition */
@@ -961,23 +890,22 @@ test("with ESI out of scope the CTC for a 20000 gross resolves", () => {
   assert.equal(r.monthly_ctc, 21300);
 });
 
-test("an unresolved EPS SPLIT does not block the CTC — the employer total is known", () => {
-  const noCeiling = { ...CONFIG, pf: { ...CONFIG.pf, applyCeilingToWage: false } };
+test("an unresolved EPS SPLIT (DOB missing) does not block the CTC — the employer total is known", () => {
   const r = E.calculateSalary(
     {
       monthly_gross: 50000,
       pf_applicable: 1,
       esi_applicable: 0,
-      previous_eps_member: null,
-      dob: "1990-05-10",
+      dob: null,
       date_of_joining: "2020-01-01",
       effective_from: "2026-04-01",
     },
-    noCeiling
+    noCeilingCfg
   );
   assert.equal(r.pf.employer_eps, null);
+  assert.equal(r.pf.employer_pf_total, 3000);
   assert.equal(r.ctc_status, E.STATUS.APPLIED);
-  assert.ok(r.unresolved.some((u) => u.code === E.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED));
+  assert.ok(r.unresolved.some((u) => u.code === E.UNRESOLVED.EPS_DOB_NOT_RECORDED));
 });
 
 /* ------------------------------------------------------ effective dating */

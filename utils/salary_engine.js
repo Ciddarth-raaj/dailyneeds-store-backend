@@ -79,7 +79,6 @@ function toDateOnly(value) {
 }
 
 /** Date-only strings compare correctly as strings, which is the whole point of the format. */
-const isOnOrAfter = (a, b) => a !== null && b !== null && a >= b;
 
 /** Completed years between two date-only strings, or null when either is missing. */
 function ageYearsOn(dob, asOf) {
@@ -148,6 +147,8 @@ const ESI_WAGE_BASIS = {
 /** Reason codes. Stable strings, because screens and reports key off them. */
 const UNRESOLVED = {
   PF_APPLICABILITY_NOT_RECORDED: "PF_APPLICABILITY_NOT_RECORDED",
+  // No longer produced: EPS is PF Applicable + age only. Kept because calculations
+  // stored before that change may carry it.
   EPS_MEMBERSHIP_NOT_RECORDED: "EPS_MEMBERSHIP_NOT_RECORDED",
   EPS_DOB_NOT_RECORDED: "EPS_DOB_NOT_RECORDED",
   ESI_APPLICABILITY_NOT_RECORDED: "ESI_APPLICABILITY_NOT_RECORDED",
@@ -310,42 +311,28 @@ function validateManualBreakup(grossRupees, components = {}, options = {}, confi
 /* -------------------------------------------------------------------- PF */
 
 /**
- * ISOLATED NUANCE — whether EPS applies, and to whom.
+ * WHETHER EPS APPLIES - DNDS PAYROLL RULE: PF APPLICABLE + AGE, NOTHING ELSE.
  *
- * Everything about the pension scheme that is not simple arithmetic lives in
- * this one function, because the approved task asks for exactly that: where a
- * rule cannot be proven from current project material, isolate it and report
- * the unresolved point rather than guessing.
+ *   PF Applicable not recorded  unresolved (nothing downstream is knowable)
+ *   PF Applicable = No          no EPF, no EPS
+ *   PF Applicable = Yes
+ *     DOB not recorded          EPS unresolved - the age cannot be guessed;
+ *                               employee PF and the employer 12% are still
+ *                               calculated, only their EPS / EPF split waits
+ *     age >= 58                 EPS 0, the employer's whole share to EPF
+ *     age <  58                 EPS, employer share split EPS / EPF
  *
- * Three questions, in order:
+ * The same rule for an existing employee and a new joiner, every month.
+ * HR decides PF Applicable at onboarding; after that this is all there is.
  *
- *   1. Is the employee in the provident fund at all? If PF applicability has
- *      not been recorded, nothing downstream is knowable.
- *   2. Have they reached the EPS exit age? Pension membership ceases at 58 and
- *      the employer's whole share goes to EPF from then on. Needs a DOB.
- *   3. Are they a post-cutoff joiner above the pension wage ceiling? Somebody
- *      who was NOT ALREADY AN EPS MEMBER on or after the cutoff, earning above
- *      the ceiling, cannot join EPS. This is the question `previous_eps_member`
- *      exists to answer, and when it has not been recorded the answer is
- *      genuinely unknown.
- *
- * THE MEMBERSHIP FACT IS `previous_eps_member`, NOT `previous_pf_member`.
- * Official EPFO Form 11 asks the two questions separately — "Whether earlier a
- * member of the Employees' Provident Fund Scheme, 1952" and "Whether earlier a
- * member of the Employees' Pension Scheme, 1995" — because they genuinely have
- * different answers. Somebody can have been an EPF member without ever having
- * been an EPS member: an international worker, an excluded employee, or
- * anybody who joined the fund above the pension wage ceiling after the cutoff
- * and was therefore kept out of EPS at that employer too. Reading a prior EPF
- * membership as a prior EPS membership would file those people into the
- * pension scheme on an inference nobody made, so this function reads the EPS
- * fact and only the EPS fact. `previous_pf_member` remains the separate EPF
- * history fact and no rule here consults it.
+ * `previous_pf_member` AND `previous_eps_member` ARE NOT READ HERE. They are
+ * onboarding / Form 11 reference facts kept on the Employee Master, and a blank
+ * one must never make a month's payroll unresolved. Wages play no part either:
+ * the effective-dated ceilings decide how much wage EPS is charged on (see
+ * `calculatePf`), never whether EPS applies.
  *
  * WHEN THE SPLIT IS UNRESOLVED THE EMPLOYER TOTAL STILL IS NOT. The employer
  * pays 12% either way; only its division between EPF and EPS is in question.
- * So an unresolved EPS does not make the CTC unknown, and the engine is
- * careful to keep the two facts apart.
  */
 function resolveEpsEligibility(context = {}, config = CONFIG) {
   const cfg = config.pf;
@@ -366,56 +353,7 @@ function resolveEpsEligibility(context = {}, config = CONFIG) {
   if (age >= cfg.epsExitAgeYears) {
     return { eligible: false, reason: `EPS membership ceases at ${cfg.epsExitAgeYears}` };
   }
-
-  /*
-   * The ceiling test comes BEFORE the membership test on purpose. At or below
-   * the pension wage ceiling the membership history does not matter — the
-   * employee is eligible either way — so an unrecorded `previous_eps_member`
-   * is only an unresolved answer for the people it can actually change, which
-   * in this structure means a Basic above the ceiling.
-   */
-  /*
-   * THE CEILING THIS TEST IS AGAINST is the one in force for the period being
-   * charged - `eps_eligibility_ceiling` when the caller has resolved it from
-   * the effective-dated schedule (September 2026 has two) - and the configured
-   * pension ceiling otherwise.
-   */
-  const pfWage = toPaise(context.pf_wage);
-  const epsCeiling = toPaise(
-    context.eps_eligibility_ceiling !== undefined && context.eps_eligibility_ceiling !== null
-      ? context.eps_eligibility_ceiling
-      : cfg.epsWageCeiling
-  );
-  if (pfWage !== null && pfWage <= epsCeiling) {
-    return { eligible: true, reason: "Pension wage is at or below the EPS ceiling" };
-  }
-
-  const doj = toDateOnly(context.date_of_joining);
-  if (doj === null) {
-    return { eligible: null, unresolved: UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED };
-  }
-  if (!isOnOrAfter(doj, cfg.newMemberCutoffDate)) {
-    return { eligible: true, reason: "Joined before the new-member cutoff" };
-  }
-
-  /*
-   * ONLY the EPS fact decides this. `previous_pf_member` is deliberately not
-   * consulted, in either direction: a recorded prior EPF membership does not
-   * establish a prior EPS membership, and this engine does not turn one into
-   * the other. An unrecorded EPS history is reported as unresolved, which is a
-   * question on a screen rather than a pension position nobody took.
-   */
-  const previousEpsMember = triState(context.previous_eps_member);
-  if (previousEpsMember === null) {
-    return { eligible: null, unresolved: UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED };
-  }
-  if (previousEpsMember === true) {
-    return { eligible: true, reason: "Existing EPS member before the cutoff" };
-  }
-  return {
-    eligible: false,
-    reason: "Not an EPS member before the cutoff, above the EPS wage ceiling",
-  };
+  return { eligible: true, reason: `PF applicable, age below ${cfg.epsExitAgeYears}` };
 }
 
 /**
@@ -443,9 +381,6 @@ function pfCeilingOn(dateValue, config = CONFIG) {
  *      September 2026 split passes each period's own, prorated, ceilings.
  *   2. the schedule row in force on `as_of` / `effective_from`.
  *   3. the flat configured ceilings.
- *
- * `epsEligibilityCeiling` is the MONTHLY pension ceiling the membership test
- * compares a monthly wage against; it is never prorated.
  */
 function resolvePfCeilings(context = {}, config = CONFIG) {
   const cfg = config.pf;
@@ -455,9 +390,6 @@ function resolvePfCeilings(context = {}, config = CONFIG) {
       wageCeiling: Number(c.wageCeiling),
       epsWageCeiling: Number(c.epsWageCeiling),
       edliWageCeiling: Number(c.edliWageCeiling),
-      epsEligibilityCeiling: Number(
-        c.epsEligibilityCeiling !== undefined ? c.epsEligibilityCeiling : c.epsWageCeiling
-      ),
       version: c.version || null,
     };
   }
@@ -467,7 +399,6 @@ function resolvePfCeilings(context = {}, config = CONFIG) {
       wageCeiling: row.wageCeiling,
       epsWageCeiling: row.epsWageCeiling,
       edliWageCeiling: row.edliWageCeiling,
-      epsEligibilityCeiling: row.epsWageCeiling,
       version: row.version,
     };
   }
@@ -475,7 +406,6 @@ function resolvePfCeilings(context = {}, config = CONFIG) {
     wageCeiling: cfg.wageCeiling,
     epsWageCeiling: cfg.epsWageCeiling,
     edliWageCeiling: cfg.edliWageCeiling,
-    epsEligibilityCeiling: cfg.epsWageCeiling,
     version: null,
   };
 }
@@ -540,32 +470,9 @@ function calculatePf(context = {}, config = CONFIG) {
   const edli = roundContribution(percentOf(edliWage, cfg.edliRatePercent), config.rounding.contributionRounding);
   const admin = roundContribution(percentOf(pfWage, cfg.adminRatePercent), config.rounding.contributionRounding);
 
-  /*
-   * EPS ELIGIBILITY IS TESTED ON THE WAGE THE EMPLOYEE IS PAID AT, NOT ON THE
-   * CAPPED CONTRIBUTION WAGE. The capped wage can never exceed the ceiling, so
-   * testing it made "a post-cutoff joiner above the ceiling who was never an
-   * EPS member" unreachable and put every such employee into EPS. The test
-   * wage is the caller's `eps_test_wage` (a payrun passes the month's
-   * contractual Basic, so a loss-of-pay month does not change membership) and
-   * otherwise the uncapped Basic this function was given.
-   */
-  const epsTestWage =
-    cfg.epsEligibilityOnUncappedWage === false
-      ? pfWage // LEGACY: the capped wage - reproduces the pre-correction behaviour exactly
-      : context.eps_test_wage !== undefined && context.eps_test_wage !== null && toPaise(context.eps_test_wage) !== null
-      ? toPaise(context.eps_test_wage)
-      : basic;
-  const eps = resolveEpsEligibility(
-    {
-      ...context,
-      pf_wage: toRupees(epsTestWage),
-      eps_eligibility_ceiling:
-        context.eps_eligibility_ceiling !== undefined && context.eps_eligibility_ceiling !== null
-          ? context.eps_eligibility_ceiling
-          : ceilings.epsEligibilityCeiling,
-    },
-    config
-  );
+  // WHETHER EPS applies is PF Applicable + age only; the ceilings below decide
+  // only how much wage it is charged on.
+  const eps = resolveEpsEligibility(context, config);
 
   const unresolved = [];
   let employerEps = null;
@@ -1322,15 +1229,6 @@ function calculateSalary(input = {}, config = CONFIG) {
     gross,
     pf_applicable: input.pf_applicable,
     esi_applicable: input.esi_applicable,
-    /*
-     * BOTH history facts travel, and they are not interchangeable. The EPS
-     * split reads `previous_eps_member` and nothing else; `previous_pf_member`
-     * is carried because it is part of the statutory context a later phase
-     * (EPF transfer, Form 11 generation) will need, not because any rule here
-     * consults it.
-     */
-    previous_pf_member: input.previous_pf_member,
-    previous_eps_member: input.previous_eps_member,
     dob: input.dob,
     date_of_joining: input.date_of_joining,
     as_of: input.as_of || input.effective_from,
@@ -1427,7 +1325,6 @@ function calculateSalary(input = {}, config = CONFIG) {
       pf_applied_wage_ceiling: pf.wage_ceiling ?? null,
       pf_ceiling_version: pf.ceiling_version ?? null,
       pf_eps_exit_age_years: config.pf.epsExitAgeYears,
-      pf_new_member_cutoff_date: config.pf.newMemberCutoffDate,
       pf_apply_ceiling_to_wage: config.pf.applyCeilingToWage,
       esi_employee_rate_percent: config.esi.employeeRatePercent,
       esi_employer_rate_percent: config.esi.employerRatePercent,

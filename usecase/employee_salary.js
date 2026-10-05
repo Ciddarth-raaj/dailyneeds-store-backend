@@ -289,10 +289,6 @@ class EmployeeSalaryUsecase {
       // The statutory facts come from the employee master, never the caller.
       pf_applicable: employee.pf_applicable,
       esi_applicable: employee.esi_applicable,
-      // Two separate history facts. The EPS split reads the EPS one; the PF
-      // one travels beside it and is never read as a substitute for it.
-      previous_pf_member: employee.previous_pf_member,
-      previous_eps_member: employee.previous_eps_member,
       dob: employee.dob,
       date_of_joining: employee.date_of_joining,
       effective_from: effectiveFrom,

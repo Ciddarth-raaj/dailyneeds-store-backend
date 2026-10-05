@@ -12,6 +12,13 @@
  *      not an EPS member until 17-09
  *   C  EPF + EPS member capped at 15,000 until 16-09
  *
+ * DNDS RULE: EPS IS PF APPLICABLE + AGE ONLY. A and C are reproduced exactly.
+ * B's Period-1 NIL EPS needs an employee who is EPS-excluded before 17-09 -
+ * a status DNDS does not model (Previous EPS Member is reference data, never
+ * a payroll gate) - so a B-type higher-wage member under 58 is charged EPS in
+ * BOTH periods. That case is asserted on its own below, against what DNDS
+ * computes, and is NOT the FAQ's B figure.
+ *
  * ROUNDING CONVENTION (documented in docs/epfo-wage-ceiling-2026.md): every
  * period is computed to the paisa, which is the precision of the FAQ's own
  * figures (`pf_exact` / `exact`). The payroll deduction and the ECR are those
@@ -126,15 +133,6 @@ const FAQ = {
     filed: { employee_pf: 1120, employer_eps: 777, employer_epf: 343, edli: 47, pf_admin_charge: 47, total_remittance: 2334 },
     ecr: ["100000000001", "SCENARIO A", 20000, 9333, 9333, 9333, 1120, 777, 343, 0, 0],
   },
-  B: {
-    scenario: "FAQ_B:EPF_ONLY>EPF_EPS|ACTUAL_WAGE",
-    p1: { epf: 10666.67, eps: 0 },
-    p2: { epf: 9333.33, eps: 9333.33 },
-    total: { epf: 20000, eps: 9333.33 },
-    exact: { employee_pf: 2400, employer_eps: 777.47, employer_epf: 1622.53, edli: 100, pf_admin_charge: 100, total_remittance: 5000 },
-    filed: { employee_pf: 2400, employer_eps: 777, employer_epf: 1623, edli: 100, pf_admin_charge: 100, total_remittance: 5000 },
-    ecr: ["100000000002", "SCENARIO B", 20000, 20000, 9333, 20000, 2400, 777, 1623, 0, 0],
-  },
   C: {
     scenario: "FAQ_C:EPF_EPS>EPF_EPS|CEILING",
     p1: { epf: 8000, eps: 8000 },
@@ -194,16 +192,27 @@ Object.entries(FAQ).forEach(([letter, want]) => {
   });
 });
 
-describe("the three scenarios are three different answers - none is the other", () => {
-  const [a, b, c] = ["A", "B", "C"].map((k) => SCENARIOS[k]());
-  it("employee PF 1,120 / 2,400 / 2,080 and EPS wages 9,333.33 / 9,333.33 / 17,333.33", () => {
-    assert.deepEqual([a.employee_pf, b.employee_pf, c.employee_pf], [1120, 2400, 2080]);
-    assert.deepEqual([a.eps_wage, b.eps_wage, c.eps_wage], [9333.33, 9333.33, 17333.33]);
+describe("a B-type member under the DNDS rule: higher-wage basis (20,000), PF applicable, under 58", () => {
+  const b = SCENARIOS.B();
+  it("EPS in BOTH periods - Previous EPS Member = No does not exclude anybody", () => {
+    assert.equal(b.pf_scenario, "EPF_EPS>EPF_EPS|ACTUAL_WAGE");
+    assert.deepEqual(b.pf_segments.map((s) => [s.pf_wage, s.eps_wage]), [[10666.67, 8000], [9333.33, 9333.33]]);
+    assert.equal(b.is_complete, true);
   });
-  it("2,080 belongs to Scenario C: it never carries B's Period-1 NIL EPS", () => {
-    assert.equal(c.pf_segments[0].eps_wage, 8000);
-    assert.equal(b.pf_segments[0].eps_wage, 0);
-    assert.notEqual(b.employee_pf, 2080);
+  it("EE 2,400, EPS 1,443.87 (1,444 filed), ER EPF 956.13 (956), EDLI 100, admin 100, total 5,000", () => {
+    assert.deepEqual(
+      [b.pf_exact.employee_pf, b.pf_exact.employer_eps, b.pf_exact.employer_epf, b.pf_exact.edli, b.pf_exact.pf_admin_charge, b.pf_exact.total_remittance],
+      [2400, 1443.87, 956.13, 100, 100, 5000]
+    );
+    assert.deepEqual([b.employee_pf, b.employer_eps, b.employer_epf], [2400, 1444, 956]);
+  });
+});
+
+describe("the FAQ scenarios DNDS reproduces are different answers - none is the other", () => {
+  const [a, c] = ["A", "C"].map((k) => SCENARIOS[k]());
+  it("employee PF 1,120 / 2,080 and EPS wages 9,333.33 / 17,333.33", () => {
+    assert.deepEqual([a.employee_pf, c.employee_pf], [1120, 2080]);
+    assert.deepEqual([a.eps_wage, c.eps_wage], [9333.33, 17333.33]);
   });
 });
 
@@ -221,11 +230,13 @@ describe("the employee states, one by one", () => {
     assert.equal(r.pf_scenario, "EXCLUDED>EXCLUDED|CEILING");
   });
 
-  it("EPF-only employee 20,000 on the ceiling basis: 8,000 / NIL then 9,333.33 / 9,333.33 (not a FAQ case)", () => {
-    const r = month(9, 20000, { previous_eps_member: 0 });
-    assert.equal(r.pf_scenario, "EPF_ONLY>EPF_EPS|CEILING");
-    assert.deepEqual(r.segments.map((s) => [s.pf_wage, s.eps_wage]), [[8000, 0], [9333.33, 9333.33]]);
-    assert.deepEqual([r.employee_pf, r.exact.employer_eps], [2080, 777.47]);
+  it("Previous EPS Member = No or blank changes nothing: still Scenario C", () => {
+    [0, null].forEach((previous_eps_member) => {
+      const r = month(9, 20000, { previous_eps_member });
+      assert.equal(r.pf_scenario, "FAQ_C:EPF_EPS>EPF_EPS|CEILING");
+      assert.deepEqual([r.employee_pf, r.exact.employer_eps], [2080, 1443.87]);
+      assert.deepEqual(r.unresolved, []);
+    });
   });
 
   it("EPF + EPS capped employee 20,000 is Scenario C", () => {
@@ -251,11 +262,12 @@ describe("the employee states, one by one", () => {
     })
   );
 
-  it("previous EPS member vs never EPS member (post-2014 joiner at 20,000)", () => {
-    assert.equal(month(8, 20000, { previous_eps_member: 1 }).employer_eps, 1250);
-    assert.equal(month(8, 20000, { previous_eps_member: 0 }).employer_eps, 0);
-    assert.equal(month(10, 20000, { previous_eps_member: 0 }).employer_eps, 1666, "within 25,000 from 17-09");
-    assert.equal(month(10, 30000, { previous_eps_member: 0 }).employer_eps, 0, "above 25,000 and never EPS: still none");
+  it("Previous EPS Member makes no difference (post-2014 joiner, under 58)", () => {
+    [1, 0, null].forEach((previous_eps_member) => {
+      assert.equal(month(8, 20000, { previous_eps_member }).employer_eps, 1250);
+      assert.equal(month(10, 20000, { previous_eps_member }).employer_eps, 1666);
+      assert.equal(month(10, 30000, { previous_eps_member }).employer_eps, 2083, "EPS capped at 25,000 from October");
+    });
   });
 
   it("age 58+: no EPS in either period, the whole employer share to EPF", () => {
