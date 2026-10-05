@@ -298,3 +298,15 @@ describe("company details", () => {
     assert.throws(() => build({}, {}), (e) => e.code === "SNAPSHOT_COMPANY_MISSING");
   });
 });
+
+describe("the establishment code is required only where it applies", () => {
+  it("PF applicable without a PF code is refused; without PF it is not needed", () => {
+    assert.throws(() => build({}, { ...COMPANY, pf_establishment_code: null }), (e) => e.code === "SNAPSHOT_COMPANY_PF_CODE_MISSING");
+    assert.doesNotThrow(() => build({ pf_applicable: 0 }, { ...COMPANY, pf_establishment_code: null }));
+  });
+
+  it("ESI applicable without an ESI code is refused; without ESI it is not needed", () => {
+    assert.throws(() => build({}, { ...COMPANY, esi_establishment_code: "" }), (e) => e.code === "SNAPSHOT_COMPANY_ESI_CODE_MISSING");
+    assert.doesNotThrow(() => build({ esi_applicable: 0 }, { ...COMPANY, esi_establishment_code: "" }));
+  });
+});

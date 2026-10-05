@@ -31,6 +31,7 @@ const {
  *                                        month persist where readiness says
  *                                        it would clear a blocker
  *   GET  /payrun/calculation/history     who calculated and approved, when
+ *   GET  /payrun/calculation/payslip-company   is a payslip company configured
  *
  * THERE IS NO SINGLE-EMPLOYEE VARIANT OF ANY OF THE THREE WRITES, deliberately
  * and for the reason `routes/payrun.js` gives: one row posts a list of one, so
@@ -751,6 +752,24 @@ class PayrunCalculationRoutes {
               store_ids: scoped.store_ids,
             })),
           });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * CAN PAYSLIPS BE PUBLISHED - is exactly one company Active for Payslip
+     * in Master → Company Details. The month screen's read keys: it names the
+     * company and nothing else (no PAN, TAN or statutory code), and Publish
+     * itself re-decides it on the server.
+     */
+    this.router.get(
+      "/payrun/calculation/payslip-company",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL),
+      async (req, res) => {
+        try {
+          res.json({ code: 200, ...(await this.usecase.getPayslipCompanyStatus()) });
         } catch (err) {
           this._fail(res, err);
         }
