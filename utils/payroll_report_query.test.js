@@ -95,12 +95,23 @@ describe("field access", () => {
 });
 
 describe("the query", () => {
-  it("reads ONLY approved & locked rows of the requested month", () => {
+  it("reads EVERY payrun employee of the requested month; figures only from approved & locked rows", () => {
     const q = build(["employee_id", "net_pay"]);
-    assert.match(q.sql, /c\.status = 'APPROVED_LOCKED'/);
-    assert.match(q.sql, /c\.period_year = \? AND c\.period_month = \?/);
+    assert.match(q.sql, /FROM payrun_employee pe\nLEFT JOIN payrun_employee_calculation c/);
+    assert.match(q.sql, /pe\.period_year = \? AND pe\.period_month = \?/);
     assert.deepEqual(q.params.slice(0, 2), [2026, 9]);
+    // No status condition in the WHERE: a row is never dropped for its lock state.
+    assert.doesNotMatch(q.sql.slice(q.sql.indexOf("WHERE")), /APPROVED_LOCKED/);
+    // ...but every calculation figure is shown only when it is final.
+    assert.match(q.sql, /IF\(c\.status = 'APPROVED_LOCKED', c\.net_pay, NULL\) AS c1_v/);
+    assert.match(q.sql, /pe\.employee_id AS c0_v/);
     assert.doesNotMatch(q.sql, /\b(INSERT|UPDATE|DELETE)\b/i);
+  });
+
+  it("nothing about the employee today filters the population", () => {
+    const q = build(["employee_id", "em_mobile"]);
+    const where = q.sql.slice(q.sql.indexOf("WHERE"));
+    assert.doesNotMatch(where, /new_employee\.status|resignation|is_active/);
   });
 
   it("a historical month is read by its own year and month", () => {
@@ -131,10 +142,10 @@ describe("the query", () => {
   it("each report type adds its population and nothing else", () => {
     const fields = Q.resolveFields(["employee_id"], ADMIN).fields;
     const of = (t) => Q.buildQuery({ reportType: t, fields, filters: Q.resolveFilters({}), period: SEPT, store_ids: null }).sql;
-    assert.match(of("EPF"), /pf_status/);
+    assert.match(of("EPF"), /IF\(c\.payrun_calculation_id IS NULL, COALESCE\(pe\.pf_applicable, 0\) = 1, COALESCE\(c\.pf_status, ''\) <> 'NOT_APPLICABLE'\)/);
     assert.match(of("ESI"), /esi_status/);
-    assert.match(of("BANK"), /c\.pay_type = 'BANK'/);
-    assert.match(of("OT"), /approved_ot_minutes > 0/);
+    assert.match(of("BANK"), /pe\.pay_type\) = 'BANK'/);
+    assert.match(of("OT"), /COALESCE\(c\.approved_ot_minutes, 0\) > 0/);
   });
 
   it("only the joins the selected fields need are added; Employee Master joins hang off new_employee", () => {
@@ -154,13 +165,14 @@ describe("the query", () => {
     const count = build(["employee_id", "absent_days"], { mode: "count" });
     assert.doesNotMatch(count.sql, /attendance_day_calculation/);
     const totals = build(["employee_name", "net_pay", "basic"], { mode: "totals" });
-    assert.match(totals.sql, /SUM\(c\.net_pay\) AS t1/);
+    assert.match(totals.sql, /SUM\(IF\(c\.status = 'APPROVED_LOCKED', c\.net_pay, NULL\)\) AS t1/);
+    assert.match(count.sql, /SUM\(c\.status = 'APPROVED_LOCKED'\) AS finalized_count/);
     assert.doesNotMatch(totals.sql, /t2/);
   });
 
   it("sorting is by a selected field's own expression, then employee id", () => {
     const q = build(["outlet", "employee_id"], { display: Q.resolveDisplay({ sort_by: "outlet", sort_dir: "desc" }, ["outlet", "employee_id"]) });
-    assert.match(q.sql, /ORDER BY pe\.store_name DESC, c\.employee_id ASC/);
+    assert.match(q.sql, /ORDER BY pe\.store_name DESC, pe\.employee_id ASC/);
     assert.equal(Q.resolveDisplay({ sort_by: "net_pay" }, ["outlet"]).sort_by, null, "cannot sort by an unselected column");
   });
 

@@ -11,15 +11,38 @@ const { locationPredicate } = require("../repository/payrun");
  * WHERE clauses. No caller string becomes SQL: field keys are looked up in
  * `constants/payroll_report_catalogue.js`, values are bound.
  *
- * ========================================================= FINALIZED ONLY
+ * ============================================ THE POPULATION IS THE PAYRUN
  *
- * Every query is pinned to `c.status = 'APPROVED_LOCKED'` for one month. A
- * report never reads an unapproved calculation, never reads the attendance
- * engine's live rows for a figure, and never calls the payroll calculation:
- * opening September's report in December shows September as it was approved.
- * Approved rows change only through the payrun's own unlock / recalculate /
- * re-approve flow, which is the existing correction process.
+ * The rows of a report are the month's PAYRUN employees (`payrun_employee`,
+ * frozen at initialization) - every one of them, narrowed only by the
+ * caller's branch scope, the report type's population and the user's own
+ * filters. Nothing about the employee TODAY (status, resignation, transfer)
+ * and nothing about a later lock change removes a row, so the Payroll
+ * Register reconciles to the payrun: same employee count, and its gross,
+ * deduction and net totals equal the payrun's finalized totals.
+ *
+ * ========================================================= FIGURES: FINAL ONLY
+ *
+ * A payroll figure is shown only where that employee's calculation is
+ * APPROVED_LOCKED. Any other row is still IN the report - with its figures
+ * blank and Payrun Status saying why - rather than showing a non-final
+ * number or silently disappearing. Every select that reads the calculation
+ * goes through `finalizedOnly`, so totals are finalized totals by
+ * construction. A report never calls the payroll calculation and never reads
+ * the attendance engine's live rows for a figure: opening September's report
+ * in December shows September as it was approved. Approved rows change only
+ * through the payrun's own unlock / recalculate / re-approve flow.
  */
+
+const FINALIZED = "c.status = 'APPROVED_LOCKED'";
+
+/**
+ * A select that reads the calculation (`c.`) is shown only for a finalized
+ * row. Fields marked `always` describe the row itself (its status, its pay
+ * type) and are exempt.
+ */
+const finalizedOnly = (field, expr) =>
+  !field.always && /\bc\./.test(expr) ? `IF(${FINALIZED}, ${expr}, NULL)` : expr;
 
 const MAX_FIELDS = (() => {
   const n = Number(process.env.PAYROLL_REPORT_MAX_FIELDS);
@@ -207,7 +230,7 @@ function buildQuery({ reportType, fields, filters, period, store_ids, display = 
     if (join.params) joinParams.push(...join.params(period));
   }
 
-  const where = ["c.period_year = ?", "c.period_month = ?", "c.status = 'APPROVED_LOCKED'"];
+  const where = ["pe.period_year = ?", "pe.period_month = ?"];
   const params = [period.year, period.month];
 
   // FAIL CLOSED: an empty scope is `1 = 0`, never "no clause".
@@ -226,19 +249,19 @@ function buildQuery({ reportType, fields, filters, period, store_ids, display = 
     params.push(filters.department_ids);
   }
   if (filters.pay_type) {
-    where.push("c.pay_type = ?");
+    where.push(`${catalogue.PAY_TYPE} = ?`);
     params.push(filters.pay_type);
   }
   if (filters.search) {
-    where.push("(pe.employee_name LIKE ? OR CAST(c.employee_id AS CHAR) = ?)");
+    where.push("(pe.employee_name LIKE ? OR CAST(pe.employee_id AS CHAR) = ?)");
     params.push(`%${filters.search}%`, filters.search);
   }
 
-  const from = [
-    "FROM payrun_employee_calculation c",
-    "JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id",
-    ...joinSql,
+  const base = [
+    "FROM payrun_employee pe",
+    "LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id",
   ].join("\n");
+  const from = [base, ...joinSql].join("\n");
   const whereSql = `WHERE ${where.join(" AND ")}`;
 
   if (mode === "count") {
@@ -246,30 +269,30 @@ function buildQuery({ reportType, fields, filters, period, store_ids, display = 
     // grouped derived table), but the count needs none of them: it is taken
     // over the base rows only, so it cannot disagree with the rows.
     return {
-      sql: `SELECT COUNT(*) AS matching_count FROM payrun_employee_calculation c JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id ${whereSql}`,
+      sql: `SELECT COUNT(*) AS matching_count,\n       SUM(${FINALIZED}) AS finalized_count\n${base}\n${whereSql}`,
       params,
     };
   }
 
   if (mode === "totals") {
     const sums = fields
-      .map((f, i) => (catalogue.isSummable(f) ? `SUM(${f.select}) AS t${i}` : null))
+      .map((f, i) => (catalogue.isSummable(f) ? `SUM(${finalizedOnly(f, f.select)}) AS t${i}` : null))
       .filter(Boolean);
     if (sums.length === 0) return null;
     return { sql: `SELECT ${sums.join(", ")}\n${from}\n${whereSql}`, params: [...joinParams, ...params] };
   }
 
-  const select = ["c.employee_id AS _employee_id"];
+  const select = ["pe.employee_id AS _employee_id", `${catalogue.PAYRUN_STATUS} AS _payrun_status`];
   fields.forEach((field, i) => {
     for (const [name, expr] of Object.entries(catalogue.selectsOf(field))) {
-      select.push(`${expr} AS c${i}_${name}`);
+      select.push(`${finalizedOnly(field, expr)} AS c${i}_${name}`);
     }
   });
 
-  let order = "c.employee_id ASC";
+  let order = "pe.employee_id ASC";
   const sortField = display && display.sort_by ? catalogue.getField(display.sort_by) : null;
   if (sortField && (sortField.sort || sortField.select)) {
-    order = `${sortField.sort || sortField.select} ${display.sort_dir === "desc" ? "DESC" : "ASC"}, c.employee_id ASC`;
+    order = `${finalizedOnly(sortField, sortField.sort || sortField.select)} ${display.sort_dir === "desc" ? "DESC" : "ASC"}, pe.employee_id ASC`;
   }
 
   const tailParams = [];
@@ -345,6 +368,8 @@ module.exports = {
   presentTotals,
   columnsOf,
   joinsFor,
+  finalizedOnly,
+  FINALIZED,
   has,
   mayUseField,
 };

@@ -135,16 +135,17 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
 
   after(() => new Promise((res) => (pool ? pool.end(res) : res())));
 
-  it("every catalogue field, selected together, is valid SQL; only approved rows of the month are reported", async () => {
+  it("every catalogue field, selected together, is valid SQL; every payrun employee of the month is reported", async () => {
     const catalogue = require("../constants/payroll_report_catalogue");
     const keys = catalogue.FIELDS.map((f) => f.key);
     const chunks = [];
     for (let i = 0; i < keys.length; i += 60) chunks.push(keys.slice(i, i + 60));
     for (const field_keys of chunks) {
       const preview = await service.preview(ADMIN, { report_type: "PAYROLL_REGISTER", year: 2026, month: 9, field_keys }, null);
-      assert.equal(preview.matching_count, 2);
-      assert.equal(preview.rows.length, 2);
+      assert.equal(preview.matching_count, 3);
+      assert.equal(preview.rows.length, 3);
       assert.equal(preview.not_finalized_count, 1);
+      assert.equal(preview.reconciliation.reconciled, true);
     }
   });
 
@@ -168,7 +169,7 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.deepEqual(months.map((m) => [m.year, m.month, m.finalized, m.payrun_employees]), [[2026, 10, 1, 1], [2026, 9, 2, 3]]);
     assert.deepEqual((await service.listMonths(ADMIN, [])).length, 0);
     const ot = await service.preview(ADMIN, { report_type: "OT", year: 2026, month: 9 }, null);
-    assert.equal(ot.matching_count, 2);
+    assert.equal(ot.matching_count, 3, "the unapproved row with OT is listed, figures blank");
   });
 
   it("layouts, copy-previous and defaults persist; the built-in templates are seeded once", async () => {
@@ -188,15 +189,80 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     await service.deleteTemplate(ADMIN, mine.template_id);
   });
 
-  it("statutory reads, files and the new export formats work against the real tables", async () => {
+  it("statutory files are all-or-nothing against the real tables, and the new export formats are accepted", async () => {
     const epf = await service.epfValidation(ADMIN, { year: 2026, month: 9 }, null);
     assert.deepEqual(epf.summary, { considered: 3, ready: 1, blocked: 2 });
-    const ecr = await service.ecrFile(ADMIN, { year: 2026, month: 9, acknowledge_blocked: true }, null);
-    assert.ok(ecr.buffer.toString().startsWith("100200300400#~#ASHA#~#20000#~#15000"));
-    const esi = await service.esicFile(ADMIN, { year: 2026, month: 9, acknowledge_blocked: true }, null);
-    assert.ok(esi.buffer.length > 0);
+    await assert.rejects(service.ecrFile(ADMIN, { year: 2026, month: 9 }, null), (e) => e.code === "BLOCKED_EMPLOYEES");
+    await assert.rejects(service.esicFile(ADMIN, { year: 2026, month: 9 }, null), (e) => e.code === "BLOCKED_EMPLOYEES");
+    // Scoped to the one complete employee's outlet... employee 3 (not approved) is
+    // in outlet 1 too, so the outlet-1 file is still refused - nobody is left out.
+    await assert.rejects(service.ecrFile(ADMIN, { year: 2026, month: 9 }, [1]), (e) => e.detail.blocked.map((b) => b.employee_id).join() === "3");
+    // October: one approved member with a UAN - the file is generated.
+    const ecr = await service.ecrFile(ADMIN, { year: 2026, month: 10 }, null);
+    assert.equal(ecr.buffer.toString(), "100200300400#~#ASHA#~#20000#~#15000#~#15000#~#15000#~#1800#~#1250#~#550#~#1#~#0");
+    const esi = await service.esicFile(ADMIN, { year: 2026, month: 10 }, null);
+    assert.equal(esi.buffer.slice(0, 8).toString("hex"), "d0cf11e0a1b11ae1");
     await service.exportPdf(ADMIN, { report_type: "PAYROLL_REGISTER", year: 2026, month: 9 }, null);
     const formats = (await q("SELECT format FROM report_export_log ORDER BY export_id")).map((r) => r.format);
     assert.deepEqual(formats, ["ecr", "esic", "pdf"]);
+  });
+
+  /* ------------------------------------------------- reconciliation, real SQL */
+
+  const REGISTER = { report_type: "PAYROLL_REGISTER", year: 2026, month: 9, field_keys: ["employee_id", "gross_salary", "total_deductions", "net_pay", "payrun_status"] };
+  const payrunFromTables = async (storeClause = "") => {
+    const [r] = await q(`SELECT COUNT(*) n, SUM(c.status = 'APPROVED_LOCKED') fin,
+        SUM(IF(c.status = 'APPROVED_LOCKED', c.total_earnings, 0)) g, SUM(IF(c.status = 'APPROVED_LOCKED', c.total_employee_deductions, 0)) d,
+        SUM(IF(c.status = 'APPROVED_LOCKED', c.net_pay, 0)) np
+        FROM payrun_employee pe LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
+       WHERE pe.period_year = 2026 AND pe.period_month = 9 ${storeClause}`);
+    return { n: Number(r.n), fin: Number(r.fin), g: Number(r.g), d: Number(r.d), np: Number(r.np) };
+  };
+
+  it("RECONCILIATION: Payroll Report employee count == finalized payrun employee count; gross, deductions and net pay match", async () => {
+    const t = await payrunFromTables();
+    const p = await service.preview(ADMIN, REGISTER, null);
+    assert.equal(p.matching_count, t.n);
+    assert.equal(p.matching_count - p.not_finalized_count, t.fin);
+    assert.equal(p.totals.gross_salary, t.g);
+    assert.equal(p.totals.total_deductions, t.d);
+    assert.equal(p.totals.net_pay, t.np);
+    assert.equal(p.reconciliation.reconciled, true);
+    const scoped = await service.preview(ADMIN, REGISTER, [1]);
+    const ts = await payrunFromTables("AND pe.store_id = 1");
+    assert.equal(scoped.matching_count, ts.n);
+    assert.equal(scoped.totals.net_pay, ts.np);
+    assert.equal(scoped.reconciliation.reconciled, true);
+  });
+
+  it("a later employee-status change, transfer or resignation does not remove a payrun employee", async () => {
+    await q("UPDATE new_employee SET status = 0, resignation_date = '2026-10-15', store_id = 2, employee_name = 'Asha Renamed' WHERE employee_id = 1");
+    const p = await service.preview(ADMIN, { ...REGISTER, field_keys: ["employee_id", "employee_name", "outlet", "net_pay"] }, null);
+    assert.deepEqual(p.rows.map((r) => r.employee_id), [1, 2, 3]);
+    assert.deepEqual(p.rows[0], { employee_id: 1, employee_name: "Asha", outlet: "Outlet A", net_pay: 18087 });
+    assert.equal(p.reconciliation.reconciled, true);
+    // ...and the outlet scope is the payrun's outlet, not today's.
+    const scoped = await service.preview(ADMIN, REGISTER, [1]);
+    assert.ok(scoped.rows.some((r) => r.employee_id === 1));
+  });
+
+  it("an unapproved / later-unlocked employee stays in the report with blank figures and a status", async () => {
+    const p = await service.preview(ADMIN, REGISTER, null);
+    assert.deepEqual(p.rows[2], { employee_id: 3, gross_salary: null, total_deductions: null, net_pay: null, payrun_status: "Not approved & locked - figures not shown" });
+    assert.equal(p.row_status[2].status, "NOT_APPROVED");
+  });
+
+  it("a later attendance recalculation does not mutate a frozen payroll figure", async () => {
+    const fields = ["employee_id", "paid_days", "lop_days", "gross_salary", "net_pay", "present_days", "attendance_snapshot_status"];
+    const before = await service.preview(ADMIN, { ...REGISTER, field_keys: fields }, null);
+    assert.equal(before.rows[0].present_days, 25);
+    // Attendance for employee 1 is recalculated after payroll.
+    await q("UPDATE attendance_monthly_payroll SET attendance_days = 10, base_days = 20, calculated_at = '2026-11-01 09:00:00.000' WHERE attendance_monthly_payroll_id = 1");
+    await q("INSERT INTO attendance_day_calculation VALUES (1,'2026-09-04','ABSENT',NULL,NULL)");
+    const after = await service.preview(ADMIN, { ...REGISTER, field_keys: fields }, null);
+    for (const k of ["paid_days", "lop_days", "gross_salary", "net_pay"]) assert.equal(after.rows[0][k], before.rows[0][k], k);
+    assert.equal(after.rows[0].present_days, null, "the changed attendance is not shown as September's");
+    assert.equal(after.rows[0].attendance_snapshot_status, "Changed after payrun - not shown");
+    assert.equal(after.reconciliation.reconciled, true);
   });
 });

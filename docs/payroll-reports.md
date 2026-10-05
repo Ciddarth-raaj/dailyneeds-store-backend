@@ -30,42 +30,145 @@ Payroll → Reports. Month-wise reports built from the **finalized payrun**, wit
 
 A month with no layout of its own opens with the user's default template if they have one, and otherwise with the report type's built-in default columns. **Copy Columns from Previous Month** copies the user's most recent layout from an earlier month for that report type into the selected month. It does not create a template.
 
+## Population: the report reconciles to the payrun
+
+A report's rows are the month's **payrun employees** (`payrun_employee`, frozen at initialization), narrowed only by:
+
+- the caller's branch scope, applied to the payrun's own outlet,
+- the report type's population,
+- the user's filters.
+
+Nothing about the employee today can drop a row: a status change, a resignation, a transfer or a later lock change all leave the row in place.
+
+- **Payroll figures are shown only where that employee's calculation is `APPROVED_LOCKED`.** Any other payrun row stays in the report with its figures blank. *Payrun Status* says why ("Not calculated" or "Not approved & locked"), the screen marks the row, and the Excel/PDF header line states how many such rows there are.
+- **Totals are therefore finalized totals.** Every calculation figure goes through `finalizedOnly` (`utils/payroll_report_query.js`).
+- **The Payroll Register always reconciles to the payrun for the same month and scope.** The report's employee count equals the number of payrun employees, its finalized count equals the number of approved employees, and its Gross, Total Deductions and Net Pay totals equal the payrun's finalized totals. `repository/payroll_report.js#payrunTotals` computes the payrun side with its own SQL, independent of the report query builder. Every Payroll Register preview returns `reconciliation: { payrun, report, reconciled }`, and the screen shows the result. A mismatch is shown, never hidden.
+
 ## Data integrity: what each column shows
 
-Every query is pinned to `payrun_employee_calculation.status = 'APPROVED_LOCKED'` for the selected month. Opening a report runs SELECTs only. It never calls the payroll or attendance calculation and never writes a payrun table. Approved figures change only through the payrun's own unlock → recalculate → approve process.
+Opening a report runs SELECTs only. It never calls the payroll or attendance calculation and never writes a payrun table. Approved figures change only through the payrun's own unlock → recalculate → approve process.
 
 Each field declares its `source`, and the column picker shows it:
 
 | Source | Meaning |
 | --- | --- |
-| Finalized payrun | Stored on the approved calculation row: all earnings, deductions, net pay, PF/ESI wages and contributions, NCP days, paid days, OT. |
-| Payrun-time snapshot | Frozen on `payrun_employee` at initialization: name, outlet, designation, department ID, joining date, last working day, salary structure, UAN, PF number, ESI number. |
-| Attendance month read by the payrun | `attendance_monthly_payroll` / `attendance_day_calculation`: present, weekly off, absent, late, early out. These are shown **only while that attendance month is still the exact one the payrun read**, meaning `calculated_at` equals the stored `attendance_calculated_at`. If attendance is corrected after payroll, these cells are blank and *Attendance Snapshot Status* reads "Changed after payrun - not shown". A later correction never silently rewrites a finalized month. |
-| Current Employee Master | **Not snapshotted by the payrun, so these show today's value**: bank name, account number, IFSC, mobile, email, PAN, gender, date of birth, employment type, and every other `em_` field. |
+| Finalized payrun | Stored on the approved calculation row: earnings, deductions, net pay, PF/ESI wages and contributions, NCP days, paid days, OT. Blank for a row that is not approved & locked. |
+| Payrun-time snapshot | Frozen on `payrun_employee` at initialization: name, outlet, designation, department ID, joining date, last working day, salary structure, PF/ESI applicability, UAN, PF number, ESI number, pay type. |
+| Attendance month read by the payrun | `attendance_monthly_payroll` / `attendance_day_calculation`: present, weekly off, absent, late, early out. These are shown **only while that attendance month is still the exact one the payrun read**, meaning `calculated_at` equals the stored `attendance_calculated_at`. If attendance is recalculated after payroll, these cells are blank and *Attendance Snapshot Status* reads "Changed after payrun - not shown". Frozen figures such as paid days, LOP and net pay never change. |
+| Current Employee Master | **Not snapshotted by the payrun, so these show today's value, labelled "Current master"**: bank name, account number, IFSC, mobile, email, PAN, gender, date of birth, employment type, and every other `em_` field. |
 
 Specific notes:
 
 - **UAN and ESI/IP number** use the payrun snapshot. When the snapshot is empty they fall back to the current master, the same rule the ECR already applies.
 - **Department** is snapshotted as an ID and displayed under the department's current name.
-- **Basic / HRA / Conveyance / Special Allowance (earned)** are the payslip's own whole-rupee split of the stored Salary Earnings (`utils/payslip_snapshot.js#balancedComponents`). The *(structure)* columns are the monthly structure.
-- **LOP Days** is the stored NCP days, i.e. salary base days less paid days. **Payable Days** is Paid Days + LOP Days.
+- **Basic / HRA / Conveyance / Special Allowance (earned)** are the payslip's own whole-rupee split of the stored Salary Earnings. The *(structure)* columns are the monthly structure.
+- **LOP Days** is the stored NCP days. **Payable Days** is Paid Days + LOP Days.
 - **Not available**: DnDS stores no monthly figure for TDS, loan recovery, penalty, holidays, paid leave or permission counts, so these columns do not exist rather than showing invented zeros.
 
 ## Statutory files
 
-The statutory files are independent of the visible report columns. Neither endpoint accepts a column list.
+Both files are generated on the server from the stored payrun rows. Each has a fixed layout that is independent of the visible report columns: neither endpoint accepts a column list.
 
-- **Download ECR File** (`POST /reports/payroll/epf/ecr`) produces the ECR 2.0 text (`#~#`, 11 fields) from the stored approved calculations.
-- **Download Contribution File** (`POST /reports/payroll/esi/contribution-file`) produces the ESIC monthly contribution sheet. It has six fixed columns: IP number (as text), IP name (letters and spaces), days, total monthly wages, zero-day reason code and last working day (DD/MM/YYYY). The sheet is written as `.xlsx`. The ESIC portal template is the older `.xls` format, so open the file in Excel and use *Save As → Excel 97-2003 Workbook* before uploading if the portal rejects `.xlsx`.
+### All or nothing
 
-**Validation.** Every relevant employee ends up either Ready or Blocked, so `ready + blocked = considered`. Each Blocked employee lists every reason.
+The statutory population is every payrun employee the month makes relevant:
 
-- **EPF reasons**: not calculated, not approved, incomplete, PF/EPS unresolved, UAN missing, UAN invalid, NCP days not stored or outside the month, negative wages, EPS/EDLI wages not stored, contribution mismatch (the EPFO arithmetic checks).
-- **ESI reasons**: not calculated, not approved, ESI unresolved, IP number missing or not 10 digits, days outside the month, wages missing, zero days or wages without a reason code, invalid reason code, last working day missing (required for reason codes 2, 3, 4, 5, 6 and 10), contribution mismatch.
+- **EPF**: the stored PF status is not `NOT_APPLICABLE`, or the snapshot says PF applies when no calculation is stored.
+- **ESI**: the same rule, using the ESI status and ESI applicability.
 
-**Zero-day reasons.** A last working day inside or before the month (`payrun_employee.resignation_date`) gives reason 2 automatically. Any other zero-day employee needs a reason chosen on the ESI tab. That choice is sent with the request and is not stored.
+Every one of them is either **Ready** or **Blocked**, so `ready + blocked = considered`. Each blocked employee is listed with every reason.
 
-**Downloading with blocked employees.** If anybody is blocked, the download is refused with HTTP 409 and the blocked list. It only proceeds with `acknowledge_blocked: true`, and then the file contains the ready employees only. The counts are returned in `X-Statutory-Ready` / `X-Statutory-Blocked` and written to the audit row. Blocked employees are never left out silently.
+**If even one employee is blocked, the file is refused** (HTTP 409 `BLOCKED_EMPLOYEES`, with the counts and the blocked list), and the download button stays disabled until the issues are resolved. **There is no "ready employees only" option.** The routes accept only the month (plus ESI zero-day reasons); a request carrying any other field, such as a partial-file flag or a column list, is rejected with 400.
+
+The ordinary Excel/PDF EPF and ESI reports still download, with their validation-status columns.
+
+### EPFO ECR - `Download ECR File` (`POST /reports/payroll/epf/ecr`)
+
+**Format**: plain text, one line per member, no header line, fields separated by `#~#`, eleven fields in the order below. All amounts and counts are whole numbers.
+
+| # | ECR field | DnDS source (stored, approved calculation) |
+| --- | --- | --- |
+| 1 | UAN | Payrun snapshot UAN; current UAN if the snapshot has none. Must be 12 digits. |
+| 2 | MEMBER NAME | Payrun snapshot name, upper case. Letters, spaces and `.` only; other characters are replaced by a space. Must start with a letter and be at most 85 characters, or the member is blocked (never truncated). |
+| 3 | GROSS WAGES | `total_earnings`, nearest rupee |
+| 4 | EPF WAGES | `pf_wage`, nearest rupee |
+| 5 | EPS WAGES | `eps_wage`, nearest rupee |
+| 6 | EDLI WAGES | `edli_wage`, nearest rupee |
+| 7 | EPF CONTRI REMITTED (EE) | `employee_pf` |
+| 8 | EPS CONTRI REMITTED | `employer_eps` |
+| 9 | EPF EPS DIFF REMITTED (ER) | `employer_epf` |
+| 10 | NCP DAYS | `ncp_days`. Blocked if not stored, or outside the month. When EPF wages are 0 it must equal the days in the month. |
+| 11 | REFUND OF ADVANCES | `0`. DnDS records no refund of EPF advances, so this is a stated value, not a guess. |
+
+**Blocking reasons**: not calculated, not approved & locked, incomplete, PF/EPS unresolved, UAN missing, UAN invalid, member name invalid or too long, NCP days not stored, NCP days outside the month, NCP days not matching zero wages, negative wages, EPS/EDLI wages not stored, contribution mismatch (EE = 12% of EPF wages, EPS = 8.33% of EPS wages, EPS and EDLI wages ≤ EPF wages, ER difference = EE − EPS, each within ₹1).
+
+### ESIC monthly contribution - `Download Contribution File` (`POST /reports/payroll/esi/contribution-file`)
+
+**Format**: a real **Excel 97-2003 `.xls`** workbook (BIFF8 / OLE2), so it does not need converting before upload. It has one sheet, one header row and one row per IP:
+
+| # | Column | DnDS source | Rule |
+| --- | --- | --- | --- |
+| 1 | IP Number (10 Digits) | Payrun snapshot ESI number; current one if the snapshot has none | Exactly 10 digits. Written as a text cell. |
+| 2 | IP Name( Only alphabets and space ) | Payrun snapshot name | Letters and spaces only, upper case. Blocked if no letters remain. |
+| 3 | No of Days for which wages paid/payable during the month | `salary_days` | Whole number, 0 to the days in the month |
+| 4 | Total Monthly Wages | `esi_wage` (as stored) | Must be present and not negative |
+| 5 | Reason Code for Zero workings days(...) | See mapping below | Numeric; 0 for all other reasons |
+| 6 | Last Working Day( Format DD/MM/YYYY or DD-MM-YYYY) | Payrun snapshot last working day, or the date chosen on the ESI tab | `DD/MM/YYYY`, zero-padded, as a text cell. Given **only** for codes 2, 3, 4, 5, 6 and 10; blank for every other code. |
+
+**Reason codes and their mapping to DnDS.** DnDS has no reason codes of its own:
+
+- An employee whose payrun-snapshot last working day falls within or before the month gets **2 - Left Service**, with that date, automatically.
+- Any other employee with zero days or zero wages is blocked (`ZERO_REASON_MISSING`) until a code is chosen on the ESI tab. The choice applies to that download only, is not stored, and is validated again on the server.
+- Employees with days and wages get **0**.
+
+| Code | ESIC reason | Last working day |
+| --- | --- | --- |
+| 0 | Without Reason | blank |
+| 1 | On Leave | blank |
+| 2 | Left Service | required |
+| 3 | Retired | required |
+| 4 | Out of Coverage | required |
+| 5 | Expired | required |
+| 6 | Non Implemented Area | required |
+| 7 | Compliance by Immediate Employer | blank |
+| 8 | Suspension of Work | blank |
+| 9 | Strike / Lockout | blank |
+| 10 | Retrenchment | required |
+| 11 | No Work | blank |
+| 12 | Does Not Belong To This Employer | blank |
+
+**Blocking reasons**: not calculated, not approved & locked, incomplete, ESI unresolved, IP number missing or not 10 digits, IP name invalid, days outside the month, wages missing or negative, zero days/wages without a reason, invalid reason code, last working day missing or after the month, contribution mismatch (employee 0.75% and employer 3.25% of wages within ₹1; employee 0 is allowed for the low-wage exemption).
+
+### Sources, and what is still to be confirmed
+
+The layouts above were checked against official pages as far as this build environment allowed. Its network policy blocks `epfindia.gov.in`, `esic.gov.in` and `esic.in`, so the full documents could not be downloaded; the following was read from those official pages through search:
+
+- **EPFO** - *Electronic Challan cum Return (ECR) File Format (for Employers)*, `epfindia.gov.in/site_docs/PDFs/OnlineECR_PDFs/ECR_ForEmployers_FileStructure.pdf`, and *Introduction - ECR Version II*, `.../EPFOUnifiedPortal/Introduction_ECR2.0.pdf`. Confirmed:
+  - plain text, one line per member, `#~#` separator;
+  - eleven fields in the monthly file (eight in the arrear file);
+  - member identifiers (UAN, name), return fields (gross, EPF, EPS, EDLI wages, NCP days) and remittance fields (EE share, EPS, ER share);
+  - no decimals;
+  - name: at most 85 characters, starts with a letter, no special character except `.`;
+  - NCP = days in the month when wages are 0;
+  - EDLI wages equal EPF wages up to the EDLI ceiling.
+- **ESIC** - *Instructions & Reason Codes* sample template, `esic.in/InsuranceGlobalWebV4/App_Themes/Help/MC_Template1.xls`; the Monthly Contribution portal; and the circular *Implementation of Provision to Upload Multiple Excel Sheets*, `esic.gov.in/attachments/circularfile/0d84038f847b3a37178d824ca3d5992b.pdf`. Confirmed:
+  - the upload is an Excel 97-2003 `.xls`;
+  - IP name is letters and space only;
+  - reason code is numeric, 0 for all other reasons;
+  - the reason list (On Leave … Does Not Belong To This Employer, with no "Duplicate IP");
+  - last working day only for Left Service, Retired, Out of Coverage, Expired, Non-Implemented Area and Retrenchment;
+  - date format `DD/MM/YYYY` or `DD-MM-YYYY`, zero-padded.
+
+**To confirm against the full documents** before relying on the files in production. All of these are single constants in `utils/payroll_statutory_files.js`:
+
+1. The template's numeric reason codes 0-12 (the reason list itself is confirmed).
+2. The exact header text of the six template columns.
+3. Whether *Total Monthly Wages* may carry paise. The file writes the stored wage, so paise appear when the stored wage has them.
+4. Whether the portal requires a particular sheet name. The file uses `Sheet1`.
+5. Whether the ECR member name must be upper case. It is written upper case.
+6. The EDLI wage ceiling after the 2026 EPFO wage-ceiling revision. EDLI wages are taken from the stored calculation, and only checked to be ≤ EPF wages.
+
+The `.xls` is written with SheetJS (`xlsx` 0.18.5). Its published advisories concern *reading* untrusted files; this code only writes.
 
 ## Permissions (no new keys)
 

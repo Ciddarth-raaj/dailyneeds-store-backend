@@ -520,28 +520,83 @@ class PayrollReportService {
     const rowsQ = Q.buildQuery({ ...args, mode: "rows", limit: pageSize, offset: (page - 1) * pageSize });
     const totalsQ = req.display.show_totals ? Q.buildQuery({ ...args, mode: "totals" }) : null;
 
-    const [countRows, rows, totalRows, notFinalized, ctx] = await Promise.all([
+    const [countRows, rows, totalRows, ctx, reconciliation] = await Promise.all([
       this.repo.query(count.sql, count.params),
       this.repo.query(rowsQ.sql, rowsQ.params),
       totalsQ ? this.repo.query(totalsQ.sql, totalsQ.params) : Promise.resolve(null),
-      this.repo.countNotFinalized({ year: req.period.year, month: req.period.month, store_ids }),
       this._postContext(req, store_ids),
+      req.type.key === REPORT_TYPES.PAYROLL_REGISTER.key ? this._payrunReconciliation(req.period, store_ids) : Promise.resolve(null),
     ]);
 
     const post = this._post(ctx);
+    const counted = countRows.length ? countRows[0] : {};
+    const matching = Number(counted.matching_count) || 0;
     return {
       report_type: req.type.key,
       period: { year: req.period.year, month: req.period.month, label: monthLabel(req.period.year, req.period.month) },
       columns: Q.columnsOf(req.fields),
       rows: rows.map((r) => Q.presentRow(r, req.fields, post)),
+      // Per row, parallel to `rows`: is this payrun row finalized, and if not
+      // what it is. Never an export column - the screen marks the row.
+      row_status: rows.map((r) => ({ status: r._payrun_status, label: catalogue.PAYRUN_STATUS_LABEL[r._payrun_status] || null })),
       totals: totalRows ? Q.presentTotals(totalRows[0], req.fields) : null,
       display: req.display,
       filters: req.filters,
-      matching_count: countRows.length ? Number(countRows[0].matching_count) : 0,
-      not_finalized_count: notFinalized,
+      matching_count: matching,
+      // Payrun employees IN this report whose figures are blank because their
+      // month is not approved & locked. They are listed, not dropped.
+      not_finalized_count: matching - (Number(counted.finalized_count) || 0),
+      reconciliation,
       page,
       page_size: pageSize,
       statutory: ctx.epf ? { summary: ctx.epf.summary } : ctx.esi ? { summary: ctx.esi.summary } : null,
+    };
+  }
+
+  /**
+   * PAYROLL REGISTER == FINALIZED PAYRUN, for the month and the caller's scope.
+   *
+   * Two independent reads that must agree: the payrun's own totals, straight
+   * from `payrun_employee` + its approved calculations
+   * (`repository/payroll_report.js#payrunTotals`), and the Payroll Register
+   * as the report builder produces it (no user filters, same scope). The
+   * screen shows the result; a mismatch is reported, never hidden.
+   */
+  async _payrunReconciliation(period, store_ids) {
+    const fields = ["gross_salary", "total_deductions", "net_pay"].map((k) => catalogue.getField(k));
+    const args = {
+      reportType: REPORT_TYPES.PAYROLL_REGISTER.key,
+      fields,
+      filters: Q.resolveFilters({}),
+      period,
+      store_ids,
+      display: Q.resolveDisplay({}),
+    };
+    const count = Q.buildQuery({ ...args, mode: "count" });
+    const totals = Q.buildQuery({ ...args, mode: "totals" });
+    const [payrun, [reportCount], [reportTotals]] = await Promise.all([
+      this.repo.payrunTotals({ year: period.year, month: period.month, store_ids }),
+      this.repo.query(count.sql, count.params),
+      this.repo.query(totals.sql, totals.params),
+    ]);
+    const t = Q.presentTotals(reportTotals, fields);
+    const report = {
+      employees: Number(reportCount && reportCount.matching_count) || 0,
+      finalized: Number(reportCount && reportCount.finalized_count) || 0,
+      gross: t.gross_salary,
+      deductions: t.total_deductions,
+      net_pay: t.net_pay,
+    };
+    const same = (a, b) => Math.round(Number(a) * 100) === Math.round(Number(b) * 100);
+    return {
+      payrun,
+      report,
+      reconciled:
+        payrun.employees === report.employees &&
+        payrun.finalized === report.finalized &&
+        same(payrun.gross, report.gross) &&
+        same(payrun.deductions, report.deductions) &&
+        same(payrun.net_pay, report.net_pay),
     };
   }
 
@@ -570,6 +625,7 @@ class PayrollReportService {
       ...req,
       rows: rows.map((r) => Q.presentRow(r, req.fields, post)),
       totals: totalRows ? Q.presentTotals(totalRows[0], req.fields) : null,
+      not_finalized_count: matching - (Number(countRow && countRow.finalized_count) || 0),
     };
   }
 
@@ -675,33 +731,36 @@ class PayrollReportService {
   }
 
   /**
-   * NEVER A SILENT PARTIAL FILE. With any employee blocked the download is
-   * refused (409, with the blocked list) unless the caller explicitly
-   * acknowledges generating for the ready employees only - and then the
-   * blocked count is in the response headers and the audit row.
+   * A STATUTORY FILE IS ALL OR NOTHING. If any employee who belongs in the
+   * statutory population is blocked, the file is refused (409, with the
+   * Ready / Blocked counts and every blocked employee and reason) until the
+   * issues are resolved. There is no "ready employees only" path: a
+   * statutory submission never omits a member, silently or on request.
    */
-  _gate(validation, acknowledged) {
-    if (validation.summary.ready === 0) {
-      throw new PayrollReportError(422, "NOTHING_READY", "No employee is ready for this statutory file", {
-        summary: validation.summary,
-        blocked: validation.blocked,
-      });
+  _gate(validation) {
+    if (validation.summary.blocked > 0) {
+      throw new PayrollReportError(
+        409,
+        "BLOCKED_EMPLOYEES",
+        `${validation.summary.blocked} employee(s) are blocked. Resolve every blocked employee before the file can be generated.`,
+        { summary: validation.summary, blocked: validation.blocked }
+      );
     }
-    if (validation.summary.blocked > 0 && !acknowledged) {
-      throw new PayrollReportError(409, "BLOCKED_EMPLOYEES", `${validation.summary.blocked} employee(s) are blocked. Resolve them, or confirm generating the file for the ${validation.summary.ready} ready employee(s) only.`, {
+    if (validation.summary.ready === 0) {
+      throw new PayrollReportError(422, "NOTHING_READY", "No employee is in the statutory population for this month", {
         summary: validation.summary,
         blocked: validation.blocked,
       });
     }
   }
 
-  async ecrFile(actor, { year, month, acknowledge_blocked }, store_ids) {
+  async ecrFile(actor, { year, month }, store_ids) {
     this._assertStatutory(actor);
     const period = Q.periodOf(year, month);
     const rows = await this.repo.listStatutoryRows({ year: period.year, month: period.month, store_ids });
     const v = this._epf(rows, period);
-    this._gate(v, acknowledge_blocked === true);
-    await this._audit(actor, { dataset_key: REPORT_TYPES.EPF.dataset_key, field_keys: ["ECR_2_0"], period, filters: { blocked: v.summary.blocked }, row_count: v.summary.ready }, "ecr");
+    this._gate(v);
+    await this._audit(actor, { dataset_key: REPORT_TYPES.EPF.dataset_key, field_keys: ["EPFO_ECR"], period, filters: {}, row_count: v.summary.ready }, "ecr");
     return {
       buffer: Buffer.from(v.text, "utf8"),
       filename: `ECR_${MONTH_SHORT[period.month - 1]}-${period.year}.txt`,
@@ -709,17 +768,17 @@ class PayrollReportService {
     };
   }
 
-  async esicFile(actor, { year, month, acknowledge_blocked, overrides }, store_ids) {
+  async esicFile(actor, { year, month, overrides }, store_ids) {
     this._assertStatutory(actor);
     const period = Q.periodOf(year, month);
     const rows = await this.repo.listStatutoryRows({ year: period.year, month: period.month, store_ids });
     const v = this._esi(rows, period, this._overrides(overrides));
-    this._gate(v, acknowledge_blocked === true);
-    const buffer = await buildEsicWorkbook(v);
-    await this._audit(actor, { dataset_key: REPORT_TYPES.ESI.dataset_key, field_keys: ["ESIC_MC"], period, filters: { blocked: v.summary.blocked }, row_count: v.summary.ready }, "esic");
+    this._gate(v);
+    const buffer = statutoryFiles.buildEsicXls(v);
+    await this._audit(actor, { dataset_key: REPORT_TYPES.ESI.dataset_key, field_keys: ["ESIC_MC"], period, filters: {}, row_count: v.summary.ready }, "esic");
     return {
       buffer,
-      filename: `ESIC_Contribution_${MONTH_SHORT[period.month - 1]}-${period.year}.xlsx`,
+      filename: `ESIC_Contribution_${MONTH_SHORT[period.month - 1]}-${period.year}.xls`,
       summary: v.summary,
     };
   }
@@ -748,11 +807,17 @@ const describeFilters = (filters) => {
   return parts.length ? parts.join(", ") : "None";
 };
 
+/** What the figures are, said on the file itself - including any row whose figures are blank. */
+const provenance = (data) =>
+  data.not_finalized_count
+    ? `Finalized payrun data. ${data.not_finalized_count} payrun employee(s) are not approved & locked: listed with blank figures.`
+    : "Finalized payrun data.";
+
 async function buildWorkbook(data) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(data.type.label.slice(0, 31), { views: [{ state: "frozen", ySplit: 4 }] });
   ws.addRow([`${data.type.label} - ${monthLabel(data.period.year, data.period.month)}`]).font = { bold: true, size: 13 };
-  ws.addRow([`Finalized payrun data. Filters: ${safeText(describeFilters(data.filters))}. Rows: ${data.rows.length}.`]);
+  ws.addRow([`${provenance(data)} Filters: ${safeText(describeFilters(data.filters))}. Rows: ${data.rows.length}.`]);
   ws.addRow([]);
   const header = ws.addRow(data.fields.map((f) => f.label));
   header.font = { bold: true };
@@ -803,32 +868,13 @@ th{background:#eee;text-align:left} .n{text-align:right} tr.t td{font-weight:bol
 thead{display:table-header-group} tr{page-break-inside:avoid}
 </style></head><body>
 <h1>${escapeHtml(data.type.label)} - ${escapeHtml(monthLabel(data.period.year, data.period.month))}</h1>
-<p class="m">Finalized payrun data. Filters: ${escapeHtml(describeFilters(data.filters))}. Rows: ${data.rows.length}.</p>
+<p class="m">${escapeHtml(provenance(data))} Filters: ${escapeHtml(describeFilters(data.filters))}. Rows: ${data.rows.length}.</p>
 <table><thead><tr>${th}</tr></thead><tbody>${body}${totals}</tbody></table>
 </body></html>`;
-}
-
-/** The ESIC monthly contribution sheet: the fixed template columns, IP numbers as text. */
-async function buildEsicWorkbook(v) {
-  const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("Sheet1");
-  ws.addRow(v.headers).font = { bold: true };
-  ws.getColumn(1).numFmt = "@";
-  ws.getColumn(6).numFmt = "@";
-  for (const r of v.file_rows) {
-    const row = ws.addRow(r);
-    row.getCell(1).value = String(r[0]);
-    row.getCell(1).numFmt = "@";
-  }
-  ws.columns.forEach((c, i) => {
-    c.width = [16, 30, 14, 14, 14, 18][i] || 14;
-  });
-  return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
 module.exports = (reportRepo, templateRepo, deps) => new PayrollReportService(reportRepo, templateRepo, deps);
 module.exports.PayrollReportService = PayrollReportService;
 module.exports.buildWorkbook = buildWorkbook;
 module.exports.buildPdfHtml = buildPdfHtml;
-module.exports.buildEsicWorkbook = buildEsicWorkbook;
 module.exports.LIMITS = LIMITS;

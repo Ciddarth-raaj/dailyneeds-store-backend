@@ -64,7 +64,7 @@ const overridesSchema = Joi.array()
   .items(
     Joi.object({
       employee_id: Joi.number().integer().positive().required(),
-      reason_code: Joi.number().integer().min(0).max(13).allow(null).optional(),
+      reason_code: Joi.number().integer().min(0).max(12).allow(null).optional(),
       last_working_day: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).allow(null, "").optional(),
     })
   )
@@ -156,7 +156,7 @@ class PayrollReportRoutes {
     res.setHeader("Content-Type", contentType);
     res.setHeader("Content-Disposition", `attachment; filename="${file.filename}"`);
     res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition, X-Statutory-Ready, X-Statutory-Blocked");
+    res.setHeader("Access-Control-Expose-Headers", "Content-Disposition, X-Statutory-Members");
     for (const [k, v] of Object.entries(extraHeaders)) res.setHeader(k, String(v));
     res.end(file.buffer);
   }
@@ -340,14 +340,13 @@ class PayrollReportRoutes {
       "/epf/ecr",
       canStatutory,
       handle(async (req, res) => {
-        const body = this.validate(req.body, { ...monthSchema, acknowledge_blocked: Joi.boolean().optional() });
+        // The month and nothing else: no column list, and no way to ask for a
+        // partial file - a body naming either is refused by Joi.
+        const body = this.validate(req.body, monthSchema);
         const store_ids = await this._scope(req, res);
         if (store_ids === undefined) return;
         const file = await this.service.ecrFile(await actor(req), body, store_ids);
-        this._send(res, file, "text/plain; charset=utf-8", {
-          "X-Statutory-Ready": file.summary.ready,
-          "X-Statutory-Blocked": file.summary.blocked,
-        });
+        this._send(res, file, "text/plain; charset=utf-8", { "X-Statutory-Members": file.summary.ready });
       })
     );
     r.post(
@@ -366,16 +365,13 @@ class PayrollReportRoutes {
       handle(async (req, res) => {
         const body = this.validate(req.body, {
           ...monthSchema,
-          acknowledge_blocked: Joi.boolean().optional(),
           overrides: overridesSchema.optional(),
         });
         const store_ids = await this._scope(req, res);
         if (store_ids === undefined) return;
         const file = await this.service.esicFile(await actor(req), body, store_ids);
-        this._send(res, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", {
-          "X-Statutory-Ready": file.summary.ready,
-          "X-Statutory-Blocked": file.summary.blocked,
-        });
+        // Excel 97-2003 (.xls), the format the ESIC portal accepts.
+        this._send(res, file, "application/vnd.ms-excel", { "X-Statutory-Members": file.summary.ready });
       })
     );
   }

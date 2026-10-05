@@ -1,7 +1,7 @@
 /**
  * Payroll Reports - the report types.
  *
- * Each type is a POPULATION (which finalized payrun rows it covers) plus a
+ * Each type is a POPULATION (which of the month's PAYRUN employees it covers) plus a
  * DEFAULT column set. Every type reads the same catalogue and the same one
  * query path (`utils/payroll_report_query.js`); a type adds a WHERE condition
  * from the fixed text below and nothing else.
@@ -34,7 +34,10 @@ const REPORT_TYPES = {
     dataset_key: "PAYROLL_EPF",
     // PF members and the unresolved: a pending PF question is exactly who an
     // EPF report has to show, not hide.
-    population: "COALESCE(c.pf_status, '') <> 'NOT_APPLICABLE'",
+    // The SAME rule as the ECR's statutory population
+    // (`utils/payroll_statutory_files.js#validateEpf`): the stored PF status
+    // where the employee has a calculation, the payrun snapshot otherwise.
+    population: "IF(c.payrun_calculation_id IS NULL, COALESCE(pe.pf_applicable, 0) = 1, COALESCE(c.pf_status, '') <> 'NOT_APPLICABLE')",
     statutory_file: "ECR",
     default_fields: [
       "employee_id", "employee_name", "uan", "pf_member_id", "gross_salary", "epf_wages", "eps_wages",
@@ -45,7 +48,7 @@ const REPORT_TYPES = {
     key: REPORT_TYPE.ESI,
     label: "ESI",
     dataset_key: "PAYROLL_ESI",
-    population: "COALESCE(c.esi_status, '') <> 'NOT_APPLICABLE'",
+    population: "IF(c.payrun_calculation_id IS NULL, COALESCE(pe.esi_applicable, 0) = 1, COALESCE(c.esi_status, '') <> 'NOT_APPLICABLE')",
     statutory_file: "ESIC",
     default_fields: [
       "employee_id", "employee_name", "esi_number", "esi_days", "esi_wages", "employee_esi", "employer_esi",
@@ -56,14 +59,14 @@ const REPORT_TYPES = {
     key: REPORT_TYPE.BANK,
     label: "Bank",
     dataset_key: "PAYROLL_BANK",
-    population: "c.pay_type = 'BANK'",
+    population: "IF(c.status = 'APPROVED_LOCKED', c.pay_type, pe.pay_type) = 'BANK'",
     default_fields: ["employee_id", "employee_name", "bank_name", "bank_account_number", "bank_ifsc", "net_pay"],
   },
   [REPORT_TYPE.OT]: {
     key: REPORT_TYPE.OT,
     label: "OT",
     dataset_key: "PAYROLL_OT",
-    population: "c.approved_ot_minutes > 0",
+    population: "COALESCE(c.approved_ot_minutes, 0) > 0",
     default_fields: ["employee_id", "employee_name", "outlet", "approved_ot_hours", "approved_ot_minutes", "ot_hourly_rate", "ot_amount", "payroll_month"],
   },
   [REPORT_TYPE.DEDUCTIONS]: {

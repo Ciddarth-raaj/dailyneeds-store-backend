@@ -1,3 +1,4 @@
+const XLSX = require("xlsx");
 const epfoEcr = require("./epfo_ecr");
 const statutory = require("../config/statutory");
 
@@ -14,9 +15,9 @@ const statutory = require("../config/statutory");
  *
  * Every employee the month makes relevant is either READY or BLOCKED, and a
  * blocked employee carries every reason. `ready + blocked = considered`,
- * always. The file can only ever be generated from the ready set, and the
- * service refuses to do even that unless the caller has seen and accepted
- * the blocked list (see `usecase/payroll_report_service.js`).
+ * always. A file is generated only when NOBODY is blocked (see
+ * `usecase/payroll_report_service.js#_gate`): there is no partial,
+ * ready-employees-only file.
  *
  * The EPF side wraps `utils/epfo_ecr.js#buildEcr` - the same builder the
  * payrun's own ECR uses - so the two can never disagree on a line. It adds
@@ -35,6 +36,10 @@ const REASON = {
   RECALCULATION_REQUIRED: "EPS / EDLI wages were not stored; recalculate before filing",
   NCP_MISSING: "NCP days were not stored for this month",
   NCP_INVALID: "NCP days are outside the month",
+  NCP_ZERO_WAGES: "EPF wages are 0, so NCP days must equal the days in the month",
+  NAME_INVALID: "Member name must start with a letter and contain only letters, spaces and '.'",
+  NAME_TOO_LONG: "Member name is longer than 85 characters",
+  IP_NAME_INVALID: "IP name must contain letters (only letters and spaces are allowed)",
   WAGES_INVALID: "A wage value is missing or negative",
   CONTRIBUTION_MISMATCH: "Contribution does not match the wages",
   ESI_PENDING: "ESI status is unresolved for this month",
@@ -53,6 +58,62 @@ const isBlank = (v) => v === null || v === undefined || String(v).trim() === "";
 const num = (v) => (isBlank(v) ? null : Number(v));
 
 /* ================================================================= EPF ==== */
+
+/**
+ * THE EPFO ECR (Electronic Challan cum Return) MONTHLY FILE - the fixed
+ * layout. Source: EPFO, "Electronic Challan cum Return (ECR) File Format (for
+ * Employers)" and "Introduction - ECR Version II" (epfindia.gov.in,
+ * site_docs/PDFs/OnlineECR_PDFs/ECR_ForEmployers_FileStructure.pdf and
+ * site_docs/PDFs/EPFOUnifiedPortal/Introduction_ECR2.0.pdf):
+ *
+ *   plain text, one DETAIL line per member, fields separated by #~#
+ *   (hash tilde hash), ELEVEN fields in this order, no header line;
+ *   every amount and count is a whole number - no decimals, no separators;
+ *   member name: max 85 characters, first character a letter, no special
+ *   character other than '.';
+ *   NCP days: days in the month for which wages are not due; where the wages
+ *   declared are 0, NCP days = number of days in the month.
+ *
+ * Each field is filled from the STORED approved calculation - see
+ * `utils/epfo_ecr.js#buildEcr`, which computes the member figures, and
+ * `docs/payroll-reports.md` for the field-by-field mapping. REFUND OF
+ * ADVANCES is a mandatory field of the monthly layout; DnDS records no refund
+ * of EPF advances, so it is the number 0 - a stated fact, not a default for
+ * a value DnDS holds.
+ */
+const ECR_FIELDS = [
+  ["uan", "UAN"],
+  ["member_name", "MEMBER NAME"],
+  ["gross_wages", "GROSS WAGES"],
+  ["epf_wages", "EPF WAGES"],
+  ["eps_wages", "EPS WAGES"],
+  ["edli_wages", "EDLI WAGES"],
+  ["ee_share", "EPF CONTRI REMITTED"],
+  ["eps_share", "EPS CONTRI REMITTED"],
+  ["er_epf_share", "EPF EPS DIFF REMITTED"],
+  ["ncp_days", "NCP DAYS"],
+  ["refund_of_advances", "REFUND OF ADVANCES"],
+];
+const ECR_SEPARATOR = epfoEcr.SEP;
+const ECR_NAME_MAX = 85;
+
+/**
+ * The member name as the ECR allows it: letters, spaces and '.', upper case.
+ * Other punctuation (a comma, a hyphen, a digit) is replaced by a space - the
+ * letters of the name are never changed - and a name that still does not
+ * start with a letter, or exceeds 85 characters, is BLOCKED, never truncated.
+ */
+const ecrMemberName = (name) =>
+  String(name || "")
+    .normalize("NFKD")
+    .replace(/[^A-Za-z. ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toUpperCase();
+
+function ecrLine(member) {
+  return ECR_FIELDS.map(([key]) => member[key]).join(ECR_SEPARATOR);
+}
 
 /**
  * @param {object} args
@@ -108,6 +169,14 @@ function validateEpf({ rows = [], period }) {
     block(employee, reason(err.code in REASON ? err.code : "INCOMPLETE"));
   }
   ecr.members.forEach((member) => {
+    const employee = prepared.find((r) => Number(r.employee.employee_id) === member.employee_id).employee;
+    const name = ecrMemberName(employee.employee_name);
+    if (!/^[A-Z]/.test(name)) block(employee, reason("NAME_INVALID"));
+    else if (name.length > ECR_NAME_MAX) block(employee, reason("NAME_TOO_LONG"));
+    member.member_name = name;
+    if (member.epf_wages === 0 && member.ncp_days !== period.days) {
+      block(employee, reason("NCP_ZERO_WAGES", `NCP ${member.ncp_days}, month has ${period.days} days`));
+    }
     const problems = epfoEcr.validateEcrMember(member);
     if (problems.length) {
       const employee = prepared.find((r) => Number(r.employee.employee_id) === member.employee_id).employee;
@@ -115,14 +184,10 @@ function validateEpf({ rows = [], period }) {
     }
   });
 
-  // `lines` and `members` are index-aligned in buildEcr.
-  const ready = [];
-  const lines = [];
-  ecr.members.forEach((member, i) => {
-    if (blocked.has(member.employee_id)) return;
-    ready.push(member);
-    lines.push(ecr.lines[i]);
-  });
+  // The lines are built HERE, from the fixed ECR_FIELDS order, and only for
+  // members with no blocking reason.
+  const ready = ecr.members.filter((member) => !blocked.has(member.employee_id));
+  const lines = ready.map(ecrLine);
 
   const totals = ready.reduce(
     (t, m) => {
@@ -152,8 +217,24 @@ function validateEpf({ rows = [], period }) {
 /* ================================================================= ESI ==== */
 
 /**
- * ESIC monthly contribution - reason codes for zero working days, as the
- * ESIC contribution template lists them.
+ * THE ESIC MONTHLY CONTRIBUTION FILE. Source: ESIC portal, "Monthly
+ * Contribution" upload and its sample template "Instructions & Reason Codes"
+ * (esic.in, InsuranceGlobalWebV4/App_Themes/Help/MC_Template1.xls), and the
+ * ESIC circular on uploading multiple Excel sheets (esic.gov.in):
+ *
+ *   an Excel 97-2003 workbook (.xls), the six template columns below in this
+ *   order, one row per IP, after one header row;
+ *   IP number: 10 digits; IP name: alphabets and space only;
+ *   number of days and total monthly wages: numbers;
+ *   reason code for zero working days: numeric, 0 for all other reasons;
+ *   last working day: DD/MM/YYYY or DD-MM-YYYY with zero padding, given ONLY
+ *   for Left Service, Retired, Out of Coverage, Expired, Non-Implemented Area
+ *   and Retrenchment - blank for every other reason.
+ *
+ * Reason codes, as the template's reason-code table numbers them. DnDS has no
+ * reason codes of its own: a last working day on the payrun snapshot gives
+ * 2 (Left Service); any other zero-day employee needs the code chosen on the
+ * ESI tab, from exactly this list.
  */
 const ESIC_REASON = {
   0: "Without Reason",
@@ -169,7 +250,6 @@ const ESIC_REASON = {
   10: "Retrenchment",
   11: "No Work",
   12: "Does Not Belong To This Employer",
-  13: "Duplicate IP",
 };
 /** The template requires a Last Working Day for these codes, and only these. */
 const ESIC_LWD_REQUIRED = new Set([2, 3, 4, 5, 6, 10]);
@@ -253,6 +333,8 @@ function validateEsi({ rows = [], period, overrides = {} }) {
     if (ip === "") block(employee, reason("IP_MISSING"));
     else if (!/^\d{10}$/.test(ip)) block(employee, reason("IP_INVALID"));
 
+    if (ipName(employee.employee_name) === "") block(employee, reason("IP_NAME_INVALID"));
+
     const days = num(calculation.salary_days);
     if (days === null || !Number.isInteger(days) || days < 0 || days > period.days) {
       block(employee, reason("DAYS_INVALID", days === null ? "blank" : String(days)));
@@ -323,6 +405,26 @@ function validateEsi({ rows = [], period, overrides = {} }) {
   };
 }
 
+/**
+ * The contribution file itself: a real Excel 97-2003 (BIFF8) workbook, one
+ * sheet, the template header row and then one row per IP. The IP number and
+ * the last working day are TEXT cells, so a 10-digit IP number never becomes
+ * a number in exponent form and a date is never re-formatted by Excel.
+ */
+function buildEsicXls(v) {
+  const aoa = [v.headers, ...v.file_rows];
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  for (let r = 1; r < aoa.length; r += 1) {
+    for (const c of [0, 5]) {
+      const ref = XLSX.utils.encode_cell({ r, c });
+      ws[ref] = { t: "s", v: String(aoa[r][c] === null || aoa[r][c] === undefined ? "" : aoa[r][c]) };
+    }
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Sheet1");
+  return XLSX.write(wb, { type: "buffer", bookType: "biff8" });
+}
+
 /** One line for a validation status cell. */
 const statusText = (validation, employeeId) => {
   const b = validation.blocked.find((x) => x.employee_id === Number(employeeId));
@@ -335,6 +437,12 @@ module.exports = {
   ESIC_REASON,
   ESIC_LWD_REQUIRED,
   ESIC_HEADERS,
+  ECR_FIELDS,
+  ECR_SEPARATOR,
+  ECR_NAME_MAX,
+  ecrMemberName,
+  ecrLine,
+  buildEsicXls,
   validateEpf,
   validateEsi,
   esicReasonFor,

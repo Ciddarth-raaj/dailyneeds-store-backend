@@ -81,20 +81,36 @@ class PayrollReportRepository {
     }));
   }
 
-  /** Payrun employees in the month and scope whose calculation is not approved & locked. */
-  async countNotFinalized({ year, month, store_ids }) {
+  /**
+   * THE PAYRUN'S OWN TOTALS for a month and scope - the reconciliation
+   * reference for the Payroll Register. Read straight from the payrun tables
+   * with its own SQL, deliberately NOT through the report query builder, so
+   * the two are independent answers that must agree.
+   */
+  async payrunTotals({ year, month, store_ids }) {
     const location = locationPredicate("pe.store_id", store_ids);
     const rows = await this.query(
-      `SELECT COUNT(*) AS n
+      `SELECT COUNT(*) AS employees,
+              COALESCE(SUM(c.status = 'APPROVED_LOCKED'), 0) AS finalized,
+              COALESCE(SUM(CASE WHEN c.status = 'APPROVED_LOCKED' THEN c.total_earnings END), 0) AS gross,
+              COALESCE(SUM(CASE WHEN c.status = 'APPROVED_LOCKED' THEN c.total_employee_deductions END), 0) AS deductions,
+              COALESCE(SUM(CASE WHEN c.status = 'APPROVED_LOCKED' THEN c.net_pay END), 0) AS net_pay
          FROM payrun_employee pe
          LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
         WHERE pe.period_year = ? AND pe.period_month = ?
-          AND (c.status IS NULL OR c.status <> 'APPROVED_LOCKED')
           ${location.clause ? `AND ${location.clause}` : ""}`,
       [year, month, ...location.params],
-      "COUNT-NOT-FINALIZED"
+      "PAYRUN-TOTALS"
     );
-    return rows.length ? Number(rows[0].n) : 0;
+    const r = rows[0] || {};
+    const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+    return {
+      employees: Number(r.employees) || 0,
+      finalized: Number(r.finalized) || 0,
+      gross: money(r.gross),
+      deductions: money(r.deductions),
+      net_pay: money(r.net_pay),
+    };
   }
 
   /* ------------------------------------------------------- statutory rows */

@@ -139,6 +139,25 @@ const f = (key, label, group, spec) => ({
   ...spec,
 });
 
+/**
+ * THE PAYRUN ROW'S OWN STATE. Every employee in the month's payrun is in the
+ * report; a figure is shown only when that employee's calculation is
+ * APPROVED_LOCKED (see `utils/payroll_report_query.js#finalizedOnly`), and
+ * this column says what the row is when it is not.
+ */
+const PAYRUN_STATUS =
+  "CASE WHEN c.payrun_calculation_id IS NULL THEN 'NOT_CALCULATED' " +
+  "WHEN c.status = 'APPROVED_LOCKED' AND c.published_at IS NOT NULL THEN 'PUBLISHED' " +
+  "WHEN c.status = 'APPROVED_LOCKED' THEN 'APPROVED_LOCKED' ELSE 'NOT_APPROVED' END";
+const PAYRUN_STATUS_LABEL = {
+  NOT_CALCULATED: "Not calculated - figures not shown",
+  NOT_APPROVED: "Not approved & locked - figures not shown",
+  APPROVED_LOCKED: "Approved & locked",
+  PUBLISHED: "Published",
+};
+/** The month's pay type: the approved calculation's, else the payrun snapshot's. */
+const PAY_TYPE = "IF(c.status = 'APPROVED_LOCKED', c.pay_type, pe.pay_type)";
+
 /* ---------------------------------------------------------------- groups */
 
 const G = {
@@ -156,7 +175,7 @@ const G = {
 
 const PAYROLL_FIELDS = [
   /* ------------------------------------------------ employee, as at payrun */
-  f("employee_id", "Employee ID", G.EMPLOYEE, { select: "c.employee_id", type: TYPE.NUMBER, transform: asNumber }),
+  f("employee_id", "Employee ID", G.EMPLOYEE, { select: "pe.employee_id", type: TYPE.NUMBER, transform: asNumber }),
   f("employee_name", "Employee Name", G.EMPLOYEE, { select: "pe.employee_name", source: SOURCE.PAYRUN_SNAPSHOT }),
   f("outlet", "Outlet", G.EMPLOYEE, { select: "pe.store_name", source: SOURCE.PAYRUN_SNAPSHOT, sort: "pe.store_name" }),
   f("department", "Department", G.EMPLOYEE, {
@@ -176,7 +195,7 @@ const PAYROLL_FIELDS = [
     select: "DATE_FORMAT(pe.resignation_date, '%Y-%m-%d')", sort: "pe.resignation_date",
     type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
   }),
-  f("pay_type", "Pay Type", G.EMPLOYEE, { select: "c.pay_type" }),
+  f("pay_type", "Pay Type", G.EMPLOYEE, { select: PAY_TYPE, always: true }),
   f("uan", "UAN", G.EMPLOYEE, {
     select: "COALESCE(NULLIF(TRIM(pe.uan), ''), NULLIF(TRIM(new_employee.uan), ''))",
     join: "new_employee", source: SOURCE.PAYRUN_SNAPSHOT,
@@ -194,11 +213,11 @@ const PAYROLL_FIELDS = [
     note: "Payrun snapshot; the current IP number is used only when none was recorded at payrun.",
   }),
   f("pf_applicable", "PF Applicable", G.EMPLOYEE, {
-    select: "c.pf_applicable", transform: TRISTATE,
+    select: "pe.pf_applicable", transform: TRISTATE, source: SOURCE.PAYRUN_SNAPSHOT,
     permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
   }),
   f("esi_applicable", "ESI Applicable", G.EMPLOYEE, {
-    select: "c.esi_applicable", transform: TRISTATE,
+    select: "pe.esi_applicable", transform: TRISTATE, source: SOURCE.PAYRUN_SNAPSHOT,
     permission: P.VIEW_EMPLOYEE_SENSITIVE, sensitive: true,
   }),
   f("payroll_month", "Payroll Month", G.EMPLOYEE, { post: "period", source: SOURCE.COMPUTED }),
@@ -331,12 +350,10 @@ const PAYROLL_FIELDS = [
   }),
 
   /* --------------------------------------------------------- the record */
-  f("payrun_status", "Payrun Status", G.RECORD, {
-    select: "IF(c.published_at IS NULL, 'Approved & locked', 'Published')",
-  }),
-  f("approved_at", "Approved At", G.RECORD, { select: "DATE_FORMAT(c.approved_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE }),
-  f("published_at", "Published At", G.RECORD, { select: "DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE }),
-  f("calculation_revision", "Calculation Revision", G.RECORD, { select: "c.calculation_revision", type: TYPE.NUMBER, transform: asNumber }),
+  f("payrun_status", "Payrun Status", G.RECORD, { select: PAYRUN_STATUS, always: true, transform: (v) => PAYRUN_STATUS_LABEL[v] || v }),
+  f("approved_at", "Approved At", G.RECORD, { select: "DATE_FORMAT(c.approved_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE, always: true }),
+  f("published_at", "Published At", G.RECORD, { select: "DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE, always: true }),
+  f("calculation_revision", "Calculation Revision", G.RECORD, { select: "c.calculation_revision", type: TYPE.NUMBER, transform: asNumber, always: true }),
 ];
 
 /* ------------------------------------------ employee master, as it is today */
@@ -397,7 +414,7 @@ const FIELDS = [...PAYROLL_FIELDS, ...MASTER_FIELDS];
  * parameters - the month's date range - and they are bound, never spliced.
  */
 const JOINS = {
-  new_employee: { sql: "LEFT JOIN new_employee ON new_employee.employee_id = c.employee_id" },
+  new_employee: { sql: "LEFT JOIN new_employee ON new_employee.employee_id = pe.employee_id" },
   snap_department: {
     sql: "LEFT JOIN department snap_department ON snap_department.department_id = pe.department_id",
   },
@@ -415,7 +432,7 @@ const JOINS = {
       "    FROM attendance_day_calculation d",
       "   WHERE d.attendance_date BETWEEN ? AND ?",
       "   GROUP BY d.employee_id",
-      ") adc ON adc.employee_id = c.employee_id",
+      ") adc ON adc.employee_id = pe.employee_id",
     ].join("\n"),
     params: (period) => [period.from, period.to],
   },
@@ -456,4 +473,7 @@ module.exports = {
   isSummable,
   ATTENDANCE_FRESH,
   SNAPSHOTTED_MASTER_KEYS,
+  PAYRUN_STATUS,
+  PAYRUN_STATUS_LABEL,
+  PAY_TYPE,
 };
