@@ -111,6 +111,106 @@ function normalizeSelection({ employee_ids, all_eligible }) {
   return { all: false, ids: normalizeEmployeeIds(employee_ids) };
 }
 
+/*
+ * ============================================ THE LIST'S FILTERS, SHARED
+ *
+ * ONE PREDICATE FOR THE LIST AND FOR EVERY "ALL" ACTION. The review screen's
+ * Department and Designation narrow who the month is shown for, exactly as the
+ * location does; the card, the status and the search narrow what is listed.
+ * When a select-all action (Calculate All Eligible, Approve All Ready, Publish
+ * All Approved) is sent WITH those filters, it is resolved through these same
+ * two functions - so it can only ever reach employees the screen was listing,
+ * never somebody a filter had hidden. Sent without them, it is the month in
+ * scope, exactly as before.
+ *
+ * Department and designation are the INITIALIZATION SNAPSHOT'S, like the
+ * location: the month is reviewed as it was initialized.
+ */
+const filterId = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isInteger(n) && n > 0 ? n : null;
+};
+
+function normalizeListFilters({ department_id, designation_id, status, card, search } = {}) {
+  const wantedStatus =
+    status && Object.values(CALC_STATUS).includes(String(status).toUpperCase())
+      ? String(status).toUpperCase()
+      : null;
+  const wantedCard =
+    card && Object.values(CALC_CARD).includes(String(card).toUpperCase())
+      ? String(card).toUpperCase()
+      : null;
+  return {
+    department_id: filterId(department_id),
+    designation_id: filterId(designation_id),
+    status: wantedStatus,
+    card: wantedCard,
+    search: search === null || search === undefined ? "" : String(search).trim().toLowerCase(),
+  };
+}
+
+/** WHO THE MONTH IS SHOWN FOR - department and designation, like the location. */
+function inFilterScope(row, filters) {
+  if (filters.department_id !== null && Number(row.department_id) !== filters.department_id) return false;
+  if (filters.designation_id !== null && Number(row.designation_id) !== filters.designation_id) return false;
+  return true;
+}
+
+/** WHAT IS LISTED - the card, the status and the search. */
+function inFilterView(row, filters) {
+  if (filters.status && row.status !== filters.status) return false;
+  if (filters.card && !calc.inCard(row, filters.card)) return false;
+  if (filters.search !== "") {
+    const haystack = `${row.employee_name || ""} ${row.employee_id}`.toLowerCase();
+    if (!haystack.includes(filters.search)) return false;
+  }
+  return true;
+}
+
+/**
+ * THE DEPARTMENT AND DESIGNATION CHOICES, from the month's own population in
+ * the caller's scope - so a branch-scoped user is offered only departments and
+ * designations that exist among the employees they may see, and each
+ * designation says which departments it occurs in, which is what lets the
+ * screen narrow the Designation list once a Department is chosen.
+ */
+function filterOptions(rows, departmentNames) {
+  const departments = new Map();
+  const designations = new Map();
+  rows.forEach((row) => {
+    const dep = filterId(row.department_id);
+    const des = filterId(row.designation_id);
+    if (dep !== null) {
+      const entry = departments.get(dep) || {
+        id: dep,
+        name: departmentNames.get(dep) || `Department ${dep}`,
+        count: 0,
+      };
+      entry.count += 1;
+      departments.set(dep, entry);
+    }
+    if (des !== null) {
+      const entry = designations.get(des) || {
+        id: des,
+        name: row.designation_name || `Designation ${des}`,
+        count: 0,
+        department_ids: [],
+      };
+      entry.count += 1;
+      if (dep !== null && !entry.department_ids.includes(dep)) entry.department_ids.push(dep);
+      designations.set(des, entry);
+    }
+  });
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name)) || a.id - b.id;
+  return {
+    departments: [...departments.values()].sort(byName),
+    designations: [...designations.values()]
+      .map((d) => ({ ...d, department_ids: d.department_ids.sort((a, b) => a - b) }))
+      .sort(byName),
+  };
+}
+
 class PayrunCalculationUsecase {
   /**
    * @param calculationRepo  this stage's own two tables
@@ -521,7 +621,10 @@ class PayrunCalculationUsecase {
           : null,
         location: employee.store_name,
         store_id: employee.store_id,
+        designation_id: employee.designation_id ?? null,
         designation_name: employee.designation_name,
+        /* The name is attached by `getMonth`, from the department master. */
+        department_id: employee.department_id ?? null,
 
         status: verdict.status,
         status_label: verdict.status_label,
@@ -629,47 +732,68 @@ class PayrunCalculationUsecase {
   /**
    * THE MONTH: the initialized population, each one's status, and the counts.
    *
-   * THE SUMMARY COUNTS THE WHOLE MONTH, NEVER THE FILTERED VIEW, exactly as
-   * the initialization stage's does: a status filter is a way of looking at
-   * the month, not a different month. On this screen the numbers are "how many
-   * still need calculating" and "how many are ready to approve", which are the
-   * two things somebody will act on.
+   * THE SUMMARY COUNTS THE MONTH IN SCOPE, NEVER THE LISTED VIEW, exactly as
+   * the initialization stage's does: a card, a status or a search is a way of
+   * looking at the month, not a different month. The scope is the location
+   * and - on this screen - the Department and Designation, which say whose
+   * month is being reviewed; the counts follow them, as they follow the
+   * location.
+   *
+   * `filter_options` are the Department and Designation choices, taken from
+   * the population BEFORE those two filters, so choosing a department does not
+   * empty its own dropdown.
    */
-  async getMonth({ year, month, store_ids = null, status = null, card = null, search = null }) {
+  async getMonth({
+    year,
+    month,
+    store_ids = null,
+    status = null,
+    card = null,
+    search = null,
+    department_id = null,
+    designation_id = null,
+  }) {
     const context = await this._assemble({ year, month, store_ids });
     const presented = context.population.map((employee) => this._present(context, employee));
     const rows = presented.map((p) => p.row);
     await this._attachPayslipStatus(context.period, rows);
-
-    const wantedStatus =
-      status && Object.values(CALC_STATUS).includes(String(status).toUpperCase())
-        ? String(status).toUpperCase()
-        : null;
-    const text = search === null || search === undefined ? "" : String(search).trim().toLowerCase();
-    /* A SUMMARY CARD - decided by the same `inCard` the card's count uses. */
-    const wantedCard =
-      card && Object.values(CALC_CARD).includes(String(card).toUpperCase())
-        ? String(card).toUpperCase()
-        : null;
-
-    const filtered = rows.filter((row) => {
-      if (wantedStatus && row.status !== wantedStatus) return false;
-      if (wantedCard && !calc.inCard(row, wantedCard)) return false;
-      if (text !== "") {
-        const haystack = `${row.employee_name || ""} ${row.employee_id}`.toLowerCase();
-        if (!haystack.includes(text)) return false;
-      }
-      return true;
+    const departmentNames = await this._departmentNames(rows);
+    rows.forEach((row) => {
+      row.department_name =
+        row.department_id === null ? null : departmentNames.get(Number(row.department_id)) || null;
     });
+
+    const filters = normalizeListFilters({ department_id, designation_id, status, card, search });
+    const scoped = rows.filter((row) => inFilterScope(row, filters));
+    const filtered = scoped.filter((row) => inFilterView(row, filters));
 
     return {
       period_year: context.period.year,
       period_month: context.period.month,
       month_locked: context.month_locked,
       calculation_version: CALCULATION_VERSION,
-      summary: calc.summarize(rows),
+      summary: calc.summarize(scoped),
+      filter_options: filterOptions(rows, departmentNames),
       rows: filtered,
     };
+  }
+
+  /** Department id -> name, from the Employee Master's department table. */
+  async _departmentNames(rows) {
+    const ids = [...new Set(rows.map((r) => filterId(r.department_id)).filter((id) => id !== null))];
+    if (ids.length === 0 || typeof this.repo.listDepartmentNames !== "function") return new Map();
+    const names = await this.repo.listDepartmentNames(ids);
+    return new Map((names || []).map((d) => [Number(d.department_id), d.department_name]));
+  }
+
+  /**
+   * A SELECT-ALL ACTION'S POPULATION, NARROWED TO WHAT THE SCREEN LISTED.
+   * `filters` absent is the whole month in scope, as it always was.
+   */
+  _withinListFilters(rows, filters) {
+    if (!filters) return rows;
+    const wanted = normalizeListFilters(filters);
+    return rows.filter((row) => inFilterScope(row, wanted) && inFilterView(row, wanted));
   }
 
   /**
@@ -921,6 +1045,7 @@ class PayrunCalculationUsecase {
     all_eligible = false,
     mode = "CALCULATE",
     store_ids = null,
+    filters = null,
     actor = {},
   }) {
     const period = normalizeMonth(year, month);
@@ -954,10 +1079,20 @@ class PayrunCalculationUsecase {
      * whose calculation a source has moved under. What a browser last saw may
      * be minutes old.
      */
+    /* Who the screen was listing, when the select-all was sent with its filters. */
+    const listed = wanted.all
+      ? new Set(
+          this._withinListFilters(
+            [...presentedById.values()].map((p) => p.row),
+            filters
+          ).map((row) => Number(row.employee_id))
+        )
+      : null;
     const targetIds = wanted.all
       ? [...presentedById.entries()]
           .filter(
-            ([, p]) =>
+            ([id, p]) =>
+              listed.has(Number(id)) &&
               p.row.calculable &&
               (recalculating
                 ? p.row.status === CALC_STATUS.RECALCULATION_REQUIRED
@@ -1432,7 +1567,16 @@ class PayrunCalculationUsecase {
    * IT LOCKS EMPLOYEES, NOT THE MONTH. Everybody not in this call is exactly
    * as editable afterwards as before it.
    */
-  async approve({ year, month, employee_ids, all_ready = false, mode = null, store_ids = null, actor = {} }) {
+  async approve({
+    year,
+    month,
+    employee_ids,
+    all_ready = false,
+    mode = null,
+    store_ids = null,
+    filters = null,
+    actor = {},
+  }) {
     const period = normalizeMonth(year, month);
     const wanted = normalizeSelection({ employee_ids, all_eligible: all_ready });
 
@@ -1451,9 +1595,9 @@ class PayrunCalculationUsecase {
     );
 
     const targetIds = wanted.all
-      ? [...presentedById.entries()]
-          .filter(([, p]) => p.row.status === CALC_STATUS.READY_FOR_APPROVAL)
-          .map(([id]) => id)
+      ? this._withinListFilters([...presentedById.values()].map((p) => p.row), filters)
+          .filter((row) => row.status === CALC_STATUS.READY_FOR_APPROVAL)
+          .map((row) => Number(row.employee_id))
       : wanted.ids;
 
     const results = [];
@@ -2075,11 +2219,13 @@ class PayrunCalculationUsecase {
    * branch scope - never from a list a browser sent. Each employee is then
    * published on their own, exactly as a selection would be.
    */
-  async publishAllApproved({ year, month, store_ids = null, actor = {} }) {
+  async publishAllApproved({ year, month, store_ids = null, filters = null, actor = {} }) {
     const period = normalizeMonth(year, month);
     const context = await this._assemble({ year: period.year, month: period.month, store_ids });
-    const ids = context.population
-      .map((e) => this._present(context, e).row)
+    const ids = this._withinListFilters(
+      context.population.map((e) => this._present(context, e).row),
+      filters
+    )
       .filter((row) => row.status === CALC_STATUS.APPROVED_LOCKED)
       .map((row) => Number(row.employee_id));
     if (ids.length === 0) {
@@ -2361,6 +2507,8 @@ module.exports = (calculationRepo, payrunRepo, adjustmentRepo) =>
   new PayrunCalculationUsecase(calculationRepo, payrunRepo, adjustmentRepo);
 module.exports.PayrunCalculationUsecase = PayrunCalculationUsecase;
 module.exports.normalizeSelection = normalizeSelection;
+module.exports.normalizeListFilters = normalizeListFilters;
+module.exports.filterOptions = filterOptions;
 module.exports.CALC_STATUS = CALC_STATUS;
 module.exports.ROW_RESULT = ROW_RESULT;
 module.exports.STORED_STATUS = STORED_STATUS;

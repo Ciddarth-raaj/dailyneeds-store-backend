@@ -195,6 +195,13 @@ class FakeCalculationRepo {
     return ids.map((id) => this.world.attendance.get(id)).filter(Boolean).map((r) => ({ ...r }));
   }
 
+  /** The department master - the names the Department filter shows. */
+  async listDepartmentNames(ids) {
+    return ids
+      .filter((id) => (this.world.departments || {})[id])
+      .map((id) => ({ department_id: id, department_name: this.world.departments[id] }));
+  }
+
   async listAttendanceDayRows(ids) {
     // `legacy` simulates the code before payroll readiness existed, so a test
     // can create the calculations that rule allowed and production still has.
@@ -3549,5 +3556,159 @@ describe("the Not Calculated card: awaiting calculation vs blocked from it", () 
     );
     assert.equal(c.CALCULATED, c.CALCULATED_NOT_READY + c.READY_FOR_APPROVAL);
     assert.equal(c.ALL, c.NOT_CALCULATED + c.CALCULATED + c.RECALCULATION_REQUIRED);
+  });
+});
+
+
+/* ============== Calculation & Review: Department / Designation filters ====== */
+
+describe("Department and Designation filters - narrow the month like the location, and every select-all with it", () => {
+  const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
+  const SALES = { department_id: 10, designation_id: 100, designation_name: "Sales Executive" };
+  const SALES_LEAD = { department_id: 10, designation_id: 101, designation_name: "Sales Lead" };
+  const STORES = { department_id: 20, designation_id: 200, designation_name: "Picker" };
+  /*
+   *   1  Sales  / Sales Executive  store 1  ready
+   *   2  Sales  / Sales Executive  store 2  ready
+   *   3  Sales  / Sales Lead       store 1  ready
+   *   4  Stores / Picker           store 1  ready
+   *   5  Stores / Picker           store 2  not ready (no confirmation)
+   *   6  Sales  / Sales Executive  store 1  not calculated
+   */
+  const setup = async () => {
+    world.departments = { 10: "Sales", 20: "Stores" };
+    world
+      .add(1, { employee: { ...SALES, employee_name: "Anil" } })
+      .add(2, { employee: { ...SALES, store_id: 2, employee_name: "Bala" } })
+      .add(3, { employee: { ...SALES_LEAD, employee_name: "Chitra" } })
+      .add(4, { employee: { ...STORES, employee_name: "Deepa" } })
+      .add(5, { employee: { ...STORES, store_id: 2, employee_name: "Elan" } })
+      .add(6, { employee: { ...SALES, employee_name: "Anitha" } });
+    world.states.delete(5);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2, 3, 4, 5], actor: ACTOR });
+  };
+  const view = (extra = {}) => calculation.getMonth({ ...MONTH, ...extra });
+
+  it("rows carry their snapshot department and designation, with the department master's name", async () => {
+    await setup();
+    const row = (await view()).rows.find((r) => r.employee_id === 4);
+    assert.deepEqual(
+      [row.department_id, row.department_name, row.designation_id, row.designation_name],
+      [20, "Stores", 200, "Picker"]
+    );
+  });
+
+  it("Department only", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10 })), [1, 2, 3, 6]);
+  });
+
+  it("Designation only", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ designation_id: 200 })), [4, 5]);
+  });
+
+  it("Department + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10, designation_id: 100 })), [1, 2, 6]);
+    assert.deepEqual(ids(await view({ department_id: 20, designation_id: 100 })), []);
+  });
+
+  it("Outlet + Department + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ store_ids: [1], department_id: 10, designation_id: 100 })), [1, 6]);
+  });
+
+  it("Search + Department", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10, search: "ani" })), [1, 6]);
+  });
+
+  it("Status card + Department, and card + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 20, card: "READY_FOR_APPROVAL" })), [4]);
+    assert.deepEqual(ids(await view({ designation_id: 100, card: "NOT_CALCULATED" })), [6]);
+  });
+
+  it("the counts follow Department / Designation like the location; search still never changes them", async () => {
+    await setup();
+    const sales = await view({ department_id: 10, search: "zzz" });
+    assert.equal(sales.summary.cards.ALL, 4);
+    assert.equal(sales.summary.cards.READY_FOR_APPROVAL, 3);
+    assert.equal(sales.summary.cards.NOT_CALCULATED, 1);
+    assert.equal(sales.rows.length, 0);
+    assert.equal((await view()).summary.cards.ALL, 6, "no filter is the whole month in scope");
+  });
+
+  it("the options come from the scoped population, unnarrowed by their own filters, with each designation's departments", async () => {
+    await setup();
+    const opts = (await view({ department_id: 10, designation_id: 100 })).filter_options;
+    assert.deepEqual(opts.departments.map((d) => [d.id, d.name, d.count]), [[10, "Sales", 4], [20, "Stores", 2]]);
+    assert.deepEqual(
+      opts.designations.map((d) => [d.id, d.name, d.department_ids]),
+      [[200, "Picker", [20]], [100, "Sales Executive", [10]], [101, "Sales Lead", [10]]]
+    );
+    // A store's scope narrows the options too.
+    const store2 = (await view({ store_ids: [2] })).filter_options;
+    assert.deepEqual(store2.designations.map((d) => [d.id, d.count]), [[200, 1], [100, 1]]);
+  });
+
+  it("Approve All Ready sent with the filters approves ONLY the listed ready employees", async () => {
+    await setup();
+    const out = await calculation.approve({
+      ...MONTH,
+      all_ready: true,
+      store_ids: [1],
+      filters: { department_id: 10, designation_id: 100, card: "READY_FOR_APPROVAL" },
+      actor: ACTOR,
+    });
+    assert.equal(out.approved_count, 1);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [1]);
+    assert.deepEqual(ids(await view({ card: "READY_FOR_APPROVAL" })), [2, 3, 4]);
+  });
+
+  it("Approve All Ready with a search or a card that hides ready employees does not reach them", async () => {
+    await setup();
+    const searched = await calculation.approve({
+      ...MONTH, all_ready: true, filters: { department_id: 10, search: "chitra" }, actor: ACTOR,
+    });
+    assert.equal(searched.approved_count, 1);
+    const hidden = await calculation.approve({
+      ...MONTH, all_ready: true, filters: { card: "NOT_CALCULATED" }, actor: ACTOR,
+    });
+    assert.equal(hidden.approved_count, 0);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [3]);
+  });
+
+  it("Calculate All Eligible sent with the filters calculates only inside them", async () => {
+    await setup();
+    world.add(7, { employee: { ...STORES, employee_name: "Farid" } });
+    const out = await calculation.calculate({
+      ...MONTH, all_eligible: true, filters: { department_id: 20 }, actor: ACTOR,
+    });
+    assert.deepEqual(out.results.map((r) => r.employee_id), [7]);
+    assert.deepEqual(ids(await view({ card: "NOT_CALCULATED" })), [6]);
+  });
+
+  it("Publish All sent with the filters publishes only inside them", async () => {
+    await setup();
+    await calculation.approve({ ...MONTH, employee_ids: [1, 4], actor: ACTOR });
+    await calculation.publishAllApproved({ ...MONTH, filters: { designation_id: 200 }, actor: ACTOR });
+    assert.deepEqual(ids(await view({ card: "PUBLISHED" })), [4]);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [1]);
+  });
+
+  it("a select-all WITHOUT filters is unchanged: the month in scope", async () => {
+    await setup();
+    const out = await calculation.approve({ ...MONTH, all_ready: true, actor: ACTOR });
+    assert.equal(out.approved_count, 4);
+  });
+
+  it("filters never widen: explicit ids are untouched by them and a hidden employee is not added", async () => {
+    await setup();
+    const out = await calculation.approve({
+      ...MONTH, employee_ids: [4], filters: { department_id: 10 }, actor: ACTOR,
+    });
+    assert.equal(out.approved_count, 1, "explicit ids are the selection itself; the filters are for select-all");
   });
 });
