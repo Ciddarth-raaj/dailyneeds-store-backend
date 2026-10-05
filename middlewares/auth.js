@@ -94,16 +94,10 @@ const unProtectedRoutes = {
     methods: { get: true },
   },
 
-  //company
-  "/company": {
-    methods: { post: true },
-  },
-  "/company/update-status": {
-    methods: { post: true },
-  },
-  "/company/company_id": {
-    methods: { get: true },
-  },
+  // company: no entry. Master → Company Details authenticates every request
+  // and takes `manage_company_details` (routes/company.js); an unprotected
+  // entry here skipped the token, so the permission check saw no user and
+  // every save answered 401.
 
   //assets
   "/asset": {
