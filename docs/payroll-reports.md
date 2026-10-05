@@ -166,14 +166,18 @@ The build environment's network policy blocks `epfindia.gov.in`, `esic.gov.in` a
   - last working day only for Left Service, Retired, Out of Coverage, Expired, Non-Implemented Area and Retrenchment;
   - dates `DD/MM/YYYY` or `DD-MM-YYYY`, zero-padded.
 
-**ESIC - still to verify against the template file itself**
+**ESIC - PENDING DIRECT-TEMPLATE VERIFICATION**
 
-1. The numeric code of each reason.
-2. The exact text of the six headers.
-3. Whether Total Monthly Wages may carry paise.
-4. Whether the sheet name matters.
+These four values have not been checked against the official template itself. They are neither invented nor changed silently: each is a single, named constant in `utils/payroll_statutory_files.js`, and stays as it is until the template is checked.
 
-`utils/payroll_statutory_official_template.test.js` checks items 1 and 2 automatically. Save the official `MC_Template1.xls` at `test_support/statutory/MC_Template1.xls` and run the suite; it is skipped until the file is present.
+| Item | Current value | Status |
+| --- | --- | --- |
+| Numeric code of each zero-wage reason | 0 Without Reason … 12 Does Not Belong To This Employer (`ESIC_REASON`) | **Pending.** The list of reasons is confirmed; the number for each is not. |
+| Exact text of the six column headers | `ESIC_HEADERS` | **Pending** |
+| Whether Total Monthly Wages may carry paise | The stored ESI wage is written as stored (paise appear when the stored wage has them) | **Pending** |
+| Whether the worksheet name is significant | `Sheet1` | **Pending** |
+
+> **Before Download Contribution File is used for an actual statutory filing**, save the official ESIC `MC_Template1.xls`, exactly as downloaded from the ESIC portal, at `test_support/statutory/MC_Template1.xls`, and run `node --test utils/payroll_statutory_official_template.test.js`. That test checks the headers and every reason-code number, and **must pass**. Confirm the paise and sheet-name points against the same template. The build environment cannot reach esic.gov.in / esic.in, so the suite is skipped until the file is supplied.
 
 ### No second payroll calculation
 
