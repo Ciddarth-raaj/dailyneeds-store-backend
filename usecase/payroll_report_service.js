@@ -7,6 +7,7 @@ const { monthLabel, MONTH_SHORT } = require("../constants/payslip");
 const Q = require("../utils/payroll_report_query");
 const statutoryFiles = require("../utils/payroll_statutory_files");
 const rules = require("./report_template_rules");
+const { EMPLOYMENT_TYPES } = require("../utils/employment_classification");
 
 /**
  * Payroll Reports - the service.
@@ -160,6 +161,9 @@ class PayrollReportService {
         label,
         requires_last_working_day: statutoryFiles.ESIC_LWD_REQUIRED.has(Number(code)),
       })),
+      // The filter choices the server accepts. Department and designation
+      // lists come from their masters; employment type is a fixed set.
+      filter_options: { employment_types: EMPLOYMENT_TYPES },
       max_fields: Q.MAX_FIELDS,
       max_rows: LIMITS.MAX_ROWS,
       max_pdf_rows: LIMITS.MAX_PDF_ROWS,
@@ -321,7 +325,13 @@ class PayrollReportService {
     return {
       field_keys: template.field_keys || [],
       display: stored.display || {},
-      filters: { outlet_ids: stored.outlet_ids, department_ids: stored.department_ids, pay_type: stored.pay_type },
+      filters: {
+        outlet_ids: stored.outlet_ids,
+        department_ids: stored.department_ids,
+        designation_ids: stored.designation_ids,
+        employment_types: stored.employment_types,
+        pay_type: stored.pay_type,
+      },
     };
   }
 
@@ -826,6 +836,8 @@ const describeFilters = (filters) => {
   const parts = [];
   if (filters.outlet_ids && filters.outlet_ids.length) parts.push(`${filters.outlet_ids.length} outlet(s)`);
   if (filters.department_ids && filters.department_ids.length) parts.push(`${filters.department_ids.length} department(s)`);
+  if (filters.designation_ids && filters.designation_ids.length) parts.push(`${filters.designation_ids.length} designation(s)`);
+  if (filters.employment_types && filters.employment_types.length) parts.push(`Employment type ${filters.employment_types.join("/")} (current master)`);
   if (filters.pay_type) parts.push(`Pay type ${filters.pay_type}`);
   if (filters.search) parts.push(`Search "${filters.search}"`);
   return parts.length ? parts.join(", ") : "None";

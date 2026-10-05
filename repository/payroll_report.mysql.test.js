@@ -265,4 +265,19 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.equal(after.rows[0].attendance_snapshot_status, "Changed after payrun - not shown");
     assert.equal(after.reconciliation.reconciled, true);
   });
+
+  it("department, designation (payrun snapshot) and employment type (current master) filters run as written", async () => {
+    await q("UPDATE payrun_employee SET designation_id = 7 WHERE employee_id = 2 AND period_month = 9");
+    await q("UPDATE new_employee SET employment_type = IF(employee_id = 2, 'Contract', 'Permanent')");
+    const run = (filters) => service.preview(ADMIN, { report_type: "PAYROLL_REGISTER", year: 2026, month: 9, field_keys: ["employee_id"], filters }, null);
+    assert.deepEqual((await run({ department_ids: [3] })).rows.map((r) => r.employee_id), [1, 2, 3]);
+    assert.deepEqual((await run({ department_ids: [99] })).rows.length, 0);
+    assert.deepEqual((await run({ designation_ids: [7] })).rows.map((r) => r.employee_id), [2]);
+    const contract = await run({ employment_types: ["Contract"] });
+    assert.deepEqual(contract.rows.map((r) => r.employee_id), [2]);
+    assert.equal(contract.matching_count, 1, "count and rows agree");
+    assert.deepEqual((await run({ employment_types: ["Permanent"], designation_ids: [7] })).rows.length, 0, "filters combine with AND");
+    // Reconciliation stays on the full scope, not the filtered view.
+    assert.equal(contract.reconciliation.reconciled, true);
+  });
 });

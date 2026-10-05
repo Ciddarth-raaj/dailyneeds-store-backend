@@ -44,6 +44,15 @@ Nothing about the employee today can drop a row: a status change, a resignation,
 - **Totals are therefore finalized totals.** Every calculation figure goes through `finalizedOnly` (`utils/payroll_report_query.js`).
 - **The Payroll Register always reconciles to the payrun for the same month and scope.** The report's employee count equals the number of payrun employees, its finalized count equals the number of approved employees, and its Gross, Total Deductions and Net Pay totals equal the payrun's finalized totals. `repository/payroll_report.js#payrunTotals` computes the payrun side with its own SQL, independent of the report query builder. Every Payroll Register preview returns `reconciliation: { payrun, report, reconciled }`, and the screen shows the result. A mismatch is shown, never hidden.
 
+## Filters
+
+The filters are outlet, department, designation, employment type, pay type and a name/ID search. All of them narrow the report; none can widen the caller's branch scope.
+
+- **Outlet, department and designation** filter on the **payrun snapshot**, meaning where the employee was in that payroll month.
+- **Employment type** is not snapshotted by the payrun, so it filters on the **current Employee Master** value, and the screen labels it "(current master)".
+- **Saving:** every filter except the search is saved in the month's layout and in templates.
+- **Reconciliation:** the Payroll Register's reconciliation always covers the full scope, not the filtered view.
+
 ## Data integrity: what each column shows
 
 Opening a report runs SELECTs only. It never calls the payroll or attendance calculation and never writes a payrun table. Approved figures change only through the payrun's own unlock → recalculate → approve process.

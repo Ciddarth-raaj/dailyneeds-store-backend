@@ -2,6 +2,7 @@ const catalogue = require("../constants/payroll_report_catalogue");
 const { getReportType, DEFAULT_DISPLAY } = require("../constants/payroll_report_types");
 const { has, mayUseField } = require("../usecase/employee_report");
 const { locationPredicate } = require("../repository/payrun");
+const { EMPLOYMENT_TYPES } = require("./employment_classification");
 
 /**
  * Payroll Reports - the ONE query path, pure.
@@ -159,13 +160,23 @@ function resolveFields(keys, actor, mode = "strict") {
 const ids = (raw) =>
   [...new Set((Array.isArray(raw) ? raw : []).map(Number).filter((n) => Number.isSafeInteger(n) && n > 0))].slice(0, 200);
 
-/** Filter VALUES only. Reusable ones (outlets, departments, pay type) may be saved in a template. */
+/**
+ * Filter VALUES only. Reusable ones (outlets, departments, designations,
+ * employment types, pay type) may be saved in a template.
+ *
+ * Outlet, department and designation filter on the PAYRUN SNAPSHOT - where the
+ * employee was in that payroll month. Employment type is not snapshotted by
+ * the payrun, so it filters on the CURRENT Employee Master value, and the
+ * screen labels it so. Only the two values the column can hold are accepted.
+ */
 function resolveFilters(raw = {}) {
   const r = raw && typeof raw === "object" ? raw : {};
   const payType = r.pay_type === "BANK" || r.pay_type === "CASH" ? r.pay_type : null;
   return {
     outlet_ids: ids(r.outlet_ids),
     department_ids: ids(r.department_ids),
+    designation_ids: ids(r.designation_ids),
+    employment_types: [...new Set((Array.isArray(r.employment_types) ? r.employment_types : []).filter((t) => EMPLOYMENT_TYPES.includes(t)))],
     pay_type: payType,
     search: String(r.search || "").trim().slice(0, 100),
   };
@@ -174,7 +185,13 @@ function resolveFilters(raw = {}) {
 /** What a template may keep: reusable filters, never a one-off search. */
 const persistableFilters = (filters) => {
   const f = resolveFilters(filters);
-  return { outlet_ids: f.outlet_ids, department_ids: f.department_ids, pay_type: f.pay_type };
+  return {
+    outlet_ids: f.outlet_ids,
+    department_ids: f.department_ids,
+    designation_ids: f.designation_ids,
+    employment_types: f.employment_types,
+    pay_type: f.pay_type,
+  };
 };
 
 /* ---------------------------------------------------------------- display */
@@ -251,6 +268,16 @@ function buildQuery({ reportType, fields, filters, period, store_ids, display = 
   if (filters.department_ids.length) {
     where.push("pe.department_id IN (?)");
     params.push(filters.department_ids);
+  }
+  if (filters.designation_ids.length) {
+    where.push("pe.designation_id IN (?)");
+    params.push(filters.designation_ids);
+  }
+  if (filters.employment_types.length) {
+    // The CURRENT master value (the payrun does not snapshot it). A subquery,
+    // not a join, so selecting this filter never multiplies or drops a row.
+    where.push("EXISTS (SELECT 1 FROM new_employee fe WHERE fe.employee_id = pe.employee_id AND fe.employment_type IN (?))");
+    params.push(filters.employment_types);
   }
   if (filters.pay_type) {
     where.push(`${catalogue.PAY_TYPE} = ?`);

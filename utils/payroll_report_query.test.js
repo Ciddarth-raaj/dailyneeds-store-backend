@@ -185,4 +185,26 @@ describe("the query", () => {
     const row = Q.presentRow(raw, fields);
     assert.equal(row.basic + row.hra + row.conveyance + row.special_allowance, 15000);
   });
+
+  it("department and designation filter on the payrun snapshot; employment type on the current master, without a join", () => {
+    const q = build(["employee_id"], {
+      filters: Q.resolveFilters({ department_ids: [3], designation_ids: [7, 8], employment_types: ["Contract", "Bogus"] }),
+    });
+    assert.match(q.sql, /pe\.department_id IN \(\?\)/);
+    assert.match(q.sql, /pe\.designation_id IN \(\?\)/);
+    assert.match(q.sql, /EXISTS \(SELECT 1 FROM new_employee fe WHERE fe\.employee_id = pe\.employee_id AND fe\.employment_type IN \(\?\)\)/);
+    assert.ok(q.params.some((p) => Array.isArray(p) && p.join() === "7,8"));
+    assert.ok(q.params.some((p) => Array.isArray(p) && p.join() === "Contract"), "an unknown employment type is dropped");
+    assert.doesNotMatch(q.sql, /LEFT JOIN new_employee/);
+    // The count applies exactly the same filters, so count and rows agree.
+    const count = build(["employee_id"], { mode: "count", filters: Q.resolveFilters({ designation_ids: [7], employment_types: ["Permanent"] }) });
+    assert.match(count.sql, /pe\.designation_id IN/);
+    assert.match(count.sql, /fe\.employment_type IN/);
+  });
+
+  it("templates keep the new filters; a one-off search is still not kept", () => {
+    assert.deepEqual(Q.persistableFilters({ department_ids: [3], designation_ids: [7], employment_types: ["Permanent"], search: "x" }), {
+      outlet_ids: [], department_ids: [3], designation_ids: [7], employment_types: ["Permanent"], pay_type: null,
+    });
+  });
 });

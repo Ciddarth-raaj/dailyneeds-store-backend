@@ -52,6 +52,8 @@ const fieldKeys = Joi.array().items(Joi.string().max(60)).max(100);
 const filtersSchema = Joi.object({
   outlet_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
   department_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
+  designation_ids: Joi.array().items(Joi.number().integer().positive()).max(200).optional(),
+  employment_types: Joi.array().items(Joi.string().max(30)).max(10).optional(),
   pay_type: Joi.string().valid(["BANK", "CASH", ""]).allow(null).optional(),
   search: Joi.string().max(100).allow("").optional(),
 });
