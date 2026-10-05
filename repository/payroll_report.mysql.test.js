@@ -32,7 +32,7 @@ const MIGRATIONS = [
   "20261024120000-payrun-calculation-column-drift-up.sql",
   "20261111120000-payrun-lifecycle-up.sql",
   "20261120120000-epfo-wage-ceiling-2026-up.sql",
-  "20261122120000-payroll-reports-up.sql",
+  "20261123120000-payroll-reports-up.sql",
 ];
 const TABLES = [
   "payroll_report_default_template", "payroll_report_layout", "report_export_log", "report_template",
@@ -92,7 +92,7 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     for (const sql of STAND_INS) await q(sql);
     for (const file of MIGRATIONS) await q(fs.readFileSync(path.join(SQLS, file), "utf8"));
     // The migration is guarded: running it twice changes nothing.
-    await q(fs.readFileSync(path.join(SQLS, "20261122120000-payroll-reports-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(SQLS, "20261123120000-payroll-reports-up.sql"), "utf8"));
 
     await q("INSERT INTO outlets VALUES (1,'Outlet A',1),(2,'Outlet B',1)");
     await q("INSERT INTO department VALUES (3,'Billing',1)");

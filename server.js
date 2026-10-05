@@ -905,6 +905,8 @@ class Server {
       payslipRepo: this.payrunPayslipRepo,
       notifier: this.payslipNotificationUsecase,
       companyEnv: this.payslipCompanyEnv,
+      // Admin bulk payslip export: several PDFs in one Chrome.
+      renderPdfs: require("./services/payslip_pdf").renderPayslipPdfs,
     });
     this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
       payslipRepo: this.payrunPayslipRepo,

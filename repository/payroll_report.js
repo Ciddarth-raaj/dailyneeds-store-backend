@@ -9,7 +9,7 @@ const { parseJson } = require("./report_template");
  * is built in `utils/payroll_report_query.js` from catalogue text and only
  * executed here; this file adds no WHERE clause of its own to a report.
  *
- * It OWNS two tables (migration 20261122120000-payroll-reports):
+ * It OWNS two tables (migration 20261123120000-payroll-reports):
  *
  *   payroll_report_layout            the columns one user chose for one report
  *                                    type in one payroll month

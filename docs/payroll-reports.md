@@ -13,7 +13,7 @@ Payroll → Reports. Month-wise reports built from the **finalized payrun**, wit
 | Service (layouts, templates, exports, statutory files) | `usecase/payroll_report_service.js` |
 | Reads + layout/default tables | `repository/payroll_report.js` |
 | HTTP, mounted at `/reports/payroll` | `routes/payroll_report.js` |
-| Migration | `migrations/mysql/migrations/20261122120000-payroll-reports.js` |
+| Migration | `migrations/mysql/migrations/20261123120000-payroll-reports.js` |
 
 ## Reused infrastructure, not a parallel system
 

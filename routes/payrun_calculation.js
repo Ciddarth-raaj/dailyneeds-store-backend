@@ -12,6 +12,8 @@ const {
   RESET_REMARK_MAX,
   LIFECYCLE_ACTION,
 } = require("../constants/payrun_calculation");
+const { MAX_PAYSLIP_EXPORT_BATCH } = require("../constants/payslip");
+const logger = require("../utils/logger");
 
 /**
  * Payrun Calculation & Review - the API. A STAGE of /payrun, mounted under it.
@@ -32,6 +34,8 @@ const {
  *                                        it would clear a blocker
  *   GET  /payrun/calculation/history     who calculated and approved, when
  *   GET  /payrun/calculation/payslip-company   is a payslip company configured
+ *   POST /payrun/calculation/payslips/export/plan  who a bulk payslip export covers
+ *   POST /payrun/calculation/payslips/export  one batch of those payslips as PDFs
  *
  * THERE IS NO SINGLE-EMPLOYEE VARIANT OF ANY OF THE THREE WRITES, deliberately
  * and for the reason `routes/payrun.js` gives: one row posts a list of one, so
@@ -142,6 +146,41 @@ class PayrunCalculationRoutes {
     };
   }
 
+  /**
+   * THE LIST'S FILTERS, as the month read takes them. A select-all action may
+   * be sent with them so that it acts only on the employees the screen was
+   * listing - never on somebody a filter had hidden. They narrow; they can
+   * never widen: `store_ids` goes through the branch scope like the read's,
+   * and the rest only remove employees from the server's own population.
+   */
+  _listFilterSchema() {
+    const id = Joi.number().integer().positive().allow("", null).optional();
+    return {
+      store_ids: Joi.any().optional(),
+      department_id: id,
+      designation_id: id,
+      status: Joi.string().valid(...Object.values(CALC_STATUS)).optional(),
+      card: Joi.string().valid(...Object.values(CALC_CARD)).optional(),
+      search: Joi.string().trim().max(120).allow("").optional(),
+    };
+  }
+
+  /** The filters a select-all was sent with, or null for the month in scope. */
+  _listFilters(body, allKey) {
+    if (!(body[allKey] === true || body[allKey] === "true")) return null;
+    const keys = ["department_id", "designation_id", "status", "card", "search"];
+    const filters = {};
+    keys.forEach((k) => {
+      if (body[k] !== undefined) filters[k] = body[k];
+    });
+    return filters;
+  }
+
+  /** Only a select-all names a location; explicit ids are scoped as before. */
+  _requestedStores(body, allKey) {
+    return body[allKey] === true || body[allKey] === "true" ? body.store_ids : null;
+  }
+
   init() {
     if (this.sensitive) {
       this.router.use("/payrun/calculation", this.sensitive.filterResponse);
@@ -168,6 +207,9 @@ class PayrunCalculationRoutes {
             /* A summary card; the server decides who is in it. */
             card: Joi.string().valid(...Object.values(CALC_CARD)).optional(),
             search: Joi.string().trim().max(120).allow("").optional(),
+            /* Department / Designation - narrow the month like the location. */
+            department_id: Joi.number().integer().positive().allow("").optional(),
+            designation_id: Joi.number().integer().positive().allow("").optional(),
           });
           if (isValid.error !== null) throw isValid.error;
 
@@ -183,6 +225,8 @@ class PayrunCalculationRoutes {
               status: req.query.status,
               card: req.query.card,
               search: req.query.search,
+              department_id: req.query.department_id,
+              designation_id: req.query.designation_id,
             })),
           });
         } catch (err) {
@@ -234,10 +278,13 @@ class PayrunCalculationRoutes {
       this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL),
       async (req, res) => {
         try {
-          const isValid = Joi.validate(req.body, this._bulkSchema("all_eligible"));
+          const isValid = Joi.validate(req.body, {
+            ...this._bulkSchema("all_eligible"),
+            ...this._listFilterSchema(),
+          });
           if (isValid.error !== null) throw isValid.error;
 
-          const scoped = await this._scope(req, res, null);
+          const scoped = await this._scope(req, res, this._requestedStores(req.body, "all_eligible"));
           if (!scoped) return;
 
           const actor = await this.permissions.actorFor(req);
@@ -250,6 +297,7 @@ class PayrunCalculationRoutes {
               all_eligible: req.body.all_eligible,
               mode: "CALCULATE",
               store_ids: scoped.store_ids,
+              filters: this._listFilters(req.body, "all_eligible"),
               actor,
             })),
           });
@@ -280,10 +328,13 @@ class PayrunCalculationRoutes {
       this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL),
       async (req, res) => {
         try {
-          const isValid = Joi.validate(req.body, this._bulkSchema("all_eligible"));
+          const isValid = Joi.validate(req.body, {
+            ...this._bulkSchema("all_eligible"),
+            ...this._listFilterSchema(),
+          });
           if (isValid.error !== null) throw isValid.error;
 
-          const scoped = await this._scope(req, res, null);
+          const scoped = await this._scope(req, res, this._requestedStores(req.body, "all_eligible"));
           if (!scoped) return;
 
           const actor = await this.permissions.actorFor(req);
@@ -296,6 +347,7 @@ class PayrunCalculationRoutes {
               all_eligible: req.body.all_eligible,
               mode: "RECALCULATE",
               store_ids: scoped.store_ids,
+              filters: this._listFilters(req.body, "all_eligible"),
               actor,
             })),
           });
@@ -326,11 +378,12 @@ class PayrunCalculationRoutes {
         try {
           const isValid = Joi.validate(req.body, {
             ...this._bulkSchema("all_ready"),
+            ...this._listFilterSchema(),
             mode: Joi.string().valid("INDIVIDUAL", "BULK").optional(),
           });
           if (isValid.error !== null) throw isValid.error;
 
-          const scoped = await this._scope(req, res, null);
+          const scoped = await this._scope(req, res, this._requestedStores(req.body, "all_ready"));
           if (!scoped) return;
 
           const actor = await this.permissions.actorFor(req);
@@ -343,6 +396,7 @@ class PayrunCalculationRoutes {
               all_ready: req.body.all_ready,
               mode: req.body.mode,
               store_ids: scoped.store_ids,
+              filters: this._listFilters(req.body, "all_ready"),
               actor,
             })),
           });
@@ -607,10 +661,11 @@ class PayrunCalculationRoutes {
       this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PUBLISH_PAYRUN),
       async (req, res) => {
         try {
-          const isValid = Joi.validate(req.body, { ...this._month() });
+          /* Publish-all IS a select-all: it may carry the list's filters. */
+          const isValid = Joi.validate(req.body, { ...this._month(), ...this._listFilterSchema() });
           if (isValid.error !== null) throw isValid.error;
 
-          const scoped = await this._scope(req, res, null);
+          const scoped = await this._scope(req, res, req.body.store_ids);
           if (!scoped) return;
 
           const actor = await this.permissions.actorFor(req);
@@ -620,6 +675,7 @@ class PayrunCalculationRoutes {
               year: Number(req.body.year),
               month: Number(req.body.month),
               store_ids: scoped.store_ids,
+              filters: this._listFilters({ ...req.body, all: true }, "all"),
               actor,
             })),
           });
@@ -770,6 +826,96 @@ class PayrunCalculationRoutes {
       async (req, res) => {
         try {
           res.json({ code: 200, ...(await this.usecase.getPayslipCompanyStatus()) });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+
+    /**
+     * BULK PAYSLIP EXPORT - the View Payslip keys AND `payroll_export_payslips`.
+     * Reading one payslip does not grant exporting the month's: the export is
+     * its own key, granted to nobody by its migration (administrators hold it
+     * through the user_type 2 bypass). It never widens the branch scope.
+     *
+     *   POST /payrun/calculation/payslips/export/plan   who will be exported
+     *   POST /payrun/calculation/payslips/export        one batch of PDFs
+     *
+     * BOTH TAKE THE LIST'S FILTERS and the server resolves the population
+     * from them (with the branch scope); `employee_ids` only narrows it - a
+     * selection on the plan, the batch on the export. Nothing is written,
+     * not even the employee's "viewed" record.
+     */
+    const exportBody = (idsSchema) => ({
+      ...this._month(),
+      ...this._listFilterSchema(),
+      employee_ids: idsSchema,
+    });
+    const exportFilters = (body) => {
+      const filters = {};
+      ["department_id", "designation_id", "status", "card", "search"].forEach((k) => {
+        if (body[k] !== undefined) filters[k] = body[k];
+      });
+      return filters;
+    };
+    this.router.post(
+      "/payrun/calculation/payslips/export/plan",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            exportBody(Joi.array().items(Joi.number().integer().positive()).min(1).max(MAX_BULK_EMPLOYEES).optional())
+          );
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.body.store_ids);
+          if (!scoped) return;
+          res.json({
+            code: 200,
+            ...(await this.usecase.planPayslipExport({
+              year: Number(req.body.year),
+              month: Number(req.body.month),
+              store_ids: scoped.store_ids,
+              filters: exportFilters(req.body),
+              employee_ids: req.body.employee_ids || null,
+            })),
+          });
+        } catch (err) {
+          this._fail(res, err);
+        }
+      }
+    );
+    this.router.post(
+      "/payrun/calculation/payslips/export",
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PAYROLL_EXPORT_PAYSLIPS),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            exportBody(Joi.array().items(Joi.number().integer().positive()).min(1).max(MAX_PAYSLIP_EXPORT_BATCH).required())
+          );
+          if (isValid.error !== null) throw isValid.error;
+          const scoped = await this._scope(req, res, req.body.store_ids);
+          if (!scoped) return;
+
+          const out = await this.usecase.exportPayslipPdfs({
+            year: Number(req.body.year),
+            month: Number(req.body.month),
+            employee_ids: req.body.employee_ids,
+            store_ids: scoped.store_ids,
+            filters: exportFilters(req.body),
+          });
+          const actor = await this.permissions.actorFor(req);
+          logger.Log({
+            level: logger.LEVEL.INFO,
+            component: "ROUTES.PAYRUN_CALCULATION",
+            code: "PAYSLIP_EXPORT",
+            description: `Exported ${out.files.length} payslip PDF(s) for ${out.period_year}-${out.period_month}`,
+            category: "",
+            ref: { actor: actor && actor.employeeId, employee_ids: out.files.map((f) => f.employee_id) },
+          });
+          res.set("Cache-Control", "no-store");
+          res.json({ code: 200, ...out });
         } catch (err) {
           this._fail(res, err);
         }

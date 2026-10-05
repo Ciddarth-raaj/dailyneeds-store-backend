@@ -49,7 +49,7 @@ const EXTRA_DDL = [
 const REPORT_MIGRATIONS = [
   "20261120120000-epfo-wage-ceiling-2026-up.sql",
   "20260909160000-reports-foundation-up.sql",
-  "20261122120000-payroll-reports-up.sql",
+  "20261123120000-payroll-reports-up.sql",
 ];
 const REPORT_TABLES = ["payroll_report_default_template", "payroll_report_layout", "report_export_log", "report_template"];
 

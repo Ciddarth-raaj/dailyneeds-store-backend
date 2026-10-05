@@ -195,6 +195,13 @@ class FakeCalculationRepo {
     return ids.map((id) => this.world.attendance.get(id)).filter(Boolean).map((r) => ({ ...r }));
   }
 
+  /** The department master - the names the Department filter shows. */
+  async listDepartmentNames(ids) {
+    return ids
+      .filter((id) => (this.world.departments || {})[id])
+      .map((id) => ({ department_id: id, department_name: this.world.departments[id] }));
+  }
+
   async listAttendanceDayRows(ids) {
     // `legacy` simulates the code before payroll readiness existed, so a test
     // can create the calculations that rule allowed and production still has.
@@ -3312,7 +3319,7 @@ describe("Calculation & Review summary cards", () => {
     assert.equal(row.status_label, "Attendance needs action");
   });
 
-  it("search works together with the selected card; the summary stays the month's", async () => {
+  it("search works together with the selected card; the summary follows the search, never the card", async () => {
     world.add(1).add(2).add(3);
     world.employees.get(2).employee_name = "Priya One";
     world.employees.get(3).employee_name = "Priya Two";
@@ -3321,7 +3328,10 @@ describe("Calculation & Review summary cards", () => {
     await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
     const view = await card("CALCULATED_NOT_READY", { search: "priya" });
     assert.deepEqual(ids(view), [2]);
-    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 2, "search never changes the counts");
+    // Counted over the search (Priya One not ready, Priya Two ready), never narrowed by the card.
+    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 1);
+    assert.equal(view.summary.cards.READY_FOR_APPROVAL, 1, "the card does not narrow the counts");
+    assert.equal(view.summary.cards.ALL, 2, "the counts follow the search, like the rows and the select-all");
   });
 
   it("location scope changes the counts and the rows together", async () => {
@@ -3699,5 +3709,306 @@ describe("the Not Calculated card: awaiting calculation vs blocked from it", () 
     );
     assert.equal(c.CALCULATED, c.CALCULATED_NOT_READY + c.READY_FOR_APPROVAL);
     assert.equal(c.ALL, c.NOT_CALCULATED + c.CALCULATED + c.RECALCULATION_REQUIRED);
+  });
+});
+
+
+/* ============== Calculation & Review: Department / Designation filters ====== */
+
+describe("Department and Designation filters - narrow the month like the location, and every select-all with it", () => {
+  const ids = (view) => view.rows.map((r) => r.employee_id).sort((a, b) => a - b);
+  const SALES = { department_id: 10, designation_id: 100, designation_name: "Sales Executive" };
+  const SALES_LEAD = { department_id: 10, designation_id: 101, designation_name: "Sales Lead" };
+  const STORES = { department_id: 20, designation_id: 200, designation_name: "Picker" };
+  /*
+   *   1  Sales  / Sales Executive  store 1  ready
+   *   2  Sales  / Sales Executive  store 2  ready
+   *   3  Sales  / Sales Lead       store 1  ready
+   *   4  Stores / Picker           store 1  ready
+   *   5  Stores / Picker           store 2  not ready (no confirmation)
+   *   6  Sales  / Sales Executive  store 1  not calculated
+   */
+  const setup = async () => {
+    world.departments = { 10: "Sales", 20: "Stores" };
+    world
+      .add(1, { employee: { ...SALES, employee_name: "Anil" } })
+      .add(2, { employee: { ...SALES, store_id: 2, employee_name: "Bala" } })
+      .add(3, { employee: { ...SALES_LEAD, employee_name: "Chitra" } })
+      .add(4, { employee: { ...STORES, employee_name: "Deepa" } })
+      .add(5, { employee: { ...STORES, store_id: 2, employee_name: "Elan" } })
+      .add(6, { employee: { ...SALES, employee_name: "Anitha" } });
+    world.states.delete(5);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2, 3, 4, 5], actor: ACTOR });
+  };
+  const view = (extra = {}) => calculation.getMonth({ ...MONTH, ...extra });
+
+  it("rows carry their snapshot department and designation, with the department master's name", async () => {
+    await setup();
+    const row = (await view()).rows.find((r) => r.employee_id === 4);
+    assert.deepEqual(
+      [row.department_id, row.department_name, row.designation_id, row.designation_name],
+      [20, "Stores", 200, "Picker"]
+    );
+  });
+
+  it("Department only", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10 })), [1, 2, 3, 6]);
+  });
+
+  it("Designation only", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ designation_id: 200 })), [4, 5]);
+  });
+
+  it("Department + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10, designation_id: 100 })), [1, 2, 6]);
+    assert.deepEqual(ids(await view({ department_id: 20, designation_id: 100 })), []);
+  });
+
+  it("Outlet + Department + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ store_ids: [1], department_id: 10, designation_id: 100 })), [1, 6]);
+  });
+
+  it("Search + Department", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 10, search: "ani" })), [1, 6]);
+  });
+
+  it("Status card + Department, and card + Designation", async () => {
+    await setup();
+    assert.deepEqual(ids(await view({ department_id: 20, card: "READY_FOR_APPROVAL" })), [4]);
+    assert.deepEqual(ids(await view({ designation_id: 100, card: "NOT_CALCULATED" })), [6]);
+  });
+
+  it("the counts follow Department / Designation / search like the location - and never the card", async () => {
+    await setup();
+    const sales = await view({ department_id: 10, card: "NOT_CALCULATED" });
+    assert.equal(sales.summary.cards.ALL, 4);
+    assert.equal(sales.summary.cards.READY_FOR_APPROVAL, 3);
+    assert.equal(sales.summary.cards.NOT_CALCULATED, 1);
+    assert.equal(sales.rows.length, 1);
+    const searched = await view({ department_id: 10, search: "ani" });
+    assert.deepEqual([searched.summary.cards.ALL, searched.summary.cards.READY_FOR_APPROVAL, searched.summary.cards.NOT_CALCULATED], [2, 1, 1]);
+    assert.equal((await view({ department_id: 10, search: "zzz" })).summary.cards.ALL, 0);
+    assert.equal((await view()).summary.cards.ALL, 6, "no filter is the whole month in scope");
+  });
+
+  it("the options come from the scoped population, unnarrowed by their own filters, with each designation's departments", async () => {
+    await setup();
+    const opts = (await view({ department_id: 10, designation_id: 100 })).filter_options;
+    assert.deepEqual(opts.departments.map((d) => [d.id, d.name, d.count]), [[10, "Sales", 4], [20, "Stores", 2]]);
+    assert.deepEqual(
+      opts.designations.map((d) => [d.id, d.name, d.department_ids]),
+      [[200, "Picker", [20]], [100, "Sales Executive", [10]], [101, "Sales Lead", [10]]]
+    );
+    // A store's scope narrows the options too.
+    const store2 = (await view({ store_ids: [2] })).filter_options;
+    assert.deepEqual(store2.designations.map((d) => [d.id, d.count]), [[200, 1], [100, 1]]);
+  });
+
+  it("Approve All Ready sent with the filters approves ONLY the listed ready employees", async () => {
+    await setup();
+    const out = await calculation.approve({
+      ...MONTH,
+      all_ready: true,
+      store_ids: [1],
+      filters: { department_id: 10, designation_id: 100, card: "READY_FOR_APPROVAL" },
+      actor: ACTOR,
+    });
+    assert.equal(out.approved_count, 1);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [1]);
+    assert.deepEqual(ids(await view({ card: "READY_FOR_APPROVAL" })), [2, 3, 4]);
+  });
+
+  it("Approve All Ready with a search or a card that hides ready employees does not reach them", async () => {
+    await setup();
+    const searched = await calculation.approve({
+      ...MONTH, all_ready: true, filters: { department_id: 10, search: "chitra" }, actor: ACTOR,
+    });
+    assert.equal(searched.approved_count, 1);
+    const hidden = await calculation.approve({
+      ...MONTH, all_ready: true, filters: { card: "NOT_CALCULATED" }, actor: ACTOR,
+    });
+    assert.equal(hidden.approved_count, 0);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [3]);
+  });
+
+  it("Calculate All Eligible sent with the filters calculates only inside them", async () => {
+    await setup();
+    world.add(7, { employee: { ...STORES, employee_name: "Farid" } });
+    const out = await calculation.calculate({
+      ...MONTH, all_eligible: true, filters: { department_id: 20 }, actor: ACTOR,
+    });
+    assert.deepEqual(out.results.map((r) => r.employee_id), [7]);
+    assert.deepEqual(ids(await view({ card: "NOT_CALCULATED" })), [6]);
+  });
+
+  it("Publish All sent with the filters publishes only inside them", async () => {
+    await setup();
+    await calculation.approve({ ...MONTH, employee_ids: [1, 4], actor: ACTOR });
+    await calculation.publishAllApproved({ ...MONTH, filters: { designation_id: 200 }, actor: ACTOR });
+    assert.deepEqual(ids(await view({ card: "PUBLISHED" })), [4]);
+    assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [1]);
+  });
+
+  it("PROOF: employees outside the active filter are not changed by ANY bulk action", async () => {
+    await setup();
+    world.add(7, { employee: { ...SALES, store_id: 2, employee_name: "Gopal" } }); // Sales, other outlet, not calculated
+    await calculation.approve({ ...MONTH, employee_ids: [3], actor: ACTOR });    // Sales Lead, approved
+    // Active filter: outlet 1 + Sales + Sales Executive + search "an" (Anil 1, Anitha 6).
+    const FILTER = { department_id: 10, designation_id: 100, search: "an" };
+    const inside = new Set([1, 6]);
+    const snapshot = () =>
+      JSON.stringify(
+        [...world.employees.keys()]
+          .filter((id) => !inside.has(id))
+          .sort((a, b) => a - b)
+          .map((id) => [id, world.calculations.get(id) || null])
+      );
+    const before = snapshot();
+    const auditBefore = world.audit.filter((a) => !inside.has(a.employee_id)).length;
+
+    const calc = await calculation.calculate({ ...MONTH, all_eligible: true, store_ids: [1], filters: FILTER, actor: ACTOR });
+    assert.deepEqual(calc.results.map((r) => r.employee_id), [6]);
+    const appr = await calculation.approve({ ...MONTH, all_ready: true, store_ids: [1], filters: FILTER, actor: ACTOR });
+    assert.deepEqual(appr.results.filter((r) => r.result === "APPROVED").map((r) => r.employee_id).sort(), [1, 6]);
+    await calculation.publishAllApproved({ ...MONTH, store_ids: [1], filters: FILTER, actor: ACTOR });
+
+    assert.equal(snapshot(), before, "no employee outside the filter was calculated, approved or published");
+    assert.equal(world.audit.filter((a) => !inside.has(a.employee_id)).length, auditBefore, "no audit entry for anyone outside");
+    const published = (await view({ card: "PUBLISHED" })).rows.map((r) => r.employee_id).sort();
+    assert.deepEqual(published, [1, 6]);
+  });
+
+  it("a select-all WITHOUT filters is unchanged: the month in scope", async () => {
+    await setup();
+    const out = await calculation.approve({ ...MONTH, all_ready: true, actor: ACTOR });
+    assert.equal(out.approved_count, 4);
+  });
+
+  it("filters never widen: explicit ids are untouched by them and a hidden employee is not added", async () => {
+    await setup();
+    const out = await calculation.approve({
+      ...MONTH, employee_ids: [4], filters: { department_id: 10 }, actor: ACTOR,
+    });
+    assert.equal(out.approved_count, 1, "explicit ids are the selection itself; the filters are for select-all");
+  });
+});
+
+/* ======================================== bulk payslip export (admin) ===== */
+
+describe("bulk payslip export - server-resolved, filtered, read-only", () => {
+  let renderCalls;
+  const stubRender = async (snapshots) => {
+    renderCalls.push(snapshots.length);
+    return snapshots.map((s) => Buffer.from(`PDF:${s.employee.employee_id}`));
+  };
+  const seed = async (n, publish, over = () => ({})) => {
+    for (let id = 1; id <= n; id += 1) world.add(id, over(id));
+    await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: publish, actor: ACTOR });
+    await calculation.publishAllApproved({ ...MONTH, actor: ACTOR });
+    calculation.renderPdfs = stubRender;
+    renderCalls = [];
+  };
+  const decode = (out) => out.files.map((f) => Buffer.from(f.pdf_base64, "base64").toString());
+
+  it("1 employee: plan names them, the batch returns their PDF with a clean, deterministic name", async () => {
+    await seed(2, [1]);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.deepEqual([plan.employee_ids, plan.count, plan.batch_size], [[1], 1, 25]);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] });
+    assert.deepEqual(decode(out), ["PDF:1"]);
+    assert.equal(out.files[0].file_name, "1_Employee-1_August_2026.pdf");
+    assert.deepEqual(out.skipped, []);
+  });
+
+  it("25 employees: one batch, ONE render call (one browser session)", async () => {
+    const all = Array.from({ length: 25 }, (_, i) => i + 1);
+    await seed(25, all);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.equal(plan.count, 25);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids });
+    assert.equal(out.files.length, 25);
+    assert.deepEqual(renderCalls, [25]);
+    assert.equal(new Set(out.files.map((f) => f.file_name)).size, 25, "no two files share a name");
+  });
+
+  it("more than 25: the plan lists all of them; a single batch of 26 is refused; 25 + 5 covers everyone once", async () => {
+    const all = Array.from({ length: 30 }, (_, i) => i + 1);
+    await seed(30, all);
+    const plan = await calculation.planPayslipExport({ ...MONTH });
+    assert.deepEqual(plan.employee_ids, all);
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids }), /At most 25/);
+    const a = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids.slice(0, 25) });
+    const b = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: plan.employee_ids.slice(25) });
+    assert.deepEqual([...a.files, ...b.files].map((f) => f.employee_id), all);
+    assert.deepEqual(renderCalls, [25, 5]);
+  });
+
+  it("filtered: the plan is only the filtered, published employees; a batch cannot reach outside the filters", async () => {
+    await seed(6, [1, 2, 3, 4, 5], (id) => ({
+      employee: { department_id: id <= 3 ? 10 : 20, store_id: id % 2 ? 1 : 2, employee_name: id === 2 ? "Priya" : `Employee ${id}` },
+    }));
+    const filters = { department_id: 10 };
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters })).employee_ids, [1, 2, 3]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters, store_ids: [1] })).employee_ids, [1, 3]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters: { ...filters, search: "priya" } })).employee_ids, [2]);
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters: { card: "READY_FOR_APPROVAL" } })).employee_ids, [], "a card that holds no published row exports nothing");
+    // A selection only narrows.
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, filters, employee_ids: [3, 4, 6] })).employee_ids, [3]);
+    // The screen sends an id outside the filters (4), one not published (6), one unknown (99): none is exported.
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, filters, employee_ids: [1, 4, 6, 99] });
+    assert.deepEqual(decode(out), ["PDF:1"]);
+    assert.deepEqual(out.skipped.map((x) => [x.employee_id, x.reason]), [[4, "NOT_EXPORTABLE"], [6, "NOT_EXPORTABLE"], [99, "NOT_EXPORTABLE"]]);
+  });
+
+  it("permission scope: an employee outside the caller's branches is never planned or exported", async () => {
+    await seed(2, [1, 2], (id) => ({ employee: { store_id: id } }));
+    assert.deepEqual((await calculation.planPayslipExport({ ...MONTH, store_ids: [1] })).employee_ids, [1]);
+    const out = await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [2], store_ids: [1] });
+    assert.deepEqual([out.files, out.skipped], [[], [{ employee_id: 2, reason: "NOT_EXPORTABLE" }]]);
+  });
+
+  it("VIEWED STAYS UNCHANGED: an export writes nothing - no viewed time, no view count, no calculation", async () => {
+    await seed(3, [1, 2, 3]);
+    world.payslips[1].first_viewed_at = "2026-10-05 08:44:10";
+    world.payslips[1].last_viewed_at = "2026-10-05 08:44:10";
+    world.payslips[1].view_count = 1;
+    const payslipsBefore = JSON.stringify(world.payslips);
+    const calcBefore = JSON.stringify([...world.calculations.values()]);
+    const auditBefore = world.audit.length;
+    await calculation.planPayslipExport({ ...MONTH });
+    await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1, 2, 3] });
+    assert.equal(JSON.stringify(world.payslips), payslipsBefore);
+    assert.equal(JSON.stringify([...world.calculations.values()]), calcBefore);
+    assert.equal(world.audit.length, auditBefore);
+    assert.deepEqual(world.payslips.map((p) => p.first_viewed_at), [null, "2026-10-05 08:44:10", null]);
+  });
+
+  it("a render failure fails the whole batch loudly - never a partial batch", async () => {
+    await seed(2, [1, 2]);
+    calculation.renderPdfs = async () => { throw new Error("chrome died"); };
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1, 2] }), /chrome died/);
+  });
+
+  it("a tampered snapshot is refused rather than exported; no renderer configured is refused", async () => {
+    await seed(1, [1]);
+    world.payslips[0].snapshot_json = world.payslips[0].snapshot_json.replace("Employee 1", "Employee X");
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] }), /integrity/i);
+    calculation.renderPdfs = null;
+    await assert.rejects(calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1] }), /not configured/);
+  });
+
+  it("file names are ASCII-safe: no path, no accents, id first", () => {
+    const { exportFilename } = require("./payrun_calculation");
+    const P = { year: 2026, month: 9 };
+    assert.equal(exportFilename({ employee: { employee_name: "C. Saravanan" } }, 101, P), "101_C-Saravanan_September_2026.pdf");
+    assert.equal(exportFilename({ employee: { employee_name: "../../etc/passwd" } }, 8, P), "8_etc-passwd_September_2026.pdf");
+    assert.equal(exportFilename({ employee: { employee_name: "Ñandú" } }, 7, P), "7_Nandu_September_2026.pdf");
+    assert.equal(exportFilename({ employee: {} }, 9, P), "9_September_2026.pdf");
   });
 });
