@@ -19,9 +19,10 @@ const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "
 const KEY = "payroll_export_payslips";
 
 describe("the payroll export payslips permission migration", () => {
-  it("is unique and its runner reads its own files", () => {
+  it("is unique, is the newest, and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, ""));
     assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
+    assert.deepEqual(all.filter((f) => f > NAME), []);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });

@@ -19,9 +19,13 @@ const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "
 const KEY = "manage_company_details";
 
 describe("the company details permission migration", () => {
-  it("is unique and its runner reads its own files", () => {
+  it("is unique, sorts after every migration that existed when it was written, and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, ""));
     assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
+    // The only migrations after it are the ones added since, named here so a
+    // new one is a deliberate addition (the convention of
+    // attendance_device_time_correction.test.js).
+    assert.deepEqual(all.filter((f) => f > NAME).sort(), ["20261122120000-payroll-export-payslips-permission"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });
