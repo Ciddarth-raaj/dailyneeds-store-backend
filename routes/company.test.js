@@ -193,3 +193,25 @@ test("the Payroll status endpoint takes the month screen's read keys and is decl
     /"\/payrun\/calculation\/payslip-company",\s*\n\s*this\.permissions\.requireAll\(P\.VIEW_EMPLOYEES, P\.VIEW_PAYROLL\)/
   );
 });
+
+/*
+ * THE AUTH LAYER IN FRONT OF THE ROUTER. `middlewares/auth.js` skips the token
+ * for anything in `unProtectedRoutes`; a /company entry there left
+ * `req.decoded` unset, so the permission guard answered every save
+ * (POST /company) with 401 "Unauthorized" - even for an administrator.
+ */
+test("no /company route is unprotected: the auth middleware always reads the token", async () => {
+  const auth = require("../middlewares/auth");
+  const open = Object.keys(auth.unProtectedRoutes).filter((k) => /^\/company(\/|$)/.test(k));
+  assert.deepEqual(open, [], `still unprotected: ${open.join(", ")}`);
+
+  const app = express();
+  app.use(express.json());
+  app.use(auth.create({ userUsecase: { getSessionState: async () => null } }));
+  app.use("/company", buildRoutes(buildUsecase(memoryRepo()), permissions).getRouter());
+  for (const route of EVERY_ROUTE) {
+    const res = await request(app, route);
+    // Refused by AUTHENTICATION (no token), not passed through to the guard.
+    assert.equal(res.body.msg, "Access Denied", `${route.method} ${route.url}`);
+  }
+});
