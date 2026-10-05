@@ -5,7 +5,7 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { resolvePayslipCompany } = require("./payslip_company");
+const { resolvePayslipCompany, payslipCompanyStatus } = require("./payslip_company");
 
 const ROW = (over = {}) => ({
   company_id: 1, company_name: "Daily Needs Departmental Store", reg_address: "188/1 Iyyanar Koil Street",
@@ -41,5 +41,37 @@ describe("the payslip issuer comes from Company Details", () => {
     const envOnly = resolvePayslipCompany([], { PAYSLIP_COMPANY_NAME: "DNDS Pvt Ltd" });
     assert.deepEqual([envOnly.name, envOnly.source, envOnly.pf_establishment_code], ["DNDS Pvt Ltd", "env", null]);
     assert.equal(resolvePayslipCompany([ROW()], { PAYSLIP_COMPANY_NAME: "  " }).name, "Daily Needs Departmental Store");
+  });
+});
+
+describe("the Payroll screen's payslip company status - the same decision as Publish", () => {
+  it("no record, or none active: not configured, with the screen's message", () => {
+    for (const rows of [[], [ROW({ status: 0 })], [ROW({ company_name: "  " })]]) {
+      const s = payslipCompanyStatus(rows);
+      assert.equal(s.configured, false);
+      assert.equal(s.reason, "NONE");
+      assert.equal(s.message, "Payslip publishing is unavailable until Company Details is configured.");
+      assert.equal(s.company, null);
+    }
+  });
+
+  it("several active: not configured until one is chosen", () => {
+    const s = payslipCompanyStatus([ROW(), ROW({ company_id: 2 })]);
+    assert.deepEqual([s.configured, s.reason, s.active_count], [false, "MULTIPLE", 2]);
+  });
+
+  it("exactly one active: configured, naming it and nothing sensitive", () => {
+    const s = payslipCompanyStatus([ROW(), ROW({ company_id: 2, status: 0 })]);
+    assert.equal(s.configured, true);
+    assert.deepEqual(s.company, {
+      company_id: 1, name: "Daily Needs Departmental Store",
+      has_pf_establishment_code: true, has_esi_establishment_code: true, source: "company_details",
+    });
+    assert.ok(!JSON.stringify(s).includes("TN/MAS/0012345"));
+  });
+
+  it("the env override stays an emergency override and is reported as such", () => {
+    const s = payslipCompanyStatus([], { PAYSLIP_COMPANY_NAME: "Override" });
+    assert.deepEqual([s.configured, s.company.source, s.company.company_id], [true, "env", null]);
   });
 });

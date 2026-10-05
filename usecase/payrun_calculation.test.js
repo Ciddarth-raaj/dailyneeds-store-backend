@@ -3046,6 +3046,156 @@ describe("Payslip Publish", () => {
   });
 });
 
+/* ================================== Company Details -> Payslip Publish */
+
+/**
+ * MASTER → COMPANY DETAILS DRIVES PUBLISH. The company usecase is the real
+ * one (`usecase/company.js`) over an in-memory repository that shares
+ * `world.companies` with the payslip repository, so an edit made through the
+ * screen's own code path is what the next Publish reads.
+ */
+describe("Company Details drives Payslip Publish", () => {
+  const buildCompany = require("./company");
+  const act = (action, employee_ids) =>
+    calculation.lifecycle({
+      ...MONTH, action, employee_ids,
+      reason: action === "PUBLISH" ? null : "Company details corrected",
+      mode: employee_ids.length === 1 ? "INDIVIDUAL" : "BULK",
+      actor: ACTOR,
+    });
+  const approved = async (...ids) => {
+    ids.forEach((id) => world.add(id));
+    await calculation.calculate({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    const out = await calculation.approve({ ...MONTH, employee_ids: ids, actor: ACTOR });
+    assert.equal(out.approved_count, ids.length);
+  };
+  /** The repository contract of repository/company.js, over world.companies. */
+  const memoryCompanyRepo = () => ({
+    async list() { return world.companies; },
+    async get(id) { return world.companies.filter((c) => c.company_id === id); },
+    async create(values, { payslip_active }) {
+      const company_id = world.companies.reduce((m, c) => Math.max(m, c.company_id), 0) + 1;
+      world.companies.push({ company_id, ...values, status: payslip_active ? 1 : 0 });
+      if (payslip_active) world.companies.forEach((c) => { if (c.company_id !== company_id) c.status = 0; });
+      return company_id;
+    },
+    async update(id, values, { payslip_active }) {
+      const row = world.companies.find((c) => c.company_id === id);
+      if (!row) return false;
+      Object.assign(row, values, { status: payslip_active ? 1 : 0 });
+      if (payslip_active) world.companies.forEach((c) => { if (c.company_id !== id) c.status = 0; });
+      return true;
+    },
+    async setPayslipCompany(id) {
+      if (!world.companies.some((c) => c.company_id === id)) return false;
+      world.companies.forEach((c) => { c.status = c.company_id === id ? 1 : 0; });
+      return true;
+    },
+  });
+  const FORM = {
+    company_name: "Daily Needs Departmental Store", reg_address: "188/1 Iyyanar Koil Street",
+    pf_number: "TN/MAS/0012345", esi_number: "51000123450001001", payslip_active: true,
+  };
+  let company;
+  beforeEach(() => {
+    world.companies = [];
+    company = buildCompany(memoryCompanyRepo());
+  });
+
+  it("no active company blocks Publish, and the Payroll status says so", async () => {
+    await approved(1);
+    const status = await calculation.getPayslipCompanyStatus();
+    assert.equal(status.configured, false);
+    assert.equal(status.message, "Payslip publishing is unavailable until Company Details is configured.");
+    await assert.rejects(act("PUBLISH", [1]), (e) => e.code === "PAYSLIP_COMPANY_NOT_CONFIGURED");
+    assert.equal(world.payslips.length, 0);
+  });
+
+  it("an inactive company is not a payslip company", async () => {
+    await approved(1);
+    await company.create({ ...FORM, payslip_active: false });
+    assert.equal((await calculation.getPayslipCompanyStatus()).configured, false);
+    await assert.rejects(act("PUBLISH", [1]), (e) => e.reason === "NONE");
+  });
+
+  it("creating the company Active for Payslip allows Publish", async () => {
+    await approved(1);
+    const { company_id } = await company.create(FORM);
+    const status = await calculation.getPayslipCompanyStatus();
+    assert.equal(status.configured, true);
+    assert.deepEqual([status.company.company_id, status.company.name], [company_id, FORM.company_name]);
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.published_count, 1, JSON.stringify(out.results));
+    assert.equal(JSON.parse(world.payslips[0].snapshot_json).company.source, `company_details:${company_id}`);
+  });
+
+  it("more than one active company refuses Publish until one is chosen", async () => {
+    await approved(1);
+    // Two rows active at once can only come from data written before this
+    // screen (the screen itself keeps exactly one).
+    world.companies.push({ company_id: 1, company_name: "A", reg_address: "x", pf_number: "TN/1", esi_number: "1234567890", status: 1 });
+    world.companies.push({ company_id: 2, company_name: "B", reg_address: "y", pf_number: "TN/2", esi_number: "1234567890", status: 1 });
+    const status = await calculation.getPayslipCompanyStatus();
+    assert.deepEqual([status.configured, status.reason, status.active_count], [false, "MULTIPLE", 2]);
+    await assert.rejects(act("PUBLISH", [1]), (e) => e.reason === "MULTIPLE");
+    assert.equal(world.payslips.length, 0);
+
+    await company.setPayslipCompany(2);
+    assert.deepEqual(world.companies.map((c) => c.status), [0, 1], "exactly one active");
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.published_count, 1);
+    assert.equal(JSON.parse(world.payslips[0].snapshot_json).company.name, "B");
+  });
+
+  it("marking another company Active for Payslip clears the first - only one is ever active", async () => {
+    await company.create(FORM);
+    await company.create({ ...FORM, company_name: "Second Ltd" });
+    assert.deepEqual(world.companies.map((c) => [c.company_name, c.status]), [[FORM.company_name, 0], ["Second Ltd", 1]]);
+    assert.equal((await company.list()).payslip.company.name, "Second Ltd");
+  });
+
+  it("the published snapshot freezes the company at Publish; a later edit changes only payslips published after it", async () => {
+    await approved(1, 2);
+    const { company_id } = await company.create(FORM);
+    await act("PUBLISH", [1]);
+    const firstText = world.payslips[0].snapshot_json;
+    const firstSha = world.payslips[0].snapshot_sha256;
+    assert.deepEqual(JSON.parse(firstText).company, {
+      name: FORM.company_name, address: FORM.reg_address,
+      pf_establishment_code: FORM.pf_number, esi_establishment_code: FORM.esi_number,
+      source: `company_details:${company_id}`,
+    });
+
+    await company.update(company_id, {
+      ...FORM, company_name: "Daily Needs Retail Pvt Ltd", reg_address: "New Address, Puducherry", pf_number: "TN/MAS/9999999",
+    });
+    assert.equal(world.payslips[0].snapshot_json, firstText, "the published payslip is byte-for-byte unchanged");
+    assert.equal(world.payslips[0].snapshot_sha256, firstSha);
+
+    await act("PUBLISH", [2]);
+    const second = JSON.parse(world.payslips.find((p) => p.employee_id === 2).snapshot_json).company;
+    assert.deepEqual([second.name, second.address, second.pf_establishment_code],
+      ["Daily Needs Retail Pvt Ltd", "New Address, Puducherry", "TN/MAS/9999999"]);
+    assert.equal(JSON.parse(world.payslips[0].snapshot_json).company.name, FORM.company_name);
+  });
+
+  it("PF applicable without a PF Establishment Code: that payslip is held with a Company Details fix, nothing published", async () => {
+    await approved(1);
+    await company.create({ ...FORM, pf_number: "" });
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.results[0].result, "BLOCKED");
+    assert.match(out.results[0].message, /no PF Establishment Code\. Add it in Master → Company Details/);
+    assert.equal(out.results[0].error_code, "SNAPSHOT_COMPANY_PF_CODE_MISSING");
+    assert.equal(world.payslips.length, 0);
+  });
+
+  it("invalid company details are refused and nothing is written", async () => {
+    await assert.rejects(company.create({ ...FORM, company_name: "" }), (e) => e.name === "ValidationError");
+    await assert.rejects(company.create({ ...FORM, reg_address: "  " }), (e) => e.name === "ValidationError");
+    assert.equal(world.companies.length, 0);
+  });
+});
+
 /* ============================================== the summary cards (filters) */
 
 /**

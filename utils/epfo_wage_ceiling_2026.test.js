@@ -519,7 +519,7 @@ describe("18. the payslip PF figures", () => {
     calculation: stored(r),
     employee: { employee_id: 101, employee_name: "Example Member", uan: "100200300400", pf_number: "TN/MAS/1/101", basic: 20000, hra: 10000, conveyance: 2500, special_allowance: 7500 },
     extras: {},
-    company: { name: "Daily Needs Departmental Store" },
+    company: { name: "Daily Needs Departmental Store", pf_establishment_code: "TN/MAS/0012345", esi_establishment_code: "51000123450001001" },
   });
 
   it("deducts the one September employee PF, 2,080", () => {
@@ -545,7 +545,7 @@ describe("18. the payslip PF figures", () => {
       calculation: stored(o),
       employee: { employee_id: 101, employee_name: "X", uan: "100200300400", basic: 20000, hra: 10000, conveyance: 2500, special_allowance: 7500 },
       extras: {},
-      company: { name: "Daily Needs Departmental Store" },
+      company: { name: "Daily Needs Departmental Store", pf_establishment_code: "TN/MAS/0012345", esi_establishment_code: "51000123450001001" },
     });
     assert.deepEqual(s2.statutory.pf_periods, []);
     assert.equal(s2.deductions.lines.find((l) => l.key === "employee_pf").amount, "2400.00");

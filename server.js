@@ -887,16 +887,17 @@ class Server {
       getMiniAppUrl: () => process.env.ATTENDANCE_CORRECTION_MINI_APP_URL || null,
       log: require("./utils/logger"),
     });
+    // The issuer comes from `company_details` (Master → Company Details);
+    // these are an emergency override only (utils/payslip_company.js).
+    this.payslipCompanyEnv = () => ({
+      PAYSLIP_COMPANY_ID: process.env.PAYSLIP_COMPANY_ID,
+      PAYSLIP_COMPANY_NAME: process.env.PAYSLIP_COMPANY_NAME,
+      PAYSLIP_COMPANY_ADDRESS: process.env.PAYSLIP_COMPANY_ADDRESS,
+    });
     this.payrunCalculationUsecase.setPayslipServices({
       payslipRepo: this.payrunPayslipRepo,
       notifier: this.payslipNotificationUsecase,
-      // The issuer comes from `company_details`; these only choose / override
-      // it when somebody configured them on purpose (utils/payslip_company.js).
-      companyEnv: () => ({
-        PAYSLIP_COMPANY_ID: process.env.PAYSLIP_COMPANY_ID,
-        PAYSLIP_COMPANY_NAME: process.env.PAYSLIP_COMPANY_NAME,
-        PAYSLIP_COMPANY_ADDRESS: process.env.PAYSLIP_COMPANY_ADDRESS,
-      }),
+      companyEnv: this.payslipCompanyEnv,
     });
     this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
       payslipRepo: this.payrunPayslipRepo,
@@ -1013,7 +1014,7 @@ class Server {
       this.budgetRepo
     );
     this.familyUsecase = require("./usecase/family")(this.familyRepo);
-    this.companyUsecase = require("./usecase/company")(this.companyRepo);
+    this.companyUsecase = require("./usecase/company")(this.companyRepo, this.payslipCompanyEnv);
     this.materialtypeUsecase = require("./usecase/materialtype")(
       this.materialtypeRepo
     );
@@ -1767,7 +1768,7 @@ class Server {
       this.permissions,
       this.ipRestriction
     );
-    const companyRouter = require("./routes/company")(this.companyUsecase);
+    const companyRouter = require("./routes/company")(this.companyUsecase, this.permissions);
     const materialtypeRouter = require("./routes/materialtype")(
       this.materialtypeUsecase
     );

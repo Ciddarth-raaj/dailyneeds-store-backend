@@ -28,7 +28,7 @@ const snapshot = () => {
       conveyance: "2500", special_allowance: "5506.68", uan: "100200300400",
     },
     extras: { account_no: "123456789012", pan_no: "ABCDE1234F" },
-    company: { name: "Daily Needs" },
+    company: { name: "Daily Needs", pf_establishment_code: "TN/MAS/0012345" },
   });
   return readFrozenSnapshot(freezeSnapshot(snap).text, freezeSnapshot(snap).sha256);
 };

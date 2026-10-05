@@ -278,6 +278,24 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
 
   const pfApplicable = isOne(c.pf_applicable);
   const esiApplicable = isOne(c.esi_applicable);
+  /*
+   * THE ESTABLISHMENT CODE IS REQUIRED ONLY WHERE IT APPLIES. A payslip that
+   * deducts PF (or ESI) names the establishment it is remitted under; one
+   * without PF (or ESI) never needs the code, so a company with no PF / ESI
+   * registration can still publish.
+   */
+  if (pfApplicable && !textOrNull(company.pf_establishment_code)) {
+    throw new SnapshotError(
+      "SNAPSHOT_COMPANY_PF_CODE_MISSING",
+      "PF applies to this employee but Company Details has no PF Establishment Code"
+    );
+  }
+  if (esiApplicable && !textOrNull(company.esi_establishment_code)) {
+    throw new SnapshotError(
+      "SNAPSHOT_COMPANY_ESI_CODE_MISSING",
+      "ESI applies to this employee but Company Details has no ESI Establishment Code"
+    );
+  }
   const payType = textOrNull(c.pay_type) || textOrNull(employee.pay_type);
   const otGroups = parseJsonList(c.ot_groups).map((g) => ({
     approved_ot_hours: g.approved_ot_hours === undefined ? null : Number(g.approved_ot_hours),

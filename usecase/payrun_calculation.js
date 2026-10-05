@@ -25,7 +25,7 @@ const crypto = require("crypto");
 const payslipSnapshot = require("../utils/payslip_snapshot");
 const pfCeilingImpact = require("../utils/pf_ceiling_impact");
 const epfoEcr = require("../utils/epfo_ecr");
-const { resolvePayslipCompany } = require("../utils/payslip_company");
+const { resolvePayslipCompany, payslipCompanyStatus } = require("../utils/payslip_company");
 const {
   SNAPSHOT_SCHEMA_VERSION,
   TEMPLATE_VERSION,
@@ -248,6 +248,19 @@ class PayrunCalculationUsecase {
   async _payslipCompany() {
     const rows = await this.payslipRepo.listCompanies();
     return resolvePayslipCompany(rows, this.companyEnv() || {});
+  }
+
+  /**
+   * CAN PAYSLIPS BE PUBLISHED - the same decision `_payslipCompany` makes at
+   * Publish, as data, so the Payroll screen disables Publish and says why
+   * instead of letting somebody press it to find out.
+   */
+  async getPayslipCompanyStatus() {
+    if (!this.payslipRepo) {
+      return { configured: false, reason: "NOT_AVAILABLE", message: "Payslip publishing is not configured on this server", company: null };
+    }
+    const rows = await this.payslipRepo.listCompanies();
+    return payslipCompanyStatus(rows, this.companyEnv() || {});
   }
 
   /**
@@ -2146,7 +2159,12 @@ class PayrunCalculationUsecase {
           };
         } catch (err) {
           if (err && err.name === "PayslipSnapshotError") {
-            push([ROW_RESULT.BLOCKED, `Not published — ${err.message}. Unlock, recalculate and approve again.`], {
+            // A missing company detail is fixed in Company Details, not by
+            // recalculating the employee.
+            const fix = /^SNAPSHOT_COMPANY_/.test(err.code || "")
+              ? "Add it in Master → Company Details and publish again."
+              : "Unlock, recalculate and approve again.";
+            push([ROW_RESULT.BLOCKED, `Not published — ${err.message}. ${fix}`], {
               error_code: err.code,
             });
             continue;

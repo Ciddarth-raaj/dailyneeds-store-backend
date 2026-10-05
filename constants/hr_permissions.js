@@ -759,4 +759,11 @@ module.exports = {
   // scope. A REQUEST permission is revoked through the ordinary approval
   // revoke, which stays with administrators.
   REVOKE_ATTENDANCE_PERMISSION: "revoke_attendance_permission",
+
+  // Master → Company Details (migration 20261121120000-company-details-
+  // permission). Create / edit the company records and choose the one
+  // payslips are issued by. GRANTED TO NOBODY: the record is who every
+  // payslip says it is from, so administrators hold it through the
+  // user_type 2 bypass and anybody else only by a deliberate grant.
+  MANAGE_COMPANY_DETAILS: "manage_company_details",
 };
