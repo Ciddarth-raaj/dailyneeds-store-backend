@@ -296,9 +296,10 @@ function sourceMarkers({
     esi_applicable: statutory.esi_applicable ?? null,
 
     /**
-     * THE REST OF THE STATUTORY SETUP THE PF / EPS RULES READ - the Form 11
-     * facts, the dates, the UAN, the coverage start and the contribution
-     * basis - as ONE marker. HR completing or correcting any of them after a
+     * THE REST OF THE STATUTORY SETUP THE PF / EPS RULES READ - the DOB
+     * (EPS age), the DOJ, the UAN, the coverage start and the contribution
+     * basis - as ONE marker. Previous PF / EPS Member are not in it: they
+     * are reference facts and no payroll rule reads them. HR completing or correcting any of them after a
      * month was calculated makes that calculation RECALCULATION_REQUIRED
      * (reason "Statutory setup changed") rather than leaving a figure on the
      * screen that was decided on the old answer. An approved month is locked
@@ -331,8 +332,6 @@ function statutorySetupMarker(statutory = {}) {
     .createHash("md5")
     .update(
       [
-        v(statutory.previous_pf_member),
-        v(statutory.previous_eps_member),
         v(statutory.dob),
         v(statutory.date_of_joining),
         v(statutory.uan).replace(/\s+/g, ""),
@@ -844,7 +843,6 @@ function computeCalculation(input = {}, config = CONFIG) {
         dob: statutory.dob ?? null,
         date_of_joining: snapshot.date_of_joining ?? statutory.date_of_joining ?? null,
         resignation_date: snapshot.resignation_date ?? null,
-        previous_eps_member: statutory.previous_eps_member ?? null,
         day_rows: Array.isArray(day_rows) ? day_rows : null,
         month_lop_days: ncpDays,
       },
@@ -858,8 +856,6 @@ function computeCalculation(input = {}, config = CONFIG) {
         pf_applicable: snapshot.pf_applicable,
         dob: statutory.dob ?? null,
         date_of_joining: snapshot.date_of_joining ?? statutory.date_of_joining ?? null,
-        previous_eps_member: statutory.previous_eps_member ?? null,
-        eps_test_wage: snapshot.basic,
         as_of,
       },
       config

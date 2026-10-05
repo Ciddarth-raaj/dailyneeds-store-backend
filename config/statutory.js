@@ -141,23 +141,6 @@ const pf = {
   epsExitAgeYears: num("PF_EPS_EXIT_AGE_YEARS", 58),
 
   /**
-   * The "new member" cut-off. Somebody who was NOT ALREADY AN EPS MEMBER on or
-   * after this date, whose pension wage exceeds the EPS ceiling, is not
-   * eligible to join EPS — the employer's whole share goes to EPF instead.
-   * This is the rule that makes `previous_eps_member` a payroll input rather
-   * than a note, and it is why the field is tri-state: for an employee whose
-   * pension history nobody has recorded, the answer is genuinely unknown and
-   * the engine reports it as unresolved rather than picking a side.
-   *
-   * IT IS THE EPS FACT AND NOT THE EPF ONE. Form 11 asks about prior EPF
-   * membership and prior EPS membership as two questions because they have two
-   * answers; `previous_pf_member` records the first and is not consulted here.
-   */
-  newMemberCutoffDate: date("PF_NEW_MEMBER_CUTOFF_DATE", "2014-09-01"),
-
-  /**
-   * ISOLATED NUANCE — see `utils/salary_engine.js#resolveEpsEligibility`.
-   *
    * Whether the employer contributes on the ceiling wage or on the whole of
    * Basic when Basic exceeds the ceiling. Daily Needs' modelled configuration
    * is the ceiling, which is what this defaults to. An establishment MAY
@@ -168,20 +151,6 @@ const pf = {
    * arithmetic.
    */
   applyCeilingToWage: bool("PF_APPLY_CEILING_TO_WAGE", true),
-
-  /**
-   * THE EPS ELIGIBILITY CORRECTION - A SEPARATE SWITCH FROM THE 2026 CEILING.
-   *
-   * The engine as first written tested "is the pension wage at or below the
-   * EPS ceiling?" on the ALREADY-CAPPED PF wage, which can never exceed the
-   * ceiling - so every post-01-09-2014 joiner above the ceiling who was never
-   * an EPS member was charged EPS. `true` (the corrected rule) tests the
-   * uncapped wage the employee is paid at. `false` reproduces the old
-   * behaviour exactly, for comparison and rollback; it cannot produce the
-   * EPFO FAQ's Scenario B, whose Period 1 EPS wage is NIL.
-   * See docs/epfo-wage-ceiling-2026.md, "EPS eligibility correction".
-   */
-  epsEligibilityOnUncappedWage: bool("PF_EPS_ELIGIBILITY_ON_UNCAPPED_WAGE", true),
 
   /**
    * A HIGHER-WAGE CONTRIBUTOR'S EDLI WAGE. The EPFO wage-ceiling FAQ's
@@ -366,6 +335,6 @@ const rounding = {
  * findable when a rate change turns out to have been wrong. Bump it whenever
  * a committed default above changes.
  */
-const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-09-17-PF-CEILING-25000";
+const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-09-17-PF-CEILING-25000-EPS-PF-APPLICABLE-AGE";
 
 module.exports = { salary, pf, esi, wages, rounding, configVersion };

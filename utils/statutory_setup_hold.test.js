@@ -26,18 +26,18 @@ describe("a September 2026 joiner", () => {
   it("with complete statutory data has no gap", () => {
     assert.deepEqual(fields(JOINER), []);
   });
-  it("missing Previous PF / EPS Member, DOB: each named, none inferred", () => {
-    assert.deepEqual(fields({ ...JOINER, previous_pf_member: null, previous_eps_member: null, dob: null }), [
-      "dob", "previous_pf_member", "previous_eps_member",
-    ]);
+  it("Previous PF / EPS Member blank: NOT a hold - they are onboarding reference facts", () => {
+    assert.deepEqual(fields({ ...JOINER, previous_pf_member: null, previous_eps_member: null }), []);
   });
-  it("Previous EPS Member is never inferred from Basic or gross", () => {
-    assert.deepEqual(fields({ ...JOINER, previous_eps_member: null, basic: 9000, monthly_gross: 9000 }), ["previous_eps_member"]);
+  it("DOB blank: NOT a hold - PF is calculated and only the EPS age decision is unresolved (by the engine)", () => {
+    assert.deepEqual(fields({ ...JOINER, dob: null }), []);
   });
-  it("an existing PF member needs their 12-digit UAN; a first-time member may still be awaiting it", () => {
-    assert.deepEqual(fields({ ...JOINER, previous_pf_member: 1 }), ["uan"]);
-    assert.deepEqual(fields({ ...JOINER, previous_pf_member: 1, uan: "100200300400" }), []);
-    assert.deepEqual(fields({ ...JOINER, previous_pf_member: 0 }), []);
+  it("the identifier rule is the same for a joiner as for everybody: UAN or PF number", () => {
+    assert.deepEqual(fields({ ...JOINER, previous_pf_member: 1 }), []);
+    assert.deepEqual(fields({ ...JOINER, uan: null, pf_number: null }), ["uan"]);
+  });
+  it("a joiner with no DOJ is held for it", () => {
+    assert.deepEqual(fields({ ...JOINER, date_of_joining: null }), ["date_of_joining"]);
   });
   it("PF Applicable not answered holds everybody, joiner or not", () => {
     assert.deepEqual(fields({ ...JOINER, pf_applicable: null }), ["pf_applicable"]);
@@ -63,11 +63,11 @@ describe("existing members are not newly held", () => {
 
 describe("the hold in readiness", () => {
   it("is a named, non-attendance blocker that Process Attendance and Close Attendance cannot clear", () => {
-    const hold = statutoryHoldReason(statutorySetupGaps({ ...JOINER, previous_eps_member: null }, SEP));
+    const hold = statutoryHoldReason(statutorySetupGaps({ ...JOINER, uan: null, pf_number: null }, SEP));
     assert.equal(hold.code, READINESS_REASON.STATUTORY_SETUP_INCOMPLETE);
     assert.equal(hold.processable, false);
     assert.equal(hold.accepted_by_close, false);
-    assert.match(hold.message, /Previous EPS Member not recorded/);
+    assert.match(hold.message, /UAN \(or PF Number\) not recorded/);
   });
   it("makes the employee not calculable even with settled attendance", () => {
     const r = evaluatePayrollReadiness({
@@ -75,7 +75,7 @@ describe("the hold in readiness", () => {
       snapshot: { monthly_gross: 20000, basic: 10000, date_of_joining: "2026-09-08" },
       monthly: null,
       attendance_required: false,
-      statutory_gaps: [{ field: "dob", label: "Date of Birth" }],
+      statutory_gaps: [{ field: "date_of_joining", label: "Date of Joining" }],
       closed_for_payroll: true,
     });
     assert.equal(r.calculable, false);

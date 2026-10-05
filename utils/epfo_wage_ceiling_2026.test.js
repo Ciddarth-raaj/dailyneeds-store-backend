@@ -234,51 +234,36 @@ describe("7. a previously PF-excluded employee with PF wage 20,000", () => {
   });
 });
 
-describe("8. an existing EPF member who is NOT an EPS member, PF wage 20,000", () => {
-  const pfOnly = { previous_eps_member: 0 };
+describe("8. Previous EPS Member = No is reference data: an existing PF member under 58 gets EPF + EPS (PF wage 20,000)", () => {
+  const recordedNo = { previous_eps_member: 0, previous_pf_member: 1 };
 
-  it("August: no EPS - joined after 01-09-2014 above the 15,000 pension ceiling", () => {
-    const pf = aug(20000, pfOnly);
-    assert.equal(pf.employer_eps, 0);
-    assert.equal(pf.employer_epf, 1800);
+  it("August: EPS 1,250, EPF 550 - as for any PF member under 58", () => {
+    const pf = aug(20000, recordedNo);
+    assert.deepEqual([pf.employee_pf, pf.employer_eps, pf.employer_epf], [1800, 1250, 550]);
   });
 
-  it("from 17-09-2026 they are inside the 25,000 ceiling and become EPS members", () => {
-    const pf = sep(20000, pfOnly);
-    assert.deepEqual(pf.segments.map((s) => s.state), ["EPF_ONLY", "EPF_EPS"]);
-    assert.equal(oct(20000, pfOnly).employer_eps, 1666);
+  it("September is Scenario C and October is EPS on 20,000 - the recorded No changes nothing", () => {
+    const pf = sep(20000, recordedNo);
+    assert.equal(pf.pf_scenario, "FAQ_C:EPF_EPS>EPF_EPS|CEILING");
+    assert.deepEqual(pf.segments.map((s) => s.state), ["EPF_EPS", "EPF_EPS"]);
+    assert.equal(oct(20000, recordedNo).employer_eps, 1666);
   });
 
-  it("on the HIGHER-WAGE basis this is FAQ Scenario B: EPF 10,666.67 + 9,333.33, EE 2,400 (not 2,080)", () => {
-    const b = sep(20000, { ...pfOnly, pf_contribution_basis: "ACTUAL_WAGE" });
-    assert.equal(b.pf_scenario, "FAQ_B:EPF_ONLY>EPF_EPS|ACTUAL_WAGE");
+  it("on the HIGHER-WAGE basis: EPF 10,666.67 + 9,333.33, EE 2,400, EPS in both periods", () => {
+    const b = sep(20000, { ...recordedNo, pf_contribution_basis: "ACTUAL_WAGE" });
+    assert.equal(b.pf_scenario, "EPF_EPS>EPF_EPS|ACTUAL_WAGE");
+    assert.deepEqual(b.segments.map((s) => [s.pf_wage, s.eps_wage]), [[10666.67, 8000], [9333.33, 9333.33]]);
     assert.equal(b.employee_pf, 2400);
   });
 
-  it("on the CEILING basis it is NOT a FAQ case: EPF 8,000 + 9,333.33, EE 2,080, EPS only from 17-09", () => {
-    // An EPF-only member whose EPF was capped at 15,000. The FAQ has no such
-    // example; the rule applied is the FAQ's own (old ceiling, then new).
-    const c = sep(20000, pfOnly);
-    assert.equal(c.pf_scenario, "EPF_ONLY>EPF_EPS|CEILING");
-    assert.deepEqual(c.segments.map((s) => [s.pf_wage, s.eps_wage]), [[8000, 0], [9333.33, 9333.33]]);
-    assert.equal(c.employee_pf, 2080);
-    assert.equal(c.exact.employer_eps, 777.47);
-  });
-
-  it("PF and EPS stay separate: PF Applicable alone never decides EPS", () => {
-    const withHistory = sep(20000, { previous_eps_member: 1 });
-    const without = sep(20000, { previous_eps_member: 0 });
-    assert.equal(withHistory.employee_pf, without.employee_pf, "the PF side is identical");
-    assert.notEqual(withHistory.segments[0].employer_eps, without.segments[0].employer_eps, "the EPS side is not");
-    const unknown = sep(20000, { previous_eps_member: null });
-    assert.ok(
-      unknown.unresolved.some((u) => u.code === engine.UNRESOLVED.EPS_MEMBERSHIP_NOT_RECORDED && u.period_to === "2026-09-16"),
-      "an unrecorded EPS history is a question for Period 1, not a guess"
-    );
-    assert.equal(unknown.employer_eps, null);
-    const r = payrun({ basic: 20000, statutory: { previous_eps_member: null } });
-    assert.equal(r.is_complete, false, "and the month cannot be approved until it is answered");
-    assert.equal(unknown.employee_pf, 2080, "the employee share is still known");
+  it("Previous EPS Member = Yes, No or blank: identical PF and EPS, and never unresolved", () => {
+    const answers = [1, 0, null].map((previous_eps_member) => sep(20000, { previous_eps_member }));
+    answers.forEach((r) => {
+      assert.deepEqual([r.employee_pf, r.employer_eps, r.employer_epf], [2080, 1444, 636]);
+      assert.deepEqual(r.unresolved, []);
+    });
+    const r = payrun({ basic: 20000, statutory: { previous_eps_member: null, previous_pf_member: null } });
+    assert.equal(r.is_complete, true, "a blank Previous PF / EPS Member never blocks approval");
   });
 });
 
@@ -328,8 +313,8 @@ describe("10. joining BEFORE 17 September (10-09-2026, PF wage 20,000)", () => {
     assert.equal(r.employee_pf, 554 + 1108);
   });
 
-  it("a new member above 15,000: no EPS for 10-16, EPS from 17-09", () => {
-    assert.deepEqual(segs.map((s) => s.eps_eligible), [false, true]);
+  it("a new member above 15,000 under 58: EPS in both periods (PF Applicable + age)", () => {
+    assert.deepEqual(segs.map((s) => s.eps_eligible), [true, true]);
     assert.equal(r.is_complete, true);
   });
 });
@@ -425,13 +410,14 @@ describe("13-14. loss of pay lands in the period it fell in", () => {
 });
 
 describe("15. the September split-period calculation (the FAQ's own figures are in epfo_faq_scenarios_2026.test.js)", () => {
-  // An EPF-only member on the CEILING basis - not one of the FAQ's three.
+  // A PF member under 58 on the CEILING basis, Previous EPS Member recorded No
+  // (reference only): Scenario C.
   const r = payrun({ basic: 20000, statutory: { previous_eps_member: 0 } });
   const [p1, p2] = r.pf_segments;
 
   it("Period 1: 01-16 on the 15,000 ceiling prorated to 8,000", () => {
     assert.deepEqual([p1.from, p1.to, p1.monthly_wage_ceiling, p1.applied_wage_ceiling], ["2026-09-01", "2026-09-16", 15000, 8000]);
-    assert.deepEqual([p1.pf_wage, p1.eps_wage, p1.state], [8000, 0, "EPF_ONLY"]);
+    assert.deepEqual([p1.pf_wage, p1.eps_wage, p1.state], [8000, 8000, "EPF_EPS"]);
   });
 
   it("Period 2: 17-30 on the 25,000 ceiling, EPF and EPS wages 9,333.33 (exact contributions)", () => {
@@ -442,15 +428,15 @@ describe("15. the September split-period calculation (the FAQ's own figures are 
 
   it("ONE September result: exact sums, rounded once to file", () => {
     assert.equal(r.pf_wage, 17333.33);
-    assert.equal(r.eps_wage, 9333.33);
-    assert.deepEqual([r.employee_pf, r.employer_pf_total, r.employer_eps, r.employer_epf], [2080, 2080, 777, 1303]);
-    assert.equal(r.pf_exact.employer_epf, 1302.53);
+    assert.equal(r.eps_wage, 17333.33);
+    assert.deepEqual([r.employee_pf, r.employer_pf_total, r.employer_eps, r.employer_epf], [2080, 2080, 1444, 636]);
+    assert.equal(r.pf_exact.employer_epf, 636.13);
     assert.equal(r.is_complete, true);
   });
 
   it("carries the audit trail: both ceiling versions, the scenario and the statutory config version", () => {
     assert.equal(r.pf_ceiling_version, "EPFO-CEILING-15000-2014-09-01+EPFO-CEILING-25000-2026-09-17");
-    assert.equal(r.pf_scenario, "EPF_ONLY>EPF_EPS|CEILING");
+    assert.equal(r.pf_scenario, "FAQ_C:EPF_EPS>EPF_EPS|CEILING");
     assert.equal(r.statutory_config_version, CONFIG.configVersion);
     assert.deepEqual(r.pf_segments.map((s) => s.ceiling_version), ["EPFO-CEILING-15000-2014-09-01", "EPFO-CEILING-25000-2026-09-17"]);
   });
@@ -487,7 +473,7 @@ function stored(result, over = {}) {
 }
 
 describe("17. the September ECR", () => {
-  // An EPF-only member on the CEILING basis (not a FAQ case; the FAQ ECRs are in epfo_faq_scenarios_2026.test.js).
+  // A capped PF member under 58 (Scenario C; Previous EPS Member = No is reference only).
   const epfOnlyCapped = payrun({ basic: 20000, statutory: { previous_eps_member: 0 } });
   const low = payrun({ basic: 12000 });
   const excluded = payrun({ basic: 22000, snapshot: { pf_applicable: 0 } });
@@ -505,7 +491,7 @@ describe("17. the September ECR", () => {
     assert.equal(file.lines.length, 2);
     assert.equal(
       file.lines[0],
-      ["100200300400", "EXAMPLE MEMBER", 40000, 17333, 9333, 17333, 2080, 777, 1303, 0, 0].join("#~#")
+      ["100200300400", "EXAMPLE MEMBER", 40000, 17333, 17333, 17333, 2080, 1444, 636, 0, 0].join("#~#")
     );
     assert.equal(file.lines.filter((l) => l.startsWith("100200300400")).length, 1);
   });
@@ -522,7 +508,7 @@ describe("17. the September ECR", () => {
   it("totals the contributions it files", () => {
     assert.equal(file.totals.members, 2);
     assert.equal(file.totals.ee_share, 2080 + low.employee_pf);
-    assert.equal(file.totals.eps_share, 777 + low.employer_eps);
+    assert.equal(file.totals.eps_share, 1444 + low.employer_eps);
   });
 });
 
