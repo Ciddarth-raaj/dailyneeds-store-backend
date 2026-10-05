@@ -137,38 +137,61 @@ The ordinary Excel/PDF EPF and ESI reports still download, with their validation
 | 11 | No Work | blank |
 | 12 | Does Not Belong To This Employer | blank |
 
-**Blocking reasons**: not calculated, not approved & locked, incomplete, ESI unresolved, IP number missing or not 10 digits, IP name invalid, days outside the month, wages missing or negative, zero days/wages without a reason, invalid reason code, last working day missing or after the month, contribution mismatch (employee 0.75% and employer 3.25% of wages within ₹1; employee 0 is allowed for the low-wage exemption).
+**Blocking reasons**: not calculated, not approved & locked, incomplete, ESI unresolved, IP number missing or not 10 digits, IP name invalid, days outside the month, wages missing or negative, zero days/wages without a reason, invalid reason code, last working day missing or after the month, stored employer contribution missing. The contributions themselves are the engine's stored figures and are not recomputed here.
 
-### Sources, and what is still to be confirmed
+### Sources and verification status
 
-The layouts above were checked against official pages as far as this build environment allowed. Its network policy blocks `epfindia.gov.in`, `esic.gov.in` and `esic.in`, so the full documents could not be downloaded; the following was read from those official pages through search:
+The build environment's network policy blocks `epfindia.gov.in`, `esic.gov.in` and `esic.in`, so the official files could not be downloaded. Everything below marked confirmed was read from the official pages themselves (via search restricted to those domains).
 
-- **EPFO** - *Electronic Challan cum Return (ECR) File Format (for Employers)*, `epfindia.gov.in/site_docs/PDFs/OnlineECR_PDFs/ECR_ForEmployers_FileStructure.pdf`, and *Introduction - ECR Version II*, `.../EPFOUnifiedPortal/Introduction_ECR2.0.pdf`. Confirmed:
-  - plain text, one line per member, `#~#` separator;
-  - eleven fields in the monthly file (eight in the arrear file);
-  - member identifiers (UAN, name), return fields (gross, EPF, EPS, EDLI wages, NCP days) and remittance fields (EE share, EPS, ER share);
-  - no decimals;
-  - name: at most 85 characters, starts with a letter, no special character except `.`;
-  - NCP = days in the month when wages are 0;
-  - EDLI wages equal EPF wages up to the EDLI ceiling.
-- **ESIC** - *Instructions & Reason Codes* sample template, `esic.in/InsuranceGlobalWebV4/App_Themes/Help/MC_Template1.xls`; the Monthly Contribution portal; and the circular *Implementation of Provision to Upload Multiple Excel Sheets*, `esic.gov.in/attachments/circularfile/0d84038f847b3a37178d824ca3d5992b.pdf`. Confirmed:
-  - the upload is an Excel 97-2003 `.xls`;
-  - IP name is letters and space only;
-  - reason code is numeric, 0 for all other reasons;
-  - the reason list (On Leave … Does Not Belong To This Employer, with no "Duplicate IP");
+**EPFO - confirmed**
+
+- **Format.** [ECR File Format (for Employers)](https://www.epfindia.gov.in/site_docs/PDFs/OnlineECR_PDFs/ECR_ForEmployers_FileStructure.pdf) and [Introduction - ECR 2.0](https://www.epfindia.gov.in/site_docs/PDFs/EPFOUnifiedPortal/Introduction_ECR2.0.pdf):
+  - `.txt` file, one line per member, `#~#` separator, eleven fields, no decimals;
+  - member name: at most 85 characters, no special character other than `.`;
+  - NCP days equal the days in the month when wages are 0;
+  - EDLI wages equal EPF wages, capped at the EDLI ceiling (0 only for no wages or an EDLI exemption);
+  - Refund of Advances: a whole number.
+- **[Revamped ECR](https://www.epfindia.gov.in/site_en/revamped_ecr.php), from wage month September 2025** (also [PIB](https://www.pib.gov.in/PressReleasePage.aspx?PRID=2178587)). It **retains the existing ECR format**. The new items are portal-side: return and payment are separated, system validations are added, 14B damages and 7Q interest are calculated, and ECRs can be revised and must be filed in month order. Nothing in the file layout changes.
+- **Upper case.** The official text sets no upper-case requirement. Names are written upper case, exactly as the payrun's own ECR (`utils/epfo_ecr.js#cleanName`) already writes them. That satisfies the character rule and keeps the two ECRs identical.
+- **EDLI ceiling.** The ceiling rises from 15,000 to 25,000 with effect from 17 September 2026 ([PIB](https://www.pib.gov.in/PressReleasePage.aspx?PRID=2313829)). The ECR writes the payroll engine's **stored** `edli_wage`, which the engine computed from its effective-dated ceiling schedule in `config/statutory.js` (`pfCeilingSchedule`). The file generator holds no ceiling constant of its own.
+- **Refund of Advances.** `0`: DnDS records no refund of EPF advances.
+
+**ESIC - confirmed**
+
+- **Format.** [MC template](http://www.esic.in/InsuranceGlobalWebV4/App_Themes/Help/MC_Template1.xls) and [multiple-sheet circular](https://esic.gov.in/attachments/circularfile/0d84038f847b3a37178d824ca3d5992b.pdf):
+  - Excel 97-2003 `.xls`;
+  - IP Name: alphabets and space only;
+  - reason code: numeric, 0 for all other reasons;
+  - the reason list (On Leave … Doesn't Belong To This Employer; no "Duplicate IP");
   - last working day only for Left Service, Retired, Out of Coverage, Expired, Non-Implemented Area and Retrenchment;
-  - date format `DD/MM/YYYY` or `DD-MM-YYYY`, zero-padded.
+  - dates `DD/MM/YYYY` or `DD-MM-YYYY`, zero-padded.
 
-**To confirm against the full documents** before relying on the files in production. All of these are single constants in `utils/payroll_statutory_files.js`:
+**ESIC - still to verify against the template file itself**
 
-1. The template's numeric reason codes 0-12 (the reason list itself is confirmed).
-2. The exact header text of the six template columns.
-3. Whether *Total Monthly Wages* may carry paise. The file writes the stored wage, so paise appear when the stored wage has them.
-4. Whether the portal requires a particular sheet name. The file uses `Sheet1`.
-5. Whether the ECR member name must be upper case. It is written upper case.
-6. The EDLI wage ceiling after the 2026 EPFO wage-ceiling revision. EDLI wages are taken from the stored calculation, and only checked to be ≤ EPF wages.
+1. The numeric code of each reason.
+2. The exact text of the six headers.
+3. Whether Total Monthly Wages may carry paise.
+4. Whether the sheet name matters.
 
-The `.xls` is written with SheetJS (`xlsx` 0.18.5). Its published advisories concern *reading* untrusted files; this code only writes.
+`utils/payroll_statutory_official_template.test.js` checks items 1 and 2 automatically. Save the official `MC_Template1.xls` at `test_support/statutory/MC_Template1.xls` and run the suite; it is skipped until the file is present.
+
+### No second payroll calculation
+
+The file generator formats and validates the stored payrun. It never re-derives a statutory figure:
+
+- **Wages and contributions** (EPF, EPS, EDLI, ESI) are the engine's stored values.
+- **The ESI check** blocks only a *missing* stored contribution. An earlier check that recomputed ESI from the current config rates was removed.
+- **The EPF arithmetic check** is the payrun's own shared `validateEcrMember`, called with the engine's configured rates (`config/statutory.js` `pf.employeeRatePercent` / `epsRatePercent`).
+
+### `.xls` round trip
+
+`utils/payroll_statutory_files.test.js` writes the contribution file and re-opens it with SheetJS. When available, it also uses `xlrd`, an independent reader that only opens genuine BIFF `.xls`. It asserts:
+
+- BIFF8 (Excel 97-2003);
+- IP number and last working day stored as **text**, so a leading zero is kept (for example `0012345678`);
+- days, wages and reason code stored as **numbers**;
+- an empty last working day stored as a **blank** cell;
+- every value unchanged after re-opening.
 
 ## Permissions (no new keys)
 
@@ -189,5 +212,6 @@ A report is a fixed number of queries whatever the headcount: count, one page or
 
 ```
 node --test utils/payroll_report_query.test.js utils/payroll_statutory_files.test.js usecase/payroll_report_service.test.js
-ATTENDANCE_TEST_MYSQL=mysql://user:pass@localhost/scratch_db node --test repository/payroll_report.mysql.test.js
+ATTENDANCE_TEST_MYSQL=mysql://user:pass@localhost/scratch_db node --test repository/payroll_report.mysql.test.js repository/payroll_report_engine.mysql.test.js
+node --test utils/payroll_statutory_official_template.test.js   # needs test_support/statutory/MC_Template1.xls
 ```

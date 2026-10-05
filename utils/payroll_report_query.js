@@ -41,6 +41,10 @@ const FINALIZED = "c.status = 'APPROVED_LOCKED'";
  * row. Fields marked `always` describe the row itself (its status, its pay
  * type) and are exempt.
  */
+/** Whether a field shows a calculation figure (blank for a row that is not finalized). */
+const isFinalizedFigure = (field) =>
+  !field.always && Object.values(catalogue.selectsOf(field)).some((expr) => /\bc\./.test(expr));
+
 const finalizedOnly = (field, expr) =>
   !field.always && /\bc\./.test(expr) ? `IF(${FINALIZED}, ${expr}, NULL)` : expr;
 
@@ -369,6 +373,7 @@ module.exports = {
   columnsOf,
   joinsFor,
   finalizedOnly,
+  isFinalizedFigure,
   FINALIZED,
   has,
   mayUseField,

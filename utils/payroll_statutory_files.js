@@ -42,6 +42,7 @@ const REASON = {
   IP_NAME_INVALID: "IP name must contain letters (only letters and spaces are allowed)",
   WAGES_INVALID: "A wage value is missing or negative",
   CONTRIBUTION_MISMATCH: "Contribution does not match the wages",
+  CONTRIBUTION_MISSING: "A contribution figure is not stored on the payrun",
   ESI_PENDING: "ESI status is unresolved for this month",
   IP_MISSING: "ESI IP number is not recorded",
   IP_INVALID: "ESI IP number must be exactly 10 digits",
@@ -95,6 +96,7 @@ const ECR_FIELDS = [
   ["refund_of_advances", "REFUND OF ADVANCES"],
 ];
 const ECR_SEPARATOR = epfoEcr.SEP;
+const ECR_RATES = { employee: statutory.pf.employeeRatePercent, eps: statutory.pf.epsRatePercent };
 const ECR_NAME_MAX = 85;
 
 /**
@@ -177,7 +179,9 @@ function validateEpf({ rows = [], period }) {
     if (member.epf_wages === 0 && member.ncp_days !== period.days) {
       block(employee, reason("NCP_ZERO_WAGES", `NCP ${member.ncp_days}, month has ${period.days} days`));
     }
-    const problems = epfoEcr.validateEcrMember(member);
+    // The payrun's own ECR consistency check, with the payroll engine's own
+    // configured rates (config/statutory.js) - not a second set of numbers.
+    const problems = epfoEcr.validateEcrMember(member, ECR_RATES);
     if (problems.length) {
       const employee = prepared.find((r) => Number(r.employee.employee_id) === member.employee_id).employee;
       block(employee, reason("CONTRIBUTION_MISMATCH", problems.join("; ")));
@@ -295,7 +299,6 @@ function esicReasonFor({ days, wages, resignation_date, override, period }) {
   return { reason_code: 0, last_working_day: null, reason_source: "DEFAULT" };
 }
 
-const within = (a, b, tolerance = 1) => Math.abs(a - b) <= tolerance;
 
 /**
  * @param {object} args
@@ -359,16 +362,12 @@ function validateEsi({ rows = [], period, overrides = {} }) {
       else if (derived.last_working_day > period.to) block(employee, reason("LWD_INVALID"));
     }
 
-    // The contribution arithmetic, within a rupee of rounding. An employee
-    // share of 0 is allowed: the low-wage exemption charges the employer only.
-    if (wages !== null && wages > 0 && calculation.esi_status === "APPLIED") {
-      const ee = num(calculation.employee_esi) || 0;
-      const er = num(calculation.employer_esi) || 0;
-      const eeExpected = (wages * statutory.esi.employeeRatePercent) / 100;
-      const erExpected = (wages * statutory.esi.employerRatePercent) / 100;
-      if ((ee !== 0 && !within(ee, eeExpected)) || !within(er, erExpected)) {
-        block(employee, reason("CONTRIBUTION_MISMATCH", `employee ${ee}, employer ${er} on wages ${wages}`));
-      }
+    // NO SECOND ESI CALCULATION. The contributions are the payroll engine's
+    // stored figures (`utils/salary_engine.js` via the payrun); this file only
+    // refuses a covered month whose stored contribution is MISSING. It never
+    // re-derives one from today's rates.
+    if (wages !== null && wages > 0 && calculation.esi_status === "APPLIED" && num(calculation.employer_esi) === null) {
+      block(employee, reason("CONTRIBUTION_MISSING", "employer ESI contribution is not stored"));
     }
 
     records.push({
@@ -417,7 +416,12 @@ function buildEsicXls(v) {
   for (let r = 1; r < aoa.length; r += 1) {
     for (const c of [0, 5]) {
       const ref = XLSX.utils.encode_cell({ r, c });
-      ws[ref] = { t: "s", v: String(aoa[r][c] === null || aoa[r][c] === undefined ? "" : aoa[r][c]) };
+      const value = aoa[r][c] === null || aoa[r][c] === undefined ? "" : String(aoa[r][c]);
+      // Text, never a number: no exponent form, no lost leading zero, no
+      // date re-formatting. An empty Last Working Day is a BLANK cell, not
+      // an empty string.
+      if (value === "") delete ws[ref];
+      else ws[ref] = { t: "s", v: value };
     }
   }
   const wb = XLSX.utils.book_new();

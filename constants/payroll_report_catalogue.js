@@ -148,13 +148,23 @@ const f = (key, label, group, spec) => ({
 const PAYRUN_STATUS =
   "CASE WHEN c.payrun_calculation_id IS NULL THEN 'NOT_CALCULATED' " +
   "WHEN c.status = 'APPROVED_LOCKED' AND c.published_at IS NOT NULL THEN 'PUBLISHED' " +
-  "WHEN c.status = 'APPROVED_LOCKED' THEN 'APPROVED_LOCKED' ELSE 'NOT_APPROVED' END";
+  "WHEN c.status = 'APPROVED_LOCKED' THEN 'APPROVED_LOCKED' " +
+  "WHEN c.unlocked_at IS NOT NULL THEN 'UNLOCKED' ELSE 'PENDING_APPROVAL' END";
+/**
+ * In the words of the payrun's own state model: a calculation is
+ * CALCULATED or APPROVED_LOCKED (`payrun_employee_calculation.status`),
+ * published when `published_at` is set, and was unlocked for correction when
+ * `unlocked_at` is set on a row that is CALCULATED again. Every non-final
+ * label says "Not Finalized" first, so a blank figure is never read as zero.
+ */
 const PAYRUN_STATUS_LABEL = {
-  NOT_CALCULATED: "Not calculated - figures not shown",
-  NOT_APPROVED: "Not approved & locked - figures not shown",
-  APPROVED_LOCKED: "Approved & locked",
-  PUBLISHED: "Published",
+  NOT_CALCULATED: "Not Finalized - Not Calculated",
+  PENDING_APPROVAL: "Not Finalized - Pending Approval",
+  UNLOCKED: "Not Finalized - Unlocked for correction (Not Locked)",
+  APPROVED_LOCKED: "Finalized - Approved & Locked",
+  PUBLISHED: "Finalized - Published",
 };
+const FINAL_STATUSES = new Set(["APPROVED_LOCKED", "PUBLISHED"]);
 /** The month's pay type: the approved calculation's, else the payrun snapshot's. */
 const PAY_TYPE = "IF(c.status = 'APPROVED_LOCKED', c.pay_type, pe.pay_type)";
 
@@ -475,5 +485,6 @@ module.exports = {
   SNAPSHOTTED_MASTER_KEYS,
   PAYRUN_STATUS,
   PAYRUN_STATUS_LABEL,
+  FINAL_STATUSES,
   PAY_TYPE,
 };

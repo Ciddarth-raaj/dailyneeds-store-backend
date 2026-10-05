@@ -49,6 +49,26 @@ const notFound = () => new PayrollReportError(404, "TEMPLATE_NOT_FOUND", "That t
 
 const STATUTORY_POST = new Set(["epf_validation", "esi_validation", "esi_reason", "esi_lwd"]);
 
+/** One row's payrun state, in the payrun's own vocabulary. */
+const rowStatus = (r) => ({
+  status: r._payrun_status,
+  finalized: catalogue.FINAL_STATUSES.has(r._payrun_status),
+  label: catalogue.PAYRUN_STATUS_LABEL[r._payrun_status] || null,
+});
+
+/** What an export writes in a figure cell of a row that is not finalized. */
+const NOT_FINALIZED = "Not finalized";
+
+/**
+ * The value an export writes for one cell: a figure of a not-finalized row
+ * says so in words, so a blank is never read as a zero salary.
+ */
+const exportValue = (data, i, field) => {
+  const status = data.row_status && data.row_status[i];
+  if (status && !status.finalized && Q.isFinalizedFigure(field)) return NOT_FINALIZED;
+  return data.rows[i][field.key];
+};
+
 class PayrollReportService {
   /**
    * @param reportRepo   repository/payroll_report.js
@@ -538,7 +558,10 @@ class PayrollReportService {
       rows: rows.map((r) => Q.presentRow(r, req.fields, post)),
       // Per row, parallel to `rows`: is this payrun row finalized, and if not
       // what it is. Never an export column - the screen marks the row.
-      row_status: rows.map((r) => ({ status: r._payrun_status, label: catalogue.PAYRUN_STATUS_LABEL[r._payrun_status] || null })),
+      row_status: rows.map(rowStatus),
+      // Which columns are payroll figures - the ones a not-finalized row
+      // shows as "Not finalized" rather than as an empty (or zero-looking) cell.
+      figure_keys: req.fields.filter(Q.isFinalizedFigure).map((f) => f.key),
       totals: totalRows ? Q.presentTotals(totalRows[0], req.fields) : null,
       display: req.display,
       filters: req.filters,
@@ -624,6 +647,7 @@ class PayrollReportService {
     return {
       ...req,
       rows: rows.map((r) => Q.presentRow(r, req.fields, post)),
+      row_status: rows.map(rowStatus),
       totals: totalRows ? Q.presentTotals(totalRows[0], req.fields) : null,
       not_finalized_count: matching - (Number(countRow && countRow.finalized_count) || 0),
     };
@@ -821,7 +845,7 @@ async function buildWorkbook(data) {
   ws.addRow([]);
   const header = ws.addRow(data.fields.map((f) => f.label));
   header.font = { bold: true };
-  for (const row of data.rows) ws.addRow(data.fields.map((f) => cellValue(f, row[f.key])));
+  data.rows.forEach((row, i) => ws.addRow(data.fields.map((f) => cellValue(f, exportValue(data, i, f)))));
   if (data.totals) {
     const totals = ws.addRow(data.fields.map((f, i) => (i === 0 ? "Total" : f.key in data.totals ? data.totals[f.key] : null)));
     totals.font = { bold: true };
@@ -853,7 +877,7 @@ function buildPdfHtml(data) {
   const numeric = (f) => f.type === catalogue.TYPE.AMOUNT || f.type === catalogue.TYPE.NUMBER;
   const th = data.fields.map((f) => `<th class="${numeric(f) ? "n" : ""}">${escapeHtml(f.label)}</th>`).join("");
   const body = data.rows
-    .map((row) => `<tr>${data.fields.map((f) => `<td class="${numeric(f) ? "n" : ""}">${escapeHtml(fmt(f, row[f.key]))}</td>`).join("")}</tr>`)
+    .map((row, i) => `<tr>${data.fields.map((f) => `<td class="${numeric(f) ? "n" : ""}">${escapeHtml(fmt(f, exportValue(data, i, f)))}</td>`).join("")}</tr>`)
     .join("");
   const totals = data.totals
     ? `<tr class="t">${data.fields

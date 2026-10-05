@@ -139,11 +139,13 @@ describe("ESI / ESIC contribution file validation", () => {
     assert.deepEqual(v.file_rows[0], ["1234567890", "EMPLOYEE A", 26, 15000, 0, ""]);
   });
 
-  it("an employee share of zero (low-wage exemption) is not a mismatch; a wrong employer share is", () => {
-    const ok = S.validateEsi({ period: SEPT, rows: [{ employee: esiEmp(1), calculation: esiCalc({ employee_esi: "0" }) }] });
-    assert.equal(ok.summary.ready, 1);
-    const bad = S.validateEsi({ period: SEPT, rows: [{ employee: esiEmp(1), calculation: esiCalc({ employer_esi: "100" }) }] });
-    assert.deepEqual(bad.blocked[0].reasons.map((r) => r.code), ["CONTRIBUTION_MISMATCH"]);
+  it("ESI contributions are the payrun's stored figures - never recomputed here; only a MISSING one blocks", () => {
+    const ok = S.validateEsi({ period: SEPT, rows: [{ employee: esiEmp(1), calculation: esiCalc({ employee_esi: "0", employer_esi: "100" }) }] });
+    assert.equal(ok.summary.ready, 1, "no second ESI calculation second-guesses the engine");
+    const missing = S.validateEsi({ period: SEPT, rows: [{ employee: esiEmp(1), calculation: esiCalc({ employer_esi: null }) }] });
+    assert.deepEqual(missing.blocked[0].reasons.map((r) => r.code), ["CONTRIBUTION_MISSING"]);
+    const src = require("fs").readFileSync(require.resolve("./payroll_statutory_files"), "utf8").replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+    assert.ok(!/esi\.(employee|employer)RatePercent/.test(src), "no ESI rate is applied in the file generator");
   });
 });
 
@@ -226,5 +228,72 @@ describe("ESIC monthly contribution - the .xls file and the reason codes", () =>
   it("an IP name with no letters is blocked, never filed blank", () => {
     const v = S.validateEsi({ period: SEPT, rows: [{ employee: esiEmp(1, { employee_name: "1234" }), calculation: esiCalc() }] });
     assert.deepEqual(v.blocked[0].reasons.map((r) => r.code), ["IP_NAME_INVALID"]);
+  });
+});
+
+describe("ESIC .xls round trip", () => {
+  const XLSX = require("xlsx");
+  const { execFileSync } = require("child_process");
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+
+  const build = () => {
+    const c = (o) => esiCalc({ esi_wage: "15000.50", ...o });
+    return S.validateEsi({
+      period: SEPT,
+      rows: [
+        { employee: esiEmp(1, { employee_name: "Asha K", esi_number: "0012345678" }), calculation: c() },
+        { employee: esiEmp(2, { employee_name: "Babu", esi_number: "3101234567", resignation_date: "2026-09-05" }), calculation: c({ employee_id: 2, salary_days: 4, esi_wage: "2000" }) },
+        { employee: esiEmp(3, { employee_name: "Chitra", esi_number: "9999999999" }), calculation: c({ employee_id: 3, salary_days: 0, esi_wage: "0", employee_esi: "0", employer_esi: "0" }) },
+      ],
+      overrides: { 3: { reason_code: 1 } },
+    });
+  };
+  const EXPECTED = [
+    ["0012345678", "ASHA K", 26, 15000.5, 0, null],
+    ["3101234567", "BABU", 4, 2000, 2, "05/09/2026"],
+    ["9999999999", "CHITRA", 0, 0, 1, null],
+  ];
+
+  it("re-opens with every value and type intact: IP number and last working day as text, leading zero kept", () => {
+    const buf = S.buildEsicXls(build());
+    assert.equal(buf.slice(0, 8).toString("hex"), "d0cf11e0a1b11ae1", "OLE2 compound file");
+    const wb = XLSX.read(buf, { type: "buffer" });
+    const ws = wb.Sheets.Sheet1;
+    const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: null });
+    assert.deepEqual(rows[0], S.ESIC_HEADERS);
+    assert.deepEqual(rows.slice(1), EXPECTED);
+    for (const r of [2, 3, 4]) {
+      assert.equal(ws[`A${r}`].t, "s", "IP number is text");
+      for (const col of ["C", "D", "E"]) assert.equal(ws[`${col}${r}`].t, "n", `${col}${r} is a number`);
+    }
+    assert.equal(ws.F3.t, "s", "last working day is text");
+    assert.equal(ws.F2, undefined, "an empty last working day is a blank cell");
+  });
+
+  // An independent reader: python xlrd reads ONLY genuine BIFF .xls files.
+  let xlrd = false;
+  try {
+    execFileSync("python3", ["-c", "import xlrd"], { stdio: "ignore" });
+    xlrd = true;
+  } catch (err) {
+    xlrd = false;
+  }
+  it("an independent Excel 97-2003 reader (xlrd) sees BIFF8 and the same typed values", { skip: !xlrd && "python3 xlrd not installed" }, () => {
+    const file = path.join(os.tmpdir(), `esic-${process.pid}.xls`);
+    fs.writeFileSync(file, S.buildEsicXls(build()));
+    const out = execFileSync("python3", ["-c", `
+import xlrd, json, sys
+b = xlrd.open_workbook(sys.argv[1])
+sh = b.sheet_by_index(0)
+print(json.dumps({"biff": b.biff_version, "rows": [[[sh.cell_type(r, c), sh.cell_value(r, c)] for c in range(sh.ncols)] for r in range(sh.nrows)]}))
+`, file]).toString();
+    fs.unlinkSync(file);
+    const { biff, rows } = JSON.parse(out);
+    assert.equal(biff, 80, "BIFF8 - Excel 97-2003");
+    const TEXT = 1, NUMBER = 2, EMPTY = 0;
+    assert.deepEqual(rows[1], [[TEXT, "0012345678"], [TEXT, "ASHA K"], [NUMBER, 26], [NUMBER, 15000.5], [NUMBER, 0], [EMPTY, ""]]);
+    assert.deepEqual(rows[2], [[TEXT, "3101234567"], [TEXT, "BABU"], [NUMBER, 4], [NUMBER, 2000], [NUMBER, 2], [TEXT, "05/09/2026"]]);
   });
 });

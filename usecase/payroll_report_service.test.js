@@ -61,7 +61,7 @@ function evaluate(expr, row) {
   if (finalOnly) return row["c.status"] === "APPROVED_LOCKED" ? evaluate(finalOnly[1], row) : null;
   if (expr === catalogue.PAYRUN_STATUS) {
     if (!row["c.status"]) return "NOT_CALCULATED";
-    if (row["c.status"] !== "APPROVED_LOCKED") return "NOT_APPROVED";
+    if (row["c.status"] !== "APPROVED_LOCKED") return row["c.unlocked_at"] ? "UNLOCKED" : "PENDING_APPROVAL";
     return row["c.published_at"] ? "PUBLISHED" : "APPROVED_LOCKED";
   }
   return expr in row ? row[expr] : null;
@@ -444,7 +444,7 @@ describe("ESI statutory file (ESIC contribution file)", () => {
     const file = await service.esicFile(STATUTORY, { ...SEPT, overrides: [{ employee_id: 2, reason_code: 1 }] }, null);
     assert.equal(file.filename, "ESIC_Contribution_Sep-2026.xls");
     assert.equal(file.buffer.slice(0, 8).toString("hex"), "d0cf11e0a1b11ae1", "OLE2 / BIFF8 .xls, not a zipped .xlsx");
-    const rows = XLSX.utils.sheet_to_json(XLSX.read(file.buffer, { type: "buffer" }).Sheets.Sheet1, { header: 1, raw: true });
+    const rows = XLSX.utils.sheet_to_json(XLSX.read(file.buffer, { type: "buffer" }).Sheets.Sheet1, { header: 1, raw: true, defval: "" });
     assert.equal(rows.length, 3);
     assert.deepEqual(rows[1], ["1234567890", "ASHA", 26, 15000, 0, ""]);
     assert.deepEqual(rows[2], ["1234567890", "BABU", 0, 0, 1, ""]);
@@ -518,8 +518,8 @@ describe("Payroll Register reconciles to the finalized payrun", () => {
     assert.equal(p.matching_count, 3, "not silently removed");
     assert.equal(p.not_finalized_count, 1);
     const row = p.rows.find((r) => r.employee_id === 3);
-    assert.deepEqual(row, { employee_id: 3, gross_salary: null, total_deductions: null, net_pay: null, payrun_status: "Not approved & locked - figures not shown" });
-    assert.equal(p.row_status[2].status, "NOT_APPROVED");
+    assert.deepEqual(row, { employee_id: 3, gross_salary: null, total_deductions: null, net_pay: null, payrun_status: "Not Finalized - Pending Approval" });
+    assert.equal(p.row_status[2].status, "PENDING_APPROVAL");
     const payrun = await repo.payrunTotals({ ...SEPT, store_ids: null });
     assert.equal(p.totals.net_pay, payrun.net_pay);
     assert.equal(p.reconciliation.reconciled, true);

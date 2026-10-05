@@ -248,8 +248,8 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
 
   it("an unapproved / later-unlocked employee stays in the report with blank figures and a status", async () => {
     const p = await service.preview(ADMIN, REGISTER, null);
-    assert.deepEqual(p.rows[2], { employee_id: 3, gross_salary: null, total_deductions: null, net_pay: null, payrun_status: "Not approved & locked - figures not shown" });
-    assert.equal(p.row_status[2].status, "NOT_APPROVED");
+    assert.deepEqual(p.rows[2], { employee_id: 3, gross_salary: null, total_deductions: null, net_pay: null, payrun_status: "Not Finalized - Pending Approval" });
+    assert.equal(p.row_status[2].status, "PENDING_APPROVAL");
   });
 
   it("a later attendance recalculation does not mutate a frozen payroll figure", async () => {
