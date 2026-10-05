@@ -732,12 +732,11 @@ class PayrunCalculationUsecase {
   /**
    * THE MONTH: the initialized population, each one's status, and the counts.
    *
-   * THE SUMMARY COUNTS THE MONTH IN SCOPE, NEVER THE LISTED VIEW, exactly as
-   * the initialization stage's does: a card, a status or a search is a way of
-   * looking at the month, not a different month. The scope is the location
-   * and - on this screen - the Department and Designation, which say whose
-   * month is being reviewed; the counts follow them, as they follow the
-   * location.
+   * THE SUMMARY COUNTS WHAT THE FILTERS SELECT, BEFORE THE CARD: the
+   * location, the Department, the Designation and the search. The selected
+   * card (or status) only chooses which of those counted employees are
+   * listed - a card is a way of looking at the counts, never a change to
+   * them. So the cards, the rows and every select-all count agree.
    *
    * `filter_options` are the Department and Designation choices, taken from
    * the population BEFORE those two filters, so choosing a department does not
@@ -764,15 +763,22 @@ class PayrunCalculationUsecase {
     });
 
     const filters = normalizeListFilters({ department_id, designation_id, status, card, search });
-    const scoped = rows.filter((row) => inFilterScope(row, filters));
-    const filtered = scoped.filter((row) => inFilterView(row, filters));
+    /*
+     * THE COUNTS AND THE ROWS SHARE ONE NARROWING. The summary is taken over
+     * everybody matching the location, department, designation and search -
+     * so the cards, the rows and the select-all counts describe the same
+     * population - and the rows are then narrowed by the selected card (or
+     * status), which is what the cards themselves count.
+     */
+    const counted = rows.filter((row) => inFilterScope(row, filters) && inFilterView(row, { ...filters, status: null, card: null }));
+    const filtered = counted.filter((row) => inFilterView(row, filters));
 
     return {
       period_year: context.period.year,
       period_month: context.period.month,
       month_locked: context.month_locked,
       calculation_version: CALCULATION_VERSION,
-      summary: calc.summarize(scoped),
+      summary: calc.summarize(counted),
       filter_options: filterOptions(rows, departmentNames),
       rows: filtered,
     };

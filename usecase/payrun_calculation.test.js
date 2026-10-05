@@ -3169,7 +3169,7 @@ describe("Calculation & Review summary cards", () => {
     assert.equal(row.status_label, "Attendance needs action");
   });
 
-  it("search works together with the selected card; the summary stays the month's", async () => {
+  it("search works together with the selected card; the summary follows the search, never the card", async () => {
     world.add(1).add(2).add(3);
     world.employees.get(2).employee_name = "Priya One";
     world.employees.get(3).employee_name = "Priya Two";
@@ -3178,7 +3178,10 @@ describe("Calculation & Review summary cards", () => {
     await calculation.calculate({ ...MONTH, all_eligible: true, actor: ACTOR });
     const view = await card("CALCULATED_NOT_READY", { search: "priya" });
     assert.deepEqual(ids(view), [2]);
-    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 2, "search never changes the counts");
+    // Counted over the search (Priya One not ready, Priya Two ready), never narrowed by the card.
+    assert.equal(view.summary.cards.CALCULATED_NOT_READY, 1);
+    assert.equal(view.summary.cards.READY_FOR_APPROVAL, 1, "the card does not narrow the counts");
+    assert.equal(view.summary.cards.ALL, 2, "the counts follow the search, like the rows and the select-all");
   });
 
   it("location scope changes the counts and the rows together", async () => {
@@ -3630,13 +3633,16 @@ describe("Department and Designation filters - narrow the month like the locatio
     assert.deepEqual(ids(await view({ designation_id: 100, card: "NOT_CALCULATED" })), [6]);
   });
 
-  it("the counts follow Department / Designation like the location; search still never changes them", async () => {
+  it("the counts follow Department / Designation / search like the location - and never the card", async () => {
     await setup();
-    const sales = await view({ department_id: 10, search: "zzz" });
+    const sales = await view({ department_id: 10, card: "NOT_CALCULATED" });
     assert.equal(sales.summary.cards.ALL, 4);
     assert.equal(sales.summary.cards.READY_FOR_APPROVAL, 3);
     assert.equal(sales.summary.cards.NOT_CALCULATED, 1);
-    assert.equal(sales.rows.length, 0);
+    assert.equal(sales.rows.length, 1);
+    const searched = await view({ department_id: 10, search: "ani" });
+    assert.deepEqual([searched.summary.cards.ALL, searched.summary.cards.READY_FOR_APPROVAL, searched.summary.cards.NOT_CALCULATED], [2, 1, 1]);
+    assert.equal((await view({ department_id: 10, search: "zzz" })).summary.cards.ALL, 0);
     assert.equal((await view()).summary.cards.ALL, 6, "no filter is the whole month in scope");
   });
 
@@ -3696,6 +3702,35 @@ describe("Department and Designation filters - narrow the month like the locatio
     await calculation.publishAllApproved({ ...MONTH, filters: { designation_id: 200 }, actor: ACTOR });
     assert.deepEqual(ids(await view({ card: "PUBLISHED" })), [4]);
     assert.deepEqual(ids(await view({ card: "APPROVED_LOCKED" })), [1]);
+  });
+
+  it("PROOF: employees outside the active filter are not changed by ANY bulk action", async () => {
+    await setup();
+    world.add(7, { employee: { ...SALES, store_id: 2, employee_name: "Gopal" } }); // Sales, other outlet, not calculated
+    await calculation.approve({ ...MONTH, employee_ids: [3], actor: ACTOR });    // Sales Lead, approved
+    // Active filter: outlet 1 + Sales + Sales Executive + search "an" (Anil 1, Anitha 6).
+    const FILTER = { department_id: 10, designation_id: 100, search: "an" };
+    const inside = new Set([1, 6]);
+    const snapshot = () =>
+      JSON.stringify(
+        [...world.employees.keys()]
+          .filter((id) => !inside.has(id))
+          .sort((a, b) => a - b)
+          .map((id) => [id, world.calculations.get(id) || null])
+      );
+    const before = snapshot();
+    const auditBefore = world.audit.filter((a) => !inside.has(a.employee_id)).length;
+
+    const calc = await calculation.calculate({ ...MONTH, all_eligible: true, store_ids: [1], filters: FILTER, actor: ACTOR });
+    assert.deepEqual(calc.results.map((r) => r.employee_id), [6]);
+    const appr = await calculation.approve({ ...MONTH, all_ready: true, store_ids: [1], filters: FILTER, actor: ACTOR });
+    assert.deepEqual(appr.results.filter((r) => r.result === "APPROVED").map((r) => r.employee_id).sort(), [1, 6]);
+    await calculation.publishAllApproved({ ...MONTH, store_ids: [1], filters: FILTER, actor: ACTOR });
+
+    assert.equal(snapshot(), before, "no employee outside the filter was calculated, approved or published");
+    assert.equal(world.audit.filter((a) => !inside.has(a.employee_id)).length, auditBefore, "no audit entry for anyone outside");
+    const published = (await view({ card: "PUBLISHED" })).rows.map((r) => r.employee_id).sort();
+    assert.deepEqual(published, [1, 6]);
   });
 
   it("a select-all WITHOUT filters is unchanged: the month in scope", async () => {
