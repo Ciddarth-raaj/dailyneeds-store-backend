@@ -956,6 +956,56 @@ class PayrunCalculationUsecase {
     };
   }
 
+  /**
+   * THE MONTH WITH ITS MONEY - the Payroll Dashboard's read.
+   *
+   * THE SAME ROWS `getMonth` LISTS, built by the same `_assemble` and
+   * `_present`, so a status, a blocker or a department on the dashboard is the
+   * one Calculation & Review shows. What is added is the stored calculation's
+   * money, and only where this screen would present it as a result: the
+   * figures are null while the attendance is not settled (`attendance_pending`,
+   * the `attendanceDependent` rule above) and while the net pay is unresolved.
+   * Nothing is calculated here; the stored row is read as it was written.
+   */
+  async getMonthFigures({ year, month, store_ids = null }) {
+    const context = await this._assemble({ year, month, store_ids });
+    const presented = context.population.map((employee) => this._present(context, employee));
+    const rows = presented.map((p) => {
+      const stored = p.internals.stored;
+      const presentable =
+        stored && p.row.attendance_pending !== true && stored.net_pay !== null && stored.net_pay !== undefined;
+      return {
+        ...p.row,
+        /* The snapshot's dated facts - what the month was initialized on. */
+        date_of_joining: p.internals.employee.date_of_joining || null,
+        resignation_date: p.internals.employee.resignation_date || null,
+        figures: presentable
+          ? {
+              gross: stored.total_earnings,
+              deductions: stored.total_employee_deductions,
+              net: stored.net_pay,
+              pf: stored.employee_pf,
+              esi: stored.employee_esi,
+              advance: stored.advance_recovery,
+              shortage: stored.shortage_recovery,
+              missing_hours: stored.missing_hours_deduction,
+            }
+          : null,
+      };
+    });
+    const departmentNames = await this._departmentNames(rows);
+    rows.forEach((row) => {
+      row.department_name =
+        row.department_id === null ? null : departmentNames.get(Number(row.department_id)) || null;
+    });
+    return {
+      period_year: context.period.year,
+      period_month: context.period.month,
+      month_locked: context.month_locked,
+      rows,
+    };
+  }
+
   /** Department id -> name, from the Employee Master's department table. */
   async _departmentNames(rows) {
     const ids = [...new Set(rows.map((r) => filterId(r.department_id)).filter((id) => id !== null))];

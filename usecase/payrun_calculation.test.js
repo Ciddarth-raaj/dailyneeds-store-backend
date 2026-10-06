@@ -4347,3 +4347,88 @@ describe("salary resolution - Recalculate takes the approved salary applicable t
     assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.APPROVED_LOCKED);
   });
 });
+
+/*
+ * ============================================ THE PAYROLL DASHBOARD'S READ ===
+ *
+ * `getMonthFigures` is `getMonth`'s rows plus the stored money, under the same
+ * presentation rule - so the dashboard and Calculation & Review cannot
+ * disagree about a status or a rupee. The dashboard usecase is then driven on
+ * top of this REAL calculation stage.
+ */
+describe("getMonthFigures - the Payroll Dashboard's read", () => {
+  const buildDashboard = require("./payroll_dashboard");
+  const emptyDashboardRepo = {
+    listEmployeeFacts: async (ids) => ids.map((id) => ({ employee_id: id, department_id: null, department_name: null, employment_type: "Permanent" })),
+    listRejoins: async () => [],
+    listMonthTotals: async () => [],
+  };
+  /* Initialization's view of the same world: every snapshot is INITIALIZED,
+     plus whoever a test adds as not initialized. */
+  const payrunView = (extra = []) => ({
+    getMonth: async ({ store_ids }) => ({
+      month_locked: false,
+      rows: [
+        ...[...world.employees.values()].map((e) => ({ ...e, status: "INITIALIZED", initialized: true, exited_in_month: false })),
+        ...extra,
+      ].filter((r) => store_ids === null || store_ids.includes(r.store_id)),
+    }),
+  });
+
+  it("returns getMonth's statuses with the stored figures, and none while attendance is pending", async () => {
+    world.add(1);
+    world.add(2); // initialized, never calculated
+    world.add(3);
+    world.attendance.get(3).is_final = 0;
+    await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
+    await calculateUnderPreviousRule(3);
+
+    const review = await calculation.getMonth({ ...MONTH });
+    const figures = await calculation.getMonthFigures({ ...MONTH });
+    const byId = (rows) => new Map(rows.map((r) => [r.employee_id, r]));
+    const r = byId(review.rows);
+    const f = byId(figures.rows);
+
+    [1, 2, 3].forEach((id) => assert.equal(f.get(id).status, r.get(id).status));
+    assert.equal(Number(f.get(1).figures.net), Number(r.get(1).net_pay));
+    assert.equal(Number(f.get(1).figures.gross), 26000);
+    assert.equal(Number(f.get(1).figures.pf) + Number(f.get(1).figures.esi), 1560 + 139);
+    assert.equal(f.get(2).figures, null);
+    assert.equal(r.get(3).net_pay, null);
+    assert.equal(f.get(3).figures, null, "a provisional figure is not a result on the dashboard either");
+  });
+
+  it("keeps the branch scope: an employee snapshotted at another location is not returned", async () => {
+    world.add(1);
+    world.add(2, { employee: { store_id: 2, store_name: "Other" } });
+    const figures = await calculation.getMonthFigures({ ...MONTH, store_ids: [1] });
+    assert.deepEqual(figures.rows.map((x) => x.employee_id), [1]);
+  });
+
+  it("the dashboard's KPIs equal the review screen's own figures", async () => {
+    world.add(1);
+    world.add(2);
+    world.add(3);
+    await calculation.calculate({ ...MONTH, employee_ids: [1, 2], actor: ACTOR });
+    const notInitialized = { employee_id: 50, employee_name: "Pending Person", store_id: 1, store_name: "Main", status: "BLOCKED", initialized: false, blocking_reasons: [{ code: "SALARY_NOT_APPROVED", label: "Salary not approved" }], exited_in_month: false };
+    const dashboard = buildDashboard(emptyDashboardRepo, payrunView([notInitialized]), calculation, { today: () => "2026-09-15" });
+
+    const summary = await dashboard.getSummary({ ...MONTH, store_ids: null });
+    const review = await calculation.getMonth({ ...MONTH });
+    const reviewNet = review.rows.reduce((s, x) => s + (x.net_pay === null ? 0 : Number(x.net_pay)), 0);
+
+    assert.equal(summary.kpis.total_employees, 4);
+    assert.equal(summary.kpis.initialized, 3);
+    assert.equal(summary.kpis.not_initialized, 1);
+    assert.equal(Number(summary.kpis.net_payable), reviewNet);
+    assert.equal(summary.kpis.costed_employees, 2);
+    const action = (key) => summary.actions.find((a) => a.key === key).count;
+    assert.equal(action("NOT_CALCULATED"), review.summary.not_calculated);
+    assert.equal(action("PENDING_APPROVAL"), review.summary.ready_for_approval);
+    assert.equal(action("SALARY_NOT_APPROVED"), 1);
+
+    const pending = await dashboard.getEmployees({ ...MONTH, store_ids: null, metric: "NOT_INITIALIZED" });
+    assert.deepEqual(pending.rows.map((x) => x.employee_id), [50]);
+    assert.deepEqual(pending.rows[0].reasons, ["Salary not approved"]);
+  });
+});
