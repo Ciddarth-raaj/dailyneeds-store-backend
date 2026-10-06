@@ -1358,9 +1358,21 @@ function deriveStatus(input = {}) {
     current_source_hash !== null && calculation.source_hash !== current_source_hash;
   const inputsMoved =
     current_inputs_hash !== null && calculation.inputs_hash !== current_inputs_hash;
+  /*
+   * THE SALARY THE FIGURES WERE ACTUALLY PRICED ON IS NOT THE ONE APPROVED FOR
+   * THE MONTH. Decided by the caller from the priced salary itself, not from
+   * the stored `salary_id` / `source_hash` - before calculation version 4 a
+   * recalculation stamped those with the live salary while pricing the month
+   * on the initialization snapshot, so for exactly the rows this exists to
+   * catch, the markers already agree with the world and the hash says nothing.
+   */
+  const pricedSalaryMoved = input.priced_salary_mismatch === true;
 
-  if (sourceMoved || inputsMoved) {
+  if (sourceMoved || inputsMoved || pricedSalaryMoved) {
     (input.change_reasons || []).forEach((code) => recalcReasons.push(recalcReasonOf(code)));
+    if (pricedSalaryMoved && !recalcReasons.some((r) => r.code === RECALC_REASON.SALARY_CHANGED)) {
+      recalcReasons.unshift(recalcReasonOf(RECALC_REASON.SALARY_CHANGED));
+    }
     if (recalcReasons.length === 0) {
       /*
        * THE HASH SAYS SOMETHING MOVED AND THE MARKER COMPARISON NAMED NOTHING.

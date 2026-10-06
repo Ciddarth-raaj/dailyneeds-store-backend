@@ -145,6 +145,25 @@ class PayrunCalculationRepository {
   }
 
   /**
+   * APPROVED SALARY RECORDS BY ID - the structure a stored calculation was
+   * priced on, for the payslip's component split. `employee_salary` rows are
+   * immutable once approved, so the id names exactly one structure for ever.
+   */
+  async listSalariesByIds(salaryIds) {
+    const ids = (salaryIds || []).filter((id) => id !== null && id !== undefined);
+    if (ids.length === 0) return [];
+    return this._read(
+      "LIST-SALARIES-BY-IDS",
+      `SELECT salary_id, employee_id, monthly_gross, daily_salary,
+              basic, conveyance, hra, special_allowance,
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from, status
+         FROM employee_salary
+        WHERE salary_id IN (?)`,
+      [ids]
+    );
+  }
+
+  /**
    * THE DEPARTMENT NAMES FOR THE REVIEW SCREEN'S DEPARTMENT FILTER.
    *
    * The snapshot carries `department_id` and not the name, so the name is

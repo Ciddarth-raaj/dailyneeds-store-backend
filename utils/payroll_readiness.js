@@ -45,6 +45,16 @@ const { availableDates } = require("./attendance_payroll");
 const REASON = Object.freeze({
   ATTENDANCE_MONTH_NOT_CALCULATED: "ATTENDANCE_MONTH_NOT_CALCULATED",
   ATTENDANCE_STALE: "ATTENDANCE_STALE",
+  /*
+   * THE ATTENDANCE MONTH WAS PRICED ON A DIFFERENT SALARY. Its Salary Days
+   * earnings, Extra Days amount and missing-hours deduction are money the
+   * attendance engine priced with the approved salary it read when the month
+   * was processed - and payroll takes them as they are. A revision approved
+   * since leaves them on the old salary while the month's gross is the new
+   * one, so the month is not paid on one salary until Process Attendance
+   * re-prices it (same engine, same effective-dated rule).
+   */
+  ATTENDANCE_SALARY_STALE: "ATTENDANCE_SALARY_STALE",
   ATTENDANCE_DAY_ROWS_INCOMPLETE: "ATTENDANCE_DAY_ROWS_INCOMPLETE",
   ATTENDANCE_SUMMARY_NOT_FINAL: "ATTENDANCE_SUMMARY_NOT_FINAL",
   APPROVED_OT_MISMATCH: "APPROVED_OT_MISMATCH",
@@ -66,6 +76,7 @@ const REASON = Object.freeze({
 const LABEL = Object.freeze({
   [REASON.ATTENDANCE_MONTH_NOT_CALCULATED]: "Attendance month not processed",
   [REASON.ATTENDANCE_STALE]: "Attendance changed since it was processed",
+  [REASON.ATTENDANCE_SALARY_STALE]: "Attendance priced on a different salary",
   [REASON.ATTENDANCE_DAY_ROWS_INCOMPLETE]: "Attendance days not settled",
   [REASON.ATTENDANCE_SUMMARY_NOT_FINAL]: "Attendance summary not final",
   [REASON.APPROVED_OT_MISMATCH]: "Approved OT does not match the days",
@@ -85,6 +96,7 @@ const LABEL = Object.freeze({
 const PROCESSABLE = new Set([
   REASON.ATTENDANCE_MONTH_NOT_CALCULATED,
   REASON.ATTENDANCE_STALE,
+  REASON.ATTENDANCE_SALARY_STALE,
   REASON.ATTENDANCE_SUMMARY_NOT_FINAL,
   REASON.APPROVED_OT_MISMATCH,
 ]);
@@ -97,6 +109,7 @@ const ACCEPTED_BY_CLOSE = new Set([
 const ATTENDANCE_REASONS = new Set([
   REASON.ATTENDANCE_MONTH_NOT_CALCULATED,
   REASON.ATTENDANCE_STALE,
+  REASON.ATTENDANCE_SALARY_STALE,
   REASON.ATTENDANCE_DAY_ROWS_INCOMPLETE,
   REASON.ATTENDANCE_SUMMARY_NOT_FINAL,
   REASON.APPROVED_OT_MISMATCH,
@@ -217,6 +230,27 @@ function evaluatePayrollReadiness(input = {}) {
       )
     );
   } else {
+    /*
+     * ONE SALARY FOR THE MONTH. `snapshot` here is the snapshot as payroll
+     * PRICES it - its salary is the approved salary applicable to the month -
+     * and the attendance month carries the gross it was priced on. Compared in
+     * paise; a month stored before the engine recorded its gross is not judged.
+     */
+    const paise = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Math.round(Number(v) * 100));
+    const attendanceGross = paise(monthly.monthly_gross);
+    const approvedGross = paise(snapshot.monthly_gross);
+    if (attendanceGross !== null && approvedGross !== null && attendanceGross !== approvedGross) {
+      const rupees = (p) => `₹${(p / 100).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      reasons.push(
+        reason(
+          REASON.ATTENDANCE_SALARY_STALE,
+          `The attendance month was processed on a monthly gross of ${rupees(attendanceGross)}, but the approved salary for this month is ${rupees(approvedGross)}. ` +
+            "Process Attendance so the salary days, extra days and missing hours are priced on the approved salary, then Recalculate.",
+          { attendance_gross: monthly.monthly_gross, approved_gross: snapshot.monthly_gross }
+        )
+      );
+    }
+
     const freshness = monthFreshness({ monthly, dayRows: days });
     if (freshness.state === "STALE") {
       reasons.push(

@@ -37,7 +37,20 @@
  * EDLI, admin, NCP days and the ceiling version are stored. Rows calculated
  * under version 2 keep their figures until somebody recalculates them.
  */
-const CALCULATION_VERSION = 3;
+/*
+ * 4: Calculate and Recalculate PRICE THE MONTH FROM THE APPROVED SALARY
+ * APPLICABLE TO IT (latest APPROVED with effective_from on or before the last
+ * day of the month), resolved once per employee and used for the figures, the
+ * salary markers and the source hash alike. Up to version 3 the figures were
+ * priced on the initialization snapshot's salary while the markers took the
+ * live one, so a revision approved after initialization was recorded as
+ * consumed but never priced. A version-3 row was therefore always priced on
+ * its snapshot's salary - which is how such rows are recognised and sent back
+ * to RECALCULATION_REQUIRED (see `usecase/payrun_calculation.js#_present`).
+ */
+const CALCULATION_VERSION = 4;
+/** The first version that prices from the resolved approved salary. */
+const PRICED_FROM_RESOLVED_SALARY_VERSION = 4;
 
 /**
  * THE STATE OF ONE EMPLOYEE'S CALCULATION, and the five values are exclusive
@@ -429,6 +442,7 @@ const MAX_BULK_EMPLOYEES = 1000;
 
 module.exports = {
   CALCULATION_VERSION,
+  PRICED_FROM_RESOLVED_SALARY_VERSION,
   CALC_STATUS,
   STORED_STATUS,
   CALC_STATUS_LABEL,

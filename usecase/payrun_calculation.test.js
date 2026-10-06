@@ -47,6 +47,10 @@ class World {
     this.days = new Map();           // employee_id -> stored attendance day rows
     this.pending = new Map();        // employee_id -> { pending_regularizations, pending_ot }
     this.salaries = new Map();       // employee_id -> current approved salary
+    // employee_id -> [employee_salary rows]: when set for an employee, the
+    // approved salary is RESOLVED from it as the real query does (latest
+    // APPROVED with effective_from <= the as-of date, ties to the higher id).
+    this.salaryHistory = new Map();
     this.amounts = new Map();        // employee_id -> { component: amount }
     this.states = new Map();         // employee_id -> { confirmed_no_adjustment }
     this.calculations = new Map();   // employee_id -> calculation row
@@ -92,11 +96,19 @@ class World {
       pay_type_source: "EMPLOYEE_MASTER",
       ...(over.employee || {}),
     });
+    // The approved salary initialization froze into the snapshot: the same
+    // structure, unless a test says otherwise.
+    const snap = this.employees.get(employeeId);
     this.salaries.set(employeeId, {
       employee_id: employeeId,
-      salary_id: 500 + employeeId,
-      effective_from: "2026-04-01",
-      monthly_gross: 26000,
+      salary_id: snap.salary_id,
+      effective_from: snap.salary_effective_from,
+      monthly_gross: snap.monthly_gross,
+      daily_salary: snap.daily_salary ?? null,
+      basic: snap.basic,
+      conveyance: snap.conveyance,
+      hra: snap.hra,
+      special_allowance: snap.special_allowance,
       ...(over.salary || {}),
     });
     this.attendance.set(employeeId, {
@@ -146,10 +158,13 @@ class World {
      */
     const rows = [];
     let date = 1;
+    // The world's month (August unless a test moves it): its dates and length.
+    const ym = `${this.year}-${String(this.month).padStart(2, "0")}`;
+    const lastDay = new Date(Date.UTC(this.year, this.month, 0)).getUTCDate();
     this.nrm.get(employeeId).forEach((g) => {
       for (let i = 0; i < Number(g.day_count); i += 1) {
         rows.push({
-          attendance_date: `2026-08-${String(date).padStart(2, "0")}`,
+          attendance_date: `${ym}-${String(date).padStart(2, "0")}`,
           status: "FINAL", is_final: 1, attendance_day_count: 1,
           nrm_minutes: g.nrm_minutes, base_nrm_minutes: g.nrm_minutes,
           worked_minutes: g.nrm_minutes, shortage_minutes: 0,
@@ -160,9 +175,9 @@ class World {
         date += 1;
       }
     });
-    for (; date <= 31; date += 1) {
+    for (; date <= lastDay; date += 1) {
       rows.push({
-        attendance_date: `2026-08-${String(date).padStart(2, "0")}`,
+        attendance_date: `${ym}-${String(date).padStart(2, "0")}`,
         status: "ABSENT", is_final: 1, attendance_day_count: 0,
         nrm_minutes: 480, base_nrm_minutes: 480, worked_minutes: 0, shortage_minutes: 0,
         approved_ot_minutes: 0, ot_rate: 1, permission_minutes: 0, calculation_version: 10,
@@ -193,6 +208,22 @@ class FakeCalculationRepo {
 
   async listAttendanceMonths(ids) {
     return ids.map((id) => this.world.attendance.get(id)).filter(Boolean).map((r) => ({ ...r }));
+  }
+
+  /** employee_salary rows by id - every history row, and every current salary. */
+  async listSalariesByIds(ids) {
+    const all = [
+      ...[...this.world.salaryHistory.values()].flat(),
+      ...[...this.world.salaries.values()],
+    ];
+    const wanted = new Set(ids.map(String));
+    const seen = new Set();
+    return all.filter((r) => {
+      const key = String(r.salary_id);
+      if (!wanted.has(key) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).map((r) => ({ ...r }));
   }
 
   /** The department master - the names the Department filter shows. */
@@ -517,8 +548,17 @@ class FakePayrunRepo {
   async getPeriod() {
     return this.world.period;
   }
-  async listApprovedSalaries(ids) {
-    return ids.map((id) => this.world.salaries.get(id)).filter(Boolean).map((s) => ({ ...s }));
+  async listApprovedSalaries(ids, asOfDate) {
+    return ids
+      .map((id) => {
+        const history = this.world.salaryHistory.get(id);
+        if (!history) return this.world.salaries.get(id);
+        return history
+          .filter((r) => r.status === "APPROVED" && r.effective_from <= asOfDate)
+          .sort((a, b) => (a.effective_from < b.effective_from ? 1 : a.effective_from > b.effective_from ? -1 : b.salary_id - a.salary_id))[0];
+      })
+      .filter(Boolean)
+      .map((s) => ({ ...s }));
   }
   async listPendingApprovals(ids) {
     return ids
@@ -817,11 +857,17 @@ describe("recalculating", () => {
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
 
     // A revision, and an attendance month that now carries two extra days.
+    // (An approved revision always has its structure - the columns are NOT NULL.)
     world.salaries.set(1, {
       employee_id: 1,
       salary_id: 9001,
       effective_from: "2026-08-01",
       monthly_gross: 30000,
+      daily_salary: 1153.85,
+      basic: 15000,
+      conveyance: 2500,
+      hra: 6000,
+      special_allowance: 6500,
     });
     Object.assign(world.attendance.get(1), {
       payroll_version: 2,
@@ -841,6 +887,9 @@ describe("recalculating", () => {
     assert.equal(row.status, CALC_STATUS.READY_FOR_APPROVAL);
     assert.equal(row.extra_days, 2);
     assert.equal(row.calculation_revision, 2);
+    // ...and the revision is what the month is now priced on.
+    assert.equal(Number(world.calculations.get(1).monthly_gross), 30000);
+    assert.equal(Number(world.calculations.get(1).salary_id), 9001);
   });
 
   /**
@@ -2746,7 +2795,7 @@ describe("Unlock, Publish and Unpublish", () => {
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
     const stored = world.calculations.get(1);
     assert.equal(Number(stored.net_pay) % 1, 0);
-    assert.equal(stored.calculation_version, 3);
+    assert.equal(stored.calculation_version, 4);
     assert.equal((await rowOf(1)).net_pay, stored.net_pay);
     assert.equal(
       Math.round(stored.net_pay * 100),
@@ -4010,5 +4059,248 @@ describe("bulk payslip export - server-resolved, filtered, read-only", () => {
     assert.equal(exportFilename({ employee: { employee_name: "../../etc/passwd" } }, 8, P), "8_etc-passwd_September_2026.pdf");
     assert.equal(exportFilename({ employee: { employee_name: "Ñandú" } }, 7, P), "7_Nandu_September_2026.pdf");
     assert.equal(exportFilename({ employee: {} }, 9, P), "9_September_2026.pdf");
+  });
+});
+
+
+/* ============== Recalculate prices the APPROVED salary applicable to the month ======
+ *
+ * The employee 1355 case (DnDS payroll starts September 2026). Up to calculation
+ * version 3 a Recalculate recorded the revision's salary_id / source hash while
+ * pricing the month on the initialization snapshot - so every test below that
+ * checks a figure failed against that code.
+ */
+describe("salary resolution - Recalculate takes the approved salary applicable to the month", () => {
+  const SEP = { year: 2026, month: 9 };
+  const OCT = { year: 2026, month: 10 };
+  const OPENING = {
+    // In force since before the ESI contribution period began (01-04-2026),
+    // as an opening salary is: ESI coverage is decided from it.
+    salary_id: 1001, employee_id: 1355, effective_from: "2026-04-01", status: "APPROVED",
+    monthly_gross: 10500, daily_salary: 403.85, basic: 9000, conveyance: 1500, hra: 0, special_allowance: 0,
+  };
+  const REVISION = {
+    salary_id: 1002, employee_id: 1355, effective_from: "2026-09-01", status: "APPROVED",
+    monthly_gross: 11500, daily_salary: 442.31, basic: 10000, conveyance: 1500, hra: 0, special_allowance: 0,
+  };
+  const OCTOBER = {
+    salary_id: 1003, employee_id: 1355, effective_from: "2026-10-01", status: "APPROVED",
+    monthly_gross: 13000, daily_salary: 500, basic: 11000, conveyance: 2000, hra: 0, special_allowance: 0,
+  };
+  const snapshotOf = (sal) => ({
+    employee_name: "Kiruthiga S", salary_id: sal.salary_id, salary_effective_from: sal.effective_from,
+    monthly_gross: sal.monthly_gross, daily_salary: sal.daily_salary, basic: sal.basic,
+    conveyance: sal.conveyance, hra: sal.hra, special_allowance: sal.special_allowance,
+  });
+  /* September is initialized while ₹10,500 is the approved salary. */
+  /*
+   * The attendance month as the engine prices it: Salary Days earnings, Extra
+   * Days amount and the gross it was priced on, all from ONE salary. A full
+   * month (26 salary days) earns the gross.
+   */
+  const pricedAttendance = (sal, extraDays = 0) => ({
+    monthly_gross: sal.monthly_gross,
+    daily_rate: sal.daily_salary,
+    salary_day_earnings: sal.monthly_gross,
+    extra_days: extraDays,
+    extra_day_earnings: Math.round(extraDays * sal.daily_salary * 100) / 100,
+  });
+  const initializeSeptember = (id = 1355, history = [OPENING], over = {}) => {
+    world.month = 9;
+    const current = history[history.length - 1];
+    world.add(id, {
+      ...over,
+      employee: { ...snapshotOf(current), employee_id: id, ...(over.employee || {}) },
+      attendance: { ...pricedAttendance(current, (over.attendance || {}).extra_days || 0), ...(over.attendance || {}) },
+    });
+    world.salaryHistory.set(id, history.map((r) => ({ ...r, employee_id: id })));
+  };
+  /* PROCESS ATTENDANCE after a revision: the same engine re-prices the month on it. */
+  const processAttendance = (id, sal) => {
+    const m = world.attendance.get(id);
+    Object.assign(m, pricedAttendance(sal, Number(m.extra_days || 0)), { payroll_version: Number(m.payroll_version) + 1 });
+  };
+  const stored = (id = 1355) => world.calculations.get(id);
+  const rowOfMonth = async (period, id = 1355) => (await calculation.getMonth({ ...period })).rows.find((r) => r.employee_id === id);
+  /* Every stored figure that is money or a count - what "the same calculation" means. */
+  const FIGURES = [
+    "monthly_gross", "daily_rate", "salary_days", "salary_earnings", "missing_hours_minutes",
+    "missing_hours_deduction", "extra_days", "extra_day_amount", "approved_ot_minutes", "ot_amount",
+    "incentive", "bonus", "arrears", "advance_recovery", "shortage_recovery", "balance_advance",
+    "pf_status", "pf_wage", "employee_pf", "employer_pf_total", "employer_epf", "employer_eps", "eps_wage",
+    "edli_wage", "edli", "pf_admin_charge", "esi_status", "esi_wage", "employee_esi", "employer_esi",
+    "total_earnings", "total_employee_deductions", "net_pay", "net_pay_rounding",
+  ];
+  const figures = (r) => Object.fromEntries(FIGURES.map((k) => [k, r[k] === null || r[k] === undefined ? null : String(r[k])]));
+
+  it("THE 1355 SEQUENCE: initialize at ₹10,500, calculate, approve ₹11,500 from 01-09, see Salary changed, Recalculate -> ₹11,500 / ₹442.31", async () => {
+    initializeSeptember(1355, [OPENING], {
+      attendance: { extra_days: 1, approved_ot_minutes: 90 },
+      nrm_groups: [{ nrm_minutes: 480, break_allowance_source: NRM_SOURCE.SHIFT, day_count: 26, approved_ot_minutes: 90 }],
+    });
+    world.amounts.set(1355, { INCENTIVE: 500, ADVANCE_RECOVERY: 200 });
+    world.states.delete(1355);
+
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().daily_rate)], [10500, 403.85]);
+    const before = { ...stored() };
+
+    // The ₹11,500 revision effective 01-09-2026 is approved.
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    const flagged = await rowOfMonth(SEP);
+    assert.equal(flagged.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.ok(flagged.recalculation_reasons.some((r) => r.code === "SALARY_CHANGED"));
+    // The attendance month is still priced on ₹10,500: payroll says so, and
+    // says Process Attendance clears it - it does not price half the month on
+    // one salary and half on the other.
+    assert.ok(codesOf(flagged).includes("ATTENDANCE_SALARY_STALE"));
+    assert.equal(flagged.attendance_processable, true);
+    const refused = await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(refused.recalculated_count || 0, 0);
+    assert.deepEqual(stored(), before, "nothing is written while the month is on two salaries");
+
+    processAttendance(1355, REVISION);
+    assert.ok(!codesOf(await rowOfMonth(SEP)).includes("ATTENDANCE_SALARY_STALE"));
+    const out = await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(out.recalculated_count, 1);
+    const after = stored();
+    assert.deepEqual(
+      [Number(after.monthly_gross), Number(after.daily_rate), Number(after.salary_id), after.salary_effective_from],
+      [11500, 442.31, 1002, "2026-09-01"]
+    );
+    // The figures moved with the salary - not only the gross.
+    assert.deepEqual([Number(after.salary_earnings), Number(after.extra_day_amount)], [11500, 442.31]);
+    for (const k of ["salary_earnings", "extra_day_amount", "pf_wage", "employee_pf", "esi_wage", "employee_esi", "employer_esi", "total_earnings", "net_pay"]) {
+      assert.notEqual(String(after[k]), String(before[k]), `${k} was not refreshed`);
+    }
+    // The non-salary inputs survived exactly.
+    for (const k of ["salary_days", "extra_days", "approved_ot_minutes", "missing_hours_minutes", "incentive", "advance_recovery", "pay_type"]) {
+      assert.equal(String(after[k]), String(before[k]), `${k} changed`);
+    }
+    // Consistent, so - and only so - READY again.
+    const ready = await rowOfMonth(SEP);
+    assert.equal(ready.status, CALC_STATUS.READY_FOR_APPROVAL);
+    assert.deepEqual(ready.recalculation_reasons, []);
+  });
+
+  it("E: every salary-dependent figure equals a fresh calculation of the same month on ₹11,500", async () => {
+    initializeSeptember(1355, [OPENING]);
+    // Control: the same history, initialized after the revision - on ₹11,500.
+    initializeSeptember(2355, [{ ...OPENING, salary_id: 2001 }, { ...REVISION, salary_id: 2002 }]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355, 2355], actor: ACTOR });
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    processAttendance(1355, REVISION);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.deepEqual(figures(stored(1355)), figures(stored(2355)));
+  });
+
+  it("E: the payslip published from it splits Basic ₹10,000 / Conveyance ₹1,500 - the revision's structure", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    processAttendance(1355, REVISION);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    await calculation.approve({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    await calculation.publishAllApproved({ ...SEP, actor: ACTOR });
+    const snap = JSON.parse(world.payslips.find((p) => p.employee_id === 1355).snapshot_json);
+    const line = (key) => snap.earnings.lines.find((l) => l.key === key);
+    assert.equal(Number(line("basic").amount), 10000);
+    assert.equal(Number(line("conveyance").amount), 1500);
+  });
+
+  it("B: a row already calculated on the old salary is refreshed - and the initialization snapshot is left as initialization froze it", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    processAttendance(1355, REVISION);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(Number(stored().salary_id), 1002);
+    assert.deepEqual(
+      [world.employees.get(1355).salary_id, world.employees.get(1355).monthly_gross],
+      [1001, 10500],
+      "payrun_employee is not written by this stage"
+    );
+  });
+
+  it("A: an approved salary effective the 1st of the month, approved BEFORE the first Calculate, is what Calculate prices", async () => {
+    initializeSeptember(1355, [OPENING]);
+    world.salaryHistory.get(1355).push({ ...REVISION }); // approved after initialization, before calculating
+    processAttendance(1355, REVISION); // the month is processed at month end, on it
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().daily_rate), Number(stored().salary_id)], [11500, 442.31, 1002]);
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("C: a FUTURE revision (01-10-2026) is never used for September; October calculation uses it", async () => {
+    initializeSeptember(1355, [OPENING, REVISION]);
+    world.salaryHistory.get(1355).push({ ...OCTOBER });
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().salary_id)], [11500, 1002]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().salary_id)], [11500, 1002], "recalculating September ignores October");
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL, "October's revision does not make September stale");
+    // October: a separate month, initialized on its own month-end salary.
+    world.calculations.clear();
+    world.month = 10;
+    world.employees.clear();
+    world.add(1355, { employee: { ...snapshotOf(OCTOBER), employee_id: 1355 }, attendance: pricedAttendance(OCTOBER) });
+    world.salaryHistory.set(1355, [OPENING, REVISION, OCTOBER].map((r) => ({ ...r })));
+    calculation.today = () => "2026-11-02"; // October has closed
+    await calculation.calculate({ ...OCT, employee_ids: [1355], actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().salary_id)], [13000, 1003]);
+  });
+
+  it("D: a PENDING or REJECTED revision is never used, and does not make the month stale", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    world.salaryHistory.get(1355).push({ ...REVISION, status: "PENDING" });
+    world.salaryHistory.get(1355).push({ ...REVISION, salary_id: 1004, status: "REJECTED" });
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), Number(stored().salary_id)], [10500, 1001]);
+  });
+
+  it("MASKED ROWS: a version-3 row priced on the snapshot but stamped with the revision reads RECALCULATION REQUIRED - Salary changed", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    processAttendance(1355, REVISION);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    // Rewrite the stored row into exactly what the old code left behind: the
+    // revision's markers and hash, the snapshot's figures, version 3.
+    const legacy = stored();
+    Object.assign(legacy, { calculation_version: 3, monthly_gross: "10500.00", daily_rate: "403.85" });
+    const row = await rowOfMonth(SEP);
+    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
+    assert.equal(row.recalculation_reasons[0].code, "SALARY_CHANGED");
+    // The approval that would have gone through is refused.
+    const appr = await calculation.approve({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    assert.equal(appr.approved_count, 0);
+    // And a Recalculate clears it on the right figures.
+    await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.deepEqual([Number(stored().monthly_gross), stored().calculation_version], [11500, 4]);
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("a version-3 row whose snapshot salary IS the applicable one is not flagged (no false alarms after deploy)", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    stored().calculation_version = 3;
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
+  });
+
+  it("LOCK: an APPROVED_LOCKED month is immutable - no figure, no salary, no snapshot changes, and it is not re-judged", async () => {
+    initializeSeptember(1355, [OPENING]);
+    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    await calculation.approve({ ...SEP, employee_ids: [1355], actor: ACTOR });
+    const lockedBefore = JSON.stringify(stored());
+    const snapBefore = JSON.stringify(world.employees.get(1355));
+    world.salaryHistory.get(1355).push({ ...REVISION });
+    const res = await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(res.recalculated_count || 0, 0);
+    assert.equal(JSON.stringify(stored()), lockedBefore);
+    assert.equal(JSON.stringify(world.employees.get(1355)), snapBefore);
+    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.APPROVED_LOCKED);
   });
 });

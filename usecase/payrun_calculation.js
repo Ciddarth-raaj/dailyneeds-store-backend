@@ -4,6 +4,7 @@ const {
   CALC_STATUS,
   CALC_CARD,
   CALCULATION_VERSION,
+  PRICED_FROM_RESOLVED_SALARY_VERSION,
   ROW_RESULT,
   STORED_STATUS,
   RESET_REASON,
@@ -232,6 +233,63 @@ function exportFilename(snapshot, employeeId, period) {
     .join("_") + ".pdf";
 }
 
+/*
+ * ================================== THE SALARY A MONTH IS PRICED ON =======
+ *
+ * ONE OBJECT, RESOLVED ONCE PER EMPLOYEE AND MONTH, used for everything that
+ * is about the salary: the figures (gross, daily rate, the four components and
+ * every amount computed from them), the salary markers (`salary_id`,
+ * `salary_effective_from`, `monthly_gross`) and therefore the source hash. A
+ * calculation can no longer record one salary and price another.
+ *
+ * IT IS THE APPROVED SALARY APPLICABLE TO THE MONTH - the latest APPROVED
+ * `employee_salary` row with `effective_from` on or before the month's last
+ * day, read by `repository/payrun.js#listApprovedSalaries`: the same resolver
+ * and the same date Initialization uses. A PENDING or REJECTED revision is
+ * never it; a revision effective after the month is never it; a mere edit to
+ * the Employee Master that is not an approved revision is never it.
+ *
+ * ONLY AN EXPLICIT ACT APPLIES IT. Reading the month prices nothing - a
+ * revision approved since the last calculation shows as RECALCULATION_REQUIRED
+ * (Salary changed) until a person presses Calculate or Recalculate.
+ *
+ * THE INITIALIZATION SNAPSHOT IS NOT WRITTEN. `payrun_employee` stays the record
+ * of what initialization froze (this stage has no statement that could touch
+ * it - see the header); the salary a calculation was priced on is stored on
+ * the calculation itself (`salary_id` and the figures, in one row).
+ *
+ * Should no approved salary resolve - which initialization makes impossible for
+ * an initialized employee - the snapshot's own salary is used, unchanged.
+ */
+const SALARY_FIELDS = ["monthly_gross", "daily_salary", "basic", "conveyance", "hra", "special_allowance"];
+function resolveMonthSalary(employee, approved) {
+  if (approved && approved.salary_id !== null && approved.salary_id !== undefined) {
+    const out = { source: "APPROVED", salary_id: approved.salary_id, effective_from: approved.effective_from ?? null };
+    SALARY_FIELDS.forEach((f) => { out[f] = approved[f] ?? null; });
+    return out;
+  }
+  const out = {
+    source: "SNAPSHOT",
+    salary_id: employee.salary_id ?? null,
+    effective_from: employee.salary_effective_from ?? null,
+  };
+  SALARY_FIELDS.forEach((f) => { out[f] = employee[f] ?? null; });
+  return out;
+}
+
+/** The snapshot with its salary fields replaced by `salary` - what is priced. */
+function pricedSnapshot(employee, salary) {
+  const out = { ...employee, salary_id: salary.salary_id, salary_effective_from: salary.effective_from };
+  SALARY_FIELDS.forEach((f) => { out[f] = salary[f]; });
+  return out;
+}
+
+const paiseOf = (value) => {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+};
+
 class PayrunCalculationUsecase {
   /**
    * @param calculationRepo  this stage's own two tables
@@ -341,10 +399,10 @@ class PayrunCalculationUsecase {
       this.repo.listEffectiveNrm(ids, from, to),
       this.repo.listStatutoryContext(ids),
       /*
-       * THE CURRENT APPROVED SALARY, READ AS A SOURCE RATHER THAN AS A VALUE.
-       * The calculation is performed on the SNAPSHOT's gross - that is what
-       * initialization froze - and this read exists so that a revision
-       * approved since can be DETECTED. Nothing below prices a month from it.
+       * THE APPROVED SALARY APPLICABLE TO THE MONTH - the same resolver and the
+       * same month-end date initialization uses. Reading the month only
+       * DETECTS a revision approved since (Salary changed); Calculate and
+       * Recalculate price the month from it - see `resolveMonthSalary`.
        */
       this.payrunRepo.listApprovedSalaries(ids, to),
       this.payrunRepo.listPendingApprovals(ids, from, to),
@@ -465,7 +523,9 @@ class PayrunCalculationUsecase {
     const attendance = context.attendanceOf.get(id) || null;
     const nrm = calc.resolveEffectiveNrm(context.nrmOf.get(id) || []);
     const statutory = context.statutoryOf.get(id) || {};
-    const salary = context.salaryOf.get(id) || null;
+    /* THE ONE SALARY OBJECT - see `resolveMonthSalary`. */
+    const salary = resolveMonthSalary(employee, context.salaryOf.get(id) || null);
+    const priced = pricedSnapshot(employee, salary);
     const counts = context.pendingOf.get(id) || {};
     const amounts = context.amountsOf.get(id) || {};
     const state = context.stateOf.get(id) || null;
@@ -517,7 +577,7 @@ class PayrunCalculationUsecase {
     const statutoryHold = statutoryHoldReason(statutoryGaps);
 
     const currentMarkers = calc.sourceMarkers({
-      salary: salary || {},
+      salary,
       attendance: attendance || {},
       nrm,
       statutory,
@@ -538,7 +598,7 @@ class PayrunCalculationUsecase {
     let readiness = null;
     if (context.dayRowsOf !== null) {
       const dryRun = calc.computeCalculation({
-        snapshot: employee,
+        snapshot: priced,
         attendance: attendance || {},
         nrm,
         amounts,
@@ -550,7 +610,7 @@ class PayrunCalculationUsecase {
       readiness = evaluatePayrollReadiness({
         year: context.period.year,
         month: context.period.month,
-        snapshot: employee,
+        snapshot: priced,
         monthly: attendance,
         day_rows: context.dayRowsOf.get(id) || [],
         attendance_required: !(statutory && Number(statutory.attendance_required) === 0),
@@ -560,6 +620,27 @@ class PayrunCalculationUsecase {
         calculation_errors: dryRun.errors,
         statutory_gaps: statutoryGaps,
       });
+    }
+
+    /*
+     * ===================== THE SALARY THE STORED FIGURES WERE PRICED ON ====
+     *
+     * Compared with the salary applicable to the month - by the PRICED salary,
+     * not by the stored markers. A row calculated before version 4 was always
+     * priced on its initialization snapshot's salary, whatever its `salary_id`
+     * says (that marker took the live salary while the figures did not), so
+     * for those rows the snapshot's salary is the one that was used. From
+     * version 4 the stored `salary_id` and gross ARE the priced salary. The
+     * gross is compared as well, in paise: it is the one salary figure every
+     * stored row carries. Locked rows are never re-judged - see deriveStatus.
+     */
+    let pricedSalaryMismatch = false;
+    if (stored && salary.source === "APPROVED") {
+      const legacy = Number(stored.calculation_version || 0) < PRICED_FROM_RESOLVED_SALARY_VERSION;
+      const pricedId = legacy ? employee.salary_id : stored.salary_id;
+      pricedSalaryMismatch =
+        String(pricedId ?? "") !== String(salary.salary_id ?? "") ||
+        paiseOf(stored.monthly_gross) !== paiseOf(salary.monthly_gross);
     }
 
     const verdict = calc.deriveStatus({
@@ -574,6 +655,7 @@ class PayrunCalculationUsecase {
         : null,
       current_source_hash: currentSourceHash,
       current_inputs_hash: currentInputsHash,
+      priced_salary_mismatch: pricedSalaryMismatch,
       /*
        * THE STORED ROW IS TRANSLATED BACK INTO MARKERS BEFORE IT IS COMPARED -
        * see `storedMarkers`. The OT split is stored as the priced breakdown
@@ -625,6 +707,9 @@ class PayrunCalculationUsecase {
     return {
       internals: {
         employee,
+        /* The snapshot as it is PRICED - its salary fields are `salary`'s. */
+        priced,
+        salary,
         attendance,
         nrm,
         statutory,
@@ -1412,10 +1497,11 @@ class PayrunCalculationUsecase {
    * own. Nothing here writes either.
    */
   _buildRow(context, presented, actor) {
-    const { employee, attendance, nrm, statutory, amounts, entrySalary } = presented.internals;
+    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary } = presented.internals;
 
     const result = calc.computeCalculation({
-      snapshot: employee,
+      /* Priced on the one resolved salary; its markers below are the same object's. */
+      snapshot: priced,
       attendance: attendance || {},
       nrm,
       amounts,
@@ -2070,12 +2156,36 @@ class PayrunCalculationUsecase {
     // What the payslip needs beyond the payrun snapshot - read once, masked
     // inside the snapshot builder, and never returned to the caller.
     const extrasOf = new Map();
+    const pricedSalaryOf = new Map();
     let company = null;
     if (action === LIFECYCLE_ACTION.PUBLISH && presentedById.size > 0) {
       company = await this._payslipCompany();
       const extras = await this.payslipRepo.listEmployeeExtras([...presentedById.keys()]);
       extras.forEach((x) => extrasOf.set(Number(x.employee_id), x));
+      /* The salary records the stored calculations were priced on - see payslipEmployee. */
+      const storedIds = [...presentedById.values()]
+        .map((p) => p.internals.stored)
+        .filter((st) => st && Number(st.calculation_version || 0) >= PRICED_FROM_RESOLVED_SALARY_VERSION)
+        .map((st) => st.salary_id);
+      if (storedIds.length && typeof this.repo.listSalariesByIds === "function") {
+        (await this.repo.listSalariesByIds(storedIds)).forEach((r) => pricedSalaryOf.set(String(r.salary_id), r));
+      }
     }
+    /*
+     * THE PAYSLIP'S SALARY STRUCTURE IS THE ONE THE FIGURES WERE PRICED ON. The
+     * component split (Basic / HRA / Conveyance / Special Allowance) must match
+     * the gross the stored calculation used: from version 4 that is the record
+     * named by its `salary_id` (immutable once approved), checked against the
+     * stored gross; a row priced by an older version used its snapshot's.
+     */
+    const payslipEmployee = (presented) => {
+      const { employee, stored } = presented.internals;
+      const record = stored ? pricedSalaryOf.get(String(stored.salary_id)) : null;
+      if (record && paiseOf(record.monthly_gross) === paiseOf(stored.monthly_gross)) {
+        return pricedSnapshot(employee, resolveMonthSalary(employee, record));
+      }
+      return employee;
+    };
     const DONE = {
       [LIFECYCLE_ACTION.UNLOCK]: [ROW_RESULT.UNLOCKED, "Unlocked. The figures are kept until the employee is recalculated."],
       [LIFECYCLE_ACTION.PUBLISH]: [ROW_RESULT.PUBLISHED, "Payslip published."],
@@ -2165,7 +2275,7 @@ class PayrunCalculationUsecase {
           const snapshot = payslipSnapshot.buildPayslipSnapshot({
             period,
             calculation: presented.internals.stored,
-            employee: presented.internals.employee,
+            employee: payslipEmployee(presented),
             extras: extrasOf.get(employeeId) || {},
             company,
           });
