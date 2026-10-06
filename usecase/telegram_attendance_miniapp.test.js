@@ -629,119 +629,14 @@ describe("the Corrections list shows what came of what was filed", () => {
 });
 
 /* ===================================================================
- * OT REQUESTS - the same engine, reached from Telegram
+ * OT REQUESTS - RETIRED: eligible OT is raised for approval automatically
  * =================================================================== */
 
-/**
- * ONE OT BUSINESS PATH. The Mini App's `submitOtRequest` is a delegation to
- * `attendanceRegularizationUsecase#raiseOtRequest` - the very function the
- * web `POST /attendance/me/ot-request` calls - with the employee taken from
- * the verified Telegram session. These assert that it delegates, that it
- * adds no rule of its own, and above all that there is NO PATH by which a
- * duration or another employee could reach the engine from here.
- */
-describe("OT submission reuses the existing OT engine", () => {
-  const otBody = { attendance_date: "2026-09-17", reason: "Stock count ran late" };
-
-  it("calls raiseOtRequest with the authenticated employee as the actor", async () => {
+describe("the Mini App raises no OT request", () => {
+  it("has no submitOtRequest - an employee cannot raise OT from Telegram", () => {
     const { miniApp, attendanceRegularizationUsecase } = build();
-    const out = await miniApp.submitOtRequest(77, otBody);
-    assert.equal(out.code, 200);
-    assert.equal(attendanceRegularizationUsecase.otCalls.length, 1);
-    const call = attendanceRegularizationUsecase.otCalls[0];
-    assert.equal(call.actor.employee_id, 77);
-    assert.equal(call.attendance_date, "2026-09-17");
-    assert.equal(call.reason, "Stock count ran late");
-    // It raised an OT request and NOT a correction: the two stay separate.
-    assert.equal(attendanceRegularizationUsecase.calls.length, 0);
-  });
-
-  it("the OT minutes come BACK from the engine; nothing can send them in", async () => {
-    const { miniApp, attendanceRegularizationUsecase } = build();
-    const out = await miniApp.submitOtRequest(77, {
-      ...otBody,
-      candidate_ot_minutes: 600,
-      approved_ot_minutes: 600,
-      ot_minutes: 600,
-    });
-    assert.equal(out.candidate_ot_minutes, 90, "the engine's figure, not the caller's 600");
-    const text = JSON.stringify(attendanceRegularizationUsecase.otCalls[0]);
-    assert.ok(!/600/.test(text), text);
-    assert.ok(!/minutes/.test(text), text);
-  });
-
-  it("an employee id smuggled into the payload reaches nothing", async () => {
-    const { miniApp, attendanceRegularizationUsecase } = build();
-    await miniApp.submitOtRequest(77, {
-      ...otBody,
-      employee_id: 78,
-      requested_for_employee_id: 78,
-      actor: { employee_id: 78 },
-    });
-    const call = attendanceRegularizationUsecase.otCalls[0];
-    assert.equal(call.actor.employee_id, 77);
-    assert.equal(call.requested_for_employee_id, undefined);
-    assert.equal(call.employee_id, undefined);
-  });
-
-  it("no employee identity at all is refused before the engine is reached", async () => {
-    const { miniApp, attendanceRegularizationUsecase } = build();
-    for (const id of [null, 0, -1, "abc"]) {
-      // eslint-disable-next-line no-await-in-loop
-      await assert.rejects(() => miniApp.submitOtRequest(id, otBody), /employee identity/);
-    }
+    assert.equal(miniApp.submitOtRequest, undefined);
     assert.equal(attendanceRegularizationUsecase.otCalls.length, 0);
-  });
-
-  /**
-   * Every OT refusal the engine owns arrives at the WebView unchanged: the
-   * duplicate claim, the open correction on the date, the payroll-lock
-   * closure (a decided request on the date), the incomplete day. The Mini
-   * App re-implements none of them and softens none of them.
-   */
-  it("every refusal from the OT engine travels straight back out", async () => {
-    const refusals = [
-      "An OT request for 2026-09-17 is already pending (#41)",
-      "2026-09-17 has an open attendance request (#42); OT can be requested once it is decided",
-      "An OT request for 2026-09-17 has already been decided (#43)",
-      "2026-09-17 is not a complete attendance day yet, so its overtime cannot be requested",
-      "2026-09-17 has no overtime calculated, so there is nothing to request",
-    ];
-    for (const message of refusals) {
-      const refusing = {
-        MAX_BACKDATE_DAYS: 45,
-        raiseOtRequest: async () => {
-          const err = new Error(message);
-          err.name = "ValidationError";
-          throw err;
-        },
-      };
-      const { miniApp } = build({ regularization: refusing });
-      // eslint-disable-next-line no-await-in-loop
-      await assert.rejects(
-        () => miniApp.submitOtRequest(77, otBody),
-        (e) => e.name === "ValidationError" && e.message === message
-      );
-    }
-  });
-
-  it("audits the OT submission with the employee, the date and the session", async () => {
-    const lines = [];
-    const attendanceMissingUsecase = buildMissingUsecase(fakeMissingRepo([employee(77)]), fakeDashboard({}));
-    const miniApp = buildMiniApp({
-      attendanceMissingUsecase,
-      attendanceCalculationUsecase: { readRange: async () => [] },
-      attendanceRegularizationUsecase: recordingRegularization(),
-      log: { LEVEL: { INFO: "info" }, Log: (l) => lines.push(l) },
-    });
-    await miniApp.submitOtRequest(77, otBody, { session_id: "abc123", telegram_user_id: 501 });
-    const line = lines.find((l) => /OT-REQUEST-SUBMITTED/.test(l.code));
-    assert.ok(line);
-    assert.equal(line.ref.employee_id, 77);
-    assert.equal(line.ref.attendance_date, "2026-09-17");
-    assert.equal(line.ref.candidate_ot_minutes, 90);
-    assert.equal(line.ref.session_id, "abc123");
-    assert.equal(line.ref.telegram_user_id, 501);
   });
 });
 

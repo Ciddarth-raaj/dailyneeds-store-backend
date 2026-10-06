@@ -457,6 +457,13 @@ class AttendanceRegularizationRepository {
        * `FOR UPDATE` first (the same statement), then re-read the live
        * windows, so whichever commits second sees the first.
        */
+      // AN AUTOMATICALLY RAISED OT is refused in a locked month under the
+      // same lock: the system never opens a question about settled pay.
+      if (request.request_type === "OT" && request.refuse_when_payroll_locked) {
+        await assertMonthsNotPayrollLocked(connection, [
+          { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
+        ]);
+      }
       if (request.request_type === "PERMISSION") {
         // The payroll row FIRST (the order every Permission write and Approve
         // & Lock share), and a locked month refused inside the transaction -
@@ -1658,6 +1665,272 @@ class AttendanceRegularizationRepository {
         ORDER BY s.attendance_approval_request_id ASC, s.stage_no ASC`,
       [requestIds]
     );
+  }
+
+  /* ============================================ AUTOMATIC PENDING OT ====
+   *
+   * Eligible OT enters approval on its own (migration 20261124120000). The
+   * OT record is the ordinary `attendance_approval_request` row - these
+   * methods only read what the sync needs and make the two guarded writes it
+   * may make to a request NOBODY HAS FINALLY DECIDED: follow the engine's
+   * minutes, or withdraw its own request when the OT is gone. A decided
+   * request (APPROVED, REJECTED, closed by the payroll lock) is never
+   * matched by either guard.
+   */
+
+  /**
+   * The cutover row, or null when the automation is not installed (the
+   * migration has not run) - which the usecase reads as "disabled", so code
+   * deployed ahead of its migration changes nothing.
+   */
+  async getAutoOtSetting() {
+    try {
+      const rows = await queryAsync(
+        this.db,
+        `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date
+           FROM attendance_ot_auto_pending_setting
+          WHERE setting_id = 1`,
+        []
+      );
+      return rows && rows[0] ? rows[0] : null;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return null;
+      this._log("GET-AUTO-OT-SETTING", err);
+      throw err;
+    }
+  }
+
+  /**
+   * Every OT request on these dates in any state but CANCELLED, with how many
+   * of its stages a person has already decided. One date carries one OT
+   * record, open or decided; the sync reads this to know which.
+   */
+  async findOtRequestsForSync(employeeId, dates) {
+    if (!Array.isArray(dates) || dates.length === 0) return [];
+    return this._read(
+      "FIND-OT-REQUESTS-FOR-SYNC",
+      `SELECT r.attendance_approval_request_id, r.request_type, r.status,
+              DATE_FORMAT(r.attendance_date, '%Y-%m-%d') AS attendance_date,
+              r.candidate_ot_minutes, r.approved_ot_minutes, r.auto_created,
+              r.current_stage_no, r.closure_reason,
+              (SELECT COUNT(*) FROM attendance_approval_step s
+                WHERE s.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND s.decision IN ('APPROVED','REJECTED')) AS decided_steps
+         FROM attendance_approval_request r
+        WHERE r.requested_for_employee_id = ?
+          AND r.attendance_date IN (?)
+          AND r.request_type IN ('OT','REGULARIZATION_WITH_OT')
+          AND r.status <> 'CANCELLED'
+        ORDER BY r.attendance_date ASC, r.attendance_approval_request_id ASC`,
+      [employeeId, dates]
+    );
+  }
+
+  /** The audit row for something the automation did, on the caller's connection. */
+  async _insertAutoOtLog(connection, entry) {
+    await queryAsync(
+      connection,
+      `INSERT INTO attendance_ot_auto_pending_log
+         (attendance_approval_request_id, employee_id, attendance_date, action,
+          previous_ot_minutes, new_ot_minutes, trigger_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [
+        entry.attendance_approval_request_id,
+        entry.employee_id,
+        entry.attendance_date,
+        entry.action,
+        entry.previous_ot_minutes === undefined ? null : entry.previous_ot_minutes,
+        entry.new_ot_minutes === undefined ? null : entry.new_ot_minutes,
+        entry.trigger_source ? String(entry.trigger_source).slice(0, 64) : null,
+      ]
+    );
+  }
+
+  /** CREATED is logged after the request commits (the request row is the record). */
+  async logAutoOt(entry) {
+    try {
+      await this._insertAutoOtLog(this.db, entry);
+      return true;
+    } catch (err) {
+      this._log("LOG-AUTO-OT", err, entry);
+      return false;
+    }
+  }
+
+  /**
+   * A PENDING OT request follows the engine's latest eligible minutes.
+   *
+   * Guarded under `FOR UPDATE` on exactly what the sync saw: still PENDING,
+   * still an OT request, still carrying `fromMinutes`. A request decided in
+   * the meantime - from DnDS or Telegram - fails the guard and is left alone.
+   *
+   * AN INCREASE IS NOT APPLIED once any stage has been approved: that
+   * approver agreed to the smaller figure, and final approval is clamped to
+   * the eligible OT anyway, so holding the lower number can never pay more
+   * than the engine allows. A decrease always applies.
+   */
+  async setPendingOtMinutes({ requestId, fromMinutes, toMinutes, triggerSource = null }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+      const rows = await queryAsync(
+        connection,
+        `SELECT attendance_approval_request_id, requested_for_employee_id,
+                DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                status, request_type, candidate_ot_minutes
+           FROM attendance_approval_request
+          WHERE attendance_approval_request_id = ?
+          FOR UPDATE`,
+        [requestId]
+      );
+      const row = rows && rows[0];
+      if (
+        !row ||
+        row.status !== "PENDING" ||
+        row.request_type !== "OT" ||
+        Number(row.candidate_ot_minutes) !== Number(fromMinutes)
+      ) {
+        await rollbackAsync(connection);
+        return { updated: false, reason: "MOVED" };
+      }
+      if (Number(toMinutes) > Number(fromMinutes)) {
+        const decided = await queryAsync(
+          connection,
+          `SELECT COUNT(*) AS n FROM attendance_approval_step
+            WHERE attendance_approval_request_id = ? AND decision IN ('APPROVED','REJECTED')`,
+          [requestId]
+        );
+        if (decided && decided[0] && Number(decided[0].n) > 0) {
+          await rollbackAsync(connection);
+          return { updated: false, reason: "INCREASE_AFTER_PARTIAL_APPROVAL" };
+        }
+      }
+      await queryAsync(
+        connection,
+        `UPDATE attendance_approval_request
+            SET candidate_ot_minutes = ?
+          WHERE attendance_approval_request_id = ?
+            AND status = 'PENDING'`,
+        [toMinutes, requestId]
+      );
+      await this._insertAutoOtLog(connection, {
+        attendance_approval_request_id: requestId,
+        employee_id: row.requested_for_employee_id,
+        attendance_date: row.attendance_date,
+        action: "MINUTES_CHANGED",
+        previous_ot_minutes: Number(fromMinutes),
+        new_ot_minutes: Number(toMinutes),
+        trigger_source: triggerSource,
+      });
+      await commitAsync(connection);
+      return { updated: true };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("SET-PENDING-OT-MINUTES", err, { requestId });
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /**
+   * WITHDRAW an OT request the automation raised, because a recalculation no
+   * longer finds eligible OT on the date (a voided punch, a correction).
+   *
+   * Only `auto_created = 1`, still PENDING, and with NO stage decided by a
+   * person. CANCELLED rather than deleted, each outstanding step stamped
+   * SKIPPED with the reason, and an audit row - so the trail shows the
+   * system asked and then withdrew the question. A request an employee
+   * raised, or one an approver has started deciding, is never touched.
+   */
+  async withdrawAutoOtRequest({ requestId, reason, triggerSource = null }) {
+    const connection = await getConnectionAsync(this.db);
+    try {
+      await beginTransactionAsync(connection);
+      const rows = await queryAsync(
+        connection,
+        `SELECT attendance_approval_request_id, requested_for_employee_id,
+                DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                status, request_type, auto_created, candidate_ot_minutes
+           FROM attendance_approval_request
+          WHERE attendance_approval_request_id = ?
+          FOR UPDATE`,
+        [requestId]
+      );
+      const row = rows && rows[0];
+      const decided =
+        row &&
+        (await queryAsync(
+          connection,
+          `SELECT COUNT(*) AS n FROM attendance_approval_step
+            WHERE attendance_approval_request_id = ? AND decision IN ('APPROVED','REJECTED')`,
+          [requestId]
+        ));
+      if (
+        !row ||
+        row.status !== "PENDING" ||
+        row.request_type !== "OT" ||
+        Number(row.auto_created) !== 1 ||
+        (decided && decided[0] && Number(decided[0].n) > 0)
+      ) {
+        await rollbackAsync(connection);
+        return { withdrawn: false, reason: "NOT_WITHDRAWABLE" };
+      }
+      await queryAsync(
+        connection,
+        `UPDATE attendance_approval_request
+            SET status = 'CANCELLED',
+                finalization_state = 'NOT_REQUIRED',
+                decided_at = CURRENT_TIMESTAMP(3)
+          WHERE attendance_approval_request_id = ?
+            AND status = 'PENDING'`,
+        [requestId]
+      );
+      await queryAsync(
+        connection,
+        `UPDATE attendance_approval_step
+            SET decision = 'SKIPPED', remarks = ?, decided_at = CURRENT_TIMESTAMP(3)
+          WHERE attendance_approval_request_id = ?
+            AND decision = 'PENDING'`,
+        [String(reason || "Withdrawn: no eligible overtime on this date").slice(0, 500), requestId]
+      );
+      await this._insertAutoOtLog(connection, {
+        attendance_approval_request_id: requestId,
+        employee_id: row.requested_for_employee_id,
+        attendance_date: row.attendance_date,
+        action: "WITHDRAWN",
+        previous_ot_minutes: Number(row.candidate_ot_minutes),
+        new_ot_minutes: 0,
+        trigger_source: triggerSource,
+      });
+      await commitAsync(connection);
+      return { withdrawn: true };
+    } catch (err) {
+      await rollbackAsync(connection);
+      this._log("WITHDRAW-AUTO-OT", err, { requestId });
+      throw err;
+    } finally {
+      connection.release();
+    }
+  }
+
+  /** The automation's audit rows for some requests, oldest first. */
+  async listAutoOtLog(requestIds) {
+    if (!Array.isArray(requestIds) || requestIds.length === 0) return [];
+    try {
+      return await queryAsync(
+        this.db,
+        `SELECT attendance_approval_request_id, action, previous_ot_minutes, new_ot_minutes,
+                trigger_source, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+           FROM attendance_ot_auto_pending_log
+          WHERE attendance_approval_request_id IN (?)
+          ORDER BY attendance_ot_auto_pending_log_id ASC`,
+        [requestIds]
+      );
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      throw err;
+    }
   }
 
   /** One employee's own requests, for the "what did I raise" view. */

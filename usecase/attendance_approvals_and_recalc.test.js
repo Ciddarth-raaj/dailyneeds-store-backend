@@ -547,7 +547,12 @@ describe("bulk recalculation", () => {
     assert.equal(byDate["2026-09-16"].status, CALC_STATUS.FINAL);
   });
 
-  it("27/28. never creates an OT request; candidate OT is merely AVAILABLE", async () => {
+  // THE CALCULATION ITSELF OWNS NO OT RULE. With no automatic-pending-OT sync
+  // wired (this harness wires none), a recalculation raises nothing and the
+  // day's OT reads AVAILABLE. In production `server.js` wires the sync, and
+  // that same OT is then raised PENDING automatically - proved in
+  // `usecase/attendance_ot_auto_pending.test.js`.
+  it("27/28. the calculation alone creates no OT request; candidate OT is AVAILABLE until the sync raises it", async () => {
     const w = world();
     await w.calculation.recalculateBulk({ ...RANGE, actor_employee_id: admin });
     assert.equal(w.store.requests.length, 0);

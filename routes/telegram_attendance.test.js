@@ -333,8 +333,8 @@ describe("what this namespace does NOT expose", () => {
       "/telegram/attendance/regularization",
       "/telegram/attendance/session",
     ]);
-    // `ot-request` RAISES one; it decides nothing. The exclusions below are
-    // about approval, and "approv" still matches nothing.
+    // `ot-request` is RETIRED (410); it raises and decides nothing. The
+    // exclusions below are about approval, and "approv" still matches nothing.
     assert.ok(!routes.some((p) => /approv|decision|pending|employee/i.test(p)));
   });
 });
@@ -393,7 +393,7 @@ describe("My Attendance over HTTP", () => {
  * DURATION. These are asserted over real HTTP because they are claims about
  * what a browser can put on the wire.
  */
-describe("POST /telegram/attendance/ot-request", () => {
+describe("POST /telegram/attendance/ot-request - RETIRED (OT is raised automatically)", () => {
   const otBody = { attendance_date: "2026-09-17", reason: "Stock count ran late" };
 
   /**
@@ -417,58 +417,18 @@ describe("POST /telegram/attendance/ot-request", () => {
     assert.deepEqual(calls.ot, [], "submitOtRequest was never executed");
   });
 
-  it("accepts exactly a date and a reason, for the TOKEN's employee", async () => {
-    calls.ot.length = 0;
-    const res = await post("/telegram/attendance/ot-request", otBody, authed);
-    const body = await res.json();
-    assert.equal(body.code, 200);
-    assert.deepEqual(calls.ot, [[EMPLOYEE, { attendance_date: "2026-09-17", reason: "Stock count ran late" }]]);
-    // The figure is the SERVER's, handed back rather than taken in.
-    assert.equal(body.candidate_ot_minutes, 90);
-  });
-
-  it("cannot be pointed at another employee, however the payload is dressed up", async () => {
-    for (const extra of [{ employee_id: 78 }, { requested_for_employee_id: 78 }]) {
+  it("an AUTHENTICATED employee is told OT needs no request (410) - nothing is raised", async () => {
+    for (const body of [otBody, { ...otBody, employee_id: 78 }, { ...otBody, candidate_ot_minutes: 600 }, {}]) {
       calls.ot.length = 0;
       // eslint-disable-next-line no-await-in-loop
-      const res = await post("/telegram/attendance/ot-request", { ...otBody, ...extra }, authed);
+      const res = await post("/telegram/attendance/ot-request", body, authed);
       // eslint-disable-next-line no-await-in-loop
-      assert.equal((await res.json()).code, 422, JSON.stringify(extra));
-      assert.deepEqual(calls.ot, [], "nothing was raised for anybody");
+      const json = await res.json();
+      assert.equal(res.status, 410, JSON.stringify(body));
+      assert.equal(json.error, "OT_REQUEST_NOT_REQUIRED");
+      assert.match(json.msg, /automatically/);
+      assert.deepEqual(calls.ot, [], "no Mini App OT path is reached");
     }
-  });
-
-  it("HAS NO FIELD FOR A DURATION: OT minutes from Telegram are refused outright", async () => {
-    for (const extra of [
-      { candidate_ot_minutes: 600 },
-      { approved_ot_minutes: 600 },
-      { ot_minutes: 600 },
-      { minutes: 600 },
-    ]) {
-      calls.ot.length = 0;
-      // eslint-disable-next-line no-await-in-loop
-      const res = await post("/telegram/attendance/ot-request", { ...otBody, ...extra }, authed);
-      // eslint-disable-next-line no-await-in-loop
-      assert.equal((await res.json()).code, 422, JSON.stringify(extra));
-      assert.deepEqual(calls.ot, []);
-    }
-  });
-
-  it("a missing or too-short reason is refused, as it is on the correction", async () => {
-    for (const reason of [undefined, "", "abc"]) {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await post("/telegram/attendance/ot-request", { ...otBody, reason }, authed);
-      // eslint-disable-next-line no-await-in-loop
-      assert.equal((await res.json()).code, 422, `reason=${JSON.stringify(reason)}`);
-    }
-  });
-
-  it("a punch_time is refused - an OT request is not a correction", async () => {
-    const res = await post(
-      "/telegram/attendance/ot-request",
-      { ...otBody, punch_time: "2026-09-17 23:30:00" },
-      authed
-    );
-    assert.equal((await res.json()).code, 422);
   });
 });
+

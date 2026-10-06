@@ -662,7 +662,77 @@ longer produced by the engine (see below); the OT claim has its own state.
 
 ---
 
-# The finalized OT flow
+# Automatic pending OT (supersedes "the employee requests OT" below)
+
+```
+employee punches -> attendance engine calculates eligible OT
+  -> PENDING OT approval (raised by the system) -> approver approves / rejects
+     (DnDS or Telegram, same record) -> only APPROVED OT is paid
+```
+
+Employees no longer request OT. `POST /attendance/me/ot-request` and
+`POST /telegram/attendance/ot-request` answer **410 `OT_REQUEST_NOT_REQUIRED`**
+and create nothing. Historical OT requests are untouched.
+
+**Where it happens.** `attendance_regularization#syncAutoOt`, called after
+every committed write that stores a day: `recalculateRange` (manual, bulk, the
+06:55 daily run, shift propagation, assignment edits, punch voids), a one-date
+shift edit, a final decision that rewrote the day (regularization, shift
+change, permission), an admin revoke, a device time correction and a direct
+permission grant. It never runs inside the write and never fails it.
+
+**The OT record is the existing one**: an `attendance_approval_request` row,
+`request_type = OT`, `auto_created = 1`, the employee's ordinary approval
+chain. Eligibility is exactly what `raiseOtRequest` used to accept from an
+employee: a closed, complete, FINAL day; its *claimable* minutes
+(`excess_ot_minutes` — on a shift-changed date only the part outside the
+approved shift); not Present/Absent Only; inside employment.
+
+| On the date | The sync |
+|---|---|
+| no OT record, eligible OT > 0 | creates it PENDING (audit `CREATED`) |
+| PENDING, minutes changed | follows the engine (audit `MINUTES_CHANGED`); an **increase** is held once any stage has approved |
+| PENDING **system** record, OT gone | withdraws it: CANCELLED, steps SKIPPED (audit `WITHDRAWN`) |
+| PENDING record an employee raised, OT gone | left for an approver (approval is clamped to 0) |
+| APPROVED / REJECTED / payroll-lock closure | never touched — an approval is clamped by the engine to the day's eligible OT on every recalculation, and payroll flags `APPROVED_OT_CHANGED` (the existing correction path) |
+
+**Gates.** Nothing is raised before the cutover date
+(`attendance_ot_auto_pending_setting.auto_pending_from_date`, seeded by
+migration 20261124120000 to the deploy date less five days), older than the
+45-day request window, on an open day, or in a payroll-locked month (checked
+before, and again under `FOR UPDATE` inside the insert). `enabled = 0` on that
+row is the kill switch.
+
+**Idempotent and race-safe.** One OT record per date; the open-request key
+(`uq_aareq_open_per_employee_date`) refuses a second PENDING one, and the loser
+of a race is reported as `duplicate_prevented`. Minute updates and withdrawals
+are guarded `FOR UPDATE` on the exact state the sync saw; a decision that
+commits first wins and the sync leaves the record alone.
+
+**Decisions.** Unchanged: `decide`, from DnDS (`WEB`) or Telegram
+(`TELEGRAM`, `usecase/attendance_ot_telegram.js`). `decide` now answers an
+already-processed request with `409 already_decided` up front, and accepts an
+optional `expected_ot_minutes` — a Telegram Approve button carries the minutes
+it showed, so a figure that moved since the message was sent is refused
+(`409 ot_minutes_changed`) and a fresh card is sent.
+
+**Telegram.** A newly raised OT messages the employee's first approver when
+their chain names a person (Attendance Approver Setup), exactly like a shift
+request. Any approver can send `/ot` to the bot to list the pending OT they may
+decide now, with Approve / Reject buttons. Reject asks for a reason by reply.
+
+**Payroll.** Unchanged: only APPROVED + SETTLED OT is in `approved_ot_minutes`.
+Pending OT is counted by `listPendingApprovals` and blocks Approve & Lock as
+`PENDING_OT_APPROVAL` unless HR closes the employee's attendance for payroll;
+approval in a locked month is refused.
+
+**Deploy backfill.** `scripts/attendance/ot-auto-pending-backfill.js` — preview
+by default, `--apply` to write; the previous five attendance days through the
+same sync; approved/rejected preserved; idempotent.
+
+---
+
+# The finalized OT flow (historical: employee-requested OT)
 
 ```
 system calculates OT -> employee requests OT with reason -> OT approval

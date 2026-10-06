@@ -459,6 +459,28 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
   };
 
   /**
+   * AUTOMATIC PENDING OT - the regularization usecase's `syncAutoOtSafely`,
+   * injected (the same cycle reason as the OT service above).
+   *
+   * Every path here that STORES a day hands the stored days to it after the
+   * write has committed - a recalculation (manual, bulk, the 06:55 daily
+   * run, shift propagation, assignment changes, punch voids) and a one-date
+   * shift edit - so eligible OT reaches approval without anybody asking, and
+   * a pending OT follows a corrected day. Never inside the write and never
+   * allowed to fail it. Not wired (unit tests that are not about it), the
+   * calculation behaves exactly as before.
+   */
+  let otAutoSync = options.ot_auto_sync || null;
+  const setOtAutoSync = (service) => {
+    otAutoSync = service || null;
+  };
+  const syncAutoOtAfterWrite = async ({ employee_id, days = null, dates = null, now = null, source }) => {
+    if (!otAutoSync || typeof otAutoSync.syncAutoOtSafely !== "function") return null;
+    if ((!days || days.length === 0) && (!dates || dates.length === 0)) return null;
+    return otAutoSync.syncAutoOtSafely({ employee_id, days, dates, now, source });
+  };
+
+  /**
    * The punch RE-DERIVATION collaborator, injected for the same reason.
    *
    * It lives in `usecase/attendance_import.js`. Recalculate has to reach it
@@ -1662,6 +1684,14 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       { now, source: "an attendance recalculation" }
     );
 
+    // ELIGIBLE OT INTO APPROVAL, from the days just stored.
+    const otAutoPending = await syncAutoOtAfterWrite({
+      employee_id: employeeId,
+      days,
+      now,
+      source: "RECALCULATION",
+    });
+
     return {
       employee_id: employeeId,
       from_date: from,
@@ -1680,6 +1710,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       punch_redrive: redrive,
       ...stored,
       month_refresh: monthRefresh,
+      ot_auto_pending: otAutoPending,
     };
   };
 
@@ -1864,6 +1895,10 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
             source: "a date shift change",
           })
         : null;
+    const otAutoPending =
+      rows.length > 0
+        ? await syncAutoOtAfterWrite({ employee_id: employeeId, days: [after], now, source: "DATE_SHIFT_EDIT" })
+        : null;
 
     return {
       employee_id: employeeId,
@@ -1885,6 +1920,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
         ? null
         : { reason: dayState.reason, closes_at: dayState.closes_at },
       month_refresh: monthRefresh,
+      ot_auto_pending: otAutoPending,
     };
   };
 
@@ -2945,6 +2981,8 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setOtRequestService,
     setPunchRedriveService,
     closeOtForPayrollLock,
+    setOtAutoSync,
+    syncAutoOtAfterWrite,
     recalculateForShiftConfigChange,
     processQueuedRecalculations,
     retryRecalculationRun,

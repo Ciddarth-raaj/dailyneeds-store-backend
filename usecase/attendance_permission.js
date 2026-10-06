@@ -488,10 +488,23 @@ module.exports = (permissionRepo, calculationUsecase) => {
    * Reports, never throws: Approve & Lock refuses a stale summary whatever
    * happens here.
    */
-  const refreshMonth = async (employee_id, attendance_date, now) =>
-    typeof calculationUsecase.refreshPersistedMonth === "function"
-      ? calculationUsecase.refreshPersistedMonth({ employee_id, attendance_date, now })
-      : { refreshed: false, reason: "NOT_WIRED" };
+  const refreshMonth = async (employee_id, attendance_date, now) => {
+    const refreshed =
+      typeof calculationUsecase.refreshPersistedMonth === "function"
+        ? await calculationUsecase.refreshPersistedMonth({ employee_id, attendance_date, now })
+        : { refreshed: false, reason: "NOT_WIRED" };
+    // The day the permission moved may carry different eligible OT: its
+    // pending OT follows. After the commit; reports, never throws.
+    if (typeof calculationUsecase.syncAutoOtAfterWrite === "function") {
+      await calculationUsecase.syncAutoOtAfterWrite({
+        employee_id,
+        dates: [attendance_date],
+        now,
+        source: "PERMISSION",
+      });
+    }
+    return refreshed;
+  };
 
   /** A permission the caller may act on, or the same "not found" for both. */
   const inScope = (row, scope_store_ids) =>

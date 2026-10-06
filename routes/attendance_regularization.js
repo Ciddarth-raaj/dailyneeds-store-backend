@@ -1,4 +1,5 @@
 const express = require("express");
+const { respondOtRequestRetired } = require("../utils/ot_request_retired");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
@@ -347,36 +348,13 @@ class AttendanceRegularizationRoutes {
     );
 
     /**
-     * MY ATTENDANCE: request the overtime the engine calculated on your OWN
-     * date.
-     *
-     * The body is a date and a reason. There is no field for an employee id
-     * and none for OT minutes - `candidate_ot_minutes`, `approved_ot_minutes`,
-     * `employee_id` and `requested_for_employee_id` are all refused by the
-     * schema (Joi rejects unknown keys) - and the usecase recalculates the
-     * date on the server and stores THAT candidate. The chain, the one-claim-
-     * per-date rule and the "complete FINAL day with OT" rule are the
-     * usecase's, unchanged by anything the client sends.
+     * MY ATTENDANCE: REQUEST OT - RETIRED. Eligible overtime is raised for
+     * approval automatically by the attendance engine, so an employee no
+     * longer asks for it. The route stays only to tell an old screen so
+     * (410, `OT_REQUEST_NOT_REQUIRED`); it creates nothing and calls no
+     * usecase. Historical OT requests are untouched and still read.
      */
-    this.router.post("/attendance/me/ot-request", requireSelf, async (req, res) => {
-      try {
-        const schema = {
-          attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
-          reason: Joi.string().min(5).max(500).required(),
-        };
-        const isValid = Joi.validate(req.body, schema);
-        if (isValid.error !== null) throw isValid.error;
-
-        const result = await this.usecase.raiseOtRequest({
-          actor: { employee_id: Number(req.decoded.employee_id), user_type: req.decoded.user_type },
-          attendance_date: req.body.attendance_date,
-          reason: req.body.reason,
-        });
-        res.json({ code: 200, ...result });
-      } catch (err) {
-        AttendanceRegularizationRoutes._respond(res, err);
-      }
-    });
+    this.router.post("/attendance/me/ot-request", requireSelf, (req, res) => respondOtRequestRetired(res));
 
     /**
      * PERMISSION REQUESTS - leave early, come in late, or be away for a

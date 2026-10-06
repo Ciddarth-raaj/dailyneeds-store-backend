@@ -968,6 +968,11 @@ class Server {
     this.attendanceCalculationUsecase.setOtRequestService(
       this.attendanceRegularizationUsecase
     );
+    // AUTOMATIC PENDING OT. Every stored day hands itself to the
+    // regularization usecase's sync after the write commits, so eligible OT
+    // enters approval with no employee request. Gated by the cutover row of
+    // migration 20261124120000 (absent = disabled).
+    this.attendanceCalculationUsecase.setOtAutoSync(this.attendanceRegularizationUsecase);
     // EDIT SHIFT ASSIGNMENT needs the calculation usecase for two things: to
     // ask, before it writes, whether the effective date reaches into a
     // payroll-locked month, and to recalculate the dates a change has just
@@ -994,6 +999,16 @@ class Server {
     this.attendanceRegularizationUsecase.setShiftChangeNotifier(
       this.attendanceShiftChangeTelegramUsecase
     );
+    // OT APPROVAL ON TELEGRAM. The same `decide` as DnDS on the same OT
+    // record; it messages the first approver of a newly raised OT and
+    // answers `/ot` with the approver's pending OT cards.
+    this.attendanceOtTelegramUsecase = require("./usecase/attendance_ot_telegram")({
+      regularizationUsecase: this.attendanceRegularizationUsecase,
+      employeeTelegramRepo: this.employeeTelegramRepo,
+      telegram: require("./services/telegram")(),
+      webBaseUrl: process.env.WEB_APP_BASE_URL || null,
+    });
+    this.attendanceRegularizationUsecase.setOtNotifier(this.attendanceOtTelegramUsecase);
     // Recalculate also re-derives the range's undatable punches, so the
     // Punch Audit stops reporting "No Shift" for an employee whose shift was
     // assigned after their punches arrived. Injected rather than required for
@@ -1105,6 +1120,14 @@ class Server {
       updateTypes: ["callback_query", "message"],
       claims: (update) => this.attendanceShiftChangeTelegramUsecase.claims(update),
       handle: (update) => this.attendanceShiftChangeTelegramUsecase.handle(update),
+    });
+    // The OT approval buttons, the reply carrying a rejection reason, and a
+    // private `/ot`. It claims exactly those, so no other handler sees them.
+    this.telegramUpdateDispatcher.register({
+      name: "attendance_ot_approval",
+      updateTypes: ["callback_query", "message"],
+      claims: (update) => this.attendanceOtTelegramUsecase.claims(update),
+      handle: (update) => this.attendanceOtTelegramUsecase.handle(update),
     });
     // EMPLOYEE TELEGRAM LINKING. Registered on the same dispatcher, and it is
     // the first handler that CLAIMS: an employee deep link is `/start e_…`,

@@ -226,12 +226,13 @@ describe("the dispatcher", () => {
       Object.fromEntries([...claimersByType.entries()].map(([k, v]) => [k, v.sort()])),
       {
         message: [
+          "attendance_ot_approval",
           "attendance_shift_change",
           "employee_telegram_link",
           "telegram_employee_menu",
         ],
         chat_join_request: ["employee_telegram_join_request"],
-        callback_query: ["attendance_shift_change"],
+        callback_query: ["attendance_ot_approval", "attendance_shift_change"],
       }
     );
 
@@ -248,6 +249,14 @@ describe("the dispatcher", () => {
     // The shift request claims a `message` ONLY when it is a reply to its own
     // reject prompt, which is why it can share the type with the two above.
     const shift = require("../usecase/attendance_shift_change_telegram")({
+      regularizationUsecase: {},
+      employeeTelegramRepo: {},
+      telegram: { isConfigured: () => false, sendMessage: async () => ({}) },
+    });
+
+    // The OT approval claims its own reject-prompt replies and a private
+    // `/ot` - neither of which any other handler matches.
+    const ot = require("../usecase/attendance_ot_telegram")({
       regularizationUsecase: {},
       employeeTelegramRepo: {},
       telegram: { isConfigured: () => false, sendMessage: async () => ({}) },
@@ -271,6 +280,14 @@ describe("the dispatcher", () => {
         reply_to_message: { text: "Reject shift request #77\n\nReply to this message with the reason." },
       }),
       privateMsg("Not enough cover that day", { reply_to_message: { text: "Some other message" } }),
+      privateMsg("Worked without manager sign-off", {
+        reply_to_message: { text: "Reject OT request #78\n\nReply to this message with the reason." },
+      }),
+      privateMsg("/ot"),
+      privateMsg("/pendingot"),
+      privateMsg("/ot@dnds_bot"),
+      privateMsg("/otherthing"),
+      { message: { chat: { id: -100, type: "supergroup" }, from: { id: 5 }, text: "/ot" } },
       privateMsg(undefined, { contact: { phone_number: "1" } }),
       { message: { chat: { id: -100, type: "supergroup" }, from: { id: 5 }, text: "/start" } },
       { message: { chat: { id: -100, type: "group" }, from: { id: 5 }, text: "/setup" } },
@@ -282,6 +299,7 @@ describe("the dispatcher", () => {
       ["telegram_employee_menu", (u) => menu.claims(u)],
       ["employee_telegram_link", (u) => link.claims(u)],
       ["attendance_shift_change", (u) => shift.claims(u)],
+      ["attendance_ot_approval", (u) => ot.claims(u)],
     ];
 
     for (const update of corpus) {
@@ -305,6 +323,14 @@ describe("the dispatcher", () => {
     );
     assert.equal(shift.claims({ callback_query: { data: "sc:77:A" } }), true);
     assert.equal(shift.claims({ callback_query: { data: "approve_po_5" } }), false);
+    assert.equal(ot.claims(privateMsg("Worked late", { reply_to_message: { text: "Reject OT request #78" } })), true);
+    assert.equal(ot.claims(privateMsg("/ot")), true);
+    assert.equal(ot.claims({ message: { chat: { id: -100, type: "group" }, from: { id: 5 }, text: "/ot" } }), false, "groups are not approval chats");
+    assert.equal(ot.claims({ callback_query: { data: "ot:78:A:60" } }), true);
+    assert.equal(ot.claims({ callback_query: { data: "ot:78:R" } }), true);
+    // The two button namespaces are disjoint.
+    assert.equal(ot.claims({ callback_query: { data: "sc:77:A" } }), false);
+    assert.equal(shift.claims({ callback_query: { data: "ot:78:A:60" } }), false);
   });
 
   it("THE CLAIM PREDICATE IS SYNCHRONOUS AND TOUCHES NO REPOSITORY", () => {

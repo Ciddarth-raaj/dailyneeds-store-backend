@@ -1,4 +1,5 @@
 const express = require("express");
+const { respondOtRequestRetired } = require("../utils/ot_request_retired");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 const readTiming = require("../utils/attendance_read_timing");
@@ -11,7 +12,7 @@ const readTiming = require("../utils/attendance_read_timing");
  *   GET  /telegram/attendance/missing-dates    Corrections, this employee's
  *   GET  /telegram/attendance/date             one date, read-only
  *   POST /telegram/attendance/regularization   raise the normal request
- *   POST /telegram/attendance/ot-request       raise the normal OT request
+ *   POST /telegram/attendance/ot-request       RETIRED - 410; OT is raised automatically
  *
  * =============================== WHY THESE FIVE ARE "UNPROTECTED" ROUTES ===
  *
@@ -208,45 +209,13 @@ class TelegramAttendanceRoutes {
     });
 
     /**
-     * Raise the NORMAL Daily Needs OT request.
-     *
-     * A THIN AUTHENTICATED DELEGATION AND NOTHING ELSE. The route exists
-     * only because a Mini App cannot present the dnds.co.in session that
-     * `POST /attendance/me/ot-request` requires - that endpoint takes its
-     * employee from `req.decoded`, which a Telegram caller has no way to
-     * populate. So this one resolves the employee from the verified Telegram
-     * session instead and hands the SAME two fields to the SAME usecase:
-     * `attendanceRegularizationUsecase#raiseOtRequest`, through
-     * `miniApp.submitOtRequest`. There is no second OT engine, no second set
-     * of eligibility rules and no Telegram approval path.
-     *
-     * TWO FIELDS, AND NEITHER IS A DURATION. `candidate_ot_minutes`,
-     * `approved_ot_minutes`, `ot_minutes`, `employee_id` and
-     * `requested_for_employee_id` are all unknown keys here, and Joi refuses
-     * unknown keys - so each is a 422, never a value that is ignored today
-     * and read tomorrow. The minutes are recalculated on the server at
-     * submission, and the client has no field with which to disagree.
+     * RAISE AN OT REQUEST - RETIRED. Employees no longer request OT, in DnDS
+     * or in Telegram: the attendance engine raises eligible OT for approval
+     * itself, and approvers decide it from DnDS or from the bot's OT cards.
+     * The session guard still runs (an unauthenticated caller is still 401),
+     * and then the same 410 the web route gives. Nothing is created.
      */
-    r.post("/telegram/attendance/ot-request", guard, async (req, res) => {
-      try {
-        const schema = {
-          attendance_date: Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).required(),
-          reason: Joi.string().min(5).max(500).required(),
-        };
-        const isValid = Joi.validate(req.body || {}, schema);
-        if (isValid.error !== null) throw isValid.error;
-
-        res.json(
-          await this.miniApp.submitOtRequest(
-            req.miniApp.employee_id,
-            { attendance_date: req.body.attendance_date, reason: req.body.reason },
-            { session_id: req.miniApp.session_id, telegram_user_id: req.miniApp.telegram_user_id }
-          )
-        );
-      } catch (err) {
-        TelegramAttendanceRoutes._respond(res, err);
-      }
-    });
+    r.post("/telegram/attendance/ot-request", guard, (req, res) => respondOtRequestRetired(res));
   }
 
   getRouter() {

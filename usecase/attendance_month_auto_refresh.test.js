@@ -524,6 +524,8 @@ describe("COVERAGE GUARD: every day-row write is followed by a month refresh", (
     "attendance_regularization.js:raiseOtRequest:createRequest": true,
     "attendance_regularization.js:raiseShiftChangeRequest:createRequest": true,
     "attendance_regularization.js:raisePermissionRequest:createRequest": true,
+    // Automatic pending OT raises a PENDING request: no day row, nothing payable.
+    "attendance_regularization.js:syncAutoOt:createRequest": true,
   };
 
   it("every site refreshes, or is listed as writing no day row", () => {
@@ -550,6 +552,7 @@ describe("COVERAGE GUARD: every day-row write is followed by a month refresh", (
       "attendance_regularization.js:raiseRequest:createRequest",
       "attendance_regularization.js:raiseShiftChangeRequest:createRequest",
       "attendance_regularization.js:revokeDecision:revokeRequest",
+      "attendance_regularization.js:syncAutoOt:createRequest",
     ]);
   });
 });

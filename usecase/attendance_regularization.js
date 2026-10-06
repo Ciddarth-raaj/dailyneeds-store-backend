@@ -1,6 +1,7 @@
 const { isPresentAbsentOnly } = require("../utils/attendance_calculation_mode");
 const { permissionNotApplicableError, PERMISSION_NOT_APPLICABLE_MESSAGE } = require("../utils/attendance_permission");
 const crypto = require("crypto");
+const logger = require("../utils/logger");
 const {
   REQUESTER_CLASS,
   APPROVER_ROLE,
@@ -32,7 +33,7 @@ function monthBounds(date) {
   const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
   return [`${date.slice(0, 7)}-01`, `${date.slice(0, 7)}-${String(last).padStart(2, "0")}`];
 }
-const { istToday } = require("../utils/istDate");
+const { istToday, istDateOf } = require("../utils/istDate");
 const {
   PERMISSION_CLOSURE_LABEL,
   resolvePermissionWindows,
@@ -67,12 +68,15 @@ const {
  * its own. New code never creates REGULARIZATION_WITH_OT; the enum value is
  * kept so historical rows still read.
  *
- * OT IS REQUESTED BY THE EMPLOYEE, NEVER QUEUED BY THE SYSTEM. The engine
- * calculates `candidate_ot_minutes`; that figure is system-controlled and the
- * request body has no field for it. `raiseOtRequest` recalculates the date on
- * the server at submission and stores THAT candidate. Approval is after the
- * work, and the approved figure is clamped to the eligible OT as calculated at
- * the moment of final approval, so it can never exceed what the engine says.
+ * OT ENTERS APPROVAL AUTOMATICALLY - NOBODY REQUESTS IT (`syncAutoOt`). The
+ * engine calculates `candidate_ot_minutes`; whenever a closed, complete day
+ * has eligible OT, the system raises (or updates) that date's PENDING OT
+ * request itself and the approver decides it from DnDS or Telegram. Employees
+ * no longer request OT: the web and Telegram request endpoints are retired,
+ * and `raiseOtRequest` stays only so the rules it encodes remain tested.
+ * Approval is after the work, and the approved figure is clamped to the
+ * eligible OT as calculated at the moment of final approval, so it can never
+ * exceed what the engine says.
  *
  * PAYROLL LOCK closes every OT claim in the month that is not finally
  * approved - never requested, or requested and not approved in time - as
@@ -341,7 +345,15 @@ module.exports = (
 
     await assertEmployedOn(forEmployeeId, date, "an attendance correction");
 
-    const open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
+    let open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
+    // An OT the SYSTEM raised for a day that has since lost a punch (a void,
+    // a late device correction) is stale, not an open question: re-sync the
+    // date - which withdraws it when the live day has no eligible OT - and
+    // look again.
+    if (open && open.request_type === REQUEST_TYPE.OT && tinyBool(open.auto_created)) {
+      await syncAutoOtSafely({ employee_id: forEmployeeId, dates: [date], now, today, source: "REGULARIZATION_RAISE" });
+      open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
+    }
     if (open) {
       throw validationError(
         `There is already an open request for ${date} (#${open.attendance_approval_request_id})`
@@ -1621,9 +1633,22 @@ module.exports = (
           source: `a ${request.request_type} revocation`,
         })
       : null;
+    // The day without the revoked decision may carry eligible OT with no
+    // final decision on it any more (a revoked OT approval, a revoked
+    // correction): it goes back into approval, exactly as the engine says.
+    const otAutoPending =
+      committed && calculations.length > 0
+        ? await syncAutoOtSafely({
+            employee_id: employeeId,
+            days: voidedDay ? [voidedDay] : [],
+            now,
+            source: `REVOKE_${request.request_type}`,
+          })
+        : null;
     return {
       ...result,
       month_refresh: monthRefresh,
+      ot_auto_pending: otAutoPending,
       request_type: request.request_type,
       attendance_date: request.attendance_date,
       employee_id: employeeId,
@@ -1657,6 +1682,10 @@ module.exports = (
     source = "WEB",
     now = null,
     month_refresh_collector = null,
+    // OT only, optional: the minutes the approver was SHOWN. A Telegram
+    // button carries them, so a message sent before a recalculation moved the
+    // figure cannot approve a number the approver never saw.
+    expected_ot_minutes = null,
   }) => {
     if (decision !== STEP_DECISION.APPROVED && decision !== STEP_DECISION.REJECTED) {
       throw validationError("decision must be APPROVED or REJECTED");
@@ -1671,6 +1700,49 @@ module.exports = (
 
     const request = await attendanceRegularizationRepo.getRequest(request_id);
     if (!request) throw validationError(`No such request: ${request_id}`);
+
+    /*
+     * ALREADY PROCESSED - from DnDS, Telegram, the payroll lock or the system
+     * withdrawing its own OT. Answered before anything else so an old button
+     * or a second tab gets the plain answer; `decideStage`'s guarded UPDATEs
+     * remain what makes a race between two live decisions safe.
+     */
+    if (request.status && request.status !== REQUEST_STATUS.PENDING) {
+      return {
+        code: 409,
+        already_decided: true,
+        status: request.status,
+        attendance_approval_request_id: Number(request_id),
+        attendance_date: request.attendance_date,
+        approved_ot_minutes:
+          request.approved_ot_minutes === null || request.approved_ot_minutes === undefined
+            ? null
+            : Number(request.approved_ot_minutes),
+        msg:
+          request.status === REQUEST_STATUS.CANCELLED
+            ? "This request was withdrawn and can no longer be decided"
+            : `This request has already been ${String(request.status).toLowerCase()}`,
+      };
+    }
+    if (
+      request.request_type === REQUEST_TYPE.OT &&
+      expected_ot_minutes !== null &&
+      expected_ot_minutes !== undefined &&
+      Number(expected_ot_minutes) !== Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0))
+    ) {
+      return {
+        code: 409,
+        ot_minutes_changed: true,
+        status: request.status,
+        attendance_approval_request_id: Number(request_id),
+        attendance_date: request.attendance_date,
+        candidate_ot_minutes: Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0)),
+        msg: `The eligible OT for ${request.attendance_date} is now ${Math.max(
+          0,
+          Math.trunc(Number(request.candidate_ot_minutes) || 0)
+        )} min after an attendance recalculation - review it again`,
+      };
+    }
 
     const step = (request.steps || []).find(
       (s) => Number(s.stage_no) === Number(request.current_stage_no)
@@ -1934,9 +2006,24 @@ module.exports = (
         ? await refreshMonthsAfter(entry, { now, source: `a ${request.request_type} decision` })
         : null;
 
+    // A FINAL decision that rewrote the day (a corrected punch, an approved
+    // one-day shift, a permission) can move the day's eligible OT: the date's
+    // pending OT follows it, or is raised now. After the commit, never inside
+    // it - it pays nothing, and a failure is reported, not thrown.
+    const otAutoPending =
+      !isOtRequest && calculations.length > 0 && saved.status !== REQUEST_STATUS.PENDING
+        ? await syncAutoOtSafely({
+            employee_id: request.requested_for_employee_id,
+            days: correctedDay ? [correctedDay] : [],
+            now,
+            source: `DECISION_${request.request_type}`,
+          })
+        : null;
+
     return {
       code: 200,
       month_refresh: monthRefresh,
+      ot_auto_pending: otAutoPending,
       attendance_approval_request_id: Number(request_id),
       stage_no: Number(step.stage_no),
       decision,
@@ -2108,6 +2195,506 @@ module.exports = (
       ),
       unrequested_dates: unrequested.map((u) => u.attendance_date),
     };
+  };
+
+  /* ================================================ AUTOMATIC PENDING OT ===
+   *
+   *   Employee punches -> attendance engine calculates eligible OT
+   *     -> PENDING OT approval (this) -> approver approves / rejects (decide,
+   *        from DnDS or Telegram) -> only APPROVED OT is paid
+   *
+   * THE ENGINE IS THE SOURCE OF TRUTH. Whether a date has OT, and how many
+   * minutes, is exactly what `raiseOtRequest` used to accept from an employee
+   * request - the claimable minutes of a closed, complete, FINAL day
+   * (`excess_ot_minutes`, which is the whole candidate on an ordinary date and
+   * only the part outside an approved one-day shift on a shift-changed one).
+   * No OT rule is restated here; the day is whatever `calculateRange` says.
+   *
+   * ONE RECORD PER DATE, the existing one. A date's OT is one ordinary
+   * `attendance_approval_request` row (request_type OT, auto_created 1),
+   * walking the employee's normal approval chain. What the sync does to it:
+   *
+   *   no OT record, eligible OT > 0         -> CREATE it PENDING
+   *   PENDING, eligible minutes changed     -> follow them (an increase is
+   *                                           held once a stage approved)
+   *   PENDING auto record, OT now gone      -> WITHDRAW it (CANCELLED,
+   *                                           steps SKIPPED) - never one an
+   *                                           employee raised or an approver
+   *                                           has started deciding
+   *   APPROVED / REJECTED / payroll-closed  -> NEVER touched. An approval is
+   *                                           already clamped by the engine
+   *                                           to the day's eligible OT on
+   *                                           every recalculation, and payroll
+   *                                           flags APPROVED_OT_CHANGED - the
+   *                                           existing correction path.
+   *
+   * IDEMPOTENT. Every date is matched against the OT record it already has,
+   * and the database's open-request key refuses a second PENDING one, so a
+   * retried or concurrent run creates nothing twice.
+   *
+   * GATED. Nothing is raised before the cutover date (migration
+   * 20261124120000, the deploy date less five days), older than the request
+   * backdate window, on a date whose day is still open, or in a payroll-locked
+   * month - and a locked month's pending OT is not changed either.
+   */
+  const AUTO_OT_SKIP = Object.freeze({
+    NO_DAY: "NO_DAY",
+    NO_SHIFT: "NO_SHIFT",
+    PRESENT_ABSENT_ONLY: "PRESENT_ABSENT_ONLY",
+    DAY_OPEN: "DAY_OPEN",
+    INCOMPLETE_DAY: "INCOMPLETE_DAY",
+    BEFORE_CUTOVER: "BEFORE_CUTOVER",
+    OUTSIDE_WINDOW: "OUTSIDE_WINDOW",
+    NOT_EMPLOYED: "NOT_EMPLOYED",
+    PAYROLL_LOCKED: "PAYROLL_LOCKED",
+    NO_OT: "NO_OT",
+  });
+
+  let otNotifier = null;
+  /** Telegram, set by `server.js`: messages the first approver of a new auto OT. */
+  const setOtNotifier = (notifier) => {
+    otNotifier = notifier || null;
+  };
+
+  /** What an approval may pay on this day: the claimable portion, never the shift-authorised one. */
+  const claimableOtOf = (day) =>
+    Math.max(
+      0,
+      Math.trunc(
+        Number(
+          day.excess_ot_minutes === undefined || day.excess_ot_minutes === null
+            ? day.candidate_ot_minutes
+            : day.excess_ot_minutes
+        ) || 0
+      )
+    );
+
+  /**
+   * Whether the engine's day carries OT that belongs in approval now, with the
+   * reason when it does not. The rules `raiseOtRequest` applied to an
+   * employee's request, applied to the system's instead.
+   */
+  const autoOtVerdict = (day, { now, today }) => {
+    if (!day) return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.NO_DAY };
+    if (isPresentAbsentOnly(day.attendance_calculation_mode)) {
+      return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.PRESENT_ABSENT_ONLY };
+    }
+    if (!day.shift_snapshot) return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.NO_SHIFT };
+    const state = dayStateOf(day, { now, today });
+    if (!state.closed) return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.DAY_OPEN };
+    if (day.is_final !== true || day.status !== CALC_STATUS.FINAL || Number(day.punch_count) % 2 === 1) {
+      return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.INCOMPLETE_DAY };
+    }
+    const minutes = claimableOtOf(day);
+    if (minutes <= 0) return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.NO_OT };
+    return { eligible: true, minutes, reason: null };
+  };
+
+  /** "09:00" from "09:00:00"; "11:42" from "2026-10-06 11:42:10". */
+  const clockOf = (value) => {
+    if (!value) return null;
+    const s = String(value);
+    const m = /(\d{2}:\d{2})(:\d{2})?$/.exec(s);
+    return m ? m[1] : s;
+  };
+
+  /** Everything an approver needs to decide, from the day the engine calculated. */
+  const otContextFor = (day, identity, request) => {
+    const punches = Array.isArray(day && day.effective_punches) ? day.effective_punches : [];
+    const snapshot = (day && day.shift_snapshot) || {};
+    return {
+      attendance_approval_request_id: request.attendance_approval_request_id,
+      employee_id: identity.employee_id,
+      employee_name: identity.employee_name || null,
+      outlet_name: identity.outlet_name || null,
+      attendance_date: day.attendance_date,
+      shift_code: snapshot.shift_code || null,
+      shift_in_time: clockOf(snapshot.in_time),
+      shift_out_time: clockOf(snapshot.out_time),
+      punch_in: punches.length > 0 ? clockOf(punches[0].io_time) : null,
+      punch_out: punches.length > 1 ? clockOf(punches[punches.length - 1].io_time) : null,
+      worked_minutes: day.worked_minutes === undefined ? null : day.worked_minutes,
+      eligible_ot_minutes: request.candidate_ot_minutes,
+      chain: request.chain || [],
+    };
+  };
+
+  const notifyOtApprover = async (context) => {
+    if (!otNotifier || typeof otNotifier.notifyFirstApprover !== "function") {
+      return { sent: false, reason: "NOT_WIRED" };
+    }
+    try {
+      return await otNotifier.notifyFirstApprover(context);
+    } catch (err) {
+      return { sent: false, reason: "SEND_FAILED", message: err && err.message ? err.message : String(err) };
+    }
+  };
+
+  /**
+   * Bring one employee's OT approval records in line with the engine for some
+   * dates.
+   *
+   * @param {object}   input
+   * @param {number}   input.employee_id
+   * @param {object[]} [input.days]   days `calculateRange` already returned
+   *                                  (a recalculation passes the days it just
+   *                                  stored, so nothing is calculated twice)
+   * @param {string[]} [input.dates]  otherwise these dates are calculated now
+   * @param {string}   [input.source] what triggered it, for the audit row
+   * @param {boolean}  [input.dry_run] report what WOULD happen, write nothing
+   * @param {boolean}  [input.notify]  message the first approver on Telegram
+   */
+  const syncAutoOt = async ({
+    employee_id,
+    days = null,
+    dates = null,
+    now = null,
+    today = null,
+    source = "RECALCULATION",
+    dry_run = false,
+    notify = true,
+    // DRY RUN ONLY: the cutover to assume, so a preview can be taken before
+    // the migration has seeded the real row. Ignored when writing.
+    assume_setting = null,
+  }) => {
+    const employeeId = Number(employee_id);
+    const result = {
+      employee_id: employeeId,
+      enabled: false,
+      dry_run: !!dry_run,
+      created: [],
+      updated: [],
+      withdrawn: [],
+      unchanged: [],
+      preserved_approved: [],
+      preserved_rejected: [],
+      held: [],
+      skipped: [],
+      errors: [],
+    };
+    if (!Number.isInteger(employeeId) || employeeId <= 0) return result;
+
+    const setting =
+      dry_run && assume_setting
+        ? assume_setting
+        : typeof attendanceRegularizationRepo.getAutoOtSetting === "function"
+        ? await attendanceRegularizationRepo.getAutoOtSetting()
+        : null;
+    if (!setting || !tinyBool(setting.enabled) || !setting.auto_pending_from_date) return result;
+    result.enabled = true;
+    const cutover = toDateOnly(setting.auto_pending_from_date);
+
+    // The business date: the one pinned, else the date of the run's own
+    // instant (a bulk run judges every employee at one moment), else now.
+    const instant = typeof now === "number" ? now : now instanceof Date ? now.getTime() : null;
+    const businessToday = today ? istToday(today) : instant !== null ? istDateOf(instant) : istToday();
+    const oldest = addDays(businessToday, -MAX_BACKDATE_DAYS);
+
+    // THE DAYS. Either handed over, or calculated now from the database.
+    let calculated = Array.isArray(days) ? days.filter((d) => d && d.attendance_date) : null;
+    if (!calculated) {
+      const wanted = [...new Set((dates || []).map(toDateOnly).filter(Boolean))].sort();
+      if (wanted.length === 0) return result;
+      const range = await attendanceCalculationUsecase.calculateRange({
+        employee_id: employeeId,
+        from_date: wanted[0],
+        to_date: wanted[wanted.length - 1],
+      });
+      calculated = (range || []).filter((d) => d && wanted.includes(d.attendance_date));
+    }
+
+    const skip = (date, reason) => result.skipped.push({ attendance_date: date, reason });
+    const inScope = [];
+    for (const day of calculated) {
+      const date = day.attendance_date;
+      if (date > businessToday) continue;
+      if (cutover && date < cutover) {
+        skip(date, AUTO_OT_SKIP.BEFORE_CUTOVER);
+        continue;
+      }
+      if (date < oldest) {
+        skip(date, AUTO_OT_SKIP.OUTSIDE_WINDOW);
+        continue;
+      }
+      inScope.push(day);
+    }
+    if (inScope.length === 0) return result;
+
+    // EMPLOYMENT: no OT before joining or after the last working date.
+    let window = null;
+    if (typeof attendanceCalculationUsecase.employmentWindowFor === "function") {
+      window = await attendanceCalculationUsecase.employmentWindowFor(employeeId);
+    }
+    const employed = (date) =>
+      !window || ((!window.joined_on || date >= window.joined_on) && (!window.ended_on || date <= window.ended_on));
+
+    // THE PAYROLL LOCK, once for every date: nothing is raised or changed in
+    // a locked month.
+    // One lookup for every month the dates touch; a hit names a period.
+    const lockedDates = new Set();
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+      const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods(
+        inScope.map((day) => ({ employee_id: employeeId, attendance_date: day.attendance_date }))
+      );
+      const lockedMonths = new Set(
+        (locked || []).map((p) => `${Number(p.year !== undefined ? p.year : p.period_year)}-${Number(p.month !== undefined ? p.month : p.period_month)}`)
+      );
+      inScope.forEach((day) => {
+        const key = `${Number(day.attendance_date.slice(0, 4))}-${Number(day.attendance_date.slice(5, 7))}`;
+        if (lockedMonths.has(key)) lockedDates.add(day.attendance_date);
+      });
+    }
+
+    const existing = await attendanceRegularizationRepo.findOtRequestsForSync(
+      employeeId,
+      inScope.map((d) => d.attendance_date)
+    );
+    const byDate = new Map();
+    (existing || []).forEach((row) => {
+      const date = toDateOnly(row.attendance_date);
+      if (!byDate.has(date)) byDate.set(date, row);
+    });
+
+    let identity = null;
+
+    for (const day of inScope) {
+      const date = day.attendance_date;
+      try {
+        /* eslint-disable no-await-in-loop */
+        const verdict = employed(date)
+          ? autoOtVerdict(day, { now, today })
+          : { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.NOT_EMPLOYED };
+        const locked = lockedDates.has(date);
+        const request = byDate.get(date) || null;
+        const requestId = request ? Number(request.attendance_approval_request_id) : null;
+
+        // A FINAL DECISION IS NEVER TOUCHED.
+        if (request && request.status === REQUEST_STATUS.APPROVED) {
+          result.preserved_approved.push({
+            attendance_date: date,
+            attendance_approval_request_id: requestId,
+            approved_ot_minutes: Number(request.approved_ot_minutes) || 0,
+            eligible_ot_minutes: verdict.minutes,
+          });
+          continue;
+        }
+        if (request && request.status === REQUEST_STATUS.REJECTED) {
+          result.preserved_rejected.push({
+            attendance_date: date,
+            attendance_approval_request_id: requestId,
+            closure_reason: request.closure_reason || null,
+            eligible_ot_minutes: verdict.minutes,
+          });
+          continue;
+        }
+
+        if (request) {
+          // PENDING. A locked month's pending OT is frozen with the month.
+          if (locked) {
+            skip(date, AUTO_OT_SKIP.PAYROLL_LOCKED);
+            continue;
+          }
+          const current = Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0));
+          const decidedSteps = Number(request.decided_steps) || 0;
+          if (request.request_type !== REQUEST_TYPE.OT) {
+            // A legacy REGULARIZATION_WITH_OT carries its own OT; left as is.
+            result.unchanged.push({ attendance_date: date, attendance_approval_request_id: requestId, legacy: true });
+            continue;
+          }
+          if (!verdict.eligible) {
+            if (tinyBool(request.auto_created) && decidedSteps === 0) {
+              if (!dry_run) {
+                const done = await attendanceRegularizationRepo.withdrawAutoOtRequest({
+                  requestId,
+                  reason: `Withdrawn by the system: ${date} no longer has eligible overtime (${verdict.reason})`,
+                  triggerSource: source,
+                });
+                if (!done || !done.withdrawn) {
+                  result.unchanged.push({ attendance_date: date, attendance_approval_request_id: requestId, moved: true });
+                  continue;
+                }
+              }
+              result.withdrawn.push({
+                attendance_date: date,
+                attendance_approval_request_id: requestId,
+                previous_ot_minutes: current,
+                reason: verdict.reason,
+              });
+            } else {
+              // Raised by an employee, or already part-approved: an approver
+              // closes it (approval is clamped to 0 eligible minutes anyway).
+              result.held.push({
+                attendance_date: date,
+                attendance_approval_request_id: requestId,
+                ot_minutes: current,
+                eligible_ot_minutes: 0,
+                reason: verdict.reason,
+              });
+            }
+            continue;
+          }
+          if (verdict.minutes === current) {
+            result.unchanged.push({ attendance_date: date, attendance_approval_request_id: requestId, ot_minutes: current });
+            continue;
+          }
+          if (verdict.minutes > current && decidedSteps > 0) {
+            result.held.push({
+              attendance_date: date,
+              attendance_approval_request_id: requestId,
+              ot_minutes: current,
+              eligible_ot_minutes: verdict.minutes,
+              reason: "INCREASE_AFTER_PARTIAL_APPROVAL",
+            });
+            continue;
+          }
+          if (!dry_run) {
+            const done = await attendanceRegularizationRepo.setPendingOtMinutes({
+              requestId,
+              fromMinutes: current,
+              toMinutes: verdict.minutes,
+              triggerSource: source,
+            });
+            if (!done || !done.updated) {
+              result.unchanged.push({
+                attendance_date: date,
+                attendance_approval_request_id: requestId,
+                moved: true,
+                reason: done ? done.reason : null,
+              });
+              continue;
+            }
+          }
+          result.updated.push({
+            attendance_date: date,
+            attendance_approval_request_id: requestId,
+            previous_ot_minutes: current,
+            ot_minutes: verdict.minutes,
+          });
+          continue;
+        }
+
+        // NO OT RECORD ON THE DATE.
+        if (!verdict.eligible) {
+          if (verdict.reason !== AUTO_OT_SKIP.NO_OT && verdict.reason !== AUTO_OT_SKIP.NO_DAY) skip(date, verdict.reason);
+          continue;
+        }
+        if (locked) {
+          skip(date, AUTO_OT_SKIP.PAYROLL_LOCKED);
+          continue;
+        }
+        if (dry_run) {
+          result.created.push({ attendance_date: date, attendance_approval_request_id: null, ot_minutes: verdict.minutes });
+          continue;
+        }
+        if (!identity) identity = await resolveIdentity(employeeId);
+        const who = identity;
+        const { chain, source: chain_source } = await resolveChain(who);
+        let created;
+        try {
+          created = await attendanceRegularizationRepo.createRequest({
+            request: {
+              request_type: REQUEST_TYPE.OT,
+              requested_for_employee_id: employeeId,
+              // The employee is the nominal requester of their own OT: the
+              // chain is theirs, and no approver is ever shown their own.
+              requested_by_employee_id: employeeId,
+              attendance_date: date,
+              outlet_id: who.outlet_id,
+              requester_class: who.requester_class,
+              reason: `System: ${verdict.minutes} min eligible overtime calculated by the attendance engine`,
+              candidate_ot_minutes: verdict.minutes,
+              auto_created: true,
+              chain_source,
+              refuse_when_payroll_locked: true,
+            },
+            chain,
+            punch: null,
+          });
+        } catch (err) {
+          // THE RACE, LOST: a concurrent run raised it first. Idempotent.
+          if (err && err.code === "ER_DUP_ENTRY") {
+            result.unchanged.push({ attendance_date: date, duplicate_prevented: true });
+            continue;
+          }
+          if (err && err.code === "PAYROLL_MONTH_LOCKED") {
+            skip(date, AUTO_OT_SKIP.PAYROLL_LOCKED);
+            continue;
+          }
+          throw err;
+        }
+        const newId = Number(created.attendance_approval_request_id);
+        if (typeof attendanceRegularizationRepo.logAutoOt === "function") {
+          await attendanceRegularizationRepo.logAutoOt({
+            attendance_approval_request_id: newId,
+            employee_id: employeeId,
+            attendance_date: date,
+            action: "CREATED",
+            previous_ot_minutes: null,
+            new_ot_minutes: verdict.minutes,
+            trigger_source: source,
+          });
+        }
+        const entry = {
+          attendance_date: date,
+          attendance_approval_request_id: newId,
+          ot_minutes: verdict.minutes,
+        };
+        if (notify) {
+          entry.telegram = await notifyOtApprover(
+            otContextFor(day, who, { attendance_approval_request_id: newId, candidate_ot_minutes: verdict.minutes, chain })
+          );
+        }
+        result.created.push(entry);
+        /* eslint-enable no-await-in-loop */
+      } catch (err) {
+        result.errors.push({ attendance_date: date, message: err && err.message ? err.message : String(err) });
+      }
+    }
+    return result;
+  };
+
+  /**
+   * What an approver is shown for one OT request, from the live day: the
+   * Telegram card, and the fresh card sent when an old one's figure moved.
+   */
+  const otApprovalContext = async (requestId) => {
+    const request = await attendanceRegularizationRepo.getRequest(requestId);
+    if (!request || request.request_type !== REQUEST_TYPE.OT) return null;
+    const employeeId = Number(request.requested_for_employee_id);
+    const [day] = await attendanceCalculationUsecase.calculateRange({
+      employee_id: employeeId,
+      from_date: request.attendance_date,
+      to_date: request.attendance_date,
+    });
+    const who = await resolveIdentity(employeeId);
+    return otContextFor(day || { attendance_date: request.attendance_date }, who, {
+      attendance_approval_request_id: Number(request.attendance_approval_request_id),
+      candidate_ot_minutes: Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0)),
+      chain: request.steps || [],
+    });
+  };
+
+  /**
+   * The sync after a write that has ALREADY committed (a recalculation, a
+   * decision). Raising an approval request makes nothing payable, so a
+   * failure here must not be reported as a failure of what triggered it: it
+   * is logged and returned on `error`, and the next recalculation of the
+   * date (the 06:55 daily run covers the last three days) raises it.
+   */
+  const syncAutoOtSafely = async (input) => {
+    try {
+      return await syncAutoOt(input);
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.ATTENDANCE_REGULARIZATION",
+        code: "USECASE.ATTENDANCE_REGULARIZATION.AUTO-OT-SYNC",
+        description: err && err.toString ? err.toString() : String(err),
+        category: "",
+        ref: { employee_id: input && input.employee_id, source: input && input.source },
+      });
+      return { employee_id: input && input.employee_id, enabled: null, error: err && err.message ? err.message : String(err) };
+    }
   };
 
   /** The roles an actor decides with: their mapped role, or every role for an administrator. */
@@ -2355,8 +2942,10 @@ module.exports = (
         .reverse()
         .find((st) => st.decision === STEP_DECISION.APPROVED || st.decision === STEP_DECISION.REJECTED);
       const claimed = Math.max(0, Math.trunc(Number(row.candidate_ot_minutes) || 0));
+      // The CLAIMABLE minutes - on a date with an approved one-day shift
+      // that is the excess only, which is also what an approval is clamped to.
       const eligible = day
-        ? Math.max(0, Math.trunc(Number(day.candidate_ot_minutes) || 0))
+        ? claimableOtOf(day)
         : row.stored_candidate_ot_minutes === null || row.stored_candidate_ot_minutes === undefined
         ? claimed
         : Math.max(0, Math.trunc(Number(row.stored_candidate_ot_minutes) || 0));
@@ -2446,6 +3035,10 @@ module.exports = (
         // OT: what was claimed when raised, what the engine finds eligible,
         // and what was finally approved. Never editable by an approver - the
         // decision endpoint takes no minutes at all.
+        // WHO RAISED THE OT: the attendance engine (SYSTEM) or, before
+        // automatic pending OT, the employee (EMPLOYEE). Same record either way.
+        auto_created: tinyBool(row.auto_created),
+        ot_source: request_type === REQUEST_TYPE.OT ? (tinyBool(row.auto_created) ? "SYSTEM" : "EMPLOYEE") : null,
         claimed_ot_minutes: request_type === REQUEST_TYPE.OT ? claimed : 0,
         eligible_ot_minutes: request_type === REQUEST_TYPE.OT ? Math.min(claimed, eligible) : 0,
         approved_ot_minutes:
@@ -2972,6 +3565,11 @@ module.exports = (
     shiftChangeEligibilityFor,
     activeBlockFor,
     setShiftChangeNotifier,
+    setOtNotifier,
+    syncAutoOt,
+    syncAutoOtSafely,
+    otApprovalContext,
+    AUTO_OT_SKIP,
     MAX_FORWARD_DAYS,
     closeOtForPayrollLock,
     raisePermissionRequest,

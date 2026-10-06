@@ -651,13 +651,35 @@ module.exports = (repo, attendanceCalculationUsecase, options = {}) => {
    * employee/month through the attendance month persist. See
    * `attendanceCalculationUsecase.refreshAffectedMonths`.
    */
-  const refreshMonthsFor = (rows, source) =>
-    typeof attendanceCalculationUsecase.refreshAffectedMonths === "function" && rows.length > 0
-      ? attendanceCalculationUsecase.refreshAffectedMonths(
-          rows.map((r) => ({ employee_id: r.employee_id, attendance_date: r.attendance_date })),
-          { source }
-        )
-      : null;
+  const refreshMonthsFor = async (rows, source) => {
+    const refreshed =
+      typeof attendanceCalculationUsecase.refreshAffectedMonths === "function" && rows.length > 0
+        ? await attendanceCalculationUsecase.refreshAffectedMonths(
+            rows.map((r) => ({ employee_id: r.employee_id, attendance_date: r.attendance_date })),
+            { source }
+          )
+        : null;
+    // A corrected punch time can move a day's eligible OT: its pending OT
+    // follows (or is raised now). After the commit; reports, never throws.
+    if (typeof attendanceCalculationUsecase.syncAutoOtAfterWrite === "function" && rows.length > 0) {
+      const byEmployee = new Map();
+      rows.forEach((r) => {
+        const id = Number(r.employee_id);
+        if (!byEmployee.has(id)) byEmployee.set(id, []);
+        byEmployee.get(id).push(r.attendance_date);
+      });
+      for (const [employeeId, dates] of byEmployee) {
+        /* eslint-disable no-await-in-loop */
+        await attendanceCalculationUsecase.syncAutoOtAfterWrite({
+          employee_id: employeeId,
+          dates,
+          source: "DEVICE_TIME_CORRECTION",
+        });
+        /* eslint-enable no-await-in-loop */
+      }
+    }
+    return refreshed;
+  };
 
   const withLabel = (row) => ({ ...row, reason_label: REASON_CODES[row.reason_code] || row.reason_code });
 

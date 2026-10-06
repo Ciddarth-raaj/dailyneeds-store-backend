@@ -55,9 +55,10 @@ const client = BOT_TOKEN ? new TelegramClient({ accessToken: BOT_TOKEN }) : null
  * the day it is switched on.
  */
 /*
- * `callback_query` IS ON, and it is on for exactly one feature: the first
- * approver's Approve / Reject buttons on a one-day shift change request
- * (`usecase/attendance_shift_change_telegram.js`). Unlike `chat_member` below
+ * `callback_query` IS ON, for the approval buttons this backend puts on its
+ * own messages: the first approver's Approve / Reject on a one-day shift
+ * change request (`usecase/attendance_shift_change_telegram.js`) and on an
+ * automatically raised OT approval (`usecase/attendance_ot_telegram.js`). Unlike `chat_member` below
  * it produces no ambient traffic at all - a callback query exists only when
  * somebody taps a button this backend itself put on a message - so turning it
  * on costs nothing until a button is tapped.
