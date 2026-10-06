@@ -812,6 +812,13 @@ class Server {
     // Payroll's Process Attendance runs THIS engine's month persist and has
     // no attendance logic of its own - see `usecase/payrun_calculation.js`.
     this.payrunCalculationUsecase.setAttendanceProcessor(this.attendanceCalculationUsecase);
+    // The Payroll Dashboard: a read over the two payrun usecases above. It
+    // calculates nothing - see `usecase/payroll_dashboard.js`.
+    this.payrollDashboardUsecase = require("./usecase/payroll_dashboard")(
+      require("./repository/payroll_dashboard")(this.mysql.connection),
+      this.payrunUsecase,
+      this.payrunCalculationUsecase
+    );
     // The Attendance Dashboard. Orchestration only, and it calculates nothing
     // of its own: it calls the SAME pure `calculateAttendanceDay` over the
     // same effective punch stream and the same dated shift resolution, so the
@@ -1620,6 +1627,12 @@ class Server {
       this.permissions,
       this.employeeBranchScope
     );
+    const payrollDashboardRouter = require("./routes/payroll_dashboard")(
+      this.payrollDashboardUsecase,
+      this.permissions,
+      this.sensitive,
+      this.employeeBranchScope
+    );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);
     const workShiftRouter = require("./routes/work_shift")(
       this.workShiftUsecase,
@@ -2059,6 +2072,8 @@ class Server {
     app.use("/", payrunAdjustmentRouter.getRouter());
     // Likewise /payrun/calculation, which is disjoint from both.
     app.use("/", payrunCalculationRouter.getRouter());
+    // /payroll/dashboard - claimed by no other router.
+    app.use("/", payrollDashboardRouter.getRouter());
 
     app.use("/shift", shiftRouter.getRouter());
     // The new payroll/attendance shift master. /shift above is unchanged and
