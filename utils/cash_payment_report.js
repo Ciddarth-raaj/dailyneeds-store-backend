@@ -8,9 +8,10 @@ const denomination = require("./cash_denomination");
  * Cash Payment report - the monthly workbook Accounts pays cash salaries from.
  *
  *   Sheet 1  Cash Denomination            employee-wise net pay with the note /
- *                                         coin count for each, column totals,
- *                                         and the month's denomination summary
- *   Sheet 2  Cash Salary Acknowledgement  employee-wise net pay with a blank
+ *                                         coin count for each, and column totals
+ *   Sheet 2  Denomination Total           the month's notes / coins required,
+ *                                         Grand Cash Required = Total Net Pay
+ *   Sheet 3  Cash Salary Acknowledgement  employee-wise net pay with a blank
  *                                         signature column
  *
  * THE LAYOUT IS THE AUGUST 2026 WORKBOOK ACCOUNTS ALREADY USED
@@ -19,7 +20,7 @@ const denomination = require("./cash_denomination");
  * per location, the denominations as live ROUNDDOWN formulas with a per-row
  * Total check, and a SUBTOTAL total row - so filtering one location gives that
  * location's cash. Added to it: S.No and Location on the denomination sheet,
- * Indian rupee formats, the denomination summary and the print setup.
+ * Indian rupee formats, the Denomination Total sheet and the print setup.
  *
  * A PRESENTATION OF THE FINALIZED PAYRUN, NOTHING MORE. Net pay is the stored
  * `payrun_employee_calculation.net_pay` of an APPROVED_LOCKED row, as the
@@ -197,7 +198,11 @@ const FONT = "Calibri";
 const THIN = { style: "thin", color: { argb: "FF000000" } };
 const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
 
-const SHEET = Object.freeze({ DENOMINATION: "Cash Denomination", ACKNOWLEDGEMENT: "Cash Salary Acknowledgement" });
+const SHEET = Object.freeze({
+  DENOMINATION: "Cash Denomination",
+  TOTAL: "Denomination Total",
+  ACKNOWLEDGEMENT: "Cash Salary Acknowledgement",
+});
 
 /** Text a spreadsheet must never evaluate: a leading = + - @ is neutralised. */
 const safeText = (v) => {
@@ -347,58 +352,81 @@ function denominationSheet(wb, data) {
     ws.getCell(amountRow, c).alignment = { horizontal: "center", vertical: "middle", shrinkToFit: true };
   }
 
-  // The month's summary: total notes / coins Accounts must draw, and the check
-  // that they add up to the net pay being paid.
-  const S = amountRow + 2;
-  ws.mergeCells(S, 3, S, 5);
-  ws.getCell(S, 3).value = "Total Notes / Coins Required";
-  ws.getCell(S, 3).font = { name: FONT, bold: true, size: 11 };
-  const SH = S + 1;
-  ["Denomination", "Qty", "Amount"].forEach((h, i) => {
-    ws.getCell(SH, 3 + i).value = h;
-  });
-  style(ws, SH, 3, 5, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "center" } });
+  pageSetup(ws, { orientation: "landscape", lastCol: totalCol, lastRow: amountRow, headerRow: HEADER_ROW });
+  return { ws, firstData: FIRST_DATA, lastData, netPayCol: 5, firstDenomCol };
+}
+
+/**
+ * The month's totals on a sheet of their own: the notes / coins Accounts
+ * must draw, and the check that they add up to the net pay being paid. Read
+ * from the denomination sheet with SUM, not SUBTOTAL, so a location filter
+ * there never changes the month's total here.
+ */
+function totalSheet(wb, data, grid) {
+  const columns = [
+    { header: "Denomination", width: 16 },
+    { header: "Qty", width: 16 },
+    { header: "Amount", width: 18 },
+  ];
+  const lastCol = columns.length;
+  const ws = wb.addWorksheet(SHEET.TOTAL, { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
+  banner(ws, lastCol, { company: data.company, title: "Total Notes / Coins Required", period: data.period, sizes: [14, 12] });
+  header(ws, HEADER_ROW, columns, { size: 11, height: 20 });
+
+  const source = `'${SHEET.DENOMINATION}'!`;
+  const range = (col) => `${source}${colLetter(col)}${grid.firstData}:${colLetter(col)}${grid.lastData}`;
+  const figure = (r, c, value, numFmt, bold = false) => {
+    const cell = ws.getCell(r, c);
+    cell.value = value;
+    cell.numFmt = numFmt;
+    cell.font = { name: FONT, size: 11, bold };
+    cell.border = BORDER;
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+  };
+
   data.denomination_totals.forEach((t, i) => {
-    const r = SH + 1 + i;
-    ws.getCell(r, 3).value = `₹${t.denomination}`;
-    ws.getCell(r, 4).value = { formula: `${colLetter(firstDenomCol + i)}${totalRow}`, result: t.count };
-    ws.getCell(r, 5).value = { formula: `D${r}*${t.denomination}`, result: t.amount };
-    style(ws, r, 3, 5, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { horizontal: "center" } });
-    ws.getCell(r, 4).numFmt = COUNT;
-    ws.getCell(r, 5).numFmt = INR;
+    const r = FIRST_DATA + i;
+    const label = ws.getCell(r, 1);
+    label.value = `₹${t.denomination}`;
+    label.font = { name: FONT, size: 11, bold: true };
+    label.border = BORDER;
+    label.alignment = { horizontal: "center", vertical: "middle" };
+    figure(r, 2, { formula: `SUM(${range(grid.firstDenomCol + i)})`, result: t.count }, COUNT);
+    figure(r, 3, { formula: `B${r}*${t.denomination}`, result: t.amount }, INR);
+    ws.getRow(r).height = 18;
   });
-  const firstSummary = SH + 1;
-  const lastSummary = SH + data.denomination_totals.length;
-  const grandRow = lastSummary + 1;
+  const lastDenom = FIRST_DATA + data.denomination_totals.length - 1;
+  const grandRow = lastDenom + 1;
   const netRow = grandRow + 1;
   const diffRow = grandRow + 2;
   [
-    [grandRow, "Grand Cash Required", { formula: `SUM(E${firstSummary}:E${lastSummary})`, result: data.denomination_amount }],
-    [netRow, "Total Net Pay", { formula: `E${totalRow}`, result: data.total_net_pay }],
-    [diffRow, "Difference (must be 0)", { formula: `E${grandRow}-E${netRow}`, result: data.denomination_amount - data.total_net_pay }],
-  ].forEach(([r, label, value]) => {
-    ws.mergeCells(r, 3, r, 4);
-    ws.getCell(r, 3).value = label;
-    ws.getCell(r, 5).value = value;
-    style(ws, r, 3, 5, { font: { name: FONT, bold: true, size: 10 }, border: BORDER });
-    ws.getCell(r, 3).alignment = { horizontal: "right" };
-    ws.getCell(r, 5).numFmt = INR;
-    ws.getCell(r, 5).alignment = { horizontal: "center" };
+    [grandRow, "Grand Cash Required", { formula: `SUM(C${FIRST_DATA}:C${lastDenom})`, result: data.denomination_amount }, INR],
+    [netRow, "Total Net Pay", { formula: `SUM(${range(grid.netPayCol)})`, result: data.total_net_pay }, INR],
+    [diffRow, "Difference (must be 0)", { formula: `C${grandRow}-C${netRow}`, result: data.denomination_amount - data.total_net_pay }, INR],
+  ].forEach(([r, label, value, numFmt]) => {
+    ws.mergeCells(r, 1, r, 2);
+    style(ws, r, 1, 2, { border: BORDER });
+    const cell = ws.getCell(r, 1);
+    cell.value = label;
+    cell.font = { name: FONT, size: 11, bold: true };
+    cell.alignment = { horizontal: "right", vertical: "middle" };
+    figure(r, 3, value, numFmt, true);
+    ws.getRow(r).height = 20;
   });
   let lastRow = diffRow;
 
   if (data.excluded.length) {
     lastRow += 2;
-    ws.mergeCells(lastRow, 1, lastRow, totalCol);
+    ws.mergeCells(lastRow, 1, lastRow, lastCol);
     ws.getCell(lastRow, 1).value = `Not included - zero or negative Net Pay (nothing payable in cash): ${data.excluded
       .map((e) => `${e.employee_id} ${safeText(e.employee_name)} (${e.net_pay})`)
       .join(", ")}`;
     ws.getCell(lastRow, 1).font = { name: FONT, italic: true, size: 9 };
     ws.getCell(lastRow, 1).alignment = { wrapText: true, vertical: "top" };
-    ws.getRow(lastRow).height = 30;
+    ws.getRow(lastRow).height = 15 * Math.min(6, Math.ceil(data.excluded.length / 2) + 1);
   }
 
-  pageSetup(ws, { orientation: "landscape", lastCol: totalCol, lastRow, headerRow: HEADER_ROW });
+  pageSetup(ws, { orientation: "portrait", lastCol, lastRow, headerRow: HEADER_ROW });
   return ws;
 }
 
@@ -453,7 +481,8 @@ async function buildWorkbook(data) {
   wb.created = stamp;
   wb.modified = stamp;
   const content = { ...data, company: data.company || "Cash Salary Payment" };
-  denominationSheet(wb, content);
+  const grid = denominationSheet(wb, content);
+  totalSheet(wb, content, grid);
   acknowledgementSheet(wb, content);
   return Buffer.from(await wb.xlsx.writeBuffer());
 }

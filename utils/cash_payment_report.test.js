@@ -171,9 +171,9 @@ describe("workbook", () => {
   const rows = [row(12, 18760), row(7, 12345), row(30, 999, { store_name: "Velachery" }), row(9, 0)];
   const data = { ...prepare(rows), company: "DAILY NEEDS DEPARTMENT STORE" };
 
-  it("has the two sheets, in order", async () => {
+  it("has the three sheets, in order", async () => {
     const wb = await load(data);
-    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Cash Salary Acknowledgement"]);
+    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Denomination Total", "Cash Salary Acknowledgement"]);
   });
 
   it("Cash Denomination: August's banner, header, live denomination formulas and row check", async () => {
@@ -206,17 +206,33 @@ describe("workbook", () => {
     assert.equal(ws.getCell("A8").value, "Denomination Amount");
     assert.equal(ws.getCell("F8").value.result, (24 + 37 + 1) * 500);
 
-    const s = findRow(ws, 3, "Total Notes / Coins Required");
-    assert.ok(s, "summary heading");
-    assert.deepEqual(rowValues(ws, s + 1, 3, 5), ["Denomination", "Qty", "Amount"]);
-    assert.deepEqual(rowValues(ws, s + 2, 3, 5), ["₹500", 62, 31000]);
-    const grand = findRow(ws, 3, "Grand Cash Required");
-    assert.equal(textOf(ws.getCell(grand, 5)), 32104);
-    assert.equal(ws.getCell(grand + 1, 3).value, "Total Net Pay");
-    assert.equal(textOf(ws.getCell(grand + 1, 5)), 32104);
-    assert.equal(ws.getCell(grand + 2, 3).value, "Difference (must be 0)");
-    assert.equal(ws.getCell(grand + 2, 5).value.formula, `E${grand}-E${grand + 1}`);
-    assert.match(String(ws.getCell(grand + 4, 1).value), /Not included.*9 Employee 9/);
+    assert.equal(findRow(ws, 3, "Total Notes / Coins Required"), null, "the summary is on its own sheet");
+    assert.match(ws.pageSetup.printArea, /^A1:O8$/, "the sheet ends at the denomination amounts");
+  });
+
+  it("Denomination Total: its own sheet - notes / coins required and Grand Cash Required = Total Net Pay", async () => {
+    const ws = (await load(data)).getWorksheet("Denomination Total");
+    assert.equal(ws.getCell("A1").value, "DAILY NEEDS DEPARTMENT STORE");
+    assert.equal(ws.getCell("A2").value, "Total Notes / Coins Required - Aug 2026");
+    assert.deepEqual(rowValues(ws, 3, 1, 3), ["Denomination", "Qty", "Amount"]);
+    assert.deepEqual(rowValues(ws, 4, 1, 3), ["₹500", 62, 31000]);
+    assert.deepEqual(rowValues(ws, 12, 1, 3), ["₹1", 0, 0]);
+    // The month's totals whatever is filtered on the denomination sheet: SUM, not SUBTOTAL.
+    assert.equal(ws.getCell("B4").value.formula, "SUM('Cash Denomination'!F4:F6)");
+    assert.equal(ws.getCell("C4").value.formula, "B4*500");
+    assert.deepEqual(rowValues(ws, 13, 1, 3), ["Grand Cash Required", "Grand Cash Required", 32104]);
+    assert.equal(ws.getCell("C13").value.formula, "SUM(C4:C12)");
+    assert.equal(ws.getCell("A14").value, "Total Net Pay");
+    assert.equal(ws.getCell("C14").value.formula, "SUM('Cash Denomination'!E4:E6)");
+    assert.equal(textOf(ws.getCell("C14")), 32104);
+    assert.equal(ws.getCell("A15").value, "Difference (must be 0)");
+    assert.equal(ws.getCell("C15").value.formula, "C13-C14");
+    assert.equal(ws.getCell("C13").numFmt, unescaped(cash.INR));
+    assert.equal(ws.getCell("B4").numFmt, cash.COUNT);
+    assert.match(String(ws.getCell("A17").value), /Not included.*9 Employee 9/);
+    assert.equal(ws.pageSetup.orientation, "portrait");
+    assert.equal(ws.pageSetup.fitToWidth, 1);
+    assert.equal(ws.pageSetup.printArea, "A1:C17");
   });
 
   it("Cash Denomination: formatting, autofilter and landscape page setup", async () => {
