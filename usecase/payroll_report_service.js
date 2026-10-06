@@ -6,6 +6,7 @@ const { REPORT_TYPES, REPORT_TYPE_ORDER, getReportType, DATASET_KEYS } = require
 const { monthLabel, MONTH_SHORT } = require("../constants/payslip");
 const Q = require("../utils/payroll_report_query");
 const statutoryFiles = require("../utils/payroll_statutory_files");
+const cashPayment = require("../utils/cash_payment_report");
 const rules = require("./report_template_rules");
 const { EMPLOYMENT_TYPES } = require("../utils/employment_classification");
 
@@ -47,6 +48,9 @@ const LIMITS = {
 
 const { PayrollReportError } = Q;
 const notFound = () => new PayrollReportError(404, "TEMPLATE_NOT_FOUND", "That template was not found");
+
+/** The export audit's dataset key for the Cash Payment Excel - not a report type, it has no columns to choose. */
+const CASH_PAYMENT_DATASET = "PAYROLL_CASH";
 
 const STATUTORY_POST = new Set(["epf_validation", "esi_validation", "esi_reason", "esi_lwd"]);
 
@@ -814,6 +818,39 @@ class PayrollReportService {
       buffer,
       filename: `ESIC_Contribution_${MONTH_SHORT[period.month - 1]}-${period.year}.xls`,
       summary: v.summary,
+    };
+  }
+
+  /* --------------------------------------------------------- cash payment */
+
+  /**
+   * CASH PAYMENT EXCEL - the month's Cash employees with their net pay, the
+   * note / coin breakup and the acknowledgement sheet
+   * (`utils/cash_payment_report.js`). The same export permission as the
+   * Payroll Register: it carries the same names and net pay, nothing more.
+   * Refused, never partial, unless every Cash employee in scope is finalized
+   * and every check reconciles.
+   */
+  async cashPaymentFile(actor, { year, month }, store_ids) {
+    this._assertExport(actor);
+    const period = Q.periodOf(year, month);
+    const scope = { year: period.year, month: period.month, store_ids };
+    const [rows, payrun, cash] = await Promise.all([
+      this.repo.listCashPayRows(scope),
+      this.repo.payrunTotals(scope),
+      this.repo.cashPayrunTotals(scope),
+    ]);
+    const data = cashPayment.prepare({ period, rows, reference: { finalized: payrun.finalized, cash } });
+    const buffer = await cashPayment.buildWorkbook(data);
+    await this._audit(
+      actor,
+      { dataset_key: CASH_PAYMENT_DATASET, field_keys: ["CASH_PAYMENT"], period, filters: {}, row_count: data.employees.length },
+      "xlsx"
+    );
+    return {
+      buffer,
+      filename: cashPayment.filename(period),
+      summary: { employees: data.employees.length, total_net_pay: data.total_net_pay, excluded: data.excluded.length },
     };
   }
 }

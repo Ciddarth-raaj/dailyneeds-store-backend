@@ -1,6 +1,7 @@
 const logger = require("../utils/logger");
 const { locationPredicate } = require("./payrun");
 const { parseJson } = require("./report_template");
+const { PAY_TYPE } = require("../constants/payroll_report_catalogue");
 
 /**
  * Payroll Reports - the reads, and the two small preference tables.
@@ -111,6 +112,53 @@ class PayrollReportRepository {
       deductions: money(r.deductions),
       net_pay: money(r.net_pay),
     };
+  }
+
+  /* ------------------------------------------------------- cash payment */
+
+  /**
+   * Every payrun employee of the month, in scope, whose pay type is CASH -
+   * by the SAME rule as the Bank report's population (`catalogue.PAY_TYPE`:
+   * the approved calculation's pay type, else the payrun snapshot's) - with
+   * their payrun status and stored net pay. Not-finalized rows are returned
+   * too, so the caller can refuse the month rather than drop them.
+   */
+  listCashPayRows({ year, month, store_ids }) {
+    const location = locationPredicate("pe.store_id", store_ids);
+    return this.query(
+      `SELECT pe.employee_id, pe.employee_name, pe.store_name,
+              c.status, c.net_pay, ${PAY_TYPE} AS pay_type
+         FROM payrun_employee pe
+         LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
+        WHERE pe.period_year = ? AND pe.period_month = ?
+          AND ${PAY_TYPE} = 'CASH'
+          ${location.clause ? `AND ${location.clause}` : ""}
+        ORDER BY pe.store_name ASC, pe.employee_id ASC`,
+      [year, month, ...location.params],
+      "CASH-PAY-ROWS"
+    );
+  }
+
+  /**
+   * THE PAYRUN'S OWN COUNT AND SUM of the month's payable Cash employees -
+   * approved & locked, pay type CASH, net pay above zero - read from the
+   * calculation table with its own SQL, as the reconciliation reference for
+   * the Cash Payment report.
+   */
+  async cashPayrunTotals({ year, month, store_ids }) {
+    const location = locationPredicate("pe.store_id", store_ids);
+    const rows = await this.query(
+      `SELECT COUNT(*) AS employees, COALESCE(SUM(c.net_pay), 0) AS net_pay
+         FROM payrun_employee_calculation c
+         JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id
+        WHERE c.period_year = ? AND c.period_month = ?
+          AND c.status = 'APPROVED_LOCKED' AND c.pay_type = 'CASH' AND c.net_pay > 0
+          ${location.clause ? `AND ${location.clause}` : ""}`,
+      [year, month, ...location.params],
+      "CASH-PAYRUN-TOTALS"
+    );
+    const r = rows[0] || {};
+    return { employees: Number(r.employees) || 0, net_pay: Math.round(Number(r.net_pay || 0) * 100) / 100 };
   }
 
   /* ------------------------------------------------------- statutory rows */

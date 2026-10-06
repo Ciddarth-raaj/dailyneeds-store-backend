@@ -26,12 +26,14 @@ const { REPORT_TYPE_ORDER } = require("../constants/payroll_report_types");
  *   POST   /epf/ecr                   Download ECR File
  *   POST   /esi/validation            Ready / Blocked for the ESIC file
  *   POST   /esi/contribution-file     Download Contribution File
+ *   POST   /cash-payment/xlsx         Cash Payment Excel (denomination + acknowledgement)
  *
  * PERMISSIONS - all `requireAll`, which is AND:
  *
  *   read      view_reports + view_employees + view_payroll + view_salary - the
  *             Payrun month screen's own conjunction plus the reporting key.
- *   export    the above + export_reports.
+ *   export    the above + export_reports. Also the Cash Payment Excel: the
+ *             same names and net pay the Payroll Register exports.
  *   statutory the above + view_employee_sensitive - the ECR / ESIC files carry
  *             full UANs and IP numbers, exactly as `GET /payrun/calculation/ecr`.
  *
@@ -374,6 +376,22 @@ class PayrollReportRoutes {
         const file = await this.service.esicFile(await actor(req), body, store_ids);
         // Excel 97-2003 (.xls), the format the ESIC portal accepts.
         this._send(res, file, "application/vnd.ms-excel", { "X-Statutory-Members": file.summary.ready });
+      })
+    );
+
+    /* ------------------------------------------------------ cash payment */
+
+    r.post(
+      "/cash-payment/xlsx",
+      canExport,
+      handle(async (req, res) => {
+        // The month and nothing else: the population is every Cash employee
+        // in the caller's scope, and the file is refused rather than partial.
+        const body = this.validate(req.body, monthSchema);
+        const store_ids = await this._scope(req, res);
+        if (store_ids === undefined) return;
+        const file = await this.service.cashPaymentFile(await actor(req), body, store_ids);
+        this._send(res, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
       })
     );
   }

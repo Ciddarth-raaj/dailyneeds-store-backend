@@ -280,4 +280,38 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     // Reconciliation stays on the full scope, not the filtered view.
     assert.equal(contract.reconciliation.reconciled, true);
   });
+
+  it("Cash Payment Excel: CASH by the payrun's pay type rule, all-or-nothing on finalization, reconciled", async () => {
+    const NOV = { year: 2026, month: 11 };
+    for (const [id, store, payType] of [[1, 1, "CASH"], [2, 2, "BANK"], [3, 1, "CASH"]]) {
+      await q(
+        `INSERT INTO payrun_employee (period_year, period_month, employee_id, employee_name, store_id, store_name, pay_type, pay_type_source)
+         VALUES (2026, 11, ?, ?, ?, ?, ?, 'EMPLOYEE_MASTER')`,
+        [id, `Emp ${id}`, store, store === 1 ? "Outlet A" : "Outlet B", payType]
+      );
+    }
+    const calc = (id, status, net, payType) =>
+      q(`INSERT INTO payrun_employee_calculation (payrun_employee_id, period_year, period_month, employee_id, source_hash, inputs_hash,
+           total_earnings, total_employee_deductions, net_pay, pay_type, is_complete, calculation_version, calculation_hash, status)
+         SELECT payrun_employee_id, 2026, 11, ?, 'h', 'h', ?, 0, ?, ?, 1, 1, 'h', ?
+           FROM payrun_employee WHERE period_year = 2026 AND period_month = 11 AND employee_id = ?`,
+        [id, net, net, payType, status, id]);
+    await calc(1, "APPROVED_LOCKED", 18760, "CASH");
+    await calc(2, "APPROVED_LOCKED", 21000, "BANK");
+    await calc(3, "CALCULATED", 500, "CASH");
+
+    const rows = await repo.listCashPayRows({ ...NOV, store_ids: null });
+    assert.deepEqual(rows.map((r) => [r.employee_id, r.status, r.pay_type]), [[1, "APPROVED_LOCKED", "CASH"], [3, "CALCULATED", "CASH"]]);
+    await assert.rejects(service.cashPaymentFile(ADMIN, NOV, null), (e) => e.code === "PAYROLL_NOT_FINALIZED");
+
+    // Employee 3 approved with nothing to pay: left out, the file is produced.
+    await q("UPDATE payrun_employee_calculation SET status = 'APPROVED_LOCKED', net_pay = 0, total_earnings = 0 WHERE period_month = 11 AND employee_id = 3");
+    assert.deepEqual(await repo.cashPayrunTotals({ ...NOV, store_ids: null }), { employees: 1, net_pay: 18760 });
+    const file = await service.cashPaymentFile(ADMIN, NOV, null);
+    assert.equal(file.filename, "Cash Payment - Nov 2026.xlsx");
+    assert.deepEqual(file.summary, { employees: 1, total_net_pay: 18760, excluded: 1 });
+
+    // Out of scope: nobody to pay.
+    await assert.rejects(service.cashPaymentFile(ADMIN, NOV, [2]), (e) => e.code === "NO_CASH_EMPLOYEES");
+  });
 });
