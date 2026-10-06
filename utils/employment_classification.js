@@ -14,6 +14,10 @@
  * it will be a deliberate decision made somewhere else; it is not implied by
  * these columns existing.
  *
+ * ONE SUCH DECISION: the Cash Payment Excel (`utils/cash_payment_report.js`)
+ * leaves Contract employees out, because the business pays them to their
+ * contractor rather than in cash. Their payroll itself is unchanged.
+ *
  * FIXED, CONTROLLED LISTS. There is no employment-type master and no grade
  * master - no table, no screen, no CRUD. The sets below are the definition,
  * the ENUM columns in `20261017120000-employee-employment-type-and-grade`

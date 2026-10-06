@@ -27,6 +27,11 @@ const denomination = require("./cash_denomination");
  * Payroll Register shows it. Nothing here prices payroll, re-reads attendance
  * or rounds a figure: a net pay that is not a whole rupee refuses the file.
  *
+ * CONTRACT EMPLOYEES ARE NOT PAID HERE. An employee whose Employee Master
+ * employment type is Contract is paid to their contractor: they are left out
+ * of every sheet and total, named on the Denomination Total sheet, and their
+ * payroll state does not hold the month up.
+ *
  * ALL OR NOTHING, like the statutory files. A month in which any Cash employee
  * is not yet approved & locked is refused, because a cash sheet that silently
  * leaves somebody out is a person who does not get paid. Every check in
@@ -76,6 +81,10 @@ const numberWithinOutlet = (e, i, list) => {
   return { sno, ...e };
 };
 
+/** Employment type Contract on the Employee Master: paid by the contractor. */
+const CONTRACT = "Contract";
+const isContract = (r) => typeof r.employment_type === "string" && r.employment_type.trim() === CONTRACT;
+
 const integrity = (message, detail = {}) => new PayrollReportError(500, "CASH_REPORT_INTEGRITY", message, detail);
 
 /**
@@ -83,7 +92,9 @@ const integrity = (message, detail = {}) => new PayrollReportError(500, "CASH_RE
  *
  * @param period     { year, month }
  * @param rows       every payrun employee of the month (in scope) whose pay type
- *                   is CASH - `repository/payroll_report.js#listCashPayRows`
+ *                   is CASH, with their current `employment_type` -
+ *                   `repository/payroll_report.js#listCashPayRows`. Contract
+ *                   employees among them are named, not paid.
  * @param reference  the payrun's own independent read of the same population -
  *                   `{ finalized, cash: { employees, net_pay } }`
  */
@@ -109,8 +120,14 @@ function prepare({ period, rows, reference }) {
   }
   if (duplicates.length) throw integrity("An employee appears more than once in the Cash population", { employees: duplicates });
 
+  // Contract employees are paid to their contractor, not in cash: they are
+  // set aside first - named on the file, never paid on it, and their payroll
+  // state does not hold the month up.
+  const contract = rows.filter(isContract).map((r) => ({ ...employeeRef(r), net_pay: money(r.net_pay) })).sort(byOutletThenCode);
+  const cash = rows.filter((r) => !isContract(r));
+
   // Every Cash employee's month must be approved & locked.
-  const pending = rows.filter((r) => r.status !== FINALIZED);
+  const pending = cash.filter((r) => r.status !== FINALIZED);
   if (pending.length) {
     throw new PayrollReportError(409, "PAYROLL_NOT_FINALIZED", MESSAGES.NOT_FINALIZED, {
       pending: pending.map((r) => ({ ...employeeRef(r), status: r.status || "NOT_CALCULATED" })),
@@ -118,13 +135,13 @@ function prepare({ period, rows, reference }) {
   }
 
   // A finalized row must carry a usable figure, already in whole rupees.
-  const invalid = rows.filter((r) => !Number.isFinite(money(r.net_pay)));
+  const invalid = cash.filter((r) => !Number.isFinite(money(r.net_pay)));
   if (invalid.length) {
     throw new PayrollReportError(422, "INVALID_NET_PAY", "Some finalized Cash employees have no Net Pay recorded.", {
       employees: invalid.map(employeeRef),
     });
   }
-  const fractional = rows.filter((r) => paise(money(r.net_pay)) % 100 !== 0);
+  const fractional = cash.filter((r) => paise(money(r.net_pay)) % 100 !== 0);
   if (fractional.length) {
     throw new PayrollReportError(
       422,
@@ -136,18 +153,18 @@ function prepare({ period, rows, reference }) {
 
   // 8. Nothing to pay is not a cash payment: zero / negative net pay is left
   // out, and the file says how many and who.
-  const excluded = rows
+  const excluded = cash
     .filter((r) => money(r.net_pay) <= 0)
     .map((r) => ({ ...employeeRef(r), net_pay: money(r.net_pay) }))
     .sort(byOutletThenCode);
-  const employees = rows
+  const employees = cash
     .filter((r) => money(r.net_pay) > 0)
     .map((r) => ({ ...employeeRef(r), net_pay: paise(money(r.net_pay)) / 100 }))
     .sort(byOutletThenCode)
     .map(numberWithinOutlet)
     .map((e) => ({ ...e, counts: denomination.breakdown(e.net_pay) }));
   if (employees.length === 0) {
-    throw new PayrollReportError(404, "NO_CASH_EMPLOYEES", MESSAGES.NO_CASH_EMPLOYEES, { excluded });
+    throw new PayrollReportError(404, "NO_CASH_EMPLOYEES", MESSAGES.NO_CASH_EMPLOYEES, { excluded, contract });
   }
 
   // 4. Each employee's breakup equals their net pay (breakdown checks it; so
@@ -178,6 +195,7 @@ function prepare({ period, rows, reference }) {
     period: { year: period.year, month: period.month, label: monthLabel(period.year, period.month) },
     employees,
     excluded,
+    contract,
     total_net_pay: totalNetPay,
     denomination_totals: denominationTotals,
     denomination_amount: denominationAmount,
@@ -415,15 +433,23 @@ function totalSheet(wb, data, grid) {
   });
   let lastRow = diffRow;
 
+  const notes = [];
+  if (data.contract && data.contract.length) {
+    notes.push(`Not included - Contract employees (paid directly to the contractor): ${data.contract.map((e) => `${e.employee_id} ${safeText(e.employee_name)}`).join(", ")}`);
+  }
   if (data.excluded.length) {
-    lastRow += 2;
-    ws.mergeCells(lastRow, 1, lastRow, lastCol);
-    ws.getCell(lastRow, 1).value = `Not included - zero or negative Net Pay (nothing payable in cash): ${data.excluded
+    notes.push(`Not included - zero or negative Net Pay (nothing payable in cash): ${data.excluded
       .map((e) => `${e.employee_id} ${safeText(e.employee_name)} (${e.net_pay})`)
-      .join(", ")}`;
+      .join(", ")}`);
+  }
+  for (const note of notes) {
+    lastRow += lastRow === diffRow ? 2 : 1;
+    ws.mergeCells(lastRow, 1, lastRow, lastCol);
+    ws.getCell(lastRow, 1).value = note;
     ws.getCell(lastRow, 1).font = { name: FONT, italic: true, size: 9 };
     ws.getCell(lastRow, 1).alignment = { wrapText: true, vertical: "top" };
-    ws.getRow(lastRow).height = 15 * Math.min(6, Math.ceil(data.excluded.length / 2) + 1);
+    // Wrapped across a narrow sheet: roughly 55 characters a line.
+    ws.getRow(lastRow).height = 13 * Math.min(15, Math.ceil(note.length / 55));
   }
 
   pageSetup(ws, { orientation: "portrait", lastCol, lastRow, headerRow: HEADER_ROW });

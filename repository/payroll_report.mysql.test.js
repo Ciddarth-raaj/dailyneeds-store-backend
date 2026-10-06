@@ -309,7 +309,17 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.deepEqual(await repo.cashPayrunTotals({ ...NOV, store_ids: null }), { employees: 1, net_pay: 18760 });
     const file = await service.cashPaymentFile(ADMIN, NOV, null);
     assert.equal(file.filename, "Cash Payment - Nov 2026.xlsx");
-    assert.deepEqual(file.summary, { employees: 1, total_net_pay: 18760, excluded: 1 });
+    assert.deepEqual(file.summary, { employees: 1, total_net_pay: 18760, excluded: 1, contract: 0 });
+
+    // A Contract employee (current Employee Master) is paid by the contractor:
+    // out of the cash and of the reconciliation read alike.
+    await q("UPDATE payrun_employee_calculation SET net_pay = 700, total_earnings = 700 WHERE period_month = 11 AND employee_id = 3");
+    await q("UPDATE new_employee SET employment_type = 'Contract' WHERE employee_id = 3");
+    assert.equal(rows.length, 2);
+    assert.equal((await repo.listCashPayRows({ ...NOV, store_ids: null })).find((r) => r.employee_id === 3).employment_type, "Contract");
+    assert.deepEqual(await repo.cashPayrunTotals({ ...NOV, store_ids: null }), { employees: 1, net_pay: 18760 });
+    assert.deepEqual((await service.cashPaymentFile(ADMIN, NOV, null)).summary, { employees: 1, total_net_pay: 18760, excluded: 0, contract: 1 });
+    await q("UPDATE new_employee SET employment_type = NULL WHERE employee_id = 3");
 
     // Out of scope: nobody to pay.
     await assert.rejects(service.cashPaymentFile(ADMIN, NOV, [2]), (e) => e.code === "NO_CASH_EMPLOYEES");

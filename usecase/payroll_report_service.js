@@ -873,7 +873,7 @@ class PayrollReportService {
     return {
       buffer,
       filename: cashPayment.filename(period),
-      summary: { employees: data.employees.length, total_net_pay: data.total_net_pay, excluded: data.excluded.length },
+      summary: { employees: data.employees.length, total_net_pay: data.total_net_pay, excluded: data.excluded.length, contract: data.contract.length },
     };
   }
 }

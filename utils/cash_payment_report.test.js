@@ -23,7 +23,9 @@ const row = (id, net_pay, over = {}) => ({
 
 /** The payrun's own independent read, consistent with the rows. */
 const referenceFor = (rows) => {
-  const payable = rows.filter((r) => r.status === "APPROVED_LOCKED" && r.pay_type === "CASH" && Number(r.net_pay) > 0);
+  const payable = rows.filter(
+    (r) => r.status === "APPROVED_LOCKED" && r.pay_type === "CASH" && Number(r.net_pay) > 0 && r.employment_type !== "Contract"
+  );
   return {
     finalized: Math.max(1, payable.length),
     cash: { employees: payable.length, net_pay: payable.reduce((s, r) => s + Number(r.net_pay), 0) },
@@ -136,6 +138,38 @@ describe("prepare - refusals", () => {
   });
 });
 
+describe("prepare - Contract employees are paid by their contractor", () => {
+  it("a Contract employee is left out of the cash and named; Permanent and not-recorded stay", () => {
+    const data = prepare([
+      row(1, 18760, { employment_type: "Permanent" }),
+      row(2, 12345, { employment_type: "Contract" }),
+      row(3, 700, { employment_type: null }),
+    ]);
+    assert.deepEqual(data.employees.map((e) => e.employee_id), [1, 3]);
+    assert.equal(data.total_net_pay, 18760 + 700);
+    assert.equal(data.denomination_amount, 18760 + 700);
+    assert.deepEqual(data.contract.map((e) => [e.employee_id, e.employee_name]), [[2, "Employee 2"]]);
+  });
+
+  it("a Contract employee whose payroll is not finalized does not hold the month up", () => {
+    const data = prepare([row(1, 500), row(2, null, { status: "CALCULATED", employment_type: "Contract" })]);
+    assert.deepEqual(data.employees.map((e) => e.employee_id), [1]);
+    assert.deepEqual(data.contract.map((e) => e.employee_id), [2]);
+  });
+
+  it("a month whose only Cash employees are Contract gives the no-employees message", () => {
+    assert.throws(
+      () => prepare([row(1, 500, { employment_type: "Contract" })], { finalized: 1, cash: { employees: 0, net_pay: 0 } }),
+      (e) => e.code === "NO_CASH_EMPLOYEES" && e.message === cash.MESSAGES.NO_CASH_EMPLOYEES && e.detail.contract[0].employee_id === 1
+    );
+  });
+
+  it("a Contract employee counted by the payrun's own read would fail the reconciliation", () => {
+    const rows = [row(1, 500), row(2, 700, { employment_type: "Contract" })];
+    assert.throws(() => prepare(rows, { finalized: 2, cash: { employees: 2, net_pay: 1200 } }), (e) => e.code === "CASH_REPORT_INTEGRITY");
+  });
+});
+
 describe("filename", () => {
   it("is Cash Payment - <MMM YYYY>.xlsx", () => {
     assert.equal(cash.filename({ year: 2026, month: 8 }), "Cash Payment - Aug 2026.xlsx");
@@ -229,7 +263,7 @@ describe("workbook", () => {
     assert.equal(ws.getCell("C15").value.formula, "C13-C14");
     assert.equal(ws.getCell("C13").numFmt, unescaped(cash.INR));
     assert.equal(ws.getCell("B4").numFmt, cash.COUNT);
-    assert.match(String(ws.getCell("A17").value), /Not included.*9 Employee 9/);
+    assert.match(String(ws.getCell("A17").value), /Not included - zero or negative Net Pay.*9 Employee 9/);
     assert.equal(ws.pageSetup.orientation, "portrait");
     assert.equal(ws.pageSetup.fitToWidth, 1);
     assert.equal(ws.pageSetup.printArea, "A1:C17");
@@ -283,6 +317,17 @@ describe("workbook", () => {
     assert.ok(formulaCells.length > 0);
     for (const c of formulaCells) assert.match(c, /<v>-?\d+<\/v>/, c);
     assert.match(xml, /<c r="I4"[^>]*><f>[^<]*<\/f><v>0<\/v><\/c>/, "a zero count is cached as 0");
+  });
+
+  it("Denomination Total names the Contract employees left out", async () => {
+    const withContract = { ...prepare([...rows, row(40, 9000, { employment_type: "Contract" })]), company: "X" };
+    const ws = (await load(withContract)).getWorksheet("Denomination Total");
+    assert.equal(textOf(ws.getCell("C14")), 32104, "the Contract employee's pay is not in the cash total");
+    assert.equal(ws.getCell("A17").value, "Not included - Contract employees (paid directly to the contractor): 40 Employee 40");
+    assert.match(String(ws.getCell("A18").value), /zero or negative Net Pay.*9 Employee 9/);
+    assert.equal(ws.pageSetup.printArea, "A1:C18");
+    const grid = (await load(withContract)).getWorksheet("Cash Denomination");
+    for (let r = 4; r <= 6; r += 1) assert.notEqual(grid.getCell(r, 2).value, 40);
   });
 
   it("without a configured company the banner still names the report", async () => {

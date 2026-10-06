@@ -122,14 +122,19 @@ class PayrollReportRepository {
    * the approved calculation's pay type, else the payrun snapshot's) - with
    * their payrun status and stored net pay. Not-finalized rows are returned
    * too, so the caller can refuse the month rather than drop them.
+   *
+   * `employment_type` is the CURRENT Employee Master value (the payrun does
+   * not snapshot it), as the Payroll Reports employment-type filter reads it:
+   * Contract employees are paid to their contractor, not in cash.
    */
   listCashPayRows({ year, month, store_ids }) {
     const location = locationPredicate("pe.store_id", store_ids);
     return this.query(
       `SELECT pe.employee_id, pe.employee_name, pe.store_name,
-              c.status, c.net_pay, ${PAY_TYPE} AS pay_type
+              c.status, c.net_pay, ${PAY_TYPE} AS pay_type, ne.employment_type
          FROM payrun_employee pe
          LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
+         LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
         WHERE pe.period_year = ? AND pe.period_month = ?
           AND ${PAY_TYPE} = 'CASH'
           ${location.clause ? `AND ${location.clause}` : ""}
@@ -141,7 +146,7 @@ class PayrollReportRepository {
 
   /**
    * THE PAYRUN'S OWN COUNT AND SUM of the month's payable Cash employees -
-   * approved & locked, pay type CASH, net pay above zero - read from the
+   * approved & locked, pay type CASH, net pay above zero, not Contract - read from the
    * calculation table with its own SQL, as the reconciliation reference for
    * the Cash Payment report.
    */
@@ -151,8 +156,10 @@ class PayrollReportRepository {
       `SELECT COUNT(*) AS employees, COALESCE(SUM(c.net_pay), 0) AS net_pay
          FROM payrun_employee_calculation c
          JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id
+         LEFT JOIN new_employee ne ON ne.employee_id = c.employee_id
         WHERE c.period_year = ? AND c.period_month = ?
           AND c.status = 'APPROVED_LOCKED' AND c.pay_type = 'CASH' AND c.net_pay > 0
+          AND COALESCE(ne.employment_type, '') <> 'Contract'
           ${location.clause ? `AND ${location.clause}` : ""}`,
       [year, month, ...location.params],
       "CASH-PAYRUN-TOTALS"
