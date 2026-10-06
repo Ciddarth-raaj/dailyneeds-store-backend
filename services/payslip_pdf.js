@@ -172,19 +172,14 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
   if (st.pf_applicable || st.esi_applicable) {
     // Schema version 1 carried only the masked numbers; print what it has.
     const pick = (full, masked) => (full !== undefined ? full : masked);
-    // A month cut by a PF ceiling change: one short line per period, under the table.
-    const periods = st.pf_applicable && Array.isArray(st.pf_periods) ? st.pf_periods : [];
-    const pfPeriods = periods.length
-      ? `<div class="note">${periods
-          .map((p) => esc(`PF ${p.from ? p.from.slice(8, 10) : ""}-${p.to ? p.to.slice(8, 10) : ""} (ceiling ${inr(p.monthly_wage_ceiling)}): wage ${inr(p.pf_wage)}, PF ${inr(p.employee_pf)}`))
-          .join("<br>")}</div>`
-      : "";
+    // The per-period PF split of a month cut by a ceiling change stays in the
+    // snapshot for payroll; the payslip prints only the month's PF Wage.
     cards.push(card("bank", "Statutory Information", `<table class="kv">
       ${st.pf_applicable ? `${row("UAN", pick(st.uan, st.uan_masked))}${row("PF Number", pick(st.pf_number, st.pf_number_masked))}${row("PF Wage", hasAmount(st.pf_wage) ? inr(st.pf_wage) : null)}` : ""}
       ${st.esi_applicable ? `${row("ESI Number", pick(st.esi_number, st.esi_number_masked))}${row("ESI Wage", hasAmount(st.esi_wage) ? inr(st.esi_wage) : null)}` : ""}
       ${row("PF Establishment Code", st.pf_applicable ? co.pf_establishment_code : null)}
       ${row("ESI Establishment Code", st.esi_applicable ? co.esi_establishment_code : null)}
-    </table>${pfPeriods}`, "stat"));
+    </table>`, "stat"));
   }
   if (adv && (hasAmount(adv.closing_balance) || hasAmount(adv.recovery_this_month))) {
     cards.push(card("hand", "Advance Details", `<table class="kv">

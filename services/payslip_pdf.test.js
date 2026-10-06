@@ -271,3 +271,17 @@ describe("sections: shown only when they apply", () => {
     assert.ok(html.includes("#732f8d"));
   });
 });
+
+describe("PF ceiling periods are not printed", () => {
+  it("a split month shows the PF Wage only, not the per-period breakdown", () => {
+    const snap = snapshot();
+    snap.statutory.pf_periods = [
+      { from: "2026-09-01", to: "2026-09-16", monthly_wage_ceiling: "15000.00", pf_wage: "7003.72", employee_pf: "840.45" },
+      { from: "2026-09-17", to: "2026-09-30", monthly_wage_ceiling: "25000.00", pf_wage: "6002.47", employee_pf: "720.29" },
+    ];
+    const html = payslipHtml(snap);
+    assert.ok(!html.includes("ceiling"));
+    assert.ok(!html.includes("₹7,003.72"));
+    assert.ok(html.includes("Statutory Information") && html.includes("100200300400"), "the card itself still prints");
+  });
+});
