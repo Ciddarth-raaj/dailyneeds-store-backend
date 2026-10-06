@@ -11,11 +11,15 @@
  * 2: full UAN / PF / ESI numbers (`statutory.uan`, `pf_number`,
  * `esi_number`), the `advance` block and the `employer_contribution` (CTC)
  * block. A version-1 snapshot has none of them and renders without them.
+ *
+ * 3: `employer_contribution.monthly_ctc` is the FIXED CTC of the approved
+ * salary record (changes only on revision), no longer Monthly Gross plus the
+ * month's contributions; `monthly_gross` leaves that block.
  */
-const SNAPSHOT_SCHEMA_VERSION = 2;
+const SNAPSHOT_SCHEMA_VERSION = 3;
 
 /** The renderer the snapshot was frozen for (Mini App detail + PDF). */
-const TEMPLATE_VERSION = "payslip-v2";
+const TEMPLATE_VERSION = "payslip-v3";
 
 const PAYSLIP_STATUS = Object.freeze({
   ACTIVE: "ACTIVE",

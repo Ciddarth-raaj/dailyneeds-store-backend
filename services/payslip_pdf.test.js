@@ -158,7 +158,8 @@ describe("header, wording and identifiers (final layout)", () => {
     const html = payslipHtml(v1);
     assert.ok(html.includes("XXXXXXXX0400"), "falls back to the masked number it carries");
     assert.ok(!html.includes("Advance Details"));
-    assert.ok(!html.includes("CTC / Employer Contribution"));
+    assert.ok(!html.includes("Employer Contribution</span>"));
+    assert.ok(!html.includes("CTC &amp; Take Home"));
     assert.ok(html.includes("₹24,953.00"));
   });
 });
@@ -236,13 +237,28 @@ describe("sections: shown only when they apply", () => {
     assert.ok(!html.includes("Advance Opening Balance"));
   });
 
-  it("CTC = Monthly Gross + Employer PF + Employer ESI, Annual = x12; zero rows hidden", () => {
-    const html = payslipHtml(rich());
-    assert.ok(html.includes("CTC / Employer Contribution"));
-    assert.ok(html.includes("₹2,400.07"), "total employer contribution");
-    assert.ok(html.includes("₹28,413.44"), "monthly CTC = 26,013.37 + 2,400.07");
-    assert.ok(html.includes("₹3,40,961.28"), "annual CTC = monthly x 12");
+  it("this month's employer contribution, then the fixed Monthly / Annual CTC and Monthly Take Home", () => {
+    const snap = rich();
+    snap.employer_contribution = { ...snap.employer_contribution, monthly_ctc: "28500.00", annual_ctc: "342000.00", monthly_take_home: "24300.00" };
+    const html = payslipHtml(snap);
+    assert.ok(html.includes("Employer Contribution</span>"), "contribution box");
+    assert.ok(html.includes("CTC &amp; Take Home"), "a separate CTC box");
+    assert.ok(html.indexOf("CTC &amp; Take Home") < html.indexOf("Earnings &amp; Deductions"), "CTC box sits under Salary Basis");
+    assert.ok(html.indexOf("Employer Contribution</span>") > html.indexOf("Earnings &amp; Deductions"), "contribution box sits in the bottom row");
+    assert.ok(html.includes("₹2,400.07"), "this month's total employer contribution");
+    assert.match(html, /Monthly CTC<\/td><td class="c">:<\/td><td class="v">₹28,500.00/);
+    assert.match(html, /Annual CTC<\/td><td class="c">:<\/td><td class="v">₹3,42,000.00/);
+    assert.match(html, /Monthly Take Home<\/td><td class="c">:<\/td><td class="v">₹24,300.00/);
     assert.ok(!html.includes("Other Employer Contribution"), "zero other contribution is hidden");
+    assert.ok(html.includes("Fixed by your salary structure; changes only on a salary revision."));
+  });
+
+  it("no fixed CTC on the salary record -> contribution box only, no CTC box", () => {
+    const html = payslipHtml(rich());
+    assert.ok(html.includes("Total Employer Contribution"));
+    assert.ok(!html.includes("CTC &amp; Take Home"));
+    assert.ok(!html.includes("Monthly CTC"));
+    assert.ok(!html.includes("Annual CTC"));
   });
 
   it("no PF and no ESI -> no statutory section and no CTC section", () => {
@@ -252,7 +268,8 @@ describe("sections: shown only when they apply", () => {
     assert.ok(!html.includes("UAN"));
     assert.ok(!html.includes("Employer PF Contribution"));
     assert.ok(!html.includes("Employer ESI Contribution"));
-    assert.ok(!html.includes("CTC / Employer Contribution"), "no employer cost -> no CTC section");
+    assert.ok(!html.includes("Employer Contribution</span>"), "no employer cost -> no contribution box");
+    assert.ok(!html.includes("CTC &amp; Take Home"), "no fixed CTC -> no CTC box");
     assert.ok(!html.includes("Total Employer Contribution"));
     assert.ok(!html.includes("Monthly CTC"));
   });

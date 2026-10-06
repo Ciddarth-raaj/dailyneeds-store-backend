@@ -193,22 +193,28 @@ describe("sensitive identifiers", () => {
     assert.equal(none.statutory.pf_number, null);
   });
 
-  it("CTC = Monthly Gross + Employer PF + Employer ESI + other employer costs; Annual = x12", () => {
-    const only = build();
-    // no EDLI / admin stored on this row -> PF applicable but unresolved -> no CTC
-    assert.equal(only.employer_contribution, null, "an unresolved employer cost hides the CTC");
-    const snap = build({ edli: "0.00", pf_admin_charge: "0.00" });
-    assert.deepEqual(snap.employer_contribution, {
-      employer_pf: "1560.74", employer_esi: "839.33", other: "0.00", total: "2400.07",
-      monthly_gross: "26013.37", monthly_ctc: "28413.44", annual_ctc: "340961.28",
+  it("employer contribution is THIS MONTH'S stored figures; CTC and take home are the salary record's FIXED ones", () => {
+    const fixedEmp = { ...EMPLOYEE, salary_monthly_ctc: "28500.00", salary_take_home: "24300.00" };
+    const at = (over) => s.buildPayslipSnapshot({ period: PERIOD, calculation: { ...STORED(), ...over }, employee: fixedEmp, extras: EXTRAS, company: COMPANY });
+    assert.deepEqual(at({ edli: "65.03", pf_admin_charge: "65.03" }).employer_contribution, {
+      employer_pf: "1560.74", employer_esi: "839.33", other: "130.06", total: "2530.13",
+      monthly_ctc: "28500.00", annual_ctc: "342000.00", monthly_take_home: "24300.00",
     });
-    const withOther = build({ edli: "65.03", pf_admin_charge: "65.03" });
-    assert.equal(withOther.employer_contribution.other, "130.06");
-    assert.equal(withOther.employer_contribution.total, "2530.13");
-    assert.equal(withOther.employer_contribution.monthly_ctc, "28543.50");
-    const noEsi = build({ esi_applicable: 0, edli: "0", pf_admin_charge: "0" });
-    assert.equal(noEsi.employer_contribution.employer_esi, "0.00", "employer ESI ignored when ESI does not apply");
-    assert.equal(noEsi.employer_contribution.monthly_ctc, "27574.11");
+    // Another month with different earned wages: contribution moves, CTC does not.
+    const other = at({ employer_pf_total: "1200.00", employer_esi: "700.00", edli: "50", pf_admin_charge: "50" }).employer_contribution;
+    assert.equal(other.total, "2000.00");
+    assert.equal(other.monthly_ctc, "28500.00", "CTC is never rebuilt from the month's contributions");
+    // An unresolved contribution hides the contribution rows, not the fixed CTC.
+    const pending = at({ edli: null }).employer_contribution;
+    assert.equal(pending.total, null);
+    assert.equal(pending.monthly_ctc, "28500.00");
+    // No fixed CTC on the record (not APPLIED) -> no CTC, never a computed one.
+    const noCtc = build({ edli: "0", pf_admin_charge: "0" }).employer_contribution;
+    assert.equal(noCtc.monthly_ctc, null);
+    assert.equal(noCtc.annual_ctc, null);
+    assert.equal(noCtc.total, "2400.07");
+    // Nothing at all -> no block.
+    assert.equal(build().employer_contribution, null);
   });
 
   it("CTC changes no payroll figure", () => {

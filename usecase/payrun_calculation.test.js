@@ -2841,7 +2841,7 @@ describe("Payslip Publish", () => {
     const slip = world.payslips[0];
     assert.equal(slip.status, "ACTIVE");
     assert.equal(slip.payslip_version, 1);
-    assert.equal(slip.template_version, "payslip-v2");
+    assert.equal(slip.template_version, "payslip-v3");
     assert.equal(slip.snapshot_sha256, snapshotText.sha256(slip.snapshot_json), "hash matches contents");
     const snap = JSON.parse(slip.snapshot_json);
     assert.equal(Number(snap.final.net_pay), Number(stored.net_pay), "snapshot Net Pay = stored Net Pay");
@@ -2854,6 +2854,32 @@ describe("Payslip Publish", () => {
     assert.equal(row.calculation_hash, stored.calculation_hash);
     assert.equal((await rowOf(1)).status, CALC_STATUS.PUBLISHED);
     assert.equal(world.lifecycle.at(-1).payslip_id, slip.payslip_id, "the lifecycle row names the payslip");
+  });
+
+  it("the payslip CTC and Take Home are the PRICED salary record's fixed figures, never this month's", async () => {
+    await approved(1);
+    link(1);
+    const salary = world.salaries.get(1);
+    Object.assign(salary, {
+      monthly_ctc: "31000.00", ctc_status: "APPLIED",
+      pf_status: "APPLIED", employee_pf: "1800.00", esi_status: "NOT_APPLICABLE", employee_esi: "0.00",
+    });
+    await act("PUBLISH", [1]);
+    const snap = JSON.parse(world.payslips.at(-1).snapshot_json);
+    assert.equal(snap.employer_contribution.monthly_ctc, "31000.00");
+    assert.equal(snap.employer_contribution.annual_ctc, "372000.00");
+    const gross = Math.round(Number(salary.monthly_gross) * 100);
+    assert.equal(snap.employer_contribution.monthly_take_home, ((gross - 180000) / 100).toFixed(2));
+  });
+
+  it("a salary record whose CTC is not APPLIED gives the payslip no CTC and no take home", async () => {
+    await approved(1);
+    link(1);
+    Object.assign(world.salaries.get(1), { monthly_ctc: null, ctc_status: "PENDING", pf_status: "PENDING", employee_pf: null });
+    await act("PUBLISH", [1]);
+    const snap = JSON.parse(world.payslips.at(-1).snapshot_json);
+    const ec = snap.employer_contribution;
+    assert.ok(ec === null || (ec.monthly_ctc === null && ec.monthly_take_home === null));
   });
 
   const drain = async () => {

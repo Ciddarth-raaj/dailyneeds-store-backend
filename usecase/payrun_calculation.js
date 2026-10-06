@@ -284,6 +284,50 @@ function pricedSnapshot(employee, salary) {
   return out;
 }
 
+/**
+ * THE FIXED CTC AND TAKE HOME OF THE SALARY RECORD A MONTH WAS PRICED ON - the
+ * Salary Master's own full-month figures, which change only when the salary is
+ * revised. The record is read exactly as the Salary Master reads it
+ * (`fillStandardEsi` completes a record stored before ESI had a standard basis).
+ *
+ *   monthly_ctc  the record's CTC, only when its ctc_status is APPLIED
+ *   take_home    Monthly Gross - the record's Employee PF - Employee ESI, only
+ *                when both are resolved (APPLIED or NOT_APPLICABLE)
+ *
+ * Either is null when unresolved: a payslip then omits it rather than printing
+ * a short figure. The month's own employer contributions and Net Pay are
+ * different figures and come from the stored calculation.
+ */
+function fixedSalaryFigures(record) {
+  const parse = (v) => {
+    if (v === null || v === undefined || typeof v === "object") return v ?? null;
+    try {
+      return JSON.parse(v);
+    } catch (err) {
+      return null;
+    }
+  };
+  const presented = engine.fillStandardEsi({
+    ...record,
+    unresolved_notes: parse(record.unresolved_notes),
+    statutory_snapshot: parse(record.statutory_snapshot),
+  });
+  const has = (v) => v !== null && v !== undefined && v !== "";
+  const monthlyCtc =
+    presented && String(presented.ctc_status) === "APPLIED" && has(presented.monthly_ctc) ? presented.monthly_ctc : null;
+  // An employee contribution as paise: 0 when it does not apply, null when it is an open question.
+  const contribution = (status, amount) => {
+    if (String(status) === "NOT_APPLICABLE") return 0;
+    if (String(status) === "APPLIED" && has(amount)) return paiseOf(amount);
+    return null;
+  };
+  const gross = paiseOf(presented && presented.monthly_gross);
+  const pf = contribution(presented && presented.pf_status, presented && presented.employee_pf);
+  const esi = contribution(presented && presented.esi_status, presented && presented.employee_esi);
+  const takeHome = gross === null || pf === null || esi === null ? null : ((gross - pf - esi) / 100).toFixed(2);
+  return { monthly_ctc: monthlyCtc, take_home: takeHome };
+}
+
 const paiseOf = (value) => {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
@@ -2182,7 +2226,13 @@ class PayrunCalculationUsecase {
       const { employee, stored } = presented.internals;
       const record = stored ? pricedSalaryOf.get(String(stored.salary_id)) : null;
       if (record && paiseOf(record.monthly_gross) === paiseOf(stored.monthly_gross)) {
-        return pricedSnapshot(employee, resolveMonthSalary(employee, record));
+        return {
+          ...pricedSnapshot(employee, resolveMonthSalary(employee, record)),
+          ...(() => {
+            const fixed = fixedSalaryFigures(record);
+            return { salary_monthly_ctc: fixed.monthly_ctc, salary_take_home: fixed.take_home };
+          })(),
+        };
       }
       return employee;
     };

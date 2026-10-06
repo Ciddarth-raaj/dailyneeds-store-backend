@@ -187,18 +187,33 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
       ${row("Recovery This Month", inr(adv.recovery_this_month))}
     </table><div class="hl"><span>Advance Closing Balance</span><b>${esc(inr(adv.closing_balance))}</b></div>`));
   }
-  // Nothing the employer pays on top -> CTC is just the Monthly Gross already shown: no section.
-  if (ctc && ctc.monthly_ctc && hasAmount(ctc.total)) {
-    cards.push(card("people", "CTC / Employer Contribution", `<table class="kv">
+  /*
+   * TWO BOXES, TWO DIFFERENT FIGURES.
+   *
+   * EMPLOYER CONTRIBUTION is THIS MONTH'S (it moves with the wages earned) and
+   * sits with the other informational cards. CTC & TAKE HOME are FIXED by the
+   * salary structure and move only on a revision; that box sits under the
+   * Salary Basis it belongs to. With no employer cost at all the CTC is just the
+   * Monthly Gross already printed, and the CTC box is left out.
+   */
+  let ctcBox = "";
+  if (ctc) {
+    if (hasAmount(ctc.total)) {
+      cards.push(card("people", "Employer Contribution", `<table class="kv">
       ${hasAmount(ctc.employer_pf) ? row("Employer PF Contribution", inr(ctc.employer_pf)) : ""}
       ${hasAmount(ctc.employer_esi) ? row("Employer ESI Contribution", inr(ctc.employer_esi)) : ""}
       ${hasAmount(ctc.other) ? row("Other Employer Contribution", inr(ctc.other)) : ""}
     </table><div class="hl"><span>Total Employer Contribution</span><b>${esc(inr(ctc.total))}</b></div>
-    <table class="kv">
-      ${row("Monthly Gross (Fixed)", inr(ctc.monthly_gross))}
-      ${row("Monthly CTC", inr(ctc.monthly_ctc))}
+    <div class="note">This month's, paid by the company over and above your salary; not part of Earnings or Deductions.</div>`, "contrib"));
+    }
+    const fixedCtc = hasAmount(ctc.monthly_ctc) ? ctc.monthly_ctc : null;
+    if (fixedCtc !== null && Number(fixedCtc) !== Number(a.monthly_gross)) {
+      ctcBox = card("wallet", "CTC & Take Home", `<table class="kv">
+      ${row("Monthly CTC", inr(fixedCtc))}
       ${row("Annual CTC", inr(ctc.annual_ctc))}
-    </table><div class="note">Paid by the company over and above your salary; not part of Earnings or Deductions.${hasAmount(ctc.other) ? " Other = EDLI and PF admin charges." : ""}</div>`, "ctc"));
+      ${hasAmount(ctc.monthly_take_home) ? row("Monthly Take Home", inr(ctc.monthly_take_home)) : ""}
+    </table><div class="note">Fixed by your salary structure; changes only on a salary revision.</div>`, "basis fixed");
+    }
   }
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Salary Payslip</title><style>
@@ -235,7 +250,9 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
 
   /* cards */
   .grid { display: flex; gap: 7px; margin-bottom: 7px; }
-  .grid > .card { flex: 1 1 0; min-width: 0; }
+  .grid > .card, .grid > .col { flex: 1 1 0; min-width: 0; }
+  .col { display: flex; flex-direction: column; gap: 7px; }
+  .col > .card:first-child { flex: 1 1 auto; }
   .card { border: 1px solid ${C.purpleLine}; border-radius: 6px; overflow: hidden; }
   .card h3 { display: flex; align-items: center; gap: 7px; margin: 0; padding: 4px 10px; font-size: 10.5px; text-transform: uppercase;
     letter-spacing: .03em; color: ${C.purpleDark}; background: ${C.purpleTint}; border-bottom: 1px solid ${C.purpleLine}; }
@@ -300,7 +317,7 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
 <div class="netbar"><div class="lab">${icon("wallet", 24)}<span>Net Pay${payType ? ` (${esc(payType)})` : ""}</span></div><div class="amt">${esc(inr(f.net_pay))}</div></div>
 <div class="grid">
   ${card("user", "Employee Details", employee)}
-  ${card("calendar", "Attendance / Salary Basis", basis, "basis")}
+  <div class="col">${card("calendar", "Attendance / Salary Basis", basis, "basis")}${ctcBox}</div>
 </div>
 <section class="ed"><h3>${icon("coins")}<span>Earnings &amp; Deductions</span></h3><div class="pair">
   ${moneyTable("earn", "Earnings / Additions", earnings, s.earnings && s.earnings.total, "Total Earnings", height)}

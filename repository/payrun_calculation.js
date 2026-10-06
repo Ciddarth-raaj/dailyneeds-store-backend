@@ -156,7 +156,10 @@ class PayrunCalculationRepository {
       "LIST-SALARIES-BY-IDS",
       `SELECT salary_id, employee_id, monthly_gross, daily_salary,
               basic, conveyance, hra, special_allowance,
-              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from, status
+              DATE_FORMAT(effective_from, '%Y-%m-%d') AS effective_from, status,
+              pf_status, employee_pf, employer_pf_total, edli, pf_admin_charge,
+              esi_status, esi_wage, employee_esi, employer_esi,
+              monthly_ctc, ctc_status, unresolved_notes, statutory_snapshot
          FROM employee_salary
         WHERE salary_id IN (?)`,
       [ids]

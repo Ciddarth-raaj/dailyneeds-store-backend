@@ -23,8 +23,8 @@
  *      that does not add up is REFUSED, never published;
  *   3. INFORMATIONAL SUMS that move no payroll figure - see `advanceOf` and
  *      `employerContributionOf`: the Advance Opening Balance (closing plus
- *      this month's recovery) and the CTC (Monthly Gross plus the stored
- *      employer-side costs, times twelve for the year).
+ *      this month's recovery), this month's Total Employer Contribution, and
+ *      the Annual CTC (the salary record's fixed Monthly CTC times twelve).
  *
  * ================================================== WHAT IT NEVER CARRIES
  *
@@ -227,37 +227,42 @@ function advanceOf(c) {
 
 /**
  * CTC / EMPLOYER CONTRIBUTION - INFORMATIONAL, never part of Earnings,
- * Deductions or Net Pay.
+ * Deductions or Net Pay. Two different figures, kept apart on purpose:
  *
- *   Total Employer Contribution = Employer PF + Employer ESI + Other
- *     (Other = EDLI + PF admin charges: the remaining employer-side
- *     statutory costs the salary engine's own CTC counts)
- *   Monthly CTC = Monthly Gross (Fixed) + Total Employer Contribution
- *   Annual CTC  = Monthly CTC x 12
+ *   EMPLOYER CONTRIBUTION - THIS MONTH'S, from the stored calculation:
+ *     Employer PF + Employer ESI + Other (EDLI + PF admin charges), on the
+ *     wages actually earned, so it moves from month to month. Null when an
+ *     applicable contribution was not resolved.
  *
- * Every figure is the stored one for this month, so the section adds up on
- * its face and nothing is unexplained. An applicable contribution the
- * calculation did not resolve (null) makes the CTC unknown: the block is then
- * null and the section is hidden, rather than printing a CTC that is short.
+ *   CTC - FIXED, from the approved salary record the month was priced on
+ *     (`employee.salary_monthly_ctc`, the Salary Master's own figure: the
+ *     fixed gross plus the full-month employer costs). It changes only when
+ *     the salary is revised. Annual CTC = Monthly CTC x 12. Null when the
+ *     record's CTC is not resolved - never rebuilt from this month's figures.
+ *
+ *   TAKE HOME - FIXED, from the same record (`employee.salary_take_home`):
+ *     Monthly Gross less the record's full-month Employee PF and ESI. This
+ *     month's actual take home is the Final Net Pay, printed separately.
+ *
+ * Null altogether when neither is available.
  */
-function employerContributionOf(c, pfApplicable, esiApplicable) {
-  const gross = toPaise(c.monthly_gross);
-  if (gross === null) return null;
+function employerContributionOf(c, employee, pfApplicable, esiApplicable) {
   const pfParts = pfApplicable ? [c.employer_pf_total, c.edli, c.pf_admin_charge].map(toPaise) : [0, 0, 0];
   const esiPart = esiApplicable ? toPaise(c.employer_esi) : 0;
-  if (pfParts.some((p) => p === null) || esiPart === null) return null;
+  const resolved = !pfParts.some((p) => p === null) && esiPart !== null;
+  const fixed = toPaise(employee.salary_monthly_ctc);
+  const takeHome = toPaise(employee.salary_take_home);
+  if (!resolved && fixed === null && takeHome === null) return null;
   const [employerPf, edli, admin] = pfParts;
-  const other = edli + admin;
-  const total = employerPf + esiPart + other;
-  const monthly = gross + total;
+  const other = resolved ? edli + admin : null;
   return {
-    employer_pf: money(employerPf),
-    employer_esi: money(esiPart),
-    other: money(other),
-    total: money(total),
-    monthly_gross: money(gross),
-    monthly_ctc: money(monthly),
-    annual_ctc: money(monthly * 12),
+    employer_pf: resolved ? money(employerPf) : null,
+    employer_esi: resolved ? money(esiPart) : null,
+    other: resolved ? money(other) : null,
+    total: resolved ? money(employerPf + esiPart + other) : null,
+    monthly_ctc: fixed === null ? null : money(fixed),
+    annual_ctc: fixed === null ? null : money(fixed * 12),
+    monthly_take_home: takeHome === null ? null : money(takeHome),
   };
 }
 
@@ -469,7 +474,7 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
       balance_advance: moneyOf(c.balance_advance),
     },
     advance: advanceOf(c),
-    employer_contribution: employerContributionOf(c, pfApplicable, esiApplicable),
+    employer_contribution: employerContributionOf(c, employee, pfApplicable, esiApplicable),
     source: {
       payrun_employee_id: Number(c.payrun_employee_id),
       payrun_calculation_id: Number(c.payrun_calculation_id),
