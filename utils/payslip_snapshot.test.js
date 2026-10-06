@@ -179,20 +179,54 @@ describe("sensitive identifiers", () => {
     assert.equal(snap.employee.bank_name, null);
   });
 
-  it("UAN / ESI only where applicable; employer contributions are not on the employee payslip", () => {
+  it("UAN / PF / ESI numbers in full, only where applicable", () => {
     const snap = build({ esi_applicable: 0 });
-    assert.equal(snap.statutory.uan_masked, "XXXXXXXX0400");
-    assert.equal(snap.statutory.pf_number_masked, "XXXXXXXX/101");
-    assert.equal(snap.statutory.esi_number_masked, null);
+    assert.equal(snap.statutory.uan, "100200300400");
+    assert.equal(snap.statutory.pf_number, "TN/MAS/1/101");
+    assert.equal(snap.statutory.esi_number, null);
+    assert.equal(snap.statutory.uan_masked, "XXXXXXXX0400", "masked forms kept for version-1 screens");
     const both = build();
-    assert.equal(both.statutory.esi_number_masked, "XXXXXX0000");
-    const { text: frozen } = s.freezeSnapshot(both);
-    assert.ok(!frozen.includes("100200300400"), "full UAN never stored on the payslip");
-    assert.ok(!frozen.includes("3100000000"), "full ESI number never stored on the payslip");
-    assert.ok(!frozen.includes("TN/MAS/1/101"), "full PF number never stored on the payslip");
-    const { text } = s.freezeSnapshot(build());
-    assert.ok(!text.includes("employer"), "no employer_* key");
-    assert.ok(!text.includes("839.33"), "no employer ESI figure");
+    assert.equal(both.statutory.esi_number, "3100000000");
+    const none = build({ pf_applicable: 0, esi_applicable: 0, employee_pf: "0.00", employee_esi: "0.00",
+      total_employee_deductions: "1237.60", net_pay: "26589.00", net_pay_rounding: "0.18" });
+    assert.equal(none.statutory.uan, null);
+    assert.equal(none.statutory.pf_number, null);
+  });
+
+  it("CTC = Monthly Gross + Employer PF + Employer ESI + other employer costs; Annual = x12", () => {
+    const only = build();
+    // no EDLI / admin stored on this row -> PF applicable but unresolved -> no CTC
+    assert.equal(only.employer_contribution, null, "an unresolved employer cost hides the CTC");
+    const snap = build({ edli: "0.00", pf_admin_charge: "0.00" });
+    assert.deepEqual(snap.employer_contribution, {
+      employer_pf: "1560.74", employer_esi: "839.33", other: "0.00", total: "2400.07",
+      monthly_gross: "26013.37", monthly_ctc: "28413.44", annual_ctc: "340961.28",
+    });
+    const withOther = build({ edli: "65.03", pf_admin_charge: "65.03" });
+    assert.equal(withOther.employer_contribution.other, "130.06");
+    assert.equal(withOther.employer_contribution.total, "2530.13");
+    assert.equal(withOther.employer_contribution.monthly_ctc, "28543.50");
+    const noEsi = build({ esi_applicable: 0, edli: "0", pf_admin_charge: "0" });
+    assert.equal(noEsi.employer_contribution.employer_esi, "0.00", "employer ESI ignored when ESI does not apply");
+    assert.equal(noEsi.employer_contribution.monthly_ctc, "27574.11");
+  });
+
+  it("CTC changes no payroll figure", () => {
+    const a = build({ edli: "0", pf_admin_charge: "0" });
+    const b = build({ edli: "99", pf_admin_charge: "99" });
+    assert.deepEqual(a.final, b.final);
+    assert.deepEqual(a.earnings, b.earnings);
+    assert.deepEqual(a.deductions, b.deductions);
+  });
+
+  it("advance details: opening = closing + recovery; absent when there is no advance", () => {
+    assert.deepEqual(build().advance, { opening_balance: "4000.00", recovery_this_month: "1000.00", closing_balance: "3000.00" });
+    const none = build({ advance_recovery: "0.00", balance_advance: "0.00",
+      total_employee_deductions: "1992.03", net_pay: "25834.00", net_pay_rounding: "-0.39" });
+    assert.equal(none.advance, null);
+    const balanceOnly = build({ advance_recovery: "0.00", balance_advance: "5000",
+      total_employee_deductions: "1992.03", net_pay: "25834.00", net_pay_rounding: "-0.39" });
+    assert.deepEqual(balanceOnly.advance, { opening_balance: "5000.00", recovery_this_month: "0.00", closing_balance: "5000.00" });
   });
 
   it("masking helpers", () => {

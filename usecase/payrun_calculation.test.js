@@ -2841,7 +2841,7 @@ describe("Payslip Publish", () => {
     const slip = world.payslips[0];
     assert.equal(slip.status, "ACTIVE");
     assert.equal(slip.payslip_version, 1);
-    assert.equal(slip.template_version, "payslip-v1");
+    assert.equal(slip.template_version, "payslip-v2");
     assert.equal(slip.snapshot_sha256, snapshotText.sha256(slip.snapshot_json), "hash matches contents");
     const snap = JSON.parse(slip.snapshot_json);
     assert.equal(Number(snap.final.net_pay), Number(stored.net_pay), "snapshot Net Pay = stored Net Pay");

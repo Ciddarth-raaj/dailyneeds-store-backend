@@ -20,13 +20,18 @@
  *   2. CHECKS - the earnings lines must add up to the stored Total Earnings,
  *      the deductions to the stored Total Deductions, and earnings minus
  *      deductions plus the stored rounding to the stored Net Pay. A snapshot
- *      that does not add up is REFUSED, never published.
+ *      that does not add up is REFUSED, never published;
+ *   3. INFORMATIONAL SUMS that move no payroll figure - see `advanceOf` and
+ *      `employerContributionOf`: the Advance Opening Balance (closing plus
+ *      this month's recovery) and the CTC (Monthly Gross plus the stored
+ *      employer-side costs, times twelve for the year).
  *
  * ================================================== WHAT IT NEVER CARRIES
  *
  * The full bank account number and the full PAN never enter the snapshot -
- * they are masked here, before anything is stored. Employer statutory
- * contributions are not on the employee-facing payslip.
+ * they are masked here, before anything is stored. UAN, PF Number and ESI
+ * Number are printed in full: they are the employee's own statutory
+ * identifiers and a masked one cannot be used to check a PF / ESI passbook.
  */
 const crypto = require("crypto");
 const {
@@ -198,6 +203,65 @@ function parseJsonList(value) {
 const line = (key, label, paise, optional = false) => ({ key, label, amount: money(paise), optional });
 
 /**
+ * ADVANCE DETAILS - shown only when there is an advance to speak of.
+ *
+ * `balance_advance` is the stored Balance Advance adjustment: "the remaining
+ * advance balance", i.e. what is still owed AFTER this month's recovery. So
+ *
+ *   Advance Closing Balance = stored balance_advance
+ *   Recovery This Month     = stored advance_recovery (the same deduction line)
+ *   Advance Opening Balance = closing + recovery
+ *
+ * Null when both are zero: the payslip then has no advance section at all.
+ */
+function advanceOf(c) {
+  const closing = paiseOr0(c.balance_advance);
+  const recovery = paiseOr0(c.advance_recovery);
+  if (closing === 0 && recovery === 0) return null;
+  return {
+    opening_balance: money(closing + recovery),
+    recovery_this_month: money(recovery),
+    closing_balance: money(closing),
+  };
+}
+
+/**
+ * CTC / EMPLOYER CONTRIBUTION - INFORMATIONAL, never part of Earnings,
+ * Deductions or Net Pay.
+ *
+ *   Total Employer Contribution = Employer PF + Employer ESI + Other
+ *     (Other = EDLI + PF admin charges: the remaining employer-side
+ *     statutory costs the salary engine's own CTC counts)
+ *   Monthly CTC = Monthly Gross (Fixed) + Total Employer Contribution
+ *   Annual CTC  = Monthly CTC x 12
+ *
+ * Every figure is the stored one for this month, so the section adds up on
+ * its face and nothing is unexplained. An applicable contribution the
+ * calculation did not resolve (null) makes the CTC unknown: the block is then
+ * null and the section is hidden, rather than printing a CTC that is short.
+ */
+function employerContributionOf(c, pfApplicable, esiApplicable) {
+  const gross = toPaise(c.monthly_gross);
+  if (gross === null) return null;
+  const pfParts = pfApplicable ? [c.employer_pf_total, c.edli, c.pf_admin_charge].map(toPaise) : [0, 0, 0];
+  const esiPart = esiApplicable ? toPaise(c.employer_esi) : 0;
+  if (pfParts.some((p) => p === null) || esiPart === null) return null;
+  const [employerPf, edli, admin] = pfParts;
+  const other = edli + admin;
+  const total = employerPf + esiPart + other;
+  const monthly = gross + total;
+  return {
+    employer_pf: money(employerPf),
+    employer_esi: money(esiPart),
+    other: money(other),
+    total: money(total),
+    monthly_gross: money(gross),
+    monthly_ctc: money(monthly),
+    annual_ctc: money(monthly * 12),
+  };
+}
+
+/**
  * @param {object} args
  * @param {object} args.period       { year, month }
  * @param {object} args.calculation  the stored `payrun_employee_calculation` row (APPROVED_LOCKED)
@@ -362,9 +426,11 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     },
     statutory: {
       pf_applicable: pfApplicable,
-      // MASKED ON THE EMPLOYEE-FACING PAYSLIP: the last four characters
-      // identify the number to its owner; the full values stay on the
-      // month's payrun snapshot for payroll's own use.
+      // IN FULL, as the employee needs them for the PF / ESI portals. The
+      // masked forms are kept for screens built on schema version 1.
+      uan: pfApplicable ? textOrNull(employee.uan) : null,
+      pf_number: pfApplicable ? textOrNull(employee.pf_number) : null,
+      esi_number: esiApplicable ? textOrNull(employee.esi_number) : null,
       uan_masked: pfApplicable ? maskTail(employee.uan) : null,
       pf_number_masked: pfApplicable ? maskTail(employee.pf_number) : null,
       pf_wage: pfApplicable ? moneyOf(c.pf_wage) : null,
@@ -402,6 +468,8 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     informational: {
       balance_advance: moneyOf(c.balance_advance),
     },
+    advance: advanceOf(c),
+    employer_contribution: employerContributionOf(c, pfApplicable, esiApplicable),
     source: {
       payrun_employee_id: Number(c.payrun_employee_id),
       payrun_calculation_id: Number(c.payrun_calculation_id),

@@ -5,11 +5,17 @@
  * frozen at Publish. These are its fixed vocabularies.
  */
 
-/** The snapshot's own shape. Bump when the JSON layout changes. */
-const SNAPSHOT_SCHEMA_VERSION = 1;
+/**
+ * The snapshot's own shape. Bump when the JSON layout changes.
+ *
+ * 2: full UAN / PF / ESI numbers (`statutory.uan`, `pf_number`,
+ * `esi_number`), the `advance` block and the `employer_contribution` (CTC)
+ * block. A version-1 snapshot has none of them and renders without them.
+ */
+const SNAPSHOT_SCHEMA_VERSION = 2;
 
 /** The renderer the snapshot was frozen for (Mini App detail + PDF). */
-const TEMPLATE_VERSION = "payslip-v1";
+const TEMPLATE_VERSION = "payslip-v2";
 
 const PAYSLIP_STATUS = Object.freeze({
   ACTIVE: "ACTIVE",

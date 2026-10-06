@@ -78,96 +78,248 @@ const printable = (lines) => (lines || []).filter((l) => !l.optional || !isZero(
 const row = (label, value) =>
   value === null || value === undefined || value === ""
     ? ""
-    : `<tr><td class="k">${esc(label)}</td><td class="v">${esc(value)}</td></tr>`;
+    : `<tr><td class="k">${esc(label)}</td><td class="c">:</td><td class="v">${esc(value)}</td></tr>`;
+
+/*
+ * THE BRAND. Purple (the logo's own #732f8d) carries the page: headers, section
+ * titles, borders, Net Pay. Orange (the logo's #f15a22) is an ACCENT only -
+ * thin rules and small marks, never a fill. Green belongs to Earnings and red
+ * to Deductions, and to nothing else.
+ */
+const C = {
+  purple: "#732f8d",
+  purpleDark: "#4a1a63",
+  purpleTint: "#f5effa",
+  purpleLine: "#d9c6e6",
+  orange: "#f15a22",
+  green: "#1e7b3c",
+  greenTint: "#e8f6ec",
+  greenLine: "#bfe3cb",
+  red: "#c0262d",
+  redTint: "#fdecec",
+  redLine: "#f3c4c6",
+  ink: "#1f1a24",
+  muted: "#5d5566",
+};
+
+/* Small inline icons (no external asset, no xmlns needed inside HTML). */
+const ICON = {
+  wallet: '<path d="M3 7h15a3 3 0 0 1 3 3v7a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V7z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 7l12-4 1.5 4" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="16.5" cy="13.5" r="1.6" fill="currentColor"/>',
+  user: '<circle cx="12" cy="8" r="4" fill="currentColor"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7z" fill="currentColor"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 10h18M8 3v4M16 3v4" stroke="currentColor" stroke-width="2"/><path d="M7 13h2v2H7zM11 13h2v2h-2zM15 13h2v2h-2zM7 17h2v2H7zM11 17h2v2h-2z" fill="currentColor"/>',
+  coins: '<ellipse cx="12" cy="6" rx="8" ry="3" fill="currentColor"/><path d="M4 10c0 1.7 3.6 3 8 3s8-1.3 8-3M4 14c0 1.7 3.6 3 8 3s8-1.3 8-3M4 18c0 1.7 3.6 3 8 3s8-1.3 8-3" fill="none" stroke="currentColor" stroke-width="2"/>',
+  bank: '<path d="M2 9l10-6 10 6z" fill="currentColor"/><path d="M5 10v8M9.5 10v8M14.5 10v8M19 10v8" stroke="currentColor" stroke-width="2.2"/><path d="M3 20h18" stroke="currentColor" stroke-width="2.4"/>',
+  hand: '<circle cx="14" cy="7" r="5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 5h4M12 7h4M13 5c2 0 2 3 0 3l2 2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M2 15h4l5 2h5a1.5 1.5 0 0 1 0 3H9M6 15v6H2" fill="none" stroke="currentColor" stroke-width="2"/>',
+  people: '<circle cx="12" cy="7" r="3.2" fill="currentColor"/><circle cx="5" cy="9" r="2.4" fill="currentColor"/><circle cx="19" cy="9" r="2.4" fill="currentColor"/><path d="M6 20c0-3.6 2.7-6 6-6s6 2.4 6 6zM0.5 19c0-2.7 2-4.5 4.5-4.5 1 0 1.8.2 2.5.7-1 1-1.8 2.2-2 3.8zM23.5 19c0-2.7-2-4.5-4.5-4.5-1 0-1.8.2-2.5.7 1 1 1.8 2.2 2 3.8z" fill="currentColor"/>',
+  rupee: '<circle cx="12" cy="12" r="10" fill="currentColor"/><path d="M8 7h8M8 10h8M9 7c5 0 5 6 0 6h-1l6 5" fill="none" stroke="#4a1a63" stroke-width="1.8" stroke-linejoin="round"/>',
+};
+const icon = (name, size = 18) =>
+  `<svg class="ic" width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">${ICON[name]}</svg>`;
+
+const card = (iconName, title, body, cls = "") =>
+  `<section class="card ${cls}"><h3>${icon(iconName)}<span>${esc(title)}</span></h3><div class="body">${body}</div></section>`;
+
+const payTypeLabel = (t) => (t === "BANK" ? "Bank" : t === "CASH" ? "Cash" : t);
+const hasAmount = (v) => v !== null && v !== undefined && v !== "" && Number(v) !== 0;
+
+/** Earnings or deductions as their own coloured table; blank rows keep the two the same height. */
+function moneyTable(kind, title, lines, total, totalLabel, height) {
+  const body = lines
+    .map((l) => `<tr><td>${esc(l.label)}</td><td class="num">${esc(inr(l.amount))}</td></tr>`)
+    .concat(Array.from({ length: Math.max(0, height - lines.length) }, () => '<tr class="blank"><td>&nbsp;</td><td></td></tr>'))
+    .join("");
+  return `<div class="money ${kind}"><div class="mh">${esc(title)}</div><table>
+  <thead><tr><th>Description</th><th class="num">Amount (₹)</th></tr></thead>
+  <tbody>${body}</tbody>
+  <tfoot><tr><td>${esc(totalLabel)}</td><td class="num">${esc(inr(total))}</td></tr></tfoot>
+</table></div>`;
+}
 
 function payslipHtml(s, { logo = logoDataUri() } = {}) {
   const e = s.employee || {};
   const a = s.attendance || {};
   const st = s.statutory || {};
   const f = s.final || {};
+  const co = s.company || {};
+  const adv = s.advance || null;
+  const ctc = s.employer_contribution || null;
   const earnings = printable(s.earnings && s.earnings.lines);
   const deductions = printable(s.deductions && s.deductions.lines);
-  const rows = Math.max(earnings.length, deductions.length);
-  const pair = [];
-  for (let i = 0; i < rows; i += 1) {
-    const er = earnings[i];
-    const dr = deductions[i];
-    pair.push(
-      `<tr><td>${er ? esc(er.label) : ""}</td><td class="num">${er ? esc(inr(er.amount)) : ""}</td>` +
-        `<td>${dr ? esc(dr.label) : ""}</td><td class="num">${dr ? esc(inr(dr.amount)) : ""}</td></tr>`
-    );
-  }
+  const height = Math.max(earnings.length, deductions.length);
+  const payType = payTypeLabel(e.pay_type);
+
+  /* ---- attendance / salary basis: the optional lines only when they apply ---- */
   const otLine =
     Number(a.approved_ot_hours) > 0
       ? row("Approved OT", `${a.approved_ot_hours} h${a.ot_hourly_rate ? ` @ ${inr(a.ot_hourly_rate)}/h` : ""} = ${inr(a.ot_amount)}`)
       : "";
+  const basis = `<table class="kv">
+    ${row("Monthly Gross (Fixed)", inr(a.monthly_gross))}${row("Salary Days", a.salary_days)}${row("Daily Rate", inr(a.daily_rate))}
+    ${row("Standard Working Hours / Day", a.nrm_hours === null || a.nrm_hours === undefined ? null : `${a.nrm_hours} h`)}
+    ${Number(a.missing_hours) > 0 ? row("Missing Hours", `${a.missing_hours} h = ${inr(a.missing_hours_deduction)}`) : ""}
+    ${Number(a.extra_days) > 0 ? row("Extra Days", `${a.extra_days} = ${inr(a.extra_day_amount)}`) : ""}${otLine}
+  </table>`;
+
+  const employee = `<table class="kv">
+    ${row("Name", e.employee_name)}${row("Employee ID", e.employee_id)}${row("Designation", e.designation_name)}
+    ${row("Department", e.department_name)}${row("Outlet", e.store_name)}${row("Date of Joining", e.date_of_joining)}
+    ${row("Payroll Month", s.period && s.period.label)}${row("Payment Type", payType)}
+    ${row("Bank Name", e.bank_name)}${row("Bank Account", e.bank_account_masked)}${row("PAN", e.pan_masked)}
+  </table>`;
+
+  /* ---- the three informational cards: each only when it applies ---- */
+  const cards = [];
+  if (st.pf_applicable || st.esi_applicable) {
+    // Schema version 1 carried only the masked numbers; print what it has.
+    const pick = (full, masked) => (full !== undefined ? full : masked);
+    // A month cut by a PF ceiling change: one short line per period, under the table.
+    const periods = st.pf_applicable && Array.isArray(st.pf_periods) ? st.pf_periods : [];
+    const pfPeriods = periods.length
+      ? `<div class="note">${periods
+          .map((p) => esc(`PF ${p.from ? p.from.slice(8, 10) : ""}-${p.to ? p.to.slice(8, 10) : ""} (ceiling ${inr(p.monthly_wage_ceiling)}): wage ${inr(p.pf_wage)}, PF ${inr(p.employee_pf)}`))
+          .join("<br>")}</div>`
+      : "";
+    cards.push(card("bank", "Statutory Information", `<table class="kv">
+      ${st.pf_applicable ? `${row("UAN", pick(st.uan, st.uan_masked))}${row("PF Number", pick(st.pf_number, st.pf_number_masked))}${row("PF Wage", hasAmount(st.pf_wage) ? inr(st.pf_wage) : null)}` : ""}
+      ${st.esi_applicable ? `${row("ESI Number", pick(st.esi_number, st.esi_number_masked))}${row("ESI Wage", hasAmount(st.esi_wage) ? inr(st.esi_wage) : null)}` : ""}
+      ${row("PF Establishment Code", st.pf_applicable ? co.pf_establishment_code : null)}
+      ${row("ESI Establishment Code", st.esi_applicable ? co.esi_establishment_code : null)}
+    </table>${pfPeriods}`, "stat"));
+  }
+  if (adv && (hasAmount(adv.closing_balance) || hasAmount(adv.recovery_this_month))) {
+    cards.push(card("hand", "Advance Details", `<table class="kv">
+      ${row("Advance Opening Balance", inr(adv.opening_balance))}
+      ${row("Recovery This Month", inr(adv.recovery_this_month))}
+    </table><div class="hl"><span>Advance Closing Balance</span><b>${esc(inr(adv.closing_balance))}</b></div>`));
+  }
+  if (ctc && ctc.monthly_ctc) {
+    cards.push(card("people", "CTC / Employer Contribution", `<table class="kv">
+      ${hasAmount(ctc.employer_pf) ? row("Employer PF Contribution", inr(ctc.employer_pf)) : ""}
+      ${hasAmount(ctc.employer_esi) ? row("Employer ESI Contribution", inr(ctc.employer_esi)) : ""}
+      ${hasAmount(ctc.other) ? row("Other Employer Contribution", inr(ctc.other)) : ""}
+    </table>${hasAmount(ctc.total) ? `<div class="hl"><span>Total Employer Contribution</span><b>${esc(inr(ctc.total))}</b></div>` : ""}
+    <table class="kv">
+      ${row("Monthly Gross (Fixed)", inr(ctc.monthly_gross))}
+      ${row("Monthly CTC", inr(ctc.monthly_ctc))}
+      ${row("Annual CTC", inr(ctc.annual_ctc))}
+    </table><div class="note">Paid by the company over and above your salary; not part of Earnings or Deductions.${hasAmount(ctc.other) ? " Other = EDLI and PF admin charges." : ""}</div>`, "ctc"));
+  }
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>Salary Payslip</title><style>
-  @page { size: A4; margin: 12mm; }
+  @page { size: A4; margin: 10mm 11mm; }
   * { box-sizing: border-box; }
-  body { font-family: Arial, Helvetica, sans-serif; font-size: 11px; color: #1a202c; margin: 0; }
-  .head { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #2d3748; padding-bottom: 10px; gap: 16px; }
-  .brand { min-width: 0; }
-  .logo { display: block; width: 150px; height: auto; }
-  .co { font-size: 18px; font-weight: bold; }
-  .addr { color: #4a5568; margin-top: 4px; font-size: 10px; max-width: 360px; white-space: pre-line; }
-  .title { text-align: right; flex-shrink: 0; }
-  .title .t1 { font-size: 16px; font-weight: bold; }
-  .title .t2 { font-size: 13px; color: #2d3748; margin-top: 2px; }
-  table, tr { page-break-inside: avoid; }
-  .net { margin: 12px 0; padding: 10px 12px; background: #f0fff4; border: 1px solid #9ae6b4; display: flex; justify-content: space-between; align-items: center; }
-  .net .amt { font-size: 20px; font-weight: bold; }
-  h3 { font-size: 12px; margin: 14px 0 4px; text-transform: uppercase; letter-spacing: .04em; color: #2d3748; }
+  html, body { margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.35; color: ${C.ink};
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   table { width: 100%; border-collapse: collapse; }
-  .kv td { padding: 2px 4px; vertical-align: top; }
-  .kv .k { color: #4a5568; width: 50%; white-space: nowrap; }
-  .kv.wide .k { width: 32%; }
-  .grid { display: flex; gap: 16px; }
-  .grid > div { flex: 1; }
-  .ed th, .ed td { border: 1px solid #cbd5e0; padding: 4px 6px; }
-  .ed th { background: #edf2f7; text-align: left; }
+  section, table, tr, .netbar, .final { page-break-inside: avoid; break-inside: avoid; }
   .num { text-align: right; white-space: nowrap; }
-  .tot td { font-weight: bold; background: #f7fafc; }
-  .fin td { padding: 3px 6px; }
-  .foot { margin-top: 18px; color: #718096; font-size: 9px; border-top: 1px solid #e2e8f0; padding-top: 6px; }
+  .ic { flex-shrink: 0; color: ${C.purple}; }
+
+  /* header */
+  .head { display: flex; justify-content: space-between; align-items: stretch; border-bottom: 2px solid ${C.purple}; }
+  .brand { min-width: 0; padding: 0 12px 6px 0; }
+  .logo { display: block; width: 190px; height: auto; }
+  .co { font-size: 18px; font-weight: bold; color: ${C.purple}; }
+  .addr { color: ${C.muted}; margin-top: 4px; font-size: 9px; max-width: 380px; white-space: pre-line; }
+  .title { position: relative; flex-shrink: 0; width: 230px; color: #fff; text-align: right; padding: 12px 14px 10px 44px;
+    background: linear-gradient(135deg, ${C.purple}, ${C.purpleDark}); clip-path: polygon(30px 0, 100% 0, 100% 100%, 0 100%); }
+  .title::before { content: ""; position: absolute; left: 22px; top: 0; bottom: 0; width: 5px; background: ${C.orange};
+    transform: skewX(-16deg); transform-origin: top; }
+  .title .t1 { font-size: 17px; font-weight: bold; letter-spacing: .03em; text-transform: uppercase; }
+  .title .t2 { font-size: 12px; margin-top: 3px; }
+  .title .t2::after { content: ""; display: block; margin: 4px 0 0 auto; width: 90px; height: 2px; background: ${C.orange}; }
+
+  /* prominent net pay */
+  .netbar { display: flex; justify-content: space-between; align-items: center; margin: 7px 0; padding: 4px 4px 4px 12px;
+    background: ${C.purpleTint}; border: 1px solid ${C.purpleLine}; border-radius: 6px; }
+  .netbar .lab { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: bold; color: ${C.purpleDark}; }
+  .netbar .amt { font-size: 20px; font-weight: bold; color: #fff; background: ${C.purpleDark}; padding: 4px 16px; border-radius: 5px;
+    border-left: 4px solid ${C.orange}; }
+
+  /* cards */
+  .grid { display: flex; gap: 7px; margin-bottom: 7px; }
+  .grid > .card { flex: 1 1 0; min-width: 0; }
+  .card { border: 1px solid ${C.purpleLine}; border-radius: 6px; overflow: hidden; }
+  .card h3 { display: flex; align-items: center; gap: 7px; margin: 0; padding: 4px 10px; font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .03em; color: ${C.purpleDark}; background: ${C.purpleTint}; border-bottom: 1px solid ${C.purpleLine}; }
+  .card .body { padding: 4px 9px 5px; }
+  .kv td { padding: 1px 0; vertical-align: top; }
+  .kv .k { color: ${C.muted}; width: 40%; }
+  .kv .c { color: ${C.muted}; width: 10px; padding: 1px 4px; }
+  .kv .v { font-weight: 600; word-break: break-word; }
+  .grid3 { font-size: 9.5px; }
+  .grid3 .kv .k { width: auto; white-space: nowrap; }
+  .grid3 .kv .v { white-space: nowrap; text-align: right; }
+  .hl span { white-space: nowrap; }
+  .basis .kv .k { width: 52%; }
+  .hl { display: flex; justify-content: space-between; gap: 6px; margin: 3px 0; padding: 3px 6px; border-radius: 4px; font-weight: bold;
+    color: ${C.purpleDark}; background: ${C.purpleTint}; border-left: 3px solid ${C.purple}; }
+  .hl b { white-space: nowrap; }
+  .note { color: ${C.muted}; font-size: 8px; margin-top: 3px; }
+
+  /* earnings and deductions, side by side */
+  .ed { border: 1px solid ${C.purpleLine}; border-radius: 6px; overflow: hidden; margin-bottom: 7px; }
+  .ed > h3 { display: flex; align-items: center; gap: 7px; margin: 0; padding: 4px 10px; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: .03em; color: #fff; background: ${C.purple}; border-bottom: 2px solid ${C.orange}; }
+  .ed > h3 .ic { color: #fff; }
+  .pair { display: flex; gap: 6px; padding: 5px; }
+  .money { flex: 1 1 0; min-width: 0; border-radius: 4px; overflow: hidden; }
+  .money .mh { padding: 3px 8px; font-size: 11px; font-weight: bold; text-transform: uppercase; }
+  .money th, .money td { padding: 2px 8px; text-align: left; }
+  .money th { font-size: 9.5px; }
+  .money th.num, .money td.num { text-align: right; }
+  .money tbody td { border-top: 1px solid; }
+  .money tfoot td { font-size: 12px; font-weight: bold; padding: 4px 8px; border-top: 1.5px solid; }
+  .earn { border: 1px solid ${C.greenLine}; }
+  .earn .mh, .earn th, .earn tfoot td { color: ${C.green}; background: ${C.greenTint}; }
+  .earn tbody td, .earn tfoot td { border-color: ${C.greenLine}; }
+  .ded { border: 1px solid ${C.redLine}; }
+  .ded .mh, .ded th, .ded tfoot td { color: ${C.red}; background: ${C.redTint}; }
+  .ded tbody td, .ded tfoot td { border-color: ${C.redLine}; }
+
+  /* net pay */
+  .final { display: flex; align-items: center; gap: 14px; padding: 6px 8px 6px 14px; border-radius: 6px; color: #fff;
+    background: linear-gradient(135deg, ${C.purple}, ${C.purpleDark}); }
+  .final .ic { color: #fff; }
+  .final .calc { flex: 1; }
+  .final .calc table td { padding: 2px 0; font-size: 11px; }
+  .final .calc .k { width: 50%; }
+  .final .calc .c { width: 12px; }
+  .final .calc .v { font-weight: bold; }
+  .final .box { text-align: center; padding: 4px 18px; border-radius: 6px; border: 1px solid rgba(255,255,255,.55);
+    border-bottom: 3px solid ${C.orange}; background: rgba(255,255,255,.08); }
+  .final .box .l { font-size: 12px; font-weight: bold; }
+  .final .box .amt { font-size: 24px; font-weight: bold; margin-top: 2px; white-space: nowrap; }
+
+  .foot { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; padding-top: 5px;
+    border-top: 1.5px solid ${C.orange}; font-size: 8.5px; color: ${C.muted}; }
+  .foot .tag { color: ${C.purple}; font-weight: bold; letter-spacing: .05em; white-space: nowrap; }
+  .foot .tag i { color: ${C.orange}; font-style: normal; padding: 0 5px; }
 </style></head><body>
-<div class="head">
-  <div class="brand">${logo ? `<img class="logo" src="${logo}" alt="${esc((s.company && s.company.name) || "DailyNeeds")}">` : `<div class="co">${esc((s.company && s.company.name) || "")}</div>`}${s.company && s.company.address ? `<div class="addr">${esc(s.company.address)}</div>` : ""}</div>
+<header class="head">
+  <div class="brand">${logo ? `<img class="logo" src="${logo}" alt="${esc(co.name || "DailyNeeds")}">` : `<div class="co">${esc(co.name || "")}</div>`}${co.address ? `<div class="addr">${esc(co.address)}</div>` : ""}</div>
   <div class="title"><div class="t1">Salary Payslip</div><div class="t2">${esc(s.period && s.period.label)}</div></div>
-</div>
-<div class="net"><div>Net Pay${e.pay_type ? ` (${esc(e.pay_type === "BANK" ? "Bank" : e.pay_type === "CASH" ? "Cash" : e.pay_type)})` : ""}</div><div class="amt">${esc(inr(f.net_pay))}</div></div>
+</header>
+<div class="netbar"><div class="lab">${icon("wallet", 24)}<span>Net Pay${payType ? ` (${esc(payType)})` : ""}</span></div><div class="amt">${esc(inr(f.net_pay))}</div></div>
 <div class="grid">
-  <div><h3>Employee</h3><table class="kv">
-    ${row("Name", e.employee_name)}${row("Employee ID", e.employee_id)}${row("Designation", e.designation_name)}
-    ${row("Outlet", e.store_name)}${row("Department", e.department_name)}${row("Date of Joining", e.date_of_joining)}
-    ${row("Payroll Month", s.period && s.period.label)}${row("Payment Type", e.pay_type === "BANK" ? "Bank" : e.pay_type === "CASH" ? "Cash" : e.pay_type)}
-    ${row("Bank", e.bank_name)}${row("Bank Account", e.bank_account_masked)}${row("PAN", e.pan_masked)}
-  </table></div>
-  <div><h3>Attendance / Salary Basis</h3><table class="kv">
-    ${row("Monthly Gross", inr(a.monthly_gross))}${row("Salary Days", a.salary_days)}${row("Daily Rate", inr(a.daily_rate))}
-    ${row("Standard Working Hours / Day", a.nrm_hours === null || a.nrm_hours === undefined ? null : `${a.nrm_hours} h`)}${Number(a.missing_hours) > 0 ? row("Missing Hours", `${a.missing_hours} h = ${inr(a.missing_hours_deduction)}`) : ""}
-    ${Number(a.extra_days) > 0 ? row("Extra Days", `${a.extra_days} = ${inr(a.extra_day_amount)}`) : ""}${otLine}
-  </table></div>
+  ${card("user", "Employee Details", employee)}
+  ${card("calendar", "Attendance / Salary Basis", basis, "basis")}
 </div>
-<h3>Earnings and Deductions</h3>
-<table class="ed">
-  <tr><th>Earnings</th><th class="num">Amount</th><th>Deductions</th><th class="num">Amount</th></tr>
-  ${pair.join("")}
-  <tr class="tot"><td>Total Earnings</td><td class="num">${esc(inr(s.earnings && s.earnings.total))}</td><td>Total Deductions</td><td class="num">${esc(inr(s.deductions && s.deductions.total))}</td></tr>
-</table>
-${st.pf_applicable || st.esi_applicable ? `<h3>Statutory</h3><table class="kv wide">
-  ${st.pf_applicable ? `${row("UAN", st.uan_masked)}${row("PF Number", st.pf_number_masked)}${row("PF Wage", st.pf_wage ? inr(st.pf_wage) : null)}${(Array.isArray(st.pf_periods) ? st.pf_periods : []).map((p) => row(`PF ${p.from ? p.from.slice(8, 10) : ""}-${p.to ? p.to.slice(8, 10) : ""} (ceiling ${inr(p.monthly_wage_ceiling)})`, `Wage ${inr(p.pf_wage)} / PF ${inr(p.employee_pf)}`)).join("")}` : ""}
-  ${st.esi_applicable ? `${row("ESI Number", st.esi_number_masked)}${row("ESI Wage", st.esi_wage ? inr(st.esi_wage) : null)}` : ""}
-  ${row("PF Establishment Code", st.pf_applicable && s.company ? s.company.pf_establishment_code : null)}
-  ${row("ESI Establishment Code", st.esi_applicable && s.company ? s.company.esi_establishment_code : null)}
-</table>` : ""}
-<h3>Net Pay</h3>
-<table class="kv fin wide">
-  ${row("Net Pay before rounding", inr(f.net_pay_before_rounding))}
-  ${row("Net Pay Rounding", inr(f.net_pay_rounding))}
-  <tr><td class="k"><b>Final Net Pay</b></td><td class="v"><b>${esc(inr(f.net_pay))}</b></td></tr>
-</table>
-<div class="foot">This is a system-generated payslip and does not require a signature.</div>
+<section class="ed"><h3>${icon("coins")}<span>Earnings &amp; Deductions</span></h3><div class="pair">
+  ${moneyTable("earn", "Earnings / Additions", earnings, s.earnings && s.earnings.total, "Total Earnings", height)}
+  ${moneyTable("ded", "Deductions / Less", deductions, s.deductions && s.deductions.total, "Total Deductions", height)}
+</div></section>
+${cards.length ? `<div class="grid grid3">${cards.join("")}</div>` : ""}
+<section class="final">
+  ${icon("rupee", 34)}
+  <div class="calc"><table>
+    <tr><td class="k">Net Pay Before Rounding</td><td class="c">:</td><td class="v">${esc(inr(f.net_pay_before_rounding))}</td></tr>
+    <tr><td class="k">Round-off</td><td class="c">:</td><td class="v">${esc(inr(f.net_pay_rounding))}</td></tr>
+  </table></div>
+  <div class="box"><div class="l">Final Net Pay</div><div class="amt">${esc(inr(f.net_pay))}</div></div>
+</section>
+<footer class="foot"><span>This is a system-generated payslip and does not require a signature.</span><span class="tag">THANK YOU<i>|</i>STAY SAFE<i>|</i>GROW TOGETHER</span></footer>
 </body></html>`;
 }
 
