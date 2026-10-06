@@ -7,11 +7,19 @@ const denomination = require("./cash_denomination");
 /**
  * Cash Payment report - the monthly workbook Accounts pays cash salaries from.
  *
- *   Sheet 1  Cash Denomination   employee-wise net pay with the note / coin
- *                                count for each, column totals, and the
- *                                month's denomination summary
- *   Sheet 2  Acknowledgement     employee-wise net pay with a blank signature
- *                                column for the physical acknowledgement
+ *   Sheet 1  Cash Denomination            employee-wise net pay with the note /
+ *                                         coin count for each, column totals,
+ *                                         and the month's denomination summary
+ *   Sheet 2  Cash Salary Acknowledgement  employee-wise net pay with a blank
+ *                                         signature column
+ *
+ * THE LAYOUT IS THE AUGUST 2026 WORKBOOK ACCOUNTS ALREADY USED
+ * ("PayrollSummaryReport for Aug26.xlsx"): company name and "<report> - <Mon
+ * YYYY>" banners, one bordered header row with an autofilter, S.No restarting
+ * per location, the denominations as live ROUNDDOWN formulas with a per-row
+ * Total check, and a SUBTOTAL total row - so filtering one location gives that
+ * location's cash. Added to it: S.No and Location on the denomination sheet,
+ * Indian rupee formats, the denomination summary and the print setup.
  *
  * A PRESENTATION OF THE FINALIZED PAYRUN, NOTHING MORE. Net pay is the stored
  * `payrun_employee_calculation.net_pay` of an APPROVED_LOCKED row, as the
@@ -43,16 +51,28 @@ const employeeRef = (r) => ({
   outlet: r.store_name || null,
 });
 
+const outletKey = (e) => (e.outlet || "").toLocaleUpperCase("en-IN");
+
 /** Outlet, then employee code: the same order every time for the same month. */
 const byOutletThenCode = (a, b) => {
-  const oa = (a.outlet || "").toLocaleUpperCase("en-IN");
-  const ob = (b.outlet || "").toLocaleUpperCase("en-IN");
+  const oa = outletKey(a);
+  const ob = outletKey(b);
   if (oa !== ob) {
     if (!oa) return 1; // an employee with no outlet goes last, not first
     if (!ob) return -1;
     return oa < ob ? -1 : 1;
   }
   return a.employee_id - b.employee_id;
+};
+
+/**
+ * S.No restarts at 1 for each outlet, as on the August workbook Accounts
+ * already uses: cash is counted out location by location.
+ */
+const numberWithinOutlet = (e, i, list) => {
+  let sno = 1;
+  for (let j = i - 1; j >= 0 && outletKey(list[j]) === outletKey(e); j -= 1) sno += 1;
+  return { sno, ...e };
 };
 
 const integrity = (message, detail = {}) => new PayrollReportError(500, "CASH_REPORT_INTEGRITY", message, detail);
@@ -123,7 +143,8 @@ function prepare({ period, rows, reference }) {
     .filter((r) => money(r.net_pay) > 0)
     .map((r) => ({ ...employeeRef(r), net_pay: paise(money(r.net_pay)) / 100 }))
     .sort(byOutletThenCode)
-    .map((e, i) => ({ sno: i + 1, ...e, counts: denomination.breakdown(e.net_pay) }));
+    .map(numberWithinOutlet)
+    .map((e) => ({ ...e, counts: denomination.breakdown(e.net_pay) }));
   if (employees.length === 0) {
     throw new PayrollReportError(404, "NO_CASH_EMPLOYEES", MESSAGES.NO_CASH_EMPLOYEES, { excluded });
   }
@@ -171,11 +192,12 @@ const filename = (period) => `Cash Payment - ${MONTH_SHORT[period.month - 1]} ${
 const INR = '[>=10000000]"₹"##\\,##\\,##\\,##0;[>=100000]"₹"##\\,##\\,##0;"₹"##,##0';
 const COUNT = '#,##0;-#,##0;"-"';
 
+// The August workbook's look: Calibri, thin black borders, no shading.
 const FONT = "Calibri";
-const THIN = { style: "thin", color: { argb: "FF808080" } };
+const THIN = { style: "thin", color: { argb: "FF000000" } };
 const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
-const HEADER_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFD9E1F2" } };
-const TOTAL_FILL = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF2F2F2" } };
+
+const SHEET = Object.freeze({ DENOMINATION: "Cash Denomination", ACKNOWLEDGEMENT: "Cash Salary Acknowledgement" });
 
 /** Text a spreadsheet must never evaluate: a leading = + - @ is neutralised. */
 const safeText = (v) => {
@@ -190,25 +212,41 @@ const colLetter = (n) => {
   return s;
 };
 
-function styleRange(ws, row, fromCol, toCol, style) {
-  for (let c = fromCol; c <= toCol; c += 1) Object.assign(ws.getCell(row, c), style);
+function style(ws, row, fromCol, toCol, props) {
+  for (let c = fromCol; c <= toCol; c += 1) Object.assign(ws.getCell(row, c), props);
 }
 
-function titleBlock(ws, lastCol, lines) {
-  lines.forEach((line, i) => {
+/** Row 1 the company, row 2 "<report> - <Mon YYYY>", both across the sheet, bordered, as in August. */
+function banner(ws, lastCol, { company, title, period, sizes }) {
+  const lines = [company, `${title} - ${MONTH_SHORT[period.month - 1]} ${period.year}`];
+  lines.forEach((text, i) => {
     const row = i + 1;
     ws.mergeCells(row, 1, row, lastCol);
+    style(ws, row, 1, lastCol, { border: BORDER });
     const cell = ws.getCell(row, 1);
-    cell.value = line.text;
-    cell.font = { name: FONT, bold: Boolean(line.bold), size: line.size || 10, italic: Boolean(line.italic) };
+    cell.value = safeText(text);
+    cell.font = { name: FONT, bold: true, size: sizes[i] };
     cell.alignment = { horizontal: "center", vertical: "middle" };
-    ws.getRow(row).height = line.height || 16;
+    ws.getRow(row).height = sizes[i] + 5;
   });
 }
 
-function pageSetup(ws, { orientation, lastCol, lastRow, titleRows }) {
+function header(ws, row, columns, { size, height }) {
+  columns.forEach((c, i) => {
+    ws.getCell(row, i + 1).value = c.header;
+    ws.getColumn(i + 1).width = c.width;
+  });
+  style(ws, row, 1, columns.length, {
+    font: { name: FONT, bold: true, size },
+    border: BORDER,
+    alignment: { horizontal: "center", vertical: "middle", wrapText: true },
+  });
+  ws.getRow(row).height = height;
+}
+
+function pageSetup(ws, { orientation, lastCol, lastRow, headerRow }) {
   ws.pageSetup = {
-    paperSize: 9, // A4
+    paperSize: 9, // A4, as August
     orientation,
     fitToPage: true,
     fitToWidth: 1,
@@ -216,99 +254,97 @@ function pageSetup(ws, { orientation, lastCol, lastRow, titleRows }) {
     horizontalCentered: true,
     margins: { left: 0.4, right: 0.4, top: 0.5, bottom: 0.6, header: 0.3, footer: 0.3 },
     printArea: `A1:${colLetter(lastCol)}${lastRow}`,
-    printTitlesRow: titleRows,
+    printTitlesRow: `${headerRow}:${headerRow}`,
   };
   ws.headerFooter = { oddFooter: "&L&8&A&R&8Page &P of &N" };
 }
 
-const EMPLOYEE_COLUMNS = [
-  { header: "S.No", width: 6 },
-  { header: "Employee Code", width: 11 },
-  { header: "Employee Name", width: 28 },
-  { header: "Location / Outlet", width: 22 },
-  { header: "Net Pay", width: 13 },
-];
+const HEADER_ROW = 3;
+const FIRST_DATA = HEADER_ROW + 1;
+
+/** One employee's denomination cells as August had them: live formulas, each on what the larger ones left. */
+function denominationFormula(r, k, firstDenomCol) {
+  const denoms = denomination.DENOMINATIONS;
+  const taken = denoms.slice(0, k).map((d, j) => `-${d}*${colLetter(firstDenomCol + j)}${r}`).join("");
+  return `ROUNDDOWN((E${r}${taken})/${denoms[k]},0)`;
+}
 
 function denominationSheet(wb, data) {
   const denoms = denomination.DENOMINATIONS;
-  const firstDenomCol = EMPLOYEE_COLUMNS.length + 1;
-  const lastCol = EMPLOYEE_COLUMNS.length + denoms.length;
-  const ws = wb.addWorksheet("Cash Denomination", { views: [{ state: "frozen", xSplit: 3, ySplit: 5 }] });
+  const columns = [
+    { header: "S.No", width: 6 },
+    { header: "Employee Code", width: 9.5 },
+    { header: "Employee Name", width: 27 },
+    { header: "Location / Outlet", width: 15 },
+    { header: "Net Pay", width: 11 },
+    ...denoms.map((d) => ({ header: `₹${d}`, width: 7.5 })),
+    { header: "Total", width: 11 },
+  ];
+  const firstDenomCol = 6;
+  const totalCol = columns.length;
+  const ws = wb.addWorksheet(SHEET.DENOMINATION, { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
 
-  titleBlock(ws, lastCol, [
-    { text: "CASH SALARY PAYMENT - DENOMINATION", bold: true, size: 14, height: 22 },
-    { text: `Payroll Month: ${data.period.label}`, bold: true, size: 11, height: 18 },
-    { text: `Finalized payroll (Approved & Locked) - Cash payment mode only. Employees: ${data.employees.length}.`, italic: true, size: 9 },
-  ]);
+  banner(ws, totalCol, { company: data.company, title: "Cash Payment Denomination", period: data.period, sizes: [16, 12] });
+  header(ws, HEADER_ROW, columns, { size: 11, height: 30 });
 
-  // Two header rows: the employee columns span both, the denominations sit
-  // under one "No. of Notes / Coins" band.
-  const H1 = 4;
-  const H2 = 5;
-  EMPLOYEE_COLUMNS.forEach((c, i) => {
-    ws.mergeCells(H1, i + 1, H2, i + 1);
-    ws.getCell(H1, i + 1).value = c.header;
-    ws.getColumn(i + 1).width = c.width;
-  });
-  ws.mergeCells(H1, firstDenomCol, H1, lastCol);
-  ws.getCell(H1, firstDenomCol).value = "Denomination (No. of Notes / Coins)";
-  denoms.forEach((d, i) => {
-    ws.getCell(H2, firstDenomCol + i).value = `₹${d}`;
-    ws.getColumn(firstDenomCol + i).width = 9.5;
-  });
-  for (const r of [H1, H2]) {
-    styleRange(ws, r, 1, lastCol, {
-      font: { name: FONT, bold: true, size: 10 },
-      fill: HEADER_FILL,
-      border: BORDER,
-      alignment: { horizontal: "center", vertical: "middle", wrapText: true },
-    });
-    ws.getRow(r).height = 18;
-  }
-
-  const firstData = H2 + 1;
   data.employees.forEach((e, i) => {
-    const r = firstData + i;
+    const r = FIRST_DATA + i;
     const row = ws.getRow(r);
-    row.values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), e.net_pay, ...denoms.map((d) => e.counts[d])];
-    row.height = 16;
-    styleRange(ws, r, 1, lastCol, { font: { name: FONT, size: 10 }, border: BORDER });
-    ws.getCell(r, 1).alignment = { horizontal: "center" };
-    ws.getCell(r, 2).alignment = { horizontal: "center" };
-    ws.getCell(r, 3).alignment = { indent: 1 };
-    ws.getCell(r, 4).alignment = { indent: 1 };
+    row.values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), e.net_pay];
+    denoms.forEach((d, k) => {
+      row.getCell(firstDenomCol + k).value = { formula: denominationFormula(r, k, firstDenomCol), result: e.counts[d] };
+    });
+    const parts = denoms.map((d, k) => `${d}*${colLetter(firstDenomCol + k)}${r}`).join(",");
+    row.getCell(totalCol).value = { formula: `SUM(${parts})`, result: e.net_pay };
+    style(ws, r, 1, totalCol, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { vertical: "middle" } });
+    ws.getCell(r, 1).alignment = { horizontal: "center", vertical: "middle" };
+    ws.getCell(r, 2).alignment = { horizontal: "left", vertical: "middle" };
     ws.getCell(r, 5).numFmt = INR;
-    for (let c = firstDenomCol; c <= lastCol; c += 1) {
+    ws.getCell(r, 5).alignment = { horizontal: "center", vertical: "middle" };
+    for (let c = firstDenomCol; c < totalCol; c += 1) {
       ws.getCell(r, c).numFmt = COUNT;
-      ws.getCell(r, c).alignment = { horizontal: "center" };
+      ws.getCell(r, c).alignment = { horizontal: "center", vertical: "middle" };
     }
+    ws.getCell(r, totalCol).numFmt = INR;
+    ws.getCell(r, totalCol).alignment = { horizontal: "center", vertical: "middle" };
   });
-  const lastData = firstData + data.employees.length - 1;
+  const lastData = FIRST_DATA + data.employees.length - 1;
+  ws.autoFilter = { from: { row: HEADER_ROW, column: 1 }, to: { row: lastData, column: totalCol } };
 
-  // Column totals: the count of each denomination, then what that count is worth.
+  // SUBTOTAL, not SUM: with the autofilter on one location, the totals are
+  // that location's cash - what August's SUBTOTAL row was there for.
   const totalRow = lastData + 1;
   const amountRow = lastData + 2;
+  const subtotal = (c) => `SUBTOTAL(9,${colLetter(c)}${FIRST_DATA}:${colLetter(c)}${lastData})`;
   ws.mergeCells(totalRow, 1, totalRow, 4);
   ws.getCell(totalRow, 1).value = "Total";
-  ws.getCell(totalRow, 5).value = { formula: `SUM(E${firstData}:E${lastData})`, result: data.total_net_pay };
+  ws.getCell(totalRow, 5).value = { formula: subtotal(5), result: data.total_net_pay };
+  data.denomination_totals.forEach((t, i) => {
+    ws.getCell(totalRow, firstDenomCol + i).value = { formula: subtotal(firstDenomCol + i), result: t.count };
+  });
+  ws.getCell(totalRow, totalCol).value = { formula: subtotal(totalCol), result: data.denomination_amount };
   ws.mergeCells(amountRow, 1, amountRow, 5);
-  ws.getCell(amountRow, 1).value = "Denomination Amount (₹)";
+  ws.getCell(amountRow, 1).value = "Denomination Amount";
   data.denomination_totals.forEach((t, i) => {
     const col = colLetter(firstDenomCol + i);
-    ws.getCell(totalRow, firstDenomCol + i).value = { formula: `SUM(${col}${firstData}:${col}${lastData})`, result: t.count };
     ws.getCell(amountRow, firstDenomCol + i).value = { formula: `${col}${totalRow}*${t.denomination}`, result: t.amount };
   });
+  ws.getCell(amountRow, totalCol).value = {
+    formula: `SUM(${colLetter(firstDenomCol)}${amountRow}:${colLetter(totalCol - 1)}${amountRow})`,
+    result: data.denomination_amount,
+  };
   for (const r of [totalRow, amountRow]) {
-    styleRange(ws, r, 1, lastCol, { font: { name: FONT, bold: true, size: 10 }, fill: TOTAL_FILL, border: BORDER });
-    ws.getCell(r, 1).alignment = { horizontal: "right" };
-    ws.getRow(r).height = 18;
+    style(ws, r, 1, totalCol, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "center", vertical: "middle" } });
+    ws.getCell(r, 1).alignment = { horizontal: "left", vertical: "middle" };
+    ws.getRow(r).height = 16;
   }
   ws.getCell(totalRow, 5).numFmt = INR;
-  for (let c = firstDenomCol; c <= lastCol; c += 1) {
+  ws.getCell(totalRow, totalCol).numFmt = INR;
+  ws.getCell(amountRow, totalCol).numFmt = INR;
+  for (let c = firstDenomCol; c < totalCol; c += 1) {
     ws.getCell(totalRow, c).numFmt = COUNT;
-    ws.getCell(totalRow, c).alignment = { horizontal: "center" };
     ws.getCell(amountRow, c).numFmt = INR;
-    ws.getCell(amountRow, c).alignment = { horizontal: "right", shrinkToFit: true };
+    ws.getCell(amountRow, c).alignment = { horizontal: "center", vertical: "middle", shrinkToFit: true };
   }
 
   // The month's summary: total notes / coins Accounts must draw, and the check
@@ -321,22 +357,14 @@ function denominationSheet(wb, data) {
   ["Denomination", "Qty", "Amount"].forEach((h, i) => {
     ws.getCell(SH, 3 + i).value = h;
   });
-  styleRange(ws, SH, 3, 5, {
-    font: { name: FONT, bold: true, size: 10 },
-    fill: HEADER_FILL,
-    border: BORDER,
-    alignment: { horizontal: "center" },
-  });
+  style(ws, SH, 3, 5, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "center" } });
   data.denomination_totals.forEach((t, i) => {
     const r = SH + 1 + i;
-    const col = colLetter(firstDenomCol + i);
     ws.getCell(r, 3).value = `₹${t.denomination}`;
-    ws.getCell(r, 4).value = { formula: `${col}${totalRow}`, result: t.count };
+    ws.getCell(r, 4).value = { formula: `${colLetter(firstDenomCol + i)}${totalRow}`, result: t.count };
     ws.getCell(r, 5).value = { formula: `D${r}*${t.denomination}`, result: t.amount };
-    styleRange(ws, r, 3, 5, { font: { name: FONT, size: 10 }, border: BORDER });
-    ws.getCell(r, 3).alignment = { horizontal: "center" };
+    style(ws, r, 3, 5, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { horizontal: "center" } });
     ws.getCell(r, 4).numFmt = COUNT;
-    ws.getCell(r, 4).alignment = { horizontal: "center" };
     ws.getCell(r, 5).numFmt = INR;
   });
   const firstSummary = SH + 1;
@@ -344,24 +372,24 @@ function denominationSheet(wb, data) {
   const grandRow = lastSummary + 1;
   const netRow = grandRow + 1;
   const diffRow = grandRow + 2;
-  const summaryTotals = [
+  [
     [grandRow, "Grand Cash Required", { formula: `SUM(E${firstSummary}:E${lastSummary})`, result: data.denomination_amount }],
     [netRow, "Total Net Pay", { formula: `E${totalRow}`, result: data.total_net_pay }],
     [diffRow, "Difference (must be 0)", { formula: `E${grandRow}-E${netRow}`, result: data.denomination_amount - data.total_net_pay }],
-  ];
-  for (const [r, label, value] of summaryTotals) {
+  ].forEach(([r, label, value]) => {
     ws.mergeCells(r, 3, r, 4);
     ws.getCell(r, 3).value = label;
     ws.getCell(r, 5).value = value;
-    styleRange(ws, r, 3, 5, { font: { name: FONT, bold: true, size: 10 }, fill: TOTAL_FILL, border: BORDER });
+    style(ws, r, 3, 5, { font: { name: FONT, bold: true, size: 10 }, border: BORDER });
     ws.getCell(r, 3).alignment = { horizontal: "right" };
     ws.getCell(r, 5).numFmt = INR;
-  }
+    ws.getCell(r, 5).alignment = { horizontal: "center" };
+  });
   let lastRow = diffRow;
 
   if (data.excluded.length) {
     lastRow += 2;
-    ws.mergeCells(lastRow, 1, lastRow, lastCol);
+    ws.mergeCells(lastRow, 1, lastRow, totalCol);
     ws.getCell(lastRow, 1).value = `Not included - zero or negative Net Pay (nothing payable in cash): ${data.excluded
       .map((e) => `${e.employee_id} ${safeText(e.employee_name)} (${e.net_pay})`)
       .join(", ")}`;
@@ -370,77 +398,53 @@ function denominationSheet(wb, data) {
     ws.getRow(lastRow).height = 30;
   }
 
-  pageSetup(ws, { orientation: "landscape", lastCol, lastRow, titleRows: `${H1}:${H2}` });
+  pageSetup(ws, { orientation: "landscape", lastCol: totalCol, lastRow, headerRow: HEADER_ROW });
   return ws;
 }
 
 function acknowledgementSheet(wb, data) {
-  const columns = [...EMPLOYEE_COLUMNS, { header: "Employee Signature", width: 30 }];
+  // August's columns and widths; "Category Name" there is the location.
+  const columns = [
+    { header: "S.No", width: 9 },
+    { header: "Employee Code", width: 17.8 },
+    { header: "Employee Name", width: 27 },
+    { header: "Location / Outlet", width: 17.7 },
+    { header: "Net Pay", width: 11.6 },
+    { header: "Employee Signature", width: 27.6 },
+  ];
   const lastCol = columns.length;
-  const ws = wb.addWorksheet("Acknowledgement", { views: [{ state: "frozen", ySplit: 4 }] });
+  const ws = wb.addWorksheet(SHEET.ACKNOWLEDGEMENT, { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
 
-  titleBlock(ws, lastCol, [
-    { text: "CASH SALARY ACKNOWLEDGEMENT", bold: true, size: 14, height: 22 },
-    { text: `Payroll Month: ${data.period.label}`, bold: true, size: 11, height: 18 },
-    { text: "Received the Net Pay shown against my name in cash.", italic: true, size: 9 },
-  ]);
+  banner(ws, lastCol, { company: data.company, title: "Cash Salary Acknowledgement", period: data.period, sizes: [14, 14] });
+  header(ws, HEADER_ROW, columns, { size: 10, height: 19.2 });
 
-  const H = 4;
-  columns.forEach((c, i) => {
-    ws.getCell(H, i + 1).value = c.header;
-    ws.getColumn(i + 1).width = c.width;
-  });
-  styleRange(ws, H, 1, lastCol, {
-    font: { name: FONT, bold: true, size: 10 },
-    fill: HEADER_FILL,
-    border: BORDER,
-    alignment: { horizontal: "center", vertical: "middle", wrapText: true },
-  });
-  ws.getRow(H).height = 20;
-
-  const firstData = H + 1;
   data.employees.forEach((e, i) => {
-    const r = firstData + i;
+    const r = FIRST_DATA + i;
     ws.getRow(r).values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), e.net_pay, null];
-    // Tall enough to sign in.
-    ws.getRow(r).height = 30;
-    styleRange(ws, r, 1, lastCol, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { vertical: "middle" } });
+    // Room for a signature.
+    ws.getRow(r).height = 24;
+    style(ws, r, 1, lastCol, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { horizontal: "left", vertical: "middle" } });
     ws.getCell(r, 1).alignment = { horizontal: "center", vertical: "middle" };
-    ws.getCell(r, 2).alignment = { horizontal: "center", vertical: "middle" };
-    ws.getCell(r, 3).alignment = { vertical: "middle", indent: 1 };
-    ws.getCell(r, 4).alignment = { vertical: "middle", indent: 1 };
+    ws.getCell(r, 5).alignment = { horizontal: "center", vertical: "middle" };
     ws.getCell(r, 5).numFmt = INR;
   });
-  const lastData = firstData + data.employees.length - 1;
+  const lastData = FIRST_DATA + data.employees.length - 1;
+  ws.autoFilter = { from: { row: HEADER_ROW, column: 1 }, to: { row: lastData, column: lastCol } };
 
   const totalRow = lastData + 1;
   ws.mergeCells(totalRow, 1, totalRow, 4);
   ws.getCell(totalRow, 1).value = "Total";
-  ws.getCell(totalRow, 5).value = { formula: `SUM(E${firstData}:E${lastData})`, result: data.total_net_pay };
-  styleRange(ws, totalRow, 1, lastCol, { font: { name: FONT, bold: true, size: 10 }, fill: TOTAL_FILL, border: BORDER });
-  ws.getCell(totalRow, 1).alignment = { horizontal: "right" };
+  ws.getCell(totalRow, 5).value = { formula: `SUBTOTAL(9,E${FIRST_DATA}:E${lastData})`, result: data.total_net_pay };
+  style(ws, totalRow, 1, lastCol, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "left", vertical: "middle" } });
+  ws.getCell(totalRow, 5).alignment = { horizontal: "center", vertical: "middle" };
   ws.getCell(totalRow, 5).numFmt = INR;
-  ws.getRow(totalRow).height = 20;
+  ws.getRow(totalRow).height = 18;
 
-  // Who paid it out and who checked it.
-  const signRow = totalRow + 3;
-  [
-    [1, 2, "Paid by"],
-    [3, 4, "Verified by"],
-    [5, 6, "Approved by"],
-  ].forEach(([from, to, label]) => {
-    ws.mergeCells(signRow, from, signRow, to);
-    const cell = ws.getCell(signRow, from);
-    cell.value = label;
-    cell.font = { name: FONT, bold: true, size: 10 };
-    cell.alignment = { horizontal: "center" };
-    cell.border = { top: THIN };
-  });
-
-  pageSetup(ws, { orientation: "portrait", lastCol, lastRow: signRow, titleRows: `${H}:${H}` });
+  pageSetup(ws, { orientation: "landscape", lastCol, lastRow: totalRow, headerRow: HEADER_ROW });
   return ws;
 }
 
+/** @param data `prepare`'s result plus `company`, the name for the banner. */
 async function buildWorkbook(data) {
   const wb = new ExcelJS.Workbook();
   // Fixed metadata: the same month exports the same workbook.
@@ -448,9 +452,10 @@ async function buildWorkbook(data) {
   wb.creator = "Payroll";
   wb.created = stamp;
   wb.modified = stamp;
-  denominationSheet(wb, data);
-  acknowledgementSheet(wb, data);
+  const content = { ...data, company: data.company || "Cash Salary Payment" };
+  denominationSheet(wb, content);
+  acknowledgementSheet(wb, content);
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
-module.exports = { MESSAGES, prepare, buildWorkbook, filename, INR, COUNT };
+module.exports = { MESSAGES, SHEET, prepare, buildWorkbook, filename, INR, COUNT };

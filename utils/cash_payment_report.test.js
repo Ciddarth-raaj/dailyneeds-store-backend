@@ -33,7 +33,7 @@ const referenceFor = (rows) => {
 const prepare = (rows, reference = referenceFor(rows)) => cash.prepare({ period: AUG, rows, reference });
 
 describe("prepare - population and order", () => {
-  it("lists every finalized Cash employee, sorted by outlet then employee code, with S.No", () => {
+  it("lists every finalized Cash employee, sorted by outlet then employee code, S.No restarting per outlet", () => {
     const rows = [row(30, 12345, { store_name: "Velachery" }), row(12, 18760), row(5, 700, { store_name: "velachery" }), row(7, 500)];
     const data = prepare(rows);
     assert.deepEqual(
@@ -41,8 +41,8 @@ describe("prepare - population and order", () => {
       [
         [1, 7, "Anna Nagar"],
         [2, 12, "Anna Nagar"],
-        [3, 5, "velachery"],
-        [4, 30, "Velachery"],
+        [1, 5, "velachery"],
+        [2, 30, "Velachery"],
       ]
     );
     assert.equal(data.period.label, "August 2026");
@@ -149,7 +149,13 @@ describe("workbook", () => {
     await wb.xlsx.load(await cash.buildWorkbook(data));
     return wb;
   };
-  const textOf = (cell) => (cell.value && typeof cell.value === "object" && "result" in cell.value ? cell.value.result : cell.value);
+  // ExcelJS drops a cached formula result of 0 when it reads a file back (the
+  // file has it - see "cached results" below), so a formula without one is 0 here.
+  const textOf = (cell) => {
+    const v = cell.value;
+    if (v && typeof v === "object" && "formula" in v) return v.result === undefined ? 0 : v.result;
+    return v;
+  };
   const rowValues = (ws, r, from, to) => {
     const out = [];
     for (let c = from; c <= to; c += 1) out.push(textOf(ws.getCell(r, c)));
@@ -163,31 +169,42 @@ describe("workbook", () => {
   };
 
   const rows = [row(12, 18760), row(7, 12345), row(30, 999, { store_name: "Velachery" }), row(9, 0)];
-  const data = prepare(rows);
+  const data = { ...prepare(rows), company: "DAILY NEEDS DEPARTMENT STORE" };
 
   it("has the two sheets, in order", async () => {
     const wb = await load(data);
-    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Acknowledgement"]);
+    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Cash Salary Acknowledgement"]);
   });
 
-  it("Cash Denomination: headers, rows, totals and the denomination summary", async () => {
+  it("Cash Denomination: August's banner, header, live denomination formulas and row check", async () => {
     const ws = (await load(data)).getWorksheet("Cash Denomination");
-    assert.equal(ws.getCell("A1").value, "CASH SALARY PAYMENT - DENOMINATION");
-    assert.equal(ws.getCell("A2").value, "Payroll Month: August 2026");
-    assert.deepEqual(rowValues(ws, 4, 1, 6), ["S.No", "Employee Code", "Employee Name", "Location / Outlet", "Net Pay", "Denomination (No. of Notes / Coins)"]);
-    assert.deepEqual(rowValues(ws, 5, 6, 14), ["₹500", "₹200", "₹100", "₹50", "₹20", "₹10", "₹5", "₹2", "₹1"]);
-    assert.deepEqual(rowValues(ws, 6, 1, 14), [1, 7, "Employee 7", "Anna Nagar", 12345, 24, 1, 1, 0, 2, 0, 1, 0, 0]);
-    assert.deepEqual(rowValues(ws, 7, 1, 14), [2, 12, "Employee 12", "Anna Nagar", 18760, 37, 1, 0, 1, 0, 1, 0, 0, 0]);
-    assert.deepEqual(rowValues(ws, 8, 1, 5), [3, 30, "Employee 30", "Velachery", 999]);
+    assert.equal(ws.getCell("A1").value, "DAILY NEEDS DEPARTMENT STORE");
+    assert.equal(ws.getCell("A1").font.size, 16);
+    assert.equal(ws.getCell("A2").value, "Cash Payment Denomination - Aug 2026");
+    assert.deepEqual(rowValues(ws, 3, 1, 15), [
+      "S.No", "Employee Code", "Employee Name", "Location / Outlet", "Net Pay",
+      "₹500", "₹200", "₹100", "₹50", "₹20", "₹10", "₹5", "₹2", "₹1", "Total",
+    ]);
+    assert.deepEqual(rowValues(ws, 4, 1, 15), [1, 7, "Employee 7", "Anna Nagar", 12345, 24, 1, 1, 0, 2, 0, 1, 0, 0, 12345]);
+    assert.deepEqual(rowValues(ws, 5, 1, 15), [2, 12, "Employee 12", "Anna Nagar", 18760, 37, 1, 0, 1, 0, 1, 0, 0, 0, 18760]);
+    assert.deepEqual(rowValues(ws, 6, 1, 5), [1, 30, "Employee 30", "Velachery", 999], "S.No restarts for a new location");
+    // The same formulas as August's sheet, shifted one column for S.No.
+    assert.equal(ws.getCell("F4").value.formula, "ROUNDDOWN((E4)/500,0)");
+    assert.equal(ws.getCell("G4").value.formula, "ROUNDDOWN((E4-500*F4)/200,0)");
+    assert.equal(ws.getCell("N4").value.formula, "ROUNDDOWN((E4-500*F4-200*G4-100*H4-50*I4-20*J4-10*K4-5*L4-2*M4)/1,0)");
+    assert.equal(ws.getCell("O4").value.formula, "SUM(500*F4,200*G4,100*H4,50*I4,20*J4,10*K4,5*L4,2*M4,1*N4)");
+  });
 
-    // Total row: formulas with their results, so the file reads right before Excel recalculates.
-    assert.equal(ws.getCell("A9").value, "Total");
-    assert.equal(ws.getCell("E9").value.formula, "SUM(E6:E8)");
-    assert.equal(ws.getCell("E9").value.result, 12345 + 18760 + 999);
-    assert.equal(ws.getCell("F9").value.formula, "SUM(F6:F8)");
-    assert.equal(ws.getCell("F9").value.result, 24 + 37 + 1);
-    assert.equal(ws.getCell("A10").value, "Denomination Amount (₹)");
-    assert.equal(ws.getCell("F10").value.result, (24 + 37 + 1) * 500);
+  it("Cash Denomination: SUBTOTAL totals, denomination amounts and the summary", async () => {
+    const ws = (await load(data)).getWorksheet("Cash Denomination");
+    assert.equal(ws.getCell("A7").value, "Total");
+    assert.equal(ws.getCell("E7").value.formula, "SUBTOTAL(9,E4:E6)");
+    assert.equal(ws.getCell("E7").value.result, 12345 + 18760 + 999);
+    assert.equal(ws.getCell("F7").value.formula, "SUBTOTAL(9,F4:F6)");
+    assert.equal(ws.getCell("F7").value.result, 24 + 37 + 1);
+    assert.equal(ws.getCell("O7").value.result, 32104);
+    assert.equal(ws.getCell("A8").value, "Denomination Amount");
+    assert.equal(ws.getCell("F8").value.result, (24 + 37 + 1) * 500);
 
     const s = findRow(ws, 3, "Total Notes / Coins Required");
     assert.ok(s, "summary heading");
@@ -199,57 +216,77 @@ describe("workbook", () => {
     assert.equal(textOf(ws.getCell(grand + 1, 5)), 32104);
     assert.equal(ws.getCell(grand + 2, 3).value, "Difference (must be 0)");
     assert.equal(ws.getCell(grand + 2, 5).value.formula, `E${grand}-E${grand + 1}`);
-
-    // The zero net pay employee is named as left out.
     assert.match(String(ws.getCell(grand + 4, 1).value), /Not included.*9 Employee 9/);
   });
 
-  it("Cash Denomination: formatting and landscape page setup", async () => {
+  it("Cash Denomination: formatting, autofilter and landscape page setup", async () => {
     const ws = (await load(data)).getWorksheet("Cash Denomination");
-    assert.equal(ws.getCell("E6").numFmt, unescaped(cash.INR));
-    assert.equal(ws.getCell("F6").numFmt, cash.COUNT);
-    assert.equal(ws.getCell("A4").font.bold, true);
-    assert.equal(ws.getCell("A6").border.top.style, "thin");
-    assert.equal(ws.getColumn(3).width, 28);
+    assert.equal(ws.getCell("E4").numFmt, unescaped(cash.INR));
+    assert.equal(ws.getCell("F4").numFmt, cash.COUNT);
+    assert.equal(ws.getCell("A3").font.bold, true);
+    assert.equal(ws.getCell("A4").font.size, 10);
+    assert.equal(ws.getCell("A4").border.top.style, "thin");
+    assert.equal(ws.getColumn(3).width, 27);
+    assert.equal(ws.autoFilter, "A3:O6");
     assert.equal(ws.pageSetup.orientation, "landscape");
     assert.equal(ws.pageSetup.paperSize, 9);
     assert.equal(ws.pageSetup.fitToPage, true);
     assert.equal(ws.pageSetup.fitToWidth, 1);
     assert.equal(ws.pageSetup.fitToHeight, 0);
-    assert.match(ws.pageSetup.printArea, /^A1:N\d+$/);
-    assert.equal(ws.pageSetup.printTitlesRow, "4:5");
+    assert.match(ws.pageSetup.printArea, /^A1:O\d+$/);
+    assert.equal(ws.pageSetup.printTitlesRow, "3:3");
     assert.equal(ws.views[0].state, "frozen");
   });
 
-  it("Acknowledgement: headers, blank signature, total, portrait", async () => {
-    const ws = (await load(data)).getWorksheet("Acknowledgement");
-    assert.equal(ws.getCell("A1").value, "CASH SALARY ACKNOWLEDGEMENT");
-    assert.deepEqual(rowValues(ws, 4, 1, 6), ["S.No", "Employee Code", "Employee Name", "Location / Outlet", "Net Pay", "Employee Signature"]);
-    assert.deepEqual(rowValues(ws, 5, 1, 6), [1, 7, "Employee 7", "Anna Nagar", 12345, null]);
-    assert.equal(ws.getRow(5).height, 30);
-    assert.equal(ws.getCell("A8").value, "Total");
-    assert.equal(ws.getCell("E8").value.result, 32104);
-    assert.equal(ws.getCell("E5").numFmt, unescaped(cash.INR));
-    assert.equal(ws.pageSetup.orientation, "portrait");
+  it("Cash Salary Acknowledgement: August's columns, blank signature, total, landscape", async () => {
+    const ws = (await load(data)).getWorksheet("Cash Salary Acknowledgement");
+    assert.equal(ws.getCell("A1").value, "DAILY NEEDS DEPARTMENT STORE");
+    assert.equal(ws.getCell("A2").value, "Cash Salary Acknowledgement - Aug 2026");
+    assert.deepEqual(rowValues(ws, 3, 1, 6), ["S.No", "Employee Code", "Employee Name", "Location / Outlet", "Net Pay", "Employee Signature"]);
+    assert.deepEqual(rowValues(ws, 4, 1, 6), [1, 7, "Employee 7", "Anna Nagar", 12345, null]);
+    assert.deepEqual(rowValues(ws, 6, 1, 4), [1, 30, "Employee 30", "Velachery"]);
+    assert.equal(ws.getRow(4).height, 24);
+    assert.equal(ws.getCell("A7").value, "Total");
+    assert.equal(ws.getCell("E7").value.formula, "SUBTOTAL(9,E4:E6)");
+    assert.equal(ws.getCell("E7").value.result, 32104);
+    assert.equal(ws.getCell("E4").numFmt, unescaped(cash.INR));
+    assert.equal(ws.getColumn(6).width, 27.6);
+    assert.equal(ws.autoFilter, "A3:F6");
+    assert.equal(ws.pageSetup.orientation, "landscape");
     assert.equal(ws.pageSetup.fitToWidth, 1);
-    assert.equal(ws.pageSetup.printTitlesRow, "4:4");
-    assert.match(ws.pageSetup.printArea, /^A1:F\d+$/);
-    assert.ok(findRow(ws, 1, "Paid by"));
+    assert.equal(ws.pageSetup.printTitlesRow, "3:3");
+    assert.match(ws.pageSetup.printArea, /^A1:F7$/);
+  });
+
+  it("cached results: every formula cell carries its value, zeros included, so the file reads right before Excel recalculates", async () => {
+    // exceljs's own zip library, so the test needs nothing exceljs does not already bring.
+    const JSZip = require(require.resolve("jszip", { paths: [require.resolve("exceljs")] }));
+    const zip = await JSZip.loadAsync(await cash.buildWorkbook(data));
+    const xml = await zip.file("xl/worksheets/sheet1.xml").async("string");
+    const formulaCells = xml.match(/<c [^>]*>(?:(?!<\/c>).)*<f>(?:(?!<\/c>).)*<\/c>/g);
+    assert.ok(formulaCells.length > 0);
+    for (const c of formulaCells) assert.match(c, /<v>-?\d+<\/v>/, c);
+    assert.match(xml, /<c r="I4"[^>]*><f>[^<]*<\/f><v>0<\/v><\/c>/, "a zero count is cached as 0");
+  });
+
+  it("without a configured company the banner still names the report", async () => {
+    const ws = (await load(prepare([row(1, 500)]))).getWorksheet("Cash Denomination");
+    assert.equal(ws.getCell("A1").value, "Cash Salary Payment");
   });
 
   it("neutralises text a spreadsheet would evaluate", async () => {
     const ws = (await load(prepare([row(1, 500, { employee_name: "=HYPERLINK(1)" })]))).getWorksheet("Cash Denomination");
-    assert.equal(ws.getCell("C6").value, "'=HYPERLINK(1)");
+    assert.equal(ws.getCell("C4").value, "'=HYPERLINK(1)");
   });
 
   it("the same month produces the same workbook", async () => {
     const a = await cash.buildWorkbook(data);
-    const b = await cash.buildWorkbook(prepare([...rows].reverse()));
-    const sheetXml = async (buf) => {
+    const b = await cash.buildWorkbook({ ...prepare([...rows].reverse()), company: data.company });
+    const sheetValues = async (buf) => {
       const wb = new ExcelJS.Workbook();
       await wb.xlsx.load(buf);
       return wb.worksheets.map((ws) => ws.getSheetValues().map((r) => JSON.stringify(r)).join("\n"));
     };
-    assert.deepEqual(await sheetXml(a), await sheetXml(b));
+    assert.deepEqual(await sheetValues(a), await sheetValues(b));
   });
 });

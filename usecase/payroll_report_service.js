@@ -7,6 +7,7 @@ const { monthLabel, MONTH_SHORT } = require("../constants/payslip");
 const Q = require("../utils/payroll_report_query");
 const statutoryFiles = require("../utils/payroll_statutory_files");
 const cashPayment = require("../utils/cash_payment_report");
+const { resolvePayslipCompany } = require("../utils/payslip_company");
 const rules = require("./report_template_rules");
 const { EMPLOYMENT_TYPES } = require("../utils/employment_classification");
 
@@ -84,6 +85,13 @@ class PayrollReportService {
     this.repo = reportRepo;
     this.templates = templateRepo;
     this.withBrowser = deps.withBrowser || ((fn) => require("../services/pdf_browser").withBrowser(fn));
+    this.companyEnv =
+      deps.companyEnv ||
+      (() => ({
+        PAYSLIP_COMPANY_ID: process.env.PAYSLIP_COMPANY_ID,
+        PAYSLIP_COMPANY_NAME: process.env.PAYSLIP_COMPANY_NAME,
+        PAYSLIP_COMPANY_ADDRESS: process.env.PAYSLIP_COMPANY_ADDRESS,
+      }));
   }
 
   /* ------------------------------------------------------------- access */
@@ -824,6 +832,21 @@ class PayrollReportService {
   /* --------------------------------------------------------- cash payment */
 
   /**
+   * The company name for a report banner: the payslip issuer from Company
+   * Details, by the same rule as Publish (`utils/payslip_company.js`). A
+   * banner is not worth refusing a cash sheet over, so an unconfigured or
+   * ambiguous Company Details gives none.
+   */
+  async _companyName() {
+    if (typeof this.repo.listCompanies !== "function") return null;
+    try {
+      return resolvePayslipCompany(await this.repo.listCompanies(), this.companyEnv() || {}).name;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
    * CASH PAYMENT EXCEL - the month's Cash employees with their net pay, the
    * note / coin breakup and the acknowledgement sheet
    * (`utils/cash_payment_report.js`). The same export permission as the
@@ -841,7 +864,7 @@ class PayrollReportService {
       this.repo.cashPayrunTotals(scope),
     ]);
     const data = cashPayment.prepare({ period, rows, reference: { finalized: payrun.finalized, cash } });
-    const buffer = await cashPayment.buildWorkbook(data);
+    const buffer = await cashPayment.buildWorkbook({ ...data, company: await this._companyName() });
     await this._audit(
       actor,
       { dataset_key: CASH_PAYMENT_DATASET, field_keys: ["CASH_PAYMENT"], period, filters: {}, row_count: data.employees.length },

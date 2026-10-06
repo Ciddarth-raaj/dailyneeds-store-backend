@@ -161,6 +161,11 @@ class PayrollReportRepository {
     return { employees: Number(r.employees) || 0, net_pay: Math.round(Number(r.net_pay || 0) * 100) / 100 };
   }
 
+  /** Company Details, for the report banner - the records the payslip issuer is chosen from. */
+  listCompanies() {
+    return this.query("SELECT company_id, company_name, reg_address, pf_number, esi_number, status FROM company_details ORDER BY company_id", [], "LIST-COMPANIES");
+  }
+
   /* ------------------------------------------------------- statutory rows */
 
   /**

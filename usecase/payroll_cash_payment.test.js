@@ -71,7 +71,7 @@ const employeesOf = async (file) => {
   await wb.xlsx.load(file.buffer);
   const ws = wb.getWorksheet("Cash Denomination");
   const ids = [];
-  for (let r = 6; typeof ws.getCell(r, 1).value === "number"; r += 1) ids.push(ws.getCell(r, 2).value);
+  for (let r = 4; typeof ws.getCell(r, 1).value === "number"; r += 1) ids.push(ws.getCell(r, 2).value);
   return { wb, ids };
 };
 
@@ -104,8 +104,22 @@ describe("cashPaymentFile - population", () => {
   it("net pay in the file is exactly the stored finalized net pay", async () => {
     const { service } = setup([emp(1, { calc: { net_pay: "12345.00" } })]);
     const { wb } = await employeesOf(await service.cashPaymentFile(EXPORTER, AUG, null));
-    assert.equal(wb.getWorksheet("Cash Denomination").getCell("E6").value, 12345);
-    assert.equal(wb.getWorksheet("Acknowledgement").getCell("E5").value, 12345);
+    assert.equal(wb.getWorksheet("Cash Denomination").getCell("E4").value, 12345);
+    assert.equal(wb.getWorksheet("Cash Salary Acknowledgement").getCell("E4").value, 12345);
+  });
+
+  it("the banner names the company from Company Details; with none configured the file is still produced", async () => {
+    const stored = [emp(1)];
+    const { service } = setup(stored);
+    const banner = async (svc) => (await employeesOf(await svc.cashPaymentFile(EXPORTER, AUG, null))).wb.getWorksheet("Cash Denomination").getCell("A1").value;
+    assert.equal(await banner(service), "Cash Salary Payment", "no Company Details read available");
+
+    const repo = fakeRepo(stored);
+    repo.listCompanies = async () => [{ company_id: 1, company_name: "DAILY NEEDS DEPARTMENT STORE", status: 1 }];
+    assert.equal(await banner(buildService(repo, { logExport: async () => 1 }, { companyEnv: () => ({}) })), "DAILY NEEDS DEPARTMENT STORE");
+
+    repo.listCompanies = async () => [{ company_id: 1, company_name: "A", status: 1 }, { company_id: 2, company_name: "B", status: 1 }];
+    assert.equal(await banner(buildService(repo, { logExport: async () => 1 }, { companyEnv: () => ({}) })), "Cash Salary Payment", "ambiguous: no guess");
   });
 
   it("records the export in the audit log, without values", async () => {
