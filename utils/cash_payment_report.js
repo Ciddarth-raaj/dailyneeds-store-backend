@@ -3,16 +3,21 @@ const ExcelJS = require("exceljs");
 const { monthLabel, MONTH_SHORT } = require("../constants/payslip");
 const { PayrollReportError } = require("./payroll_report_query");
 const denomination = require("./cash_denomination");
+const { exitedByMonthEnd } = require("./payrun_eligibility");
 
 /**
  * Cash Payment report - the monthly workbook Accounts pays cash salaries from.
  *
  *   Sheet 1  Cash Denomination            employee-wise net pay with the note /
  *                                         coin count for each, and column totals
- *   Sheet 2  Denomination Total           the month's notes / coins required,
- *                                         Grand Cash Required = Total Net Pay
- *   Sheet 3  Cash Salary Acknowledgement  employee-wise net pay with a blank
- *                                         signature column
+ *   Sheet 2  Exit Employees               the same grid for employees who had
+ *                                         left by the month end, with Last
+ *                                         Working Day and a signature column
+ *   Sheet 3  Denomination Total           the month's notes / coins required
+ *                                         for both, Grand Cash Required =
+ *                                         Total Net Pay, and the split by sheet
+ *   Sheet 4  Cash Salary Acknowledgement  active employees' net pay with a
+ *                                         blank signature column
  *
  * THE LAYOUT IS THE AUGUST 2026 WORKBOOK ACCOUNTS ALREADY USED
  * ("PayrollSummaryReport for Aug26.xlsx"): company name and "<report> - <Mon
@@ -79,6 +84,17 @@ const numberWithinOutlet = (e, i, list) => {
   let sno = 1;
   for (let j = i - 1; j >= 0 && outletKey(list[j]) === outletKey(e); j -= 1) sno += 1;
   return { sno, ...e };
+};
+
+/** One sheet's own totals. */
+const groupTotals = (list) => {
+  const denominationTotals = denomination.totals(list.map((e) => e.counts));
+  return {
+    employees: list.length,
+    net_pay: list.reduce((s, e) => s + e.net_pay, 0),
+    denomination_totals: denominationTotals,
+    denomination_amount: denominationTotals.reduce((s, d) => s + d.amount, 0),
+  };
 };
 
 /** Employment type Contract on the Employee Master: paid by the contractor. */
@@ -157,24 +173,33 @@ function prepare({ period, rows, reference }) {
     .filter((r) => money(r.net_pay) <= 0)
     .map((r) => ({ ...employeeRef(r), net_pay: money(r.net_pay) }))
     .sort(byOutletThenCode);
-  const employees = cash
+  const paid = cash
     .filter((r) => money(r.net_pay) > 0)
-    .map((r) => ({ ...employeeRef(r), net_pay: paise(money(r.net_pay)) / 100 }))
+    .map((r) => ({
+      ...employeeRef(r),
+      net_pay: paise(money(r.net_pay)) / 100,
+      last_working_day: r.resignation_date || null,
+      // The Payrun screen's own Exited rule: left by the END of this month.
+      exited: exitedByMonthEnd({ year: period.year, month: period.month, ended_on: r.resignation_date || null }),
+    }))
     .sort(byOutletThenCode)
-    .map(numberWithinOutlet)
     .map((e) => ({ ...e, counts: denomination.breakdown(e.net_pay) }));
-  if (employees.length === 0) {
+  if (paid.length === 0) {
     throw new PayrollReportError(404, "NO_CASH_EMPLOYEES", MESSAGES.NO_CASH_EMPLOYEES, { excluded, contract });
   }
+  // Exit employees are paid off a sheet of their own; S.No restarts per
+  // outlet within each sheet.
+  const employees = paid.filter((e) => !e.exited).map(numberWithinOutlet);
+  const exitEmployees = paid.filter((e) => e.exited).map(numberWithinOutlet);
 
   // 4. Each employee's breakup equals their net pay (breakdown checks it; so
   // does this, independently).
-  for (const e of employees) {
+  for (const e of paid) {
     if (denomination.valueOf(e.counts) !== e.net_pay) throw integrity(`Denomination breakup for employee ${e.employee_id} does not equal Net Pay`);
   }
 
-  const totalNetPay = employees.reduce((s, e) => s + e.net_pay, 0);
-  const denominationTotals = denomination.totals(employees.map((e) => e.counts));
+  const totalNetPay = paid.reduce((s, e) => s + e.net_pay, 0);
+  const denominationTotals = denomination.totals(paid.map((e) => e.counts));
   const denominationAmount = denominationTotals.reduce((s, d) => s + d.amount, 0);
 
   // 5. Σ denomination value = report total.
@@ -184,9 +209,9 @@ function prepare({ period, rows, reference }) {
   // 1-3. Same employees and the same money as the payrun's own independent read.
   const refEmployees = Number(reference.cash && reference.cash.employees);
   const refNetPay = paise(Number(reference.cash && reference.cash.net_pay));
-  if (refEmployees !== employees.length || refNetPay !== paise(totalNetPay)) {
+  if (refEmployees !== paid.length || refNetPay !== paise(totalNetPay)) {
     throw integrity("The Cash Payment report does not reconcile with finalized payroll", {
-      report: { employees: employees.length, net_pay: totalNetPay },
+      report: { employees: paid.length, net_pay: totalNetPay },
       payroll: { employees: refEmployees, net_pay: refNetPay / 100 },
     });
   }
@@ -194,11 +219,14 @@ function prepare({ period, rows, reference }) {
   return {
     period: { year: period.year, month: period.month, label: monthLabel(period.year, period.month) },
     employees,
+    exit_employees: exitEmployees,
     excluded,
     contract,
+    // Every figure below is the whole month's cash: active and exit together.
     total_net_pay: totalNetPay,
     denomination_totals: denominationTotals,
     denomination_amount: denominationAmount,
+    groups: { active: groupTotals(employees), exit: groupTotals(exitEmployees) },
   };
 }
 
@@ -218,6 +246,7 @@ const BORDER = { top: THIN, left: THIN, bottom: THIN, right: THIN };
 
 const SHEET = Object.freeze({
   DENOMINATION: "Cash Denomination",
+  EXIT: "Exit Employees",
   TOTAL: "Denomination Total",
   ACKNOWLEDGEMENT: "Cash Salary Acknowledgement",
 });
@@ -286,44 +315,66 @@ const HEADER_ROW = 3;
 const FIRST_DATA = HEADER_ROW + 1;
 
 /** One employee's denomination cells as August had them: live formulas, each on what the larger ones left. */
-function denominationFormula(r, k, firstDenomCol) {
+function denominationFormula(r, k, netCol, firstDenomCol) {
   const denoms = denomination.DENOMINATIONS;
   const taken = denoms.slice(0, k).map((d, j) => `-${d}*${colLetter(firstDenomCol + j)}${r}`).join("");
-  return `ROUNDDOWN((E${r}${taken})/${denoms[k]},0)`;
+  return `ROUNDDOWN((${colLetter(netCol)}${r}${taken})/${denoms[k]},0)`;
 }
 
-function denominationSheet(wb, data) {
+/**
+ * An employee-wise denomination grid. The active employees' sheet is
+ * August's; the exit employees' sheet adds their Last Working Day and a
+ * signature column, because they are paid off this sheet alone.
+ */
+function denominationSheet(wb, data, { name, title, employees, totals, exit = false }) {
   const denoms = denomination.DENOMINATIONS;
   const columns = [
     { header: "S.No", width: 6 },
     { header: "Employee Code", width: 9.5 },
     { header: "Employee Name", width: 27 },
     { header: "Location / Outlet", width: 15 },
+    ...(exit ? [{ header: "Last Working Day", width: 12 }] : []),
     { header: "Net Pay", width: 11 },
     ...denoms.map((d) => ({ header: `₹${d}`, width: 7.5 })),
     { header: "Total", width: 11 },
+    ...(exit ? [{ header: "Employee Signature", width: 24 }] : []),
   ];
-  const firstDenomCol = 6;
-  const totalCol = columns.length;
-  const ws = wb.addWorksheet(SHEET.DENOMINATION, { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
+  const netCol = exit ? 6 : 5;
+  const firstDenomCol = netCol + 1;
+  const totalCol = firstDenomCol + denoms.length;
+  const lastCol = columns.length;
+  const ws = wb.addWorksheet(name, { views: [{ state: "frozen", ySplit: HEADER_ROW }] });
 
-  banner(ws, totalCol, { company: data.company, title: "Cash Payment Denomination", period: data.period, sizes: [16, 12] });
+  banner(ws, lastCol, { company: data.company, title, period: data.period, sizes: [16, 12] });
   header(ws, HEADER_ROW, columns, { size: 11, height: 30 });
 
-  data.employees.forEach((e, i) => {
+  if (employees.length === 0) {
+    ws.mergeCells(FIRST_DATA, 1, FIRST_DATA, lastCol);
+    const cell = ws.getCell(FIRST_DATA, 1);
+    cell.value = exit ? "No exit employees are paid in cash this month." : "No active employees are paid in cash this month.";
+    cell.font = { name: FONT, italic: true, size: 10 };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = BORDER;
+    pageSetup(ws, { orientation: "landscape", lastCol, lastRow: FIRST_DATA, headerRow: HEADER_ROW });
+    return null;
+  }
+
+  employees.forEach((e, i) => {
     const r = FIRST_DATA + i;
     const row = ws.getRow(r);
-    row.values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), e.net_pay];
+    row.values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), ...(exit ? [e.last_working_day || ""] : []), e.net_pay];
     denoms.forEach((d, k) => {
-      row.getCell(firstDenomCol + k).value = { formula: denominationFormula(r, k, firstDenomCol), result: e.counts[d] };
+      row.getCell(firstDenomCol + k).value = { formula: denominationFormula(r, k, netCol, firstDenomCol), result: e.counts[d] };
     });
     const parts = denoms.map((d, k) => `${d}*${colLetter(firstDenomCol + k)}${r}`).join(",");
     row.getCell(totalCol).value = { formula: `SUM(${parts})`, result: e.net_pay };
-    style(ws, r, 1, totalCol, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { vertical: "middle" } });
+    if (exit) row.height = 24; // room to sign
+    style(ws, r, 1, lastCol, { font: { name: FONT, size: 10 }, border: BORDER, alignment: { vertical: "middle" } });
     ws.getCell(r, 1).alignment = { horizontal: "center", vertical: "middle" };
     ws.getCell(r, 2).alignment = { horizontal: "left", vertical: "middle" };
-    ws.getCell(r, 5).numFmt = INR;
-    ws.getCell(r, 5).alignment = { horizontal: "center", vertical: "middle" };
+    if (exit) ws.getCell(r, 5).alignment = { horizontal: "center", vertical: "middle" };
+    ws.getCell(r, netCol).numFmt = INR;
+    ws.getCell(r, netCol).alignment = { horizontal: "center", vertical: "middle" };
     for (let c = firstDenomCol; c < totalCol; c += 1) {
       ws.getCell(r, c).numFmt = COUNT;
       ws.getCell(r, c).alignment = { horizontal: "center", vertical: "middle" };
@@ -331,37 +382,37 @@ function denominationSheet(wb, data) {
     ws.getCell(r, totalCol).numFmt = INR;
     ws.getCell(r, totalCol).alignment = { horizontal: "center", vertical: "middle" };
   });
-  const lastData = FIRST_DATA + data.employees.length - 1;
-  ws.autoFilter = { from: { row: HEADER_ROW, column: 1 }, to: { row: lastData, column: totalCol } };
+  const lastData = FIRST_DATA + employees.length - 1;
+  ws.autoFilter = { from: { row: HEADER_ROW, column: 1 }, to: { row: lastData, column: lastCol } };
 
   // SUBTOTAL, not SUM: with the autofilter on one location, the totals are
   // that location's cash - what August's SUBTOTAL row was there for.
   const totalRow = lastData + 1;
   const amountRow = lastData + 2;
   const subtotal = (c) => `SUBTOTAL(9,${colLetter(c)}${FIRST_DATA}:${colLetter(c)}${lastData})`;
-  ws.mergeCells(totalRow, 1, totalRow, 4);
+  ws.mergeCells(totalRow, 1, totalRow, netCol - 1);
   ws.getCell(totalRow, 1).value = "Total";
-  ws.getCell(totalRow, 5).value = { formula: subtotal(5), result: data.total_net_pay };
-  data.denomination_totals.forEach((t, i) => {
+  ws.getCell(totalRow, netCol).value = { formula: subtotal(netCol), result: totals.net_pay };
+  totals.denomination_totals.forEach((t, i) => {
     ws.getCell(totalRow, firstDenomCol + i).value = { formula: subtotal(firstDenomCol + i), result: t.count };
   });
-  ws.getCell(totalRow, totalCol).value = { formula: subtotal(totalCol), result: data.denomination_amount };
-  ws.mergeCells(amountRow, 1, amountRow, 5);
+  ws.getCell(totalRow, totalCol).value = { formula: subtotal(totalCol), result: totals.denomination_amount };
+  ws.mergeCells(amountRow, 1, amountRow, netCol);
   ws.getCell(amountRow, 1).value = "Denomination Amount";
-  data.denomination_totals.forEach((t, i) => {
+  totals.denomination_totals.forEach((t, i) => {
     const col = colLetter(firstDenomCol + i);
     ws.getCell(amountRow, firstDenomCol + i).value = { formula: `${col}${totalRow}*${t.denomination}`, result: t.amount };
   });
   ws.getCell(amountRow, totalCol).value = {
     formula: `SUM(${colLetter(firstDenomCol)}${amountRow}:${colLetter(totalCol - 1)}${amountRow})`,
-    result: data.denomination_amount,
+    result: totals.denomination_amount,
   };
   for (const r of [totalRow, amountRow]) {
-    style(ws, r, 1, totalCol, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "center", vertical: "middle" } });
+    style(ws, r, 1, lastCol, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "center", vertical: "middle" } });
     ws.getCell(r, 1).alignment = { horizontal: "left", vertical: "middle" };
     ws.getRow(r).height = 16;
   }
-  ws.getCell(totalRow, 5).numFmt = INR;
+  ws.getCell(totalRow, netCol).numFmt = INR;
   ws.getCell(totalRow, totalCol).numFmt = INR;
   ws.getCell(amountRow, totalCol).numFmt = INR;
   for (let c = firstDenomCol; c < totalCol; c += 1) {
@@ -370,19 +421,19 @@ function denominationSheet(wb, data) {
     ws.getCell(amountRow, c).alignment = { horizontal: "center", vertical: "middle", shrinkToFit: true };
   }
 
-  pageSetup(ws, { orientation: "landscape", lastCol: totalCol, lastRow: amountRow, headerRow: HEADER_ROW });
-  return { ws, firstData: FIRST_DATA, lastData, netPayCol: 5, firstDenomCol };
+  pageSetup(ws, { orientation: "landscape", lastCol, lastRow: amountRow, headerRow: HEADER_ROW });
+  return { sheet: name, firstData: FIRST_DATA, lastData, netCol, firstDenomCol };
 }
 
 /**
  * The month's totals on a sheet of their own: the notes / coins Accounts
- * must draw, and the check that they add up to the net pay being paid. Read
- * from the denomination sheet with SUM, not SUBTOTAL, so a location filter
- * there never changes the month's total here.
+ * must draw for active AND exit employees, and the check that they add up to
+ * the net pay being paid. Read from both denomination sheets with SUM, not
+ * SUBTOTAL, so a location filter there never changes the month's total here.
  */
-function totalSheet(wb, data, grid) {
+function totalSheet(wb, data, grids) {
   const columns = [
-    { header: "Denomination", width: 16 },
+    { header: "Denomination", width: 19 },
     { header: "Qty", width: 16 },
     { header: "Amount", width: 18 },
   ];
@@ -391,8 +442,9 @@ function totalSheet(wb, data, grid) {
   banner(ws, lastCol, { company: data.company, title: "Total Notes / Coins Required", period: data.period, sizes: [14, 12] });
   header(ws, HEADER_ROW, columns, { size: 11, height: 20 });
 
-  const source = `'${SHEET.DENOMINATION}'!`;
-  const range = (col) => `${source}${colLetter(col)}${grid.firstData}:${colLetter(col)}${grid.lastData}`;
+  const present = grids.filter(Boolean);
+  const rangeOf = (grid, col) => `'${grid.sheet}'!${colLetter(col)}${grid.firstData}:${colLetter(col)}${grid.lastData}`;
+  const sumOf = (pick) => `SUM(${present.map((g) => rangeOf(g, pick(g))).join(",")})`;
   const figure = (r, c, value, numFmt, bold = false) => {
     const cell = ws.getCell(r, c);
     cell.value = value;
@@ -409,7 +461,7 @@ function totalSheet(wb, data, grid) {
     label.font = { name: FONT, size: 11, bold: true };
     label.border = BORDER;
     label.alignment = { horizontal: "center", vertical: "middle" };
-    figure(r, 2, { formula: `SUM(${range(grid.firstDenomCol + i)})`, result: t.count }, COUNT);
+    figure(r, 2, { formula: sumOf((g) => g.firstDenomCol + i), result: t.count }, COUNT);
     figure(r, 3, { formula: `B${r}*${t.denomination}`, result: t.amount }, INR);
     ws.getRow(r).height = 18;
   });
@@ -419,7 +471,7 @@ function totalSheet(wb, data, grid) {
   const diffRow = grandRow + 2;
   [
     [grandRow, "Grand Cash Required", { formula: `SUM(C${FIRST_DATA}:C${lastDenom})`, result: data.denomination_amount }, INR],
-    [netRow, "Total Net Pay", { formula: `SUM(${range(grid.netPayCol)})`, result: data.total_net_pay }, INR],
+    [netRow, "Total Net Pay", { formula: sumOf((g) => g.netCol), result: data.total_net_pay }, INR],
     [diffRow, "Difference (must be 0)", { formula: `C${grandRow}-C${netRow}`, result: data.denomination_amount - data.total_net_pay }, INR],
   ].forEach(([r, label, value, numFmt]) => {
     ws.mergeCells(r, 1, r, 2);
@@ -431,7 +483,27 @@ function totalSheet(wb, data, grid) {
     figure(r, 3, value, numFmt, true);
     ws.getRow(r).height = 20;
   });
-  let lastRow = diffRow;
+  // Where the cash goes: which sheet pays it.
+  const splitHead = diffRow + 2;
+  ["Paid from", "Employees", "Net Pay"].forEach((h, i) => {
+    ws.getCell(splitHead, i + 1).value = h;
+  });
+  style(ws, splitHead, 1, 3, { font: { name: FONT, bold: true, size: 11 }, border: BORDER, alignment: { horizontal: "center", vertical: "middle" } });
+  [
+    [SHEET.DENOMINATION, data.groups.active],
+    [SHEET.EXIT, data.groups.exit],
+  ].forEach(([sheet, g], i) => {
+    const r = splitHead + 1 + i;
+    const label = ws.getCell(r, 1);
+    label.value = sheet;
+    label.font = { name: FONT, size: 11 };
+    label.border = BORDER;
+    label.alignment = { horizontal: "left", vertical: "middle" };
+    figure(r, 2, g.employees, "0");
+    figure(r, 3, g.net_pay, INR);
+  });
+  let lastRow = splitHead + 2;
+  const diffRowEnd = lastRow;
 
   const notes = [];
   if (data.contract && data.contract.length) {
@@ -443,7 +515,7 @@ function totalSheet(wb, data, grid) {
       .join(", ")}`);
   }
   for (const note of notes) {
-    lastRow += lastRow === diffRow ? 2 : 1;
+    lastRow += lastRow === diffRowEnd ? 2 : 1;
     ws.mergeCells(lastRow, 1, lastRow, lastCol);
     ws.getCell(lastRow, 1).value = note;
     ws.getCell(lastRow, 1).font = { name: FONT, italic: true, size: 9 };
@@ -472,6 +544,17 @@ function acknowledgementSheet(wb, data) {
   banner(ws, lastCol, { company: data.company, title: "Cash Salary Acknowledgement", period: data.period, sizes: [14, 14] });
   header(ws, HEADER_ROW, columns, { size: 10, height: 19.2 });
 
+  if (data.employees.length === 0) {
+    ws.mergeCells(FIRST_DATA, 1, FIRST_DATA, lastCol);
+    const cell = ws.getCell(FIRST_DATA, 1);
+    cell.value = "No active employees are paid in cash this month - see Exit Employees.";
+    cell.font = { name: FONT, italic: true, size: 10 };
+    cell.alignment = { horizontal: "center", vertical: "middle" };
+    cell.border = BORDER;
+    pageSetup(ws, { orientation: "landscape", lastCol, lastRow: FIRST_DATA, headerRow: HEADER_ROW });
+    return ws;
+  }
+
   data.employees.forEach((e, i) => {
     const r = FIRST_DATA + i;
     ws.getRow(r).values = [e.sno, e.employee_id, safeText(e.employee_name), safeText(e.outlet), e.net_pay, null];
@@ -488,7 +571,7 @@ function acknowledgementSheet(wb, data) {
   const totalRow = lastData + 1;
   ws.mergeCells(totalRow, 1, totalRow, 4);
   ws.getCell(totalRow, 1).value = "Total";
-  ws.getCell(totalRow, 5).value = { formula: `SUBTOTAL(9,E${FIRST_DATA}:E${lastData})`, result: data.total_net_pay };
+  ws.getCell(totalRow, 5).value = { formula: `SUBTOTAL(9,E${FIRST_DATA}:E${lastData})`, result: data.groups.active.net_pay };
   style(ws, totalRow, 1, lastCol, { font: { name: FONT, bold: true, size: 10 }, border: BORDER, alignment: { horizontal: "left", vertical: "middle" } });
   ws.getCell(totalRow, 5).alignment = { horizontal: "center", vertical: "middle" };
   ws.getCell(totalRow, 5).numFmt = INR;
@@ -507,8 +590,20 @@ async function buildWorkbook(data) {
   wb.created = stamp;
   wb.modified = stamp;
   const content = { ...data, company: data.company || "Cash Salary Payment" };
-  const grid = denominationSheet(wb, content);
-  totalSheet(wb, content, grid);
+  const active = denominationSheet(wb, content, {
+    name: SHEET.DENOMINATION,
+    title: "Cash Payment Denomination",
+    employees: content.employees,
+    totals: content.groups.active,
+  });
+  const exit = denominationSheet(wb, content, {
+    name: SHEET.EXIT,
+    title: "Exit Employees - Cash Payment",
+    employees: content.exit_employees,
+    totals: content.groups.exit,
+    exit: true,
+  });
+  totalSheet(wb, content, [active, exit]);
   acknowledgementSheet(wb, content);
   return Buffer.from(await wb.xlsx.writeBuffer());
 }

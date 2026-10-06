@@ -170,6 +170,30 @@ describe("prepare - Contract employees are paid by their contractor", () => {
   });
 });
 
+describe("prepare - exit employees", () => {
+  it("an employee who left by the month end goes to the exit list; later leavers stay active", () => {
+    const data = prepare([
+      row(1, 18760),
+      row(2, 12345, { resignation_date: "2026-08-20" }),
+      row(3, 999, { resignation_date: "2026-08-31" }),
+      row(4, 700, { resignation_date: "2026-09-02" }),
+    ]);
+    assert.deepEqual(data.employees.map((e) => e.employee_id), [1, 4], "left after August: still active for August");
+    assert.deepEqual(data.exit_employees.map((e) => [e.sno, e.employee_id, e.last_working_day]), [[1, 2, "2026-08-20"], [2, 3, "2026-08-31"]]);
+    assert.equal(data.total_net_pay, 18760 + 12345 + 999 + 700, "the month's cash is everybody's");
+    assert.equal(data.denomination_amount, data.total_net_pay);
+    assert.equal(data.groups.active.net_pay, 18760 + 700);
+    assert.equal(data.groups.exit.net_pay, 12345 + 999);
+    assert.equal(data.groups.active.denomination_amount + data.groups.exit.denomination_amount, data.total_net_pay);
+  });
+
+  it("a month whose only Cash employees have exited still produces the file", () => {
+    const data = prepare([row(2, 500, { resignation_date: "2026-08-10" })]);
+    assert.deepEqual(data.employees, []);
+    assert.equal(data.exit_employees.length, 1);
+  });
+});
+
 describe("filename", () => {
   it("is Cash Payment - <MMM YYYY>.xlsx", () => {
     assert.equal(cash.filename({ year: 2026, month: 8 }), "Cash Payment - Aug 2026.xlsx");
@@ -205,9 +229,9 @@ describe("workbook", () => {
   const rows = [row(12, 18760), row(7, 12345), row(30, 999, { store_name: "Velachery" }), row(9, 0)];
   const data = { ...prepare(rows), company: "DAILY NEEDS DEPARTMENT STORE" };
 
-  it("has the three sheets, in order", async () => {
+  it("has the four sheets, in order", async () => {
     const wb = await load(data);
-    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Denomination Total", "Cash Salary Acknowledgement"]);
+    assert.deepEqual(wb.worksheets.map((w) => w.name), ["Cash Denomination", "Exit Employees", "Denomination Total", "Cash Salary Acknowledgement"]);
   });
 
   it("Cash Denomination: August's banner, header, live denomination formulas and row check", async () => {
@@ -263,10 +287,13 @@ describe("workbook", () => {
     assert.equal(ws.getCell("C15").value.formula, "C13-C14");
     assert.equal(ws.getCell("C13").numFmt, unescaped(cash.INR));
     assert.equal(ws.getCell("B4").numFmt, cash.COUNT);
-    assert.match(String(ws.getCell("A17").value), /Not included - zero or negative Net Pay.*9 Employee 9/);
+    assert.deepEqual(rowValues(ws, 17, 1, 3), ["Paid from", "Employees", "Net Pay"]);
+    assert.deepEqual(rowValues(ws, 18, 1, 3), ["Cash Denomination", 3, 32104]);
+    assert.deepEqual(rowValues(ws, 19, 1, 3), ["Exit Employees", 0, 0]);
+    assert.match(String(ws.getCell("A21").value), /Not included - zero or negative Net Pay.*9 Employee 9/);
     assert.equal(ws.pageSetup.orientation, "portrait");
     assert.equal(ws.pageSetup.fitToWidth, 1);
-    assert.equal(ws.pageSetup.printArea, "A1:C17");
+    assert.equal(ws.pageSetup.printArea, "A1:C21");
   });
 
   it("Cash Denomination: formatting, autofilter and landscape page setup", async () => {
@@ -323,11 +350,55 @@ describe("workbook", () => {
     const withContract = { ...prepare([...rows, row(40, 9000, { employment_type: "Contract" })]), company: "X" };
     const ws = (await load(withContract)).getWorksheet("Denomination Total");
     assert.equal(textOf(ws.getCell("C14")), 32104, "the Contract employee's pay is not in the cash total");
-    assert.equal(ws.getCell("A17").value, "Not included - Contract employees (paid directly to the contractor): 40 Employee 40");
-    assert.match(String(ws.getCell("A18").value), /zero or negative Net Pay.*9 Employee 9/);
-    assert.equal(ws.pageSetup.printArea, "A1:C18");
+    assert.equal(ws.getCell("A21").value, "Not included - Contract employees (paid directly to the contractor): 40 Employee 40");
+    assert.match(String(ws.getCell("A22").value), /zero or negative Net Pay.*9 Employee 9/);
+    assert.equal(ws.pageSetup.printArea, "A1:C22");
     const grid = (await load(withContract)).getWorksheet("Cash Denomination");
     for (let r = 4; r <= 6; r += 1) assert.notEqual(grid.getCell(r, 2).value, 40);
+  });
+
+  it("Exit Employees: own sheet with Last Working Day, denominations, signature; totals cover both sheets", async () => {
+    const mixed = { ...prepare([...rows, row(50, 12345, { resignation_date: "2026-08-25", store_name: "Velachery" })]), company: "X" };
+    const wb = await load(mixed);
+    const ex = wb.getWorksheet("Exit Employees");
+    assert.equal(ex.getCell("A2").value, "Exit Employees - Cash Payment - Aug 2026");
+    assert.deepEqual(rowValues(ex, 3, 1, 17), [
+      "S.No", "Employee Code", "Employee Name", "Location / Outlet", "Last Working Day", "Net Pay",
+      "₹500", "₹200", "₹100", "₹50", "₹20", "₹10", "₹5", "₹2", "₹1", "Total", "Employee Signature",
+    ]);
+    assert.deepEqual(rowValues(ex, 4, 1, 17), [1, 50, "Employee 50", "Velachery", "2026-08-25", 12345, 24, 1, 1, 0, 2, 0, 1, 0, 0, 12345, null]);
+    assert.equal(ex.getCell("G4").value.formula, "ROUNDDOWN((F4)/500,0)");
+    assert.equal(ex.getCell("A5").value, "Total");
+    assert.equal(ex.getCell("F5").value.formula, "SUBTOTAL(9,F4:F4)");
+    assert.equal(ex.pageSetup.orientation, "landscape");
+    assert.equal(ex.pageSetup.printArea, "A1:Q6");
+
+    // The exit employee is not on the active sheets.
+    const active = wb.getWorksheet("Cash Denomination");
+    const ack = wb.getWorksheet("Cash Salary Acknowledgement");
+    for (const ws of [active, ack]) for (let r = 4; r <= 6; r += 1) assert.notEqual(ws.getCell(r, 2).value, 50);
+    assert.equal(ack.getCell("E7").value.result, 32104, "acknowledgement total: active employees only");
+
+    const tot = wb.getWorksheet("Denomination Total");
+    assert.equal(tot.getCell("B4").value.formula, "SUM('Cash Denomination'!F4:F6,'Exit Employees'!G4:G4)");
+    assert.deepEqual(rowValues(tot, 4, 1, 3), ["₹500", 62 + 24, (62 + 24) * 500]);
+    assert.equal(tot.getCell("C14").value.formula, "SUM('Cash Denomination'!E4:E6,'Exit Employees'!F4:F4)");
+    assert.equal(textOf(tot.getCell("C13")), 32104 + 12345);
+    assert.equal(textOf(tot.getCell("C14")), 32104 + 12345);
+    assert.deepEqual(rowValues(tot, 18, 1, 3), ["Cash Denomination", 3, 32104]);
+    assert.deepEqual(rowValues(tot, 19, 1, 3), ["Exit Employees", 1, 12345]);
+  });
+
+  it("no exit employees: the sheet says so; no active employees: the active sheets say so", async () => {
+    const ex = (await load(data)).getWorksheet("Exit Employees");
+    assert.equal(ex.getCell("A4").value, "No exit employees are paid in cash this month.");
+    const onlyExit = { ...prepare([row(2, 500, { resignation_date: "2026-08-10" })]), company: "X" };
+    const wb = await load(onlyExit);
+    assert.equal(wb.getWorksheet("Cash Denomination").getCell("A4").value, "No active employees are paid in cash this month.");
+    assert.match(wb.getWorksheet("Cash Salary Acknowledgement").getCell("A4").value, /No active employees/);
+    const tot = wb.getWorksheet("Denomination Total");
+    assert.equal(tot.getCell("C14").value.formula, "SUM('Exit Employees'!F4:F4)");
+    assert.equal(textOf(tot.getCell("C14")), 500);
   });
 
   it("without a configured company the banner still names the report", async () => {

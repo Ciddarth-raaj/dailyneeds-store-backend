@@ -32,6 +32,7 @@ const emp = (id, over = {}) => ({
   store_name: over.store_name || "Anna Nagar",
   snapshot_pay_type: over.snapshot_pay_type || "CASH",
   employment_type: over.employment_type === undefined ? "Permanent" : over.employment_type,
+  resignation_date: over.resignation_date || null,
   calc: over.calc === null ? null : { status: "APPROVED_LOCKED", pay_type: "CASH", net_pay: "18760.00", ...(over.calc || {}) },
 });
 
@@ -51,6 +52,7 @@ function fakeRepo(stored) {
           net_pay: e.calc ? e.calc.net_pay : null,
           pay_type: payType(e),
           employment_type: e.employment_type,
+          resignation_date: e.resignation_date,
         })),
     payrunTotals: async (scope) => ({ finalized: inMonth(scope).filter((e) => e.calc && e.calc.status === "APPROVED_LOCKED").length }),
     cashPayrunTotals: async (scope) => {
@@ -88,7 +90,7 @@ describe("cashPaymentFile - population", () => {
     const file = await service.cashPaymentFile(EXPORTER, AUG, null);
     assert.equal(file.filename, "Cash Payment - Aug 2026.xlsx");
     assert.deepEqual((await employeesOf(file)).ids, [1, 3]);
-    assert.deepEqual(file.summary, { employees: 2, total_net_pay: 18760 + 700, excluded: 0, contract: 0 });
+    assert.deepEqual(file.summary, { employees: 2, exit_employees: 0, total_net_pay: 18760 + 700, excluded: 0, contract: 0 });
   });
 
   it("Contract employees are paid by the contractor: excluded, even while their own payroll is pending", async () => {
@@ -100,7 +102,16 @@ describe("cashPaymentFile - population", () => {
     ]);
     const file = await service.cashPaymentFile(EXPORTER, AUG, null);
     assert.deepEqual((await employeesOf(file)).ids, [1, 4]);
-    assert.deepEqual(file.summary, { employees: 2, total_net_pay: 18760 + 500, excluded: 0, contract: 2 });
+    assert.deepEqual(file.summary, { employees: 2, exit_employees: 0, total_net_pay: 18760 + 500, excluded: 0, contract: 2 });
+  });
+
+  it("exit employees are paid off their own sheet and counted in the month's cash", async () => {
+    const { service } = setup([emp(1), emp(2, { resignation_date: "2026-08-15", calc: { net_pay: "700.00" } })]);
+    const file = await service.cashPaymentFile(EXPORTER, AUG, null);
+    const { wb, ids } = await employeesOf(file);
+    assert.deepEqual(ids, [1]);
+    assert.equal(wb.getWorksheet("Exit Employees").getCell("B4").value, 2);
+    assert.deepEqual(file.summary, { employees: 2, exit_employees: 1, total_net_pay: 18760 + 700, excluded: 0, contract: 0 });
   });
 
   it("the approved calculation's pay type wins over the payrun snapshot", async () => {

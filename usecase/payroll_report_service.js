@@ -867,13 +867,19 @@ class PayrollReportService {
     const buffer = await cashPayment.buildWorkbook({ ...data, company: await this._companyName() });
     await this._audit(
       actor,
-      { dataset_key: CASH_PAYMENT_DATASET, field_keys: ["CASH_PAYMENT"], period, filters: {}, row_count: data.employees.length },
+      { dataset_key: CASH_PAYMENT_DATASET, field_keys: ["CASH_PAYMENT"], period, filters: {}, row_count: data.employees.length + data.exit_employees.length },
       "xlsx"
     );
     return {
       buffer,
       filename: cashPayment.filename(period),
-      summary: { employees: data.employees.length, total_net_pay: data.total_net_pay, excluded: data.excluded.length, contract: data.contract.length },
+      summary: {
+        employees: data.employees.length + data.exit_employees.length,
+        exit_employees: data.exit_employees.length,
+        total_net_pay: data.total_net_pay,
+        excluded: data.excluded.length,
+        contract: data.contract.length,
+      },
     };
   }
 }

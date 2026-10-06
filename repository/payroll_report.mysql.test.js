@@ -309,7 +309,7 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.deepEqual(await repo.cashPayrunTotals({ ...NOV, store_ids: null }), { employees: 1, net_pay: 18760 });
     const file = await service.cashPaymentFile(ADMIN, NOV, null);
     assert.equal(file.filename, "Cash Payment - Nov 2026.xlsx");
-    assert.deepEqual(file.summary, { employees: 1, total_net_pay: 18760, excluded: 1, contract: 0 });
+    assert.deepEqual(file.summary, { employees: 1, exit_employees: 0, total_net_pay: 18760, excluded: 1, contract: 0 });
 
     // A Contract employee (current Employee Master) is paid by the contractor:
     // out of the cash and of the reconciliation read alike.
@@ -318,8 +318,15 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.equal(rows.length, 2);
     assert.equal((await repo.listCashPayRows({ ...NOV, store_ids: null })).find((r) => r.employee_id === 3).employment_type, "Contract");
     assert.deepEqual(await repo.cashPayrunTotals({ ...NOV, store_ids: null }), { employees: 1, net_pay: 18760 });
-    assert.deepEqual((await service.cashPaymentFile(ADMIN, NOV, null)).summary, { employees: 1, total_net_pay: 18760, excluded: 0, contract: 1 });
+    assert.deepEqual((await service.cashPaymentFile(ADMIN, NOV, null)).summary, { employees: 1, exit_employees: 0, total_net_pay: 18760, excluded: 0, contract: 1 });
     await q("UPDATE new_employee SET employment_type = NULL WHERE employee_id = 3");
+
+    // Resigned by 30 November: an exit employee - still paid in cash, off the
+    // Exit Employees sheet.
+    await q("UPDATE new_employee SET resignation_date = '2026-11-20' WHERE employee_id = 3");
+    assert.equal((await repo.listCashPayRows({ ...NOV, store_ids: null })).find((r) => r.employee_id === 3).resignation_date, "2026-11-20");
+    assert.deepEqual((await service.cashPaymentFile(ADMIN, NOV, null)).summary, { employees: 2, exit_employees: 1, total_net_pay: 19460, excluded: 0, contract: 0 });
+    await q("UPDATE new_employee SET resignation_date = NULL WHERE employee_id = 3");
 
     // Out of scope: nobody to pay.
     await assert.rejects(service.cashPaymentFile(ADMIN, NOV, [2]), (e) => e.code === "NO_CASH_EMPLOYEES");

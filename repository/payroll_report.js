@@ -126,12 +126,15 @@ class PayrollReportRepository {
    * `employment_type` is the CURRENT Employee Master value (the payrun does
    * not snapshot it), as the Payroll Reports employment-type filter reads it:
    * Contract employees are paid to their contractor, not in cash.
+   * `resignation_date` is the Employee Master's, the date the Payrun screen's
+   * Exited card reads (`utils/payrun_eligibility.js#exitedByMonthEnd`).
    */
   listCashPayRows({ year, month, store_ids }) {
     const location = locationPredicate("pe.store_id", store_ids);
     return this.query(
       `SELECT pe.employee_id, pe.employee_name, pe.store_name,
-              c.status, c.net_pay, ${PAY_TYPE} AS pay_type, ne.employment_type
+              c.status, c.net_pay, ${PAY_TYPE} AS pay_type, ne.employment_type,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date
          FROM payrun_employee pe
          LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
          LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
