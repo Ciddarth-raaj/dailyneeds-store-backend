@@ -328,6 +328,14 @@ function fixedSalaryFigures(record) {
   return { monthly_ctc: monthlyCtc, take_home: takeHome };
 }
 
+/** The salary_id a stored calculation was priced on: its own from version 4, its snapshot's before. */
+function pricedSalaryIdOf({ employee, stored }) {
+  if (!stored) return null;
+  return Number(stored.calculation_version || 0) >= PRICED_FROM_RESOLVED_SALARY_VERSION
+    ? stored.salary_id
+    : employee && employee.salary_id;
+}
+
 const paiseOf = (value) => {
   if (value === null || value === undefined || value === "") return null;
   const n = Number(value);
@@ -2206,11 +2214,15 @@ class PayrunCalculationUsecase {
       company = await this._payslipCompany();
       const extras = await this.payslipRepo.listEmployeeExtras([...presentedById.keys()]);
       extras.forEach((x) => extrasOf.set(Number(x.employee_id), x));
-      /* The salary records the stored calculations were priced on - see payslipEmployee. */
+      /*
+       * The salary records the stored calculations were priced on - see
+       * payslipEmployee. From version 4 that is the stored `salary_id`; an
+       * older row was priced on its initialization snapshot's salary.
+       */
       const storedIds = [...presentedById.values()]
-        .map((p) => p.internals.stored)
-        .filter((st) => st && Number(st.calculation_version || 0) >= PRICED_FROM_RESOLVED_SALARY_VERSION)
-        .map((st) => st.salary_id);
+        .filter((p) => p.internals.stored)
+        .map((p) => pricedSalaryIdOf(p.internals))
+        .filter((id) => id !== null && id !== undefined);
       if (storedIds.length && typeof this.repo.listSalariesByIds === "function") {
         (await this.repo.listSalariesByIds(storedIds)).forEach((r) => pricedSalaryOf.set(String(r.salary_id), r));
       }
@@ -2222,19 +2234,21 @@ class PayrunCalculationUsecase {
      * named by its `salary_id` (immutable once approved), checked against the
      * stored gross; a row priced by an older version used its snapshot's.
      */
+    /*
+     * The fixed CTC / Take Home come from the same priced record for EVERY
+     * version, so a month approved under version 3 still prints them. Only a
+     * version-4 row also takes its component split from the record; an older
+     * row keeps its snapshot's split, exactly as before.
+     */
     const payslipEmployee = (presented) => {
       const { employee, stored } = presented.internals;
-      const record = stored ? pricedSalaryOf.get(String(stored.salary_id)) : null;
-      if (record && paiseOf(record.monthly_gross) === paiseOf(stored.monthly_gross)) {
-        return {
-          ...pricedSnapshot(employee, resolveMonthSalary(employee, record)),
-          ...(() => {
-            const fixed = fixedSalaryFigures(record);
-            return { salary_monthly_ctc: fixed.monthly_ctc, salary_take_home: fixed.take_home };
-          })(),
-        };
-      }
-      return employee;
+      const record = stored ? pricedSalaryOf.get(String(pricedSalaryIdOf(presented.internals))) : null;
+      if (!record || paiseOf(record.monthly_gross) !== paiseOf(stored.monthly_gross)) return employee;
+      const fixed = fixedSalaryFigures(record);
+      const figures = { salary_monthly_ctc: fixed.monthly_ctc, salary_take_home: fixed.take_home };
+      return Number(stored.calculation_version || 0) >= PRICED_FROM_RESOLVED_SALARY_VERSION
+        ? { ...pricedSnapshot(employee, resolveMonthSalary(employee, record)), ...figures }
+        : { ...employee, ...figures };
     };
     const DONE = {
       [LIFECYCLE_ACTION.UNLOCK]: [ROW_RESULT.UNLOCKED, "Unlocked. The figures are kept until the employee is recalculated."],

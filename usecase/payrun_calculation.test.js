@@ -2872,6 +2872,23 @@ describe("Payslip Publish", () => {
     assert.equal(snap.employer_contribution.monthly_take_home, ((gross - 180000) / 100).toFixed(2));
   });
 
+  it("a month approved under version 3 still gets the fixed CTC, from the SNAPSHOT's salary record it was priced on", async () => {
+    await approved(1);
+    link(1);
+    const salary = world.salaries.get(1);
+    Object.assign(salary, {
+      monthly_ctc: "31000.00", ctc_status: "APPLIED",
+      pf_status: "APPLIED", employee_pf: "1800.00", esi_status: "NOT_APPLICABLE", employee_esi: "0.00",
+    });
+    // What version 3 left behind: priced on the snapshot, salary_id marker pointing elsewhere.
+    Object.assign(world.calculations.get(1), { calculation_version: 3, salary_id: 999999 });
+    const out = await act("PUBLISH", [1]);
+    assert.equal(out.published_count, 1);
+    const snap = JSON.parse(world.payslips.at(-1).snapshot_json);
+    assert.equal(snap.employer_contribution.monthly_ctc, "31000.00");
+    assert.equal(snap.employer_contribution.annual_ctc, "372000.00");
+  });
+
   it("a salary record whose CTC is not APPLIED gives the payslip no CTC and no take home", async () => {
     await approved(1);
     link(1);

@@ -72,8 +72,8 @@ function inr(amount) {
 
 const isZero = (amount) => amount === null || amount === undefined || Number(amount) === 0;
 
-/** The lines a payslip prints: every non-optional line, and optional ones only when non-zero. */
-const printable = (lines) => (lines || []).filter((l) => !l.optional || !isZero(l.amount));
+/** The lines a payslip prints: only the non-zero ones (a zero Special Allowance is clutter). Totals print regardless. */
+const printable = (lines) => (lines || []).filter((l) => l && !isZero(l.amount));
 
 const row = (label, value) =>
   value === null || value === undefined || value === ""
@@ -263,7 +263,8 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
   .kv .v { font-weight: 600; word-break: break-word; }
   .grid3 { font-size: 9.5px; }
   .grid3 .kv .k { width: auto; white-space: nowrap; }
-  .grid3 .kv .v { white-space: nowrap; text-align: right; }
+  .grid3 .kv .v { text-align: right; overflow-wrap: anywhere; }
+  .grid3 > .card.stat { flex-grow: 1.3; }
   .hl span { white-space: nowrap; }
   .basis .kv .k { width: 52%; }
   .hl { display: flex; justify-content: space-between; gap: 6px; margin: 3px 0; padding: 3px 6px; border-radius: 4px; font-weight: bold;

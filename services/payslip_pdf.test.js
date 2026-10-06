@@ -302,3 +302,19 @@ describe("PF ceiling periods are not printed", () => {
     assert.ok(html.includes("Statutory Information") && html.includes("100200300400"), "the card itself still prints");
   });
 });
+
+describe("real-payslip fixes", () => {
+  it("a zero salary component (Special Allowance 0) is not printed; totals are", () => {
+    const snap = snapshot();
+    snap.earnings.lines = snap.earnings.lines.map((l) => (l.key === "special_allowance" ? { ...l, amount: "0.00" } : l));
+    const html = payslipHtml(snap);
+    assert.ok(!html.includes("Special Allowance"));
+    assert.ok(html.includes("Total Earnings"));
+  });
+
+  it("long statutory values wrap inside their card instead of being cut off", () => {
+    const html = payslipHtml(snapshot());
+    assert.match(html, /\.grid3 \.kv \.v \{ text-align: right; overflow-wrap: anywhere; \}/);
+    assert.ok(!/\.grid3 \.kv \.v \{[^}]*nowrap/.test(html));
+  });
+});
