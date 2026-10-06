@@ -31,6 +31,7 @@ const METRIC = {
   INITIALIZED: "INITIALIZED",
   NOT_INITIALIZED: "NOT_INITIALIZED",
   COSTED: "COSTED",
+  UNCOSTED: "UNCOSTED",
   DED_PF: "DED_PF",
   DED_ESI: "DED_ESI",
   DED_ADVANCE: "DED_ADVANCE",
@@ -72,6 +73,8 @@ function figuresInPaise(figures) {
     // Shortage recovery and the missing-hours deduction - the two employee
     // deductions that are neither statutory nor an advance.
     other: z(figures.shortage) + z(figures.missing_hours),
+    // Net pay is paid in whole rupees: gross - deductions + rounding = net.
+    rounding: z(figures.rounding),
   };
 }
 
@@ -167,19 +170,43 @@ function inWindow(date, window) {
  * the scope whose master has since moved out is still this scope's payroll,
  * which is the calculation screen's answer too.
  */
-function mergeMonth({ year, month, initRows = [], calcRows = [], facts = [], rejoins = [] }) {
+function mergeMonth({ year, month, initRows = [], calcRows = [], facts = [], periods = [] }) {
   const window = monthWindow(year, month);
   const factOf = new Map(facts.map((f) => [Number(f.employee_id), f]));
-  const rejoined = new Set(rejoins.map((r) => Number(r.employee_id)));
+  const periodsOf = new Map();
+  periods.forEach((p) => {
+    const id = Number(p.employee_id);
+    if (!periodsOf.has(id)) periodsOf.set(id, []);
+    periodsOf.get(id).push(p);
+  });
   const initOf = new Map(initRows.map((r) => [Number(r.employee_id), r]));
   const rows = [];
 
+  /*
+   * JOINED / REJOINED / RESIGNED IN THE MONTH.
+   *
+   *   rejoined  an employment period after the first opened in the month
+   *   joined    the first period opened in the month, or - with no period
+   *             history - the joining date is in the month; never also a
+   *             rejoin
+   *   resigned  the payrun's own dated exit (`exited_in_month`, the Exited
+   *             card's rule) OR any period of theirs ended in the month - so
+   *             an August exit is still an August exit after a later rejoin
+   *             has cleared the master's resignation date
+   *
+   * Joining and resigning in the same month counts in both.
+   */
   const movement = (id, joining, resignation, exited) => {
-    const isRejoin = rejoined.has(id) && inWindow(joining, window);
+    const own = periodsOf.get(id) || [];
+    const isRejoin = own.some((p) => Number(p.period_no) > 1 && inWindow(p.joined_on, window));
+    const firstJoin = own.some((p) => Number(p.period_no) === 1 && inWindow(p.joined_on, window));
+    const endedInMonth = own.some((p) => inWindow(p.ended_on, window));
+    const exitedByRule =
+      exited === undefined ? exitedByMonthEnd({ year, month, ended_on: resignation }) : exited === true;
     return {
-      joined: !isRejoin && inWindow(joining, window),
+      joined: !isRejoin && (firstJoin || inWindow(joining, window)),
       rejoined: isRejoin,
-      resigned: exited === undefined ? exitedByMonthEnd({ year, month, ended_on: resignation }) : exited === true,
+      resigned: exitedByRule || endedInMonth,
     };
   };
 
@@ -307,11 +334,11 @@ function filterOptions(rows, filters) {
 /* ------------------------------------------------------------- aggregates */
 
 function sumFigures(rows) {
-  const t = { costed: 0, gross: 0, deductions: 0, net: 0, pf: 0, esi: 0, advance: 0, other: 0 };
+  const t = { costed: 0, gross: 0, deductions: 0, net: 0, pf: 0, esi: 0, advance: 0, other: 0, rounding: 0 };
   rows.forEach((row) => {
     if (!row.figures) return;
     t.costed += 1;
-    ["gross", "deductions", "net", "pf", "esi", "advance", "other"].forEach((k) => {
+    ["gross", "deductions", "net", "pf", "esi", "advance", "other", "rounding"].forEach((k) => {
       t[k] += row.figures[k];
     });
   });
@@ -328,6 +355,7 @@ function kpis(rows) {
     payroll_cost: rupees(t.gross),
     total_deductions: rupees(t.deductions),
     net_payable: rupees(t.net),
+    net_pay_rounding: rupees(t.rounding),
     costed_employees: t.costed,
     uncosted_initialized: initialized - t.costed,
   };
@@ -391,6 +419,7 @@ function earnings(rows) {
     gross: rupees(t.gross),
     net: rupees(t.net),
     deductions: rupees(t.deductions),
+    net_pay_rounding: rupees(t.rounding),
     costed_employees: t.costed,
     breakdown: DEDUCTIONS.map((d) => ({
       key: d.key,
@@ -488,12 +517,12 @@ const hasInitReason = (row, code) => row.init_reasons.some((b) => b.code === cod
  */
 const ACTIONS = [
   {
-    key: "NOT_INITIALIZED_READY",
-    label: "Ready to initialize",
-    description: "Eligible employees whose payroll month has not been initialized yet.",
-    severity: "medium",
-    test: (r) => !r.initialized && r.init_status === STATUS_GROUP.READY,
-    target: { stage: "INITIALIZATION", card: "READY" },
+    key: "NOT_INITIALIZED",
+    label: "Not initialized",
+    description: "In the month's payroll population but not initialized - Ready, or Blocked by an initialization rule.",
+    severity: "high",
+    test: (r) => !r.initialized,
+    target: null, // Ready card while anybody is ready, else Blocked - see actionItems
   },
   {
     key: "SALARY_NOT_APPROVED",
@@ -583,7 +612,12 @@ function actionItems(rows) {
   return ACTIONS.map((a) => {
     const affected = rows.filter(a.test);
     let target = a.target;
-    if (!target) {
+    if (!target && a.key === "NOT_INITIALIZED") {
+      target = {
+        stage: "INITIALIZATION",
+        card: affected.some((r) => r.init_status === STATUS_GROUP.READY) ? "READY" : "BLOCKED",
+      };
+    } else if (!target) {
       target = affected.some((r) => r.initialized)
         ? { stage: "CALCULATION", card: CALC_CARD.ALL }
         : { stage: "INITIALIZATION", card: "BLOCKED" };
@@ -615,6 +649,8 @@ function selectRows(rows, { metric, group_by = null, group_id = null }) {
       return rows.filter((r) => !r.initialized);
     case METRIC.COSTED:
       return rows.filter((r) => Boolean(r.figures));
+    case METRIC.UNCOSTED:
+      return rows.filter((r) => r.initialized && !r.figures);
     case METRIC.DED_PF:
       return rows.filter(fig("pf"));
     case METRIC.DED_ESI:
@@ -686,7 +722,7 @@ function drilldown(rows, { page = 1, page_size = 50 } = {}) {
     total: rows.length,
     page: current,
     page_size: size,
-    totals: { costed_employees: t.costed, gross: rupees(t.gross), deductions: rupees(t.deductions), net: rupees(t.net) },
+    totals: { costed_employees: t.costed, gross: rupees(t.gross), deductions: rupees(t.deductions), net: rupees(t.net), net_pay_rounding: rupees(t.rounding) },
     rows: rows.slice((current - 1) * size, current * size).map(presentRow),
   };
 }

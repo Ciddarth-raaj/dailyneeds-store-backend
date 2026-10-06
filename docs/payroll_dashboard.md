@@ -1,91 +1,135 @@
-# Payroll Dashboard — design and data contract
+# Payroll Dashboard — design, data contract and review findings
 
 A read-only dashboard over the payroll month that already exists. It calculates
 nothing: every count, status and figure comes from the two usecases the Payrun
 screens already use, so the dashboard and Calculation & Review cannot disagree.
 
-## 1. What already exists (inspection findings)
+## 1. Where every number comes from
 
-| Question | Answer in DnDS today |
+| Dashboard item | Source (existing code, reused) |
 |---|---|
-| Payroll population of a month | `PayrunUsecase.getMonth` → `repository/payrun.js#listPopulation` (dated rule: joined ≤ month end, resignation ≥ month start; `status` deliberately not read) |
-| Initialized | a `payrun_employee` row exists (the month's snapshot). Not initialized = population row with `status` READY or BLOCKED |
-| Calculated / review status | `PayrunCalculationUsecase.getMonth` derives `CALC_STATUS` live (NOT_CALCULATED, ATTENDANCE_PENDING, CALCULATED, RECALCULATION_REQUIRED, READY_FOR_APPROVAL, APPROVED_LOCKED, PUBLISHED). Only CALCULATED / APPROVED_LOCKED are stored in `payrun_employee_calculation.status` |
-| Money | `payrun_employee_calculation`: `total_earnings` (gross), `total_employee_deductions`, `net_pay`, `employee_pf`, `employee_esi`, `advance_recovery`, `shortage_recovery`, `missing_hours_deduction`. Deductions = missing hours + PF + ESI + advance + shortage |
-| PT / Income tax (TDS) | **Not stored anywhere** (`constants/payroll_report_catalogue.js` says so). Shown as "Not tracked", never as ₹0 |
-| Location / Department / Designation | initialized employees: the month's snapshot (`payrun_employee.store_id / department_id / designation_id`) — the same attribution Calculation & Review uses. Not initialized: the live Employee Master. There is no transfer history table |
-| Employee type | `new_employee.employment_type` (Permanent / Contract), live master only (not snapshotted) |
-| Joined / Resigned / Rejoined | joined: joining date inside the month; resigned: `exited_in_month` from `utils/payrun_eligibility.js#exitedByMonthEnd` (the Exited card's rule); rejoined: an `employee_employment_period` with `period_no > 1` whose `joined_on` is in the month |
-| Held / Pre-joining | **Not modelled** in payroll (`constants/payrun.js`: "There is no HOLD"). Not shown |
-| Permissions | `requireAll(view_employees, view_payroll, view_salary)` — the Payrun / Calculation & Review conjunction |
-| Scope | `middlewares/employee_branch_scope.js#listFilters` — admin / `employee_scope_all_branches` see all, everybody else their own branch, fail-closed |
-| Blocking validations | Initialization `BLOCK_REASON` (SALARY_NOT_APPROVED, STATUTORY_SETUP_INCOMPLETE, …); approval `READY_BLOCKER` (ATTENDANCE_INCOMPLETE, PENDING_* , ADJUSTMENT_PENDING_CONFIRMATION, STATUTORY_SETUP_INCOMPLETE, CALCULATION_INCOMPLETE, …); `RECALC_REASON` |
-| Negative net pay | no validation exists; the dashboard flags `net_pay < 0` from the stored figure (a fact, not a new rule) |
+| Payroll population, Ready / Blocked, blocking reasons, `exited_in_month` | `PayrunUsecase.getMonth` (`repository/payrun.js#listPopulation`, `utils/payrun_eligibility.js`) |
+| Initialized | a `payrun_employee` snapshot exists |
+| Calculation status, blockers, recalculation reasons, attendance-needs-action, statutory hold | `PayrunCalculationUsecase._assemble` + `_present` — the code `getMonth` (Calculation & Review) runs |
+| Gross / deductions / net / PF / ESI / advance / other / rounding | the **stored** `payrun_employee_calculation` row, via `PayrunCalculationUsecase.getMonthFigures` |
+| Month strip | one aggregate over `payrun_employee ⟕ payrun_employee_calculation` (stored state only) |
+| Scope | `middlewares/employee_branch_scope.js#listFilters`, fail-closed |
+| Permissions | `requireAll(view_employees, view_payroll, view_salary)` — the Payrun conjunction |
 
-## 2. Backend
+`getMonthFigures` = `getMonth`'s rows (same `_assemble`/`_present`) + the stored figures,
+**null while `attendance_pending`** — the same `provisional` rule the employee detail's
+`breakup.final` applies — and null while the stored net pay is unresolved. It reads only;
+it writes nothing. An employee whose figures are null is *initialized but not costed*.
+
+## 2. Money formulas (stored fields, `utils/payrun_calculation.js#computeCalculation`)
+
+```
+Payroll Cost (Gross) = total_earnings
+                     = salary_earnings + extra_day_amount + ot_amount + incentive + bonus + arrears
+Total Deductions     = total_employee_deductions
+                     = missing_hours_deduction + employee_pf + employee_esi + advance_recovery + shortage_recovery
+Net Payable          = net_pay = round_to_rupee(Gross − Deductions)
+Gross − Deductions + net_pay_rounding = Net Payable        (exact, to the paisa)
+```
+
+`Gross − Deductions = Net` is **not** always exact: net pay is paid in whole rupees and the
+stored `net_pay_rounding` (< ₹0.50 per employee) closes the gap. The dashboard returns and
+shows the rounding total.
+
+Deduction breakdown: PF = `employee_pf`, ESI = `employee_esi`, Advance = `advance_recovery`,
+Other = `shortage_recovery + missing_hours_deduction`. The four add up to Total Deductions.
+**Employer contributions** (`employer_pf_total`, `employer_epf/eps`, `edli`, `pf_admin_charge`,
+`employer_esi`) and CTC are **not** included anywhere — the payrun does not put them in
+employee deductions either. `balance_advance` is informational and never deducted.
+
+**PT and Income Tax / TDS**: DnDS stores no monthly figure for either. They are returned with
+`tracked: false` and `amount: null` and shown as *Not tracked* in the breakdown and the
+comparison; drill-down rows have no such column. Never ₹0.
+
+## 3. Historical correctness (effective dates)
+
+| Dimension | Initialized employee | Not-initialized employee |
+|---|---|---|
+| Location / Department / Designation | **historical** — the month's snapshot, as at initialization | **current** Employee Master |
+| Employee Type | **current** master (not snapshotted) | current master |
+| Joined / Resigned / Rejoined | employment-period history + dated master facts (see §4) | same |
+
+What cannot be reconstructed today:
+- There is **no transfer history table**. A not-initialized employee in a past month is
+  attributed to their *current* location/department/designation. (In a completed month
+  everybody is initialized, so this affects open/partial months only.)
+- A snapshot records the dimensions **as at initialization**, not as at month start; a
+  mid-month transfer before initialization shows the new location.
+- Employee Type is always current.
+- The payrun's own population rule (`listPopulation`) reads the master's *current-spell*
+  dates; an employee who left in a month and has since **rejoined** has a later joining date
+  and drops out of that month's population if they were never initialized for it. This is
+  existing payrun behaviour, not the dashboard's, and initialized months are unaffected.
+
+## 4. People Movement
+
+- **Rejoined**: an `employee_employment_period` with `period_no > 1` whose `joined_on` is in
+  the month. Reliable for every rejoin done through DnDS: `employee_master.rejoin` opens the
+  period in the same transaction (or rolls back). Rejoins before the lifecycle backfill were
+  never recorded as such and read as *New Joined*.
+- **New Joined**: the first period opened in the month, or (no period history) the joining
+  date is in the month; never also a rejoin.
+- **Resigned / Exited**: the payrun's own `exited_in_month` OR any period that ended in the
+  month — so an August exit stays an August exit after a later rejoin clears the master's
+  `resignation_date`.
+- Boundaries (tested): joined on the 1st ✓, resigned on the last day ✓, joined and resigned in
+  the same month → both ✓, rejoined twice in a month → one rejoin ✓, a later (future-dated)
+  join or exit is not this month's ✓.
+- **Hold / Pre-joining**: not payroll statuses in DnDS (`constants/payrun.js`: "There is no
+  HOLD"); not shown.
+
+## 5. Action Required — each item is an existing rule
+
+| Item | Rule (existing) | Opens |
+|---|---|---|
+| Not initialized | population row, not `INITIALIZED` (READY or BLOCKED) | Initialization · Ready (else Blocked) |
+| Salary configuration issues | init blocker `SALARY_NOT_APPROVED` | Initialization · Blocked |
+| PF / ESI configuration issues | init blocker `STATUTORY_SETUP_INCOMPLETE`, or calc `statutory_hold` / blocker `STATUTORY_SETUP_INCOMPLETE` | Calculation · All (Initialization · Blocked if none initialized) |
+| Payroll attendance pending | calc row `attendance_needs_action` (the *Attendance Needs Action* card) | Calculation · Attendance Needs Action |
+| Adjustments not confirmed | blocker `ADJUSTMENT_PENDING_CONFIRMATION` | Adjustments · Pending confirmation |
+| Not calculated | status `NOT_CALCULATED` | Calculation · Not Calculated |
+| Recalculation required | status `RECALCULATION_REQUIRED` | Calculation · Recalculation Required |
+| Payroll calculation errors | blocker `CALCULATION_INCOMPLETE` or recalc reason `CALCULATION_FAILED` | Calculation · All |
+| Negative net pay | stored `net_pay < 0` (direct check; no existing validation) | Calculation · All |
+| Pending payroll verification | status `READY_FOR_APPROVAL` | Calculation · Ready for Approval |
+
+No "unusual salary" item: there is no system-defined threshold. Every count equals its
+drill-down (tested in the pure suite and on real MySQL).
+
+## 6. Endpoints
 
 All under `/payroll/dashboard`, `requireAll(view_employees, view_payroll, view_salary)`,
-branch-scoped with `listFilters(req, store_id)`: a `store_id` outside the caller's
-branches is refused 403, never widened. `Cache-Control: no-store`.
+`Cache-Control: no-store`. The usecases always get the caller's **whole** scope; a
+`store_id` filter must be inside it (else 403); a malformed id is 400 before anything is read.
 
-Common query: `year`, `month`, optional `store_id`, `department_id`, `designation_id` (single ids; absent = All).
+- `GET /months?fy=2026[&store_id&department_id&designation_id]` — 12 months, stored progress, gross.
+- `GET /summary?year&month[&filters][&compare_year&compare_month]` — KPIs (incl.
+  `costed_employees`, `uncosted_initialized`, `net_pay_rounding`), headcount, earnings,
+  comparison (default: previous month), movement, actions, dependent filter options.
+- `GET /employees?year&month&metric[&group_by&group_id][&filters][&page&page_size≤200]` —
+  metrics: `ALL INITIALIZED NOT_INITIALIZED COSTED UNCOSTED DED_PF DED_ESI DED_ADVANCE
+  DED_OTHER MOVE_JOINED MOVE_REJOINED MOVE_RESIGNED HEADCOUNT ACTION_<key>`.
 
-### `GET /payroll/dashboard/months?fy=2026` (+ filters)
-One cheap aggregate over `payrun_employee ⟕ payrun_employee_calculation` for April `fy` … March `fy+1`.
-```json
-{ "code": 200, "fy": 2026, "label": "FY 2026-27",
-  "months": [ { "year": 2026, "month": 4, "label": "APR '26", "status": "PUBLISHED",
-                "initialized": 240, "calculated": 240, "approved": 240, "published": 240,
-                "gross": "2907375.00" } ] }
-```
-`status`: FUTURE · NOT_STARTED · INITIALIZED · CALCULATING · APPROVED · PUBLISHED (derived from stored state only).
+## 7. Validation on real MySQL
 
-### `GET /payroll/dashboard/summary` (+ `compare_year`, `compare_month`)
-```json
-{ "code": 200,
-  "period": { "year": 2026, "month": 8, "label": "August 2026", "month_locked": false },
-  "filters": { "applied": {...}, "options": {
-      "locations":    [{ "id": 1, "name": "Moolakulam", "count": 120 }],
-      "departments":  [{ "id": 3, "name": "Billing", "count": 40 }],      // within chosen location
-      "designations": [{ "id": 9, "name": "Cashier", "count": 12 }] } },  // within chosen location + department
-  "kpis": { "total_employees": 241, "initialized": 240, "not_initialized": 1,
-            "payroll_cost": "2907375.00", "total_deductions": "153751.00", "net_payable": "2753624.00",
-            "costed_employees": 238, "uncosted_initialized": 2 },
-  "headcount": { "location": [...], "department": [...], "designation": [...], "employment_type": [...] },
-  "earnings": { "gross": "…", "net": "…", "deductions": "…",
-                "breakdown": [ { "key": "PF", "label": "PF", "amount": "53020.00", "tracked": true },
-                               { "key": "PT", "label": "Professional Tax", "amount": null, "tracked": false }, … ] },
-  "comparison": { "base": {...}, "compare": {...},
-                  "metrics": [ { "key": "GROSS", "label": "Gross Wages", "base": "…", "compare": "…", "difference": "…", "tracked": true } ] },
-  "movement": [ { "key": "JOINED", "label": "New Joined", "count": 16, "payroll_cost": "…", "deductions": "…", "net_wages": "…" }, … ],
-  "actions":  [ { "key": "ATTENDANCE_NEEDS_ACTION", "label": "…", "description": "…", "count": 3,
-                  "severity": "high", "target": { "stage": "CALCULATION", "card": "ATTENDANCE_NEEDS_ACTION" } } ] }
-```
-Money figures count only employees whose calculation the review screen presents as a result
-(calculated, attendance settled, net pay resolved) — the `attendanceDependent` rule in
-`usecase/payrun_calculation.js#_present`. `uncosted_initialized` says how many are left out.
+`repository/payroll_dashboard.mysql.test.js` (skipped unless `PAYROLL_DASHBOARD_TEST_MYSQL`
+names a scratch DB on which **every** migration has been run). Run on MySQL 8.0.46 with all
+328 migrations; utf8mb4_general_ci server default (the migrations mix `general_ci` /
+`unicode_ci`; on MySQL 8's default `0900_ai_ci` some historical purchase migrations fail).
+The production usecases initialize, calculate and approve the months; the dashboard is then
+reconciled with independent SQL: completed month, partial month, not-started month,
+joiner/leaver/rejoin, each filter and all three combined, comparison, month strip, empty scope,
+branch scope, per-employee agreement with Calculation & Review's detail, every action count =
+its drill-down.
 
-### `GET /payroll/dashboard/employees` (+ `metric`, `group_by`, `group_id`, `page`, `page_size`)
-The drill-down, fetched only when opened, paginated (max 200).
-`metric`: ALL · INITIALIZED · NOT_INITIALIZED · COSTED · DED_PF · DED_ESI · DED_ADVANCE · DED_OTHER ·
-MOVE_JOINED · MOVE_REJOINED · MOVE_RESIGNED · HEADCOUNT (+ `group_by` location|department|designation|employment_type, `group_id`) ·
-ACTION_<key>.
-```json
-{ "code": 200, "total": 1, "page": 1, "page_size": 50,
-  "totals": { "gross": "…", "deductions": "…", "net": "…" },
-  "rows": [ { "employee_id": 77, "employee_name": "…", "location": "…", "department": "…", "designation": "…",
-              "initialized": false, "status_label": "Blocked", "reasons": ["Salary not approved"],
-              "gross": null, "deductions": null, "net": null, "pf": null, "esi": null, "advance": null, "other": null } ] }
-```
-
-### Code
-- `usecase/payrun_calculation.js#getMonthFigures` — `_assemble` + `_present` (unchanged) plus the stored figures, under the same presentation rule.
-- `repository/payroll_dashboard.js` — the FY month aggregate, live employee facts (department name, employment type), rejoin periods.
-- `utils/payroll_dashboard.js` — pure: merge, filters + dependent options, KPIs, head count, breakdown, comparison, movement, action items, drill-down selection.
-- `usecase/payroll_dashboard.js`, `routes/payroll_dashboard.js`, wired in `server.js`.
-
-## 3. Frontend
-- `pages/payroll/dashboard.jsx`, menu entry *Payroll → Payroll Dashboard* (same three keys as Payrun).
-- `components/payroll/dashboard/`: `DashboardFilterBar`, `MonthStrip`, `KpiCards`, `HeadCountPanel` (recharts bar, group-by select), `EarningsDeductionsPanel` (donut + breakdown tiles), `ComparisonPanel`, `PeopleMovementPanel`, `ActionRequiredPanel`, `DrilldownDrawer`.
-- `helper/payrollDashboard.js`, `util/payrollDashboard.js` (CommonJS: FY months, compact ₹ L/Cr, payrun deep link).
-- `pages/payroll/payrun.jsx` accepts `?year&month&stage&card&store_id&department_id&designation_id&search` so an action item / drill-down row opens Calculation & Review on exactly those employees.
+Volume run (650 employees, 12 months of payrun rows): summary ≈ 0.5–0.7 s / 42 statements
+(two months assembled: selected + comparison), month strip ≈ 15 ms / 1 statement, drill-down
+page ≈ 0.3 s / 21 statements (re-assembles the month; no N+1). For comparison, Calculation &
+Review's own month read ≈ 0.25–0.35 s / 13 statements. The month-strip query uses a range scan
+on `idx_payrun_employee_month`; the calculation join uses `idx_payrun_calculation_payrun`;
+the employment-period read uses `idx_period_joined`/`idx_period_ended`.

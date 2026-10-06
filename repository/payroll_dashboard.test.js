@@ -19,7 +19,8 @@ describe("listMonthTotals", () => {
   it("reads April to March as one range", async () => {
     const { repo, calls } = capture([{ period_year: 2026, period_month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, gross: 1234.5 }]);
     const rows = await repo.listMonthTotals({ ...FY, store_ids: null });
-    assert.deepEqual(calls[0].params, [202604, 202703]);
+    assert.deepEqual(calls[0].params, [2026, 2027, 202604, 202703]);
+    assert.match(calls[0].sql, /pe\.period_year BETWEEN \? AND \?/, "an index-usable range on period_year");
     assert.ok(!/store_id IN/.test(calls[0].sql), "company-wide: no location clause");
     assert.deepEqual(rows, [{ year: 2026, month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, gross: "1234.5" }]);
   });
@@ -32,7 +33,7 @@ describe("listMonthTotals", () => {
     assert.match(calls[1].sql, /pe\.store_id IN \(\?\)/);
     assert.match(calls[1].sql, /pe\.department_id = \?/);
     assert.match(calls[1].sql, /pe\.designation_id = \?/);
-    assert.deepEqual(calls[1].params, [202604, 202703, [1, 2], 10, 100]);
+    assert.deepEqual(calls[1].params, [2026, 2027, 202604, 202703, [1, 2], 10, 100]);
   });
 });
 
@@ -40,14 +41,14 @@ describe("the per-employee reads", () => {
   it("read nothing for nobody", async () => {
     const { repo, calls } = capture();
     assert.deepEqual(await repo.listEmployeeFacts([]), []);
-    assert.deepEqual(await repo.listRejoins([], "2026-08-01", "2026-08-31"), []);
+    assert.deepEqual(await repo.listPeriodsInWindow([], "2026-08-01", "2026-08-31"), []);
     assert.equal(calls.length, 0);
   });
 
-  it("a rejoin is a later employment period opened in the month", async () => {
+  it("reads the periods that opened or closed in the month", async () => {
     const { repo, calls } = capture();
-    await repo.listRejoins([5, 6], "2026-08-01", "2026-08-31");
-    assert.match(calls[0].sql, /period_no > 1/);
-    assert.deepEqual(calls[0].params, [[5, 6], "2026-08-01", "2026-08-31"]);
+    await repo.listPeriodsInWindow([5, 6], "2026-08-01", "2026-08-31");
+    assert.match(calls[0].sql, /joined_on BETWEEN \? AND \?\) OR \(ended_on BETWEEN \? AND \?/);
+    assert.deepEqual(calls[0].params, [[5, 6], "2026-08-01", "2026-08-31", "2026-08-01", "2026-08-31"]);
   });
 });

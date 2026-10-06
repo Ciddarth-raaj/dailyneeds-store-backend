@@ -4360,7 +4360,7 @@ describe("getMonthFigures - the Payroll Dashboard's read", () => {
   const buildDashboard = require("./payroll_dashboard");
   const emptyDashboardRepo = {
     listEmployeeFacts: async (ids) => ids.map((id) => ({ employee_id: id, department_id: null, department_name: null, employment_type: "Permanent" })),
-    listRejoins: async () => [],
+    listPeriodsInWindow: async () => [],
     listMonthTotals: async () => [],
   };
   /* Initialization's view of the same world: every snapshot is INITIALIZED,

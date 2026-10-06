@@ -989,6 +989,7 @@ class PayrunCalculationUsecase {
               advance: stored.advance_recovery,
               shortage: stored.shortage_recovery,
               missing_hours: stored.missing_hours_deduction,
+              rounding: stored.net_pay_rounding === undefined ? null : stored.net_pay_rounding,
             }
           : null,
       };

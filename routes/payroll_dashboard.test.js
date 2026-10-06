@@ -47,19 +47,26 @@ const BRANCH_VIEWER = { designation: 61, employee: 901 }; // payroll keys, own b
 const HQ_VIEWER = { designation: 62, employee: 902 }; // payroll keys + all branches
 const NO_SALARY = { designation: 63, employee: 903 }; // view_payroll without view_salary
 const READ_ONLY = { designation: 64, employee: 904 }; // only view_employees
+const NO_PAYROLL = { designation: 65, employee: 905 }; // view_employees + view_salary
+const NO_EMPLOYEES = { designation: 66, employee: 906 }; // view_payroll + view_salary, no view_employees
+const TWO_BRANCH = { designation: 67, employee: 907 }; // payroll keys, Moolakulam AND ECR
+const LAWSPET = 3;
 
 const GRANTS = {
   [BRANCH_VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
   [HQ_VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.EMPLOYEE_SCOPE_ALL_BRANCHES],
   [NO_SALARY.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL],
   [READ_ONLY.designation]: [P.VIEW_EMPLOYEES],
+  [NO_PAYROLL.designation]: [P.VIEW_EMPLOYEES, P.VIEW_SALARY],
+  [NO_EMPLOYEES.designation]: [P.VIEW_PAYROLL, P.VIEW_SALARY],
+  [TWO_BRANCH.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
 };
 
-const EMPLOYEES = [BRANCH_VIEWER, HQ_VIEWER, NO_SALARY, READ_ONLY].map((who) => ({
+const EMPLOYEES = [BRANCH_VIEWER, HQ_VIEWER, NO_SALARY, READ_ONLY, NO_PAYROLL, NO_EMPLOYEES].map((who) => ({
   employee_id: who.employee,
   store_id: MOOLAKULAM,
   status: 1,
-}));
+})).concat([{ employee_id: TWO_BRANCH.employee, store_ids: [MOOLAKULAM, ECR], status: 1 }]);
 
 /* --------------------------------------------- the month, in two branches */
 
@@ -89,7 +96,7 @@ const calculation = {
 };
 const repo = {
   listEmployeeFacts: async (ids) => ids.map((id) => ({ employee_id: id, department_id: id === 3 ? 10 : 11, department_name: id === 3 ? "Billing" : "Stores", employment_type: "Permanent" })),
-  listRejoins: async () => [],
+  listPeriodsInWindow: async () => [],
   listMonthTotals: async (args) => {
     seen.push({ name: "repo.listMonthTotals", ...args });
     return [];
@@ -151,7 +158,7 @@ const ids = (rows) => rows.map((r) => r.employee_id).sort();
 
 describe("permissions", () => {
   it("needs view_employees + view_payroll + view_salary", async () => {
-    for (const who of [NO_SALARY, READ_ONLY]) {
+    for (const who of [NO_SALARY, READ_ONLY, NO_PAYROLL, NO_EMPLOYEES]) {
       for (const route of ["summary", "months", "employees"]) {
         const res = await get(who, route, { ...MONTH, fy: 2026, metric: "ALL" });
         assert.equal(res.status, 403, `${route} for ${who.designation}`);
@@ -178,13 +185,13 @@ describe("branch scope", () => {
   });
 
   it("no drill-down leaks another branch's employee", async () => {
-    for (const metric of ["ALL", "COSTED", "NOT_INITIALIZED", "ACTION_NOT_INITIALIZED_READY"]) {
+    for (const metric of ["ALL", "COSTED", "NOT_INITIALIZED", "ACTION_NOT_INITIALIZED"]) {
       const res = await get(BRANCH_VIEWER, "employees", { ...MONTH, metric });
       assert.equal(res.status, 200);
       res.body.rows.forEach((r) => assert.ok([1, 3].includes(r.employee_id), `${metric} leaked ${r.employee_id}`));
     }
-    const ready = await get(BRANCH_VIEWER, "employees", { ...MONTH, metric: "ACTION_NOT_INITIALIZED_READY" });
-    assert.equal(ready.body.total, 0, "Deepak is ready to initialize, but at ECR");
+    const pending = await get(BRANCH_VIEWER, "employees", { ...MONTH, metric: "ACTION_NOT_INITIALIZED" });
+    assert.deepEqual(ids(pending.body.rows), [3], "Chitra only - Deepak is not initialized too, but at ECR");
   });
 
   it("a location outside the caller's branches is refused, on every route", async () => {
@@ -269,5 +276,37 @@ describe("filters and drill-downs at the door", () => {
       const res = await get(HQ_VIEWER, "employees", bad);
       assert.equal(res.status, 400, JSON.stringify(bad));
     }
+  });
+});
+
+describe("review: scope edge cases through the real middleware", () => {
+  it("a multi-branch user sees exactly their branches, and may narrow to either", async () => {
+    const all = await get(TWO_BRANCH, "summary", MONTH);
+    assert.equal(all.status, 200);
+    assert.deepEqual(seen.filter((s) => s.name === "payrun.getMonth" && s.month === 8)[0].store_ids.sort(), [MOOLAKULAM, ECR]);
+    assert.equal(all.body.kpis.total_employees, 4);
+    const ecr = await get(TWO_BRANCH, "summary", { ...MONTH, store_id: ECR });
+    assert.equal(ecr.body.kpis.total_employees, 2);
+    const lawspet = await get(TWO_BRANCH, "summary", { ...MONTH, store_id: LAWSPET });
+    assert.equal(lawspet.status, 403, "a third branch is refused");
+  });
+
+  it("a malformed location never broadens the scope - it is refused before anything is read", async () => {
+    seen = [];
+    for (const bad of ["abc", "0", "-1", "1.5", "1,2", "1 OR 1=1", "%27"]) {
+      const res = await get(BRANCH_VIEWER, "summary", { ...MONTH, store_id: bad });
+      assert.equal(res.status, 400, `store_id=${bad}`);
+    }
+    current = BRANCH_VIEWER;
+    const res = await fetch(`http://127.0.0.1:${port}/payroll/dashboard/summary?year=2026&month=8&store_id=1&store_id=2`, {
+      headers: { "x-access-token": await tokenFor(BRANCH_VIEWER) },
+    });
+    assert.equal(res.status, 400, "a repeated store_id (array) is refused");
+    assert.equal(seen.length, 0);
+  });
+
+  it("no location filter is the caller's whole scope, never company-wide for a branch user", async () => {
+    await get(BRANCH_VIEWER, "employees", { ...MONTH, metric: "ALL" });
+    seen.filter((s) => s.store_ids !== undefined).forEach((s) => assert.deepEqual(s.store_ids, [MOOLAKULAM]));
   });
 });

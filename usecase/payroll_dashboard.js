@@ -40,13 +40,13 @@ class PayrollDashboardUsecase {
       ...new Set([...(init.rows || []), ...(calc.rows || [])].map((r) => Number(r.employee_id))),
     ];
     const { from, to } = monthWindow(year, month);
-    const [facts, rejoins] = await Promise.all([
+    const [facts, periods] = await Promise.all([
       this.repo.listEmployeeFacts(ids),
-      this.repo.listRejoins(ids, from, to),
+      this.repo.listPeriodsInWindow(ids, from, to),
     ]);
     return {
       month_locked: Boolean(init.month_locked || calc.month_locked),
-      rows: D.mergeMonth({ year, month, initRows: init.rows || [], calcRows: calc.rows || [], facts, rejoins }),
+      rows: D.mergeMonth({ year, month, initRows: init.rows || [], calcRows: calc.rows || [], facts, periods }),
     };
   }
 

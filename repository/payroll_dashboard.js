@@ -46,8 +46,17 @@ class PayrollDashboardRepository {
    * Calculation & Review attributes an initialized employee.
    */
   async listMonthTotals({ from, to, store_ids = null, department_id = null, designation_id = null }) {
-    const where = ["(pe.period_year * 100 + pe.period_month) BETWEEN ? AND ?"];
-    const params = [from.year * 100 + from.month, to.year * 100 + to.month];
+    /*
+     * A financial year spans two calendar years. The bare `period_year`
+     * range lets MySQL use `idx_payrun_employee_month (period_year,
+     * period_month)`; the composite comparison then trims April-March. An
+     * expression alone over the two columns could not use the index.
+     */
+    const where = [
+      "pe.period_year BETWEEN ? AND ?",
+      "(pe.period_year * 100 + pe.period_month) BETWEEN ? AND ?",
+    ];
+    const params = [from.year, to.year, from.year * 100 + from.month, to.year * 100 + to.month];
     const location = locationPredicate("pe.store_id", store_ids);
     if (location.clause) {
       where.push(location.clause);
@@ -105,21 +114,29 @@ class PayrollDashboardRepository {
   }
 
   /**
-   * WHO REJOINED IN THE WINDOW: an employment period after the first one
-   * (`period_no > 1`) that opened inside it. The lifecycle period table is the
-   * one place a rejoin is recorded as such - `new_employee` only keeps the
-   * latest joining date.
+   * THE EMPLOYMENT PERIODS THAT OPENED OR CLOSED IN THE WINDOW - the dated
+   * history of joins, exits and rejoins.
+   *
+   * WHY THE PERIOD TABLE AND NOT ONLY `new_employee`. The master keeps the
+   * LATEST spell: a rejoin (`employee_master.markRejoined`) overwrites
+   * `date_of_joining` and clears `resignation_date`, so an August exit
+   * followed by a November rejoin is invisible in the master by December.
+   * `employee_employment_period` keeps every spell; the Rejoin action opens
+   * a new period in the same transaction (or rolls back), so a rejoin made
+   * in DnDS is always here. Rejoins that pre-date the lifecycle backfill
+   * were never recorded as such and read as period 1.
    */
-  async listRejoins(employeeIds, from, to) {
+  async listPeriodsInWindow(employeeIds, from, to) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
     return this._read(
-      "LIST-REJOINS",
-      `SELECT employee_id, DATE_FORMAT(joined_on, '%Y-%m-%d') AS joined_on
+      "LIST-PERIODS-IN-WINDOW",
+      `SELECT employee_id, period_no,
+              DATE_FORMAT(joined_on, '%Y-%m-%d') AS joined_on,
+              DATE_FORMAT(ended_on, '%Y-%m-%d')  AS ended_on
          FROM employee_employment_period
         WHERE employee_id IN (?)
-          AND period_no > 1
-          AND joined_on BETWEEN ? AND ?`,
-      [employeeIds, from, to]
+          AND ((joined_on BETWEEN ? AND ?) OR (ended_on BETWEEN ? AND ?))`,
+      [employeeIds, from, to, from, to]
     );
   }
 }

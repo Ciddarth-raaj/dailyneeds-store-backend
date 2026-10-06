@@ -136,7 +136,7 @@ describe("merging the two stages", () => {
         calc(4, { date_of_joining: "2026-07-31" }),
       ],
       initRows: [init(5, { date_of_joining: "2026-08-31", exited_in_month: false }), init(6, { exited_in_month: true })],
-      rejoins: [{ employee_id: 2, joined_on: "2026-08-03" }],
+      periods: [{ employee_id: 2, period_no: 2, joined_on: "2026-08-03", ended_on: null }],
     });
     const m = (id) => rows.find((r) => r.employee_id === id).movement;
     assert.deepEqual(m(1), { joined: true, rejoined: false, resigned: false });
@@ -145,6 +145,57 @@ describe("merging the two stages", () => {
     assert.equal(m(4).joined, false);
     assert.equal(m(5).joined, true);
     assert.equal(m(6).resigned, true, "the initialization stage's dated exit is used as it is");
+  });
+
+  it("boundary dates: first day, last day, same-month join and exit", () => {
+    const rows = D.mergeMonth({
+      ...MONTH,
+      calcRows: [
+        calc(1, { date_of_joining: "2026-08-01" }),
+        calc(2, { resignation_date: "2026-08-31" }),
+        calc(3, { date_of_joining: "2026-08-05", resignation_date: "2026-08-25" }),
+        calc(4, { date_of_joining: "2026-09-01" }),
+        calc(5, { resignation_date: "2026-09-01" }),
+      ],
+    });
+    const m = (id) => rows.find((r) => r.employee_id === id).movement;
+    assert.equal(m(1).joined, true, "joined on the 1st");
+    assert.equal(m(2).resigned, true, "resigned on the last day");
+    assert.deepEqual(m(3), { joined: true, rejoined: false, resigned: true }, "both, in the same month");
+    assert.equal(m(4).joined, false, "a later (future-dated) join is not this month's");
+    assert.equal(m(5).resigned, false, "an exit after the month is not this month's");
+  });
+
+  it("history survives a later rejoin: an August exit stays an August exit", () => {
+    // Left 20 Aug, rejoined 10 Nov: the master now says joined 10 Nov, no resignation.
+    const rows = D.mergeMonth({
+      ...MONTH,
+      calcRows: [calc(7, { date_of_joining: "2026-11-10", resignation_date: null })],
+      periods: [{ employee_id: 7, period_no: 1, joined_on: "2021-01-01", ended_on: "2026-08-20" }],
+    });
+    assert.deepEqual(rows[0].movement, { joined: false, rejoined: false, resigned: true });
+  });
+
+  it("a first period that opened in the month is a join even when the master has moved on", () => {
+    const rows = D.mergeMonth({
+      ...MONTH,
+      calcRows: [calc(8, { date_of_joining: "2026-12-01" })],
+      periods: [{ employee_id: 8, period_no: 1, joined_on: "2026-08-04", ended_on: "2026-10-31" }],
+    });
+    assert.deepEqual(rows[0].movement, { joined: true, rejoined: false, resigned: false });
+  });
+
+  it("rejoined more than once: counted once, as a rejoin, never as a new join", () => {
+    const rows = D.mergeMonth({
+      ...MONTH,
+      calcRows: [calc(9, { date_of_joining: "2026-08-20" })],
+      periods: [
+        { employee_id: 9, period_no: 2, joined_on: "2026-08-02", ended_on: "2026-08-10" },
+        { employee_id: 9, period_no: 3, joined_on: "2026-08-20", ended_on: null },
+      ],
+    });
+    assert.deepEqual(rows[0].movement, { joined: false, rejoined: true, resigned: true });
+    assert.equal(D.peopleMovement(rows).find((x) => x.key === "REJOINED").count, 1);
   });
 
   it("leaves figures out while the review screen presents none", () => {
@@ -291,7 +342,7 @@ describe("people movement", () => {
       ...MONTH,
       calcRows: [calc(1, { date_of_joining: "2026-08-10" }), calc(2, { resignation_date: "2026-08-05" }), calc(3, { date_of_joining: "2026-08-02" })],
       initRows: [init(4, { date_of_joining: "2026-08-25" })],
-      rejoins: [{ employee_id: 3 }],
+      periods: [{ employee_id: 3, period_no: 2, joined_on: "2026-08-02", ended_on: null }],
     });
     const mv = Object.fromEntries(D.peopleMovement(rows).map((m) => [m.key, m]));
     assert.equal(mv.JOINED.count, 2);
@@ -325,7 +376,8 @@ describe("action required", () => {
 
   it("counts only what the payrun stages already decided", () => {
     const items = Object.fromEntries(D.actionItems(rows()).map((a) => [a.key, a]));
-    assert.equal(items.NOT_INITIALIZED_READY.count, 1);
+    assert.equal(items.NOT_INITIALIZED.count, 2, "ready and blocked");
+    assert.deepEqual(items.NOT_INITIALIZED.target, { stage: "INITIALIZATION", card: "READY" });
     assert.equal(items.SALARY_NOT_APPROVED.count, 1);
     assert.equal(items.STATUTORY_SETUP.count, 2);
     assert.equal(items.ATTENDANCE_NEEDS_ACTION.count, 1);
@@ -380,5 +432,65 @@ describe("drill-down", () => {
     assert.deepEqual(blocked.reasons, ["Salary not approved"]);
     assert.equal(blocked.gross, null);
     assert.equal(D.drilldown(rows, { page_size: 5000 }).page_size, 200);
+  });
+});
+
+describe("review: reconciliation and exact drill-downs", () => {
+  const mixed = () =>
+    D.mergeMonth({
+      ...MONTH,
+      calcRows: [
+        calc(1, { figures: { gross: "20000.40", deductions: "1500.10", net: "18500.00", pf: "1200", esi: "150.10", advance: "100", shortage: "50", missing_hours: "0", rounding: "-0.30" } }),
+        calc(2, { figures: { gross: "15000.00", deductions: "1235.60", net: "13764.00", pf: "1100", esi: "112.50", advance: "0", shortage: "0", missing_hours: "23.10", rounding: "-0.40" } }),
+        calc(3, { status: "ATTENDANCE_PENDING", attendance_needs_action: true, figures: null }),
+        calc(4, { status: "NOT_CALCULATED", figures: null, blockers: [{ code: "NOT_CALCULATED" }] }),
+        calc(5, { status: "CALCULATED", statutory_hold: { code: "STATUTORY_SETUP_INCOMPLETE" }, blockers: [{ code: "CALCULATION_INCOMPLETE" }] }),
+        calc(6, { figures: { gross: "100", deductions: "300", net: "-200", rounding: "0" } }),
+        calc(7, { status: "RECALCULATION_REQUIRED", recalculation_reasons: [{ code: "SALARY_CHANGED" }] }),
+      ],
+      initRows: [init(8), init(9, { status: "BLOCKED", blocking_reasons: [{ code: "SALARY_NOT_APPROVED" }] })],
+    });
+
+  it("gross - deductions + rounding = net payable, in the totals", () => {
+    const k = D.kpis(mixed());
+    const p = (v) => D.toPaise(v);
+    assert.equal(p(k.payroll_cost) - p(k.total_deductions) + p(k.net_pay_rounding), p(k.net_payable));
+    const e = D.earnings(mixed());
+    assert.equal(e.net_pay_rounding, k.net_pay_rounding);
+  });
+
+  it("every Action Required count is exactly its drill-down", () => {
+    const rows = mixed();
+    D.actionItems(rows).forEach((a) => {
+      const drilled = D.selectRows(rows, { metric: a.metric });
+      assert.equal(drilled.length, a.count, a.key);
+    });
+  });
+
+  it("every KPI count is exactly its drill-down", () => {
+    const rows = mixed();
+    const k = D.kpis(rows);
+    assert.equal(D.selectRows(rows, { metric: "ALL" }).length, k.total_employees);
+    assert.equal(D.selectRows(rows, { metric: "INITIALIZED" }).length, k.initialized);
+    assert.equal(D.selectRows(rows, { metric: "NOT_INITIALIZED" }).length, k.not_initialized);
+    assert.equal(D.selectRows(rows, { metric: "COSTED" }).length, k.costed_employees);
+    assert.equal(D.selectRows(rows, { metric: "UNCOSTED" }).length, k.uncosted_initialized);
+    assert.deepEqual(D.selectRows(rows, { metric: "UNCOSTED" }).map((r) => r.employee_id).sort(), [3, 4]);
+    const drill = D.drilldown(D.selectRows(rows, { metric: "COSTED" }));
+    assert.deepEqual([drill.totals.gross, drill.totals.deductions, drill.totals.net], [k.payroll_cost, k.total_deductions, k.net_payable]);
+  });
+
+  it("PT and TDS are never a number anywhere", () => {
+    const rows = mixed();
+    D.earnings(rows).breakdown.filter((b) => ["PT", "IT"].includes(b.key)).forEach((b) => {
+      assert.equal(b.tracked, false);
+      assert.equal(b.amount, null);
+      assert.equal(b.employees, null);
+    });
+    D.comparison(rows, rows, MONTH, MONTH).metrics.filter((m) => ["PT", "IT"].includes(m.key)).forEach((m) => {
+      assert.deepEqual([m.tracked, m.base, m.compare, m.difference, m.percent], [false, null, null, null, null]);
+    });
+    const row = D.presentRow(rows[0]);
+    assert.ok(!("pt" in row) && !("tds" in row) && !("income_tax" in row), "drill-down rows carry no PT/TDS column");
   });
 });
