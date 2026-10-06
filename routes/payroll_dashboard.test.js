@@ -127,7 +127,8 @@ before(async () => {
   app.use(auth.create({ userUsecase: { getSessionState: async () => sessionFor(current) } }));
   const branchScope = buildScopeFor(permissions, EMPLOYEES);
   const usecase = buildDashboard(repo, payrun, calculation, { today: () => "2026-10-06" });
-  const routes = require("./payroll_dashboard")(usecase, permissions, branchScope);
+  const sensitive = require("../middlewares/sensitive")(permissions);
+  const routes = require("./payroll_dashboard")(usecase, permissions, sensitive, branchScope);
   app.use("/", routes.getRouter());
   server = await new Promise((r) => {
     const s = app.listen(0, "127.0.0.1", () => r(s));
@@ -308,5 +309,37 @@ describe("review: scope edge cases through the real middleware", () => {
   it("no location filter is the caller's whole scope, never company-wide for a branch user", async () => {
     await get(BRANCH_VIEWER, "employees", { ...MONTH, metric: "ALL" });
     seen.filter((s) => s.store_ids !== undefined).forEach((s) => assert.deepEqual(s.store_ids, [MOOLAKULAM]));
+  });
+});
+
+describe("review: B3 sensitive fields", () => {
+  const { SENSITIVE_EMPLOYEE_FIELDS } = require("../constants/sensitive_fields");
+  const keysOf = (value, out = new Set()) => {
+    if (Array.isArray(value)) value.forEach((v) => keysOf(v, out));
+    else if (value && typeof value === "object") Object.entries(value).forEach(([k, v]) => { out.add(k.toLowerCase()); keysOf(v, out); });
+    return out;
+  };
+
+  it("no response carries a field from the sensitive vocabulary", async () => {
+    const bodies = [
+      (await get(HQ_VIEWER, "summary", MONTH)).body,
+      (await get(HQ_VIEWER, "months", { fy: 2026 })).body,
+      ...(await Promise.all(["ALL", "COSTED", "DED_PF", "DED_ESI", "NOT_INITIALIZED"].map((metric) => get(HQ_VIEWER, "employees", { ...MONTH, metric })))).map((r) => r.body),
+    ];
+    const keys = keysOf(bodies);
+    SENSITIVE_EMPLOYEE_FIELDS.forEach((f) => assert.ok(!keys.has(f.toLowerCase()), `response carries sensitive key ${f}`));
+  });
+
+  it("PF / ESI amounts survive the B3 filter for a caller without view_employee_sensitive", async () => {
+    const res = await get(HQ_VIEWER, "employees", { ...MONTH, metric: "COSTED" });
+    assert.equal(res.status, 200);
+    res.body.rows.forEach((r) => {
+      assert.ok("employee_pf" in r && "employee_esi" in r);
+      assert.notEqual(r.gross, null, "pay figures are not stripped");
+    });
+  });
+
+  it("the router refuses to be built without the filter", () => {
+    assert.throws(() => require("./payroll_dashboard")({}, { requireAll: () => (q, s, n) => n() }, null, {}), /sensitive-field filter is required/);
   });
 });

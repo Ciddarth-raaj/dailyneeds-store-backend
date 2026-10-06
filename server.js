@@ -1630,6 +1630,7 @@ class Server {
     const payrollDashboardRouter = require("./routes/payroll_dashboard")(
       this.payrollDashboardUsecase,
       this.permissions,
+      this.sensitive,
       this.employeeBranchScope
     );
     const shiftRouter = require("./routes/shift")(this.shiftUsecase, this.permissions);

@@ -17,12 +17,13 @@ const FY = { from: { year: 2026, month: 4 }, to: { year: 2027, month: 3 } };
 
 describe("listMonthTotals", () => {
   it("reads April to March as one range", async () => {
-    const { repo, calls } = capture([{ period_year: 2026, period_month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, gross: 1234.5 }]);
+    const { repo, calls } = capture([{ period_year: 2026, period_month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, approved_gross: 1234.5 }]);
     const rows = await repo.listMonthTotals({ ...FY, store_ids: null });
     assert.deepEqual(calls[0].params, [2026, 2027, 202604, 202703]);
     assert.match(calls[0].sql, /pe\.period_year BETWEEN \? AND \?/, "an index-usable range on period_year");
     assert.ok(!/store_id IN/.test(calls[0].sql), "company-wide: no location clause");
-    assert.deepEqual(rows, [{ year: 2026, month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, gross: "1234.5" }]);
+    assert.match(calls[0].sql, /CASE WHEN c\.status = 'APPROVED_LOCKED' THEN c\.total_earnings END/, "final (approved) gross only");
+    assert.deepEqual(rows, [{ year: 2026, month: 8, initialized: 3, calculated: 2, approved: 1, published: 0, approved_gross: "1234.5" }]);
   });
 
   it("fails closed on an empty scope and narrows by the snapshot", async () => {

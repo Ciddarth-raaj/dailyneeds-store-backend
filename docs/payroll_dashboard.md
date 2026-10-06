@@ -12,7 +12,7 @@ screens already use, so the dashboard and Calculation & Review cannot disagree.
 | Initialized | a `payrun_employee` snapshot exists |
 | Calculation status, blockers, recalculation reasons, attendance-needs-action, statutory hold | `PayrunCalculationUsecase._assemble` + `_present` — the code `getMonth` (Calculation & Review) runs |
 | Gross / deductions / net / PF / ESI / advance / other / rounding | the **stored** `payrun_employee_calculation` row, via `PayrunCalculationUsecase.getMonthFigures` |
-| Month strip | one aggregate over `payrun_employee ⟕ payrun_employee_calculation` (stored state only) |
+| Month strip | one aggregate over `payrun_employee ⟕ payrun_employee_calculation` (stored state only); its amount is the **approved & locked** gross — final figures only, never a provisional one |
 | Scope | `middlewares/employee_branch_scope.js#listFilters`, fail-closed |
 | Permissions | `requireAll(view_employees, view_payroll, view_salary)` — the Payrun conjunction |
 
@@ -104,10 +104,13 @@ drill-down (tested in the pure suite and on real MySQL).
 ## 6. Endpoints
 
 All under `/payroll/dashboard`, `requireAll(view_employees, view_payroll, view_salary)`,
-`Cache-Control: no-store`. The usecases always get the caller's **whole** scope; a
+`Cache-Control: no-store`, and the B3 sensitive-field response filter (`middlewares/sensitive.js`)
+like every payrun router; no response carries a field from that vocabulary (drill-down amounts are
+`employee_pf` / `employee_esi`, as on Calculation & Review). The usecases always get the caller's **whole** scope; a
 `store_id` filter must be inside it (else 403); a malformed id is 400 before anything is read.
 
-- `GET /months?fy=2026[&store_id&department_id&designation_id]` — 12 months, stored progress, gross.
+- `GET /months?fy=2026[&store_id&department_id&designation_id]` — 12 months, stored progress,
+  `approved_gross` (approved & locked rows only; null until something is approved).
 - `GET /summary?year&month[&filters][&compare_year&compare_month]` — KPIs (incl.
   `costed_employees`, `uncosted_initialized`, `net_pay_rounding`), headcount, earnings,
   comparison (default: previous month), movement, actions, dependent filter options.
@@ -133,3 +136,32 @@ page ≈ 0.3 s / 21 statements (re-assembles the month; no N+1). For comparison,
 Review's own month read ≈ 0.25–0.35 s / 13 statements. The month-strip query uses a range scan
 on `idx_payrun_employee_month`; the calculation join uses `idx_payrun_calculation_payrun`;
 the employment-period read uses `idx_period_joined`/`idx_period_ended`.
+
+### Production database compatibility
+
+Production (recorded in `docs/auth-stage0a-preproduction-readiness.md` §5.1): `dnds_prod` on
+AWS RDS, **MySQL 8.4.9**, with mixed table collations (`ERROR 1270 Illegal mix of collations`
+has occurred there). Its `@@collation_server` / `@@character_set_server` and the schema default
+were not readable from the review environment (credentials live only on the server; RDS is on a
+private address) — confirm with the read-only queries below.
+
+The suite and the volume run were therefore repeated on **MySQL 8.4.9** with the RDS-default
+server settings (`utf8mb4` / `utf8mb4_0900_ai_ci`, same `sql_mode`): all 328 migrations (payroll
+and employee migrations unmodified), giving a mixed-collation schema (`0900_ai_ci` payroll tables,
+`utf8mb3_general_ci` outlets). 12/12 pass; volume figures match 8.0.46. Between the 8.0.46
+(`general_ci`) and 8.4.9 (`0900_ai_ci`) runs both collation worlds are covered. The dashboard's own
+SQL compares only integer ids, dates and status literals, never strings across tables, so a
+collation mix cannot produce error 1270 in it.
+
+Read-only confirmation for production:
+
+```sql
+SELECT VERSION(), @@character_set_server, @@collation_server, @@sql_mode;
+SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME
+  FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = 'dnds_prod';
+SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES
+ WHERE TABLE_SCHEMA = 'dnds_prod'
+   AND TABLE_NAME IN ('new_employee','outlets','department','designation','employee_salary',
+                      'employee_employment_period','payrun_employee','payrun_employee_calculation',
+                      'payrun_period','attendance_monthly_payroll','attendance_day_calculation');
+```

@@ -16,6 +16,11 @@ const { GROUP_BY } = require("../utils/payroll_dashboard");
  * the same people and the same money those screens do, so it needs exactly
  * their keys and grants nothing new.
  *
+ * B3 APPLIES HERE TOO, exactly as on the payrun routers: the sensitive
+ * response filter runs on every route, so a caller without
+ * `view_employee_sensitive` can never receive an identifier field through the
+ * dashboard - today none is returned, and the filter keeps it that way.
+ *
  * BRANCH SCOPE on every route, fail-closed, from the shared resolver. The
  * usecase is always handed the caller's WHOLE scope (so the Location choices
  * are every branch they may see); a `store_id` filter must be inside it - one
@@ -29,10 +34,12 @@ const monthSchema = {
 };
 
 class PayrollDashboardRoutes {
-  constructor(usecase, permissions, branchScope) {
+  constructor(usecase, permissions, sensitive, branchScope) {
     if (!branchScope) throw new Error("routes/payroll_dashboard: the employee branch scope is required");
+    if (!sensitive) throw new Error("routes/payroll_dashboard: the sensitive-field filter is required");
     this.usecase = usecase;
     this.permissions = permissions;
+    this.sensitive = sensitive;
     this.branchScope = branchScope;
     this.router = express.Router();
     this.init();
@@ -88,6 +95,7 @@ class PayrollDashboardRoutes {
   init() {
     const canView = this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY);
     const r = this.router;
+    r.use("/payroll/dashboard", this.sensitive.filterResponse);
     const handle = (fn) => async (req, res) => {
       try {
         res.setHeader("Cache-Control", "no-store");

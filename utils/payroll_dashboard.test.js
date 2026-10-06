@@ -78,23 +78,25 @@ describe("financial year and month selection", () => {
       fy: 2026,
       today: { year: 2026, month: 10 },
       totals: [
-        { year: 2026, month: 4, initialized: 10, calculated: 10, approved: 10, published: 10, gross: "1000.5" },
-        { year: 2026, month: 5, initialized: 10, calculated: 10, approved: 10, published: 3, gross: "1000" },
-        { year: 2026, month: 6, initialized: 10, calculated: 4, approved: 1, published: 0, gross: "400" },
-        { year: 2026, month: 7, initialized: 10, calculated: 0, approved: 0, published: 0, gross: "0" },
+        { year: 2026, month: 4, initialized: 10, calculated: 10, approved: 10, published: 10, approved_gross: "1000.5" },
+        { year: 2026, month: 5, initialized: 10, calculated: 10, approved: 10, published: 3, approved_gross: "1000" },
+        { year: 2026, month: 6, initialized: 10, calculated: 4, approved: 1, published: 0, approved_gross: "100" },
+        { year: 2026, month: 7, initialized: 10, calculated: 3, approved: 0, published: 0, approved_gross: "0" },
       ],
     });
     const status = Object.fromEntries(strip.map((m) => [m.label, m.status]));
     assert.equal(status["APR '26"], "PUBLISHED");
     assert.equal(status["MAY '26"], "APPROVED");
     assert.equal(status["JUN '26"], "CALCULATING");
-    assert.equal(status["JUL '26"], "INITIALIZED");
+    assert.equal(status["JUL '26"], "CALCULATING");
+    assert.equal(D.monthStatus({ initialized: 4, calculated: 0, approved: 0, published: 0 }, { year: 2026, month: 7 }, { year: 2026, month: 10 }), "INITIALIZED");
     assert.equal(status["AUG '26"], "NOT_STARTED");
     assert.equal(status["OCT '26"], "NOT_STARTED");
     assert.equal(status["NOV '26"], "FUTURE");
-    assert.equal(strip[0].gross, "1000.50");
-    assert.equal(strip[3].gross, null, "nothing calculated: no amount, not a zero");
-    assert.equal(strip[4].gross, null);
+    assert.equal(strip[0].approved_gross, "1000.50");
+    assert.equal(strip[2].approved_gross, "100.00", "partly approved: the approved part only");
+    assert.equal(strip[3].approved_gross, null, "calculated but nothing approved: no amount - never a provisional one");
+    assert.equal(strip[4].approved_gross, null);
   });
 });
 

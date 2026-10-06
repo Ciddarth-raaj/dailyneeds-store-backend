@@ -38,7 +38,7 @@ class PayrollDashboardRepository {
   /**
    * THE MONTH STRIP: per payroll month in [from, to] (each `{year, month}`),
    * how many employees are initialized, calculated, approved and published,
-   * and the stored gross of the calculated ones. Stored state only - the
+   * and the gross of the APPROVED ones (final figures only - see below). Stored state only - the
    * month strip is a progress view, not a review; the derived statuses are
    * the summary's job.
    *
@@ -77,7 +77,14 @@ class PayrollDashboardRepository {
               COALESCE(SUM(c.payrun_employee_id IS NOT NULL), 0) AS calculated,
               COALESCE(SUM(c.status = 'APPROVED_LOCKED'), 0) AS approved,
               COALESCE(SUM(c.status = 'APPROVED_LOCKED' AND c.published_at IS NOT NULL), 0) AS published,
-              COALESCE(SUM(c.total_earnings), 0) AS gross
+              /*
+               * APPROVED & LOCKED ONLY. A calculated-but-unapproved row may be
+               * priced on attendance that is not settled yet - Calculation &
+               * Review shows such figures as provisional (blank) - and this
+               * statement cannot tell which. Approval is refused while
+               * attendance is unsettled, so a locked row's gross is final.
+               */
+              COALESCE(SUM(CASE WHEN c.status = 'APPROVED_LOCKED' THEN c.total_earnings END), 0) AS approved_gross
          FROM payrun_employee pe
          LEFT JOIN payrun_employee_calculation c ON c.payrun_employee_id = pe.payrun_employee_id
         WHERE ${where.join(" AND ")}
@@ -92,7 +99,7 @@ class PayrollDashboardRepository {
       calculated: Number(r.calculated),
       approved: Number(r.approved),
       published: Number(r.published),
-      gross: r.gross === null ? null : String(r.gross),
+      approved_gross: r.approved_gross === null ? null : String(r.approved_gross),
     }));
   }
 

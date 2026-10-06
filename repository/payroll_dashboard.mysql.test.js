@@ -337,7 +337,8 @@ describe("payroll dashboard on real MySQL (full migrated schema)", { skip: !URL 
     assert.equal(by["2026-9"].status, "CALCULATING");
     assert.equal(by["2026-10"].status, "NOT_STARTED");
     assert.equal(by["2026-11"].status, "FUTURE");
-    assert.equal(by["2026-8"].gross, (await stored(2026, 8)).gross);
+    assert.equal(by["2026-8"].approved_gross, (await stored(2026, 8)).gross, "August is fully approved");
+    assert.equal(by["2026-9"].approved_gross, null, "September is calculated in part but nothing is approved: no provisional amount");
     const one = await dashboard.getMonths({ fy: 2026, store_ids: SCOPE, filters: { store_id: 9903, department_id: 9902 } });
     assert.equal(one.months.find((x) => x.month === 8).initialized, (await stored(2026, 8, "pe.store_id = ? AND pe.department_id = ?", [9903, 9902])).n);
   });

@@ -141,7 +141,9 @@ function buildMonthStrip({ fy, totals, today }) {
       calculated: t ? t.calculated : 0,
       approved: t ? t.approved : 0,
       published: t ? t.published : 0,
-      gross: t && t.calculated > 0 ? rupees(toPaise(t.gross)) : null,
+      // Final money only: the approved & locked gross. A month with nothing
+      // approved yet has no amount on the strip (never a provisional one).
+      approved_gross: t && t.approved > 0 ? rupees(toPaise(t.approved_gross)) : null,
     };
   });
 }
@@ -706,8 +708,10 @@ function presentRow(row) {
     gross: money("gross"),
     deductions: money("deductions"),
     net: money("net"),
-    pf: money("pf"),
-    esi: money("esi"),
+    /* Named as Calculation & Review names them. Never `pf` / `esi`: those are
+       the Employee Master's identifier fields in the B3 sensitive vocabulary. */
+    employee_pf: money("pf"),
+    employee_esi: money("esi"),
     advance: money("advance"),
     other: money("other"),
     stage: row.initialized ? "CALCULATION" : "INITIALIZATION",
