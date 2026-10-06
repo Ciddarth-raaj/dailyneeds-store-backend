@@ -192,12 +192,13 @@ function payslipHtml(s, { logo = logoDataUri() } = {}) {
       ${row("Recovery This Month", inr(adv.recovery_this_month))}
     </table><div class="hl"><span>Advance Closing Balance</span><b>${esc(inr(adv.closing_balance))}</b></div>`));
   }
-  if (ctc && ctc.monthly_ctc) {
+  // Nothing the employer pays on top -> CTC is just the Monthly Gross already shown: no section.
+  if (ctc && ctc.monthly_ctc && hasAmount(ctc.total)) {
     cards.push(card("people", "CTC / Employer Contribution", `<table class="kv">
       ${hasAmount(ctc.employer_pf) ? row("Employer PF Contribution", inr(ctc.employer_pf)) : ""}
       ${hasAmount(ctc.employer_esi) ? row("Employer ESI Contribution", inr(ctc.employer_esi)) : ""}
       ${hasAmount(ctc.other) ? row("Other Employer Contribution", inr(ctc.other)) : ""}
-    </table>${hasAmount(ctc.total) ? `<div class="hl"><span>Total Employer Contribution</span><b>${esc(inr(ctc.total))}</b></div>` : ""}
+    </table><div class="hl"><span>Total Employer Contribution</span><b>${esc(inr(ctc.total))}</b></div>
     <table class="kv">
       ${row("Monthly Gross (Fixed)", inr(ctc.monthly_gross))}
       ${row("Monthly CTC", inr(ctc.monthly_ctc))}

@@ -245,16 +245,16 @@ describe("sections: shown only when they apply", () => {
     assert.ok(!html.includes("Other Employer Contribution"), "zero other contribution is hidden");
   });
 
-  it("no PF and no ESI -> no statutory section and no employer PF / ESI rows", () => {
+  it("no PF and no ESI -> no statutory section and no CTC section", () => {
     const html = payslipHtml(rich({ pf_applicable: 0, esi_applicable: 0, employee_pf: "0.00", employee_esi: "0.00",
       total_employee_deductions: "1000.00", net_pay: "25513.00", net_pay_rounding: "-0.26" }));
     assert.ok(!html.includes("Statutory Information"));
     assert.ok(!html.includes("UAN"));
     assert.ok(!html.includes("Employer PF Contribution"));
     assert.ok(!html.includes("Employer ESI Contribution"));
-    assert.ok(html.includes("₹26,013.37"), "CTC is then the Monthly Gross alone");
-    assert.ok(!html.includes("Total Employer Contribution"), "a zero total is not printed");
-    assert.ok(html.includes("Monthly CTC"));
+    assert.ok(!html.includes("CTC / Employer Contribution"), "no employer cost -> no CTC section");
+    assert.ok(!html.includes("Total Employer Contribution"));
+    assert.ok(!html.includes("Monthly CTC"));
   });
 
   it("Net Pay footer: before rounding, round-off, final", () => {
