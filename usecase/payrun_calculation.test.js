@@ -2655,11 +2655,15 @@ describe("Unlock, Publish and Unpublish", () => {
     assert.equal((await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR })).approved_count, 1);
   });
 
-  it("Unlock: a reason is required; Publish needs none", async () => {
+  it("Unlock: a reason is required; Publish and Unpublish need none", async () => {
     await approved(1);
     await assert.rejects(() => act("UNLOCK", [1], { reason: "" }), /reason of at least 5/);
-    await assert.rejects(() => act("UNPUBLISH", [1], { reason: "x" }), /reason of at least 5/);
     assert.equal((await act("PUBLISH", [1])).published_count, 1);
+    const out = await act("UNPUBLISH", [1], { reason: "", remark: "" });
+    assert.deepEqual(out.results.map((r) => r.result), ["UNPUBLISHED"]);
+    const audit = world.lifecycle.filter((a) => a.action === "UNPUBLISH");
+    assert.equal(audit.length, 1, "the unpublish is still audited");
+    assert.equal(audit[0].reason ?? null, null);
   });
 
   it("Unlock: the branch scope is enforced", async () => {
