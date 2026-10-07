@@ -35,6 +35,17 @@ const DOWN = fs.readFileSync(path.join(SQL_DIR, "20261124120000-attendance-ot-au
 // key and the deferred-sync tables.
 const PRIORITY_UP = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-up.sql"), "utf8");
 const PRIORITY_DOWN = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-down.sql"), "utf8");
+// A PERMISSION raise reads the employee's attendance-mode history: the real
+// table, taken from its own migration (as the permission suite does), so this
+// suite never depends on a table another suite left behind.
+const MODE_HISTORY_TABLE = fs
+  .readFileSync(path.join(SQL_DIR, "20261108120000-employee-attendance-calculation-mode-up.sql"), "utf8")
+  .split("\n")
+  .filter((line) => !/^\s*--/.test(line))
+  .join("\n")
+  .split(/;\s*(?:\n|$)/)
+  .map((st) => st.trim())
+  .find((st) => /^CREATE TABLE IF NOT EXISTS `employee_attendance_calculation_mode`/.test(st));
 
 const EMP = 601;
 const EMP2 = 602;
@@ -100,6 +111,7 @@ const SCHEMA = [
    ) ENGINE=InnoDB`,
 ];
 const TABLES = [
+  "employee_attendance_calculation_mode",
   "attendance_regularized_punch",
   "attendance_ot_deferred_sync_log",
   "attendance_ot_deferred_sync",
@@ -134,6 +146,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     for (const ddl of SCHEMA) await q(pool, ddl);
     await q(pool, UP);
     await q(pool, PRIORITY_UP);
+    await q(pool, MODE_HISTORY_TABLE);
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
     const engine = {
