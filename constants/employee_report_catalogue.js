@@ -36,7 +36,8 @@ const {
  *   additional_course, date_of_joining, pan_no, payment_type, status,
  *   resignation_date, default_work_shift_id, pf_applicable, esi_applicable,
  *   previous_pf_member, previous_eps_member, attendance_required,
- *   employment_type, grade, extra_break_hours, works_all_locations
+ *   payroll_eligible, employment_type, grade, extra_break_hours,
+ *   works_all_locations
  *
  * DELIBERATELY_EXCLUDED (18), each with its reason:
  *   employee_image        operational/internal - a base64 LONGTEXT blob; not
@@ -518,6 +519,17 @@ const FIELDS = [
 
   { key: "attendance_required", label: "Attendance Required", group: "Employment",
     select: "new_employee.attendance_required", join_footprint: "base",
+    transform: ATTENDANCE_REQUIRED_LABEL,
+    filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
+    history_backed: false, enabled: true },
+
+  /**
+   * PAYROLL ELIGIBLE - No is "Salary Not Applicable": the employee is left out
+   * of the payroll population. NOT NULL DEFAULT 1, so it reads the same two
+   * answers Attendance Required does, with the same transform (only 0 is No).
+   */
+  { key: "payroll_eligible", label: "Payroll Eligible", group: "Employment",
+    select: "new_employee.payroll_eligible", join_footprint: "base",
     transform: ATTENDANCE_REQUIRED_LABEL,
     filter: { type: FILTER.ENUM, options: YES_NO_OPTIONS },
     history_backed: false, enabled: true },

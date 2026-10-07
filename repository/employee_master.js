@@ -428,6 +428,100 @@ class EmployeeMasterRepository {
     return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
   }
 
+  /* ------------------------------------------------- payroll eligible ---- */
+
+  /**
+   * Whether this employee is paid through DnDS payroll (Salary Not
+   * Applicable when 0). DELIBERATELY NOT ON `EDITABLE_FIELDS`, for the reason
+   * `attendance_required` is not: the switch is administrators only, and the
+   * generic edit path must refuse it by name.
+   */
+  async getPayrollEligible(employeeId) {
+    const rows = await this._read(
+      "GET-PAYROLL-ELIGIBLE",
+      `SELECT employee_id, employee_name, payroll_eligible
+         FROM new_employee WHERE employee_id = ?`,
+      [employeeId]
+    );
+    if (!rows || !rows[0]) return null;
+    return {
+      employee_id: Number(rows[0].employee_id),
+      employee_name: rows[0].employee_name,
+      payroll_eligible: Number(rows[0].payroll_eligible) === 1,
+    };
+  }
+
+  /** The current value, read under lock in the change's own transaction. */
+  async readPayrollEligibleForUpdate(tx, employeeId) {
+    const rows = await tx.query(
+      "SELECT payroll_eligible FROM new_employee WHERE employee_id = ? FOR UPDATE",
+      [employeeId]
+    );
+    const row = Array.isArray(rows) ? rows[0] : null;
+    return row ? Number(row.payroll_eligible) === 1 : null;
+  }
+
+  /** One append-only audit row per real change. */
+  async insertPayrollEligibleAudit(tx, { employeeId, oldValue, newValue, changedBy, changedByUserId }) {
+    await tx.query(
+      `INSERT INTO employee_payroll_eligible_audit
+         (employee_id, old_value, new_value, changed_by, changed_by_user_id)
+       VALUES (?, ?, ?, ?, ?)`,
+      [employeeId, oldValue ? 1 : 0, newValue ? 1 : 0, changedBy, changedByUserId]
+    );
+  }
+
+  /** The change history, newest first, with the acting employee's name. */
+  async listPayrollEligibleAudit(employeeId, limit = 20) {
+    const rows = await this._read(
+      "LIST-PAYROLL-ELIGIBLE-AUDIT",
+      `SELECT a.audit_id, a.old_value, a.new_value, a.changed_by, a.changed_by_user_id,
+              DATE_FORMAT(a.changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at,
+              actor.employee_name AS changed_by_name
+         FROM employee_payroll_eligible_audit a
+         LEFT JOIN new_employee actor ON actor.employee_id = a.changed_by
+        WHERE a.employee_id = ?
+        ORDER BY a.changed_at DESC, a.audit_id DESC
+        LIMIT ?`,
+      [employeeId, limit]
+    );
+    return (rows || []).map((r) => ({
+      audit_id: Number(r.audit_id),
+      old_value: Number(r.old_value) === 1,
+      new_value: Number(r.new_value) === 1,
+      changed_by: r.changed_by === null ? null : Number(r.changed_by),
+      changed_by_user_id: r.changed_by_user_id === null ? null : Number(r.changed_by_user_id),
+      changed_by_name: r.changed_by_name || null,
+      changed_at: r.changed_at,
+    }));
+  }
+
+  /**
+   * The payroll months this employee is already initialized into, newest
+   * first. Read only so the profile can say, before Yes -> No, that those
+   * months stay exactly as they are.
+   */
+  async listInitializedPayrollMonths(employeeId, limit = 24) {
+    const rows = await this._read(
+      "LIST-INITIALIZED-PAYROLL-MONTHS",
+      `SELECT period_year, period_month
+         FROM payrun_employee
+        WHERE employee_id = ?
+        ORDER BY period_year DESC, period_month DESC
+        LIMIT ?`,
+      [employeeId, limit]
+    );
+    return (rows || []).map((r) => ({ year: Number(r.period_year), month: Number(r.period_month) }));
+  }
+
+  async setPayrollEligible(tx, employeeId, eligible) {
+    const res = await tx.query(
+      "UPDATE new_employee SET payroll_eligible = ? WHERE employee_id = ?",
+      [eligible ? 1 : 0, employeeId]
+    );
+    return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
+  }
+
   /* -------------------------------------------------- location scope ---- */
 
   /**

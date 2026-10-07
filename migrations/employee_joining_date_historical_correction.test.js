@@ -32,6 +32,7 @@ describe("the migration", () => {
       "20261121120000-company-details-permission",
       "20261122120000-payroll-export-payslips-permission",
       "20261123120000-payroll-reports",
+      "20261124120000-employee-payroll-eligible",
       "20261125120000-attendance-ot-auto-pending",
       "20261126120000-attendance-ot-late-settlement",
       "20261127120000-attendance-ot-correction-priority",
