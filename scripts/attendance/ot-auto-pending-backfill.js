@@ -41,11 +41,13 @@
  *   payroll-locked month                       -> NOT raised; reported with
  *                                                its minutes (and an existing
  *                                                pending one is preserved)
- *   another PENDING request on the date        -> NOT raised (the date's one
- *   (a regularization or permission)              open slot is taken); listed
- *                                                under blocked_by_open_request
- *                                                with its minutes - re-run once
- *                                                that request is decided
+ *   an attendance correction PENDING on the    -> NOT raised from the uncorrected
+ *   date (regularization, HR correction,          day; listed under
+ *   shift change, permission)                     blocked_by_open_request and, on
+ *                                                --apply only, REMEMBERED in
+ *                                                attendance_ot_deferred_sync: the
+ *                                                correction's final decision
+ *                                                re-runs OT for that exact date
  *
  * IDEMPOTENT: a second run creates nothing. TELEGRAM: no per-date cards - each
  * named first approver gets ONE summary ("12 OT approvals pending from
@@ -195,6 +197,8 @@ function chainProblem(chain, authority) {
 async function run({
   calculateRange,
   syncAutoOt,
+  // --apply only: re-sync remembered dates whose correction is already decided.
+  resolveDeferredOt = null,
   listEmployees,
   listApprovalAuthority = async () => null,
   listAttendedDates,
@@ -276,7 +280,12 @@ async function run({
     locked_month_pending_preserved: 0,
     blocked_by_open_request_days: 0,
     blocked_by_open_request_minutes: 0,
+    pending_waiting_for_correction: 0,
+    deferred_dates: 0,
+    deferred_newly_recorded: 0,
+    deferred_eligible_minutes: 0,
   };
+  const deferredByKind = {};
   const chainProblems = [];
   const blockedByOpenRequest = [];
   const detail = [];
@@ -296,6 +305,9 @@ async function run({
         notify: false,
         // THIS employee's window, for THIS call only.
         allow_creation_from: plan.from_date,
+        // Dates an attendance correction holds open are REMEMBERED (on --apply
+        // only) so the correction's decision re-runs OT for them.
+        track_deferred: true,
         assume_setting: apply ? null : setting && enabled ? setting : { enabled: 1, auto_pending_from_date: plan.from_date },
       });
       if (!result.enabled) {
@@ -320,8 +332,18 @@ async function run({
           eligible_ot_minutes: b.eligible_ot_minutes,
           blocking_request_id: b.blocking_request_id,
           blocking_request_type: b.blocking_request_type,
+          // EMPLOYEE_REGULARIZATION / HR_CORRECTION / PERMISSION / SHIFT_CHANGE / OTHER
+          blocking_request_kind: b.blocking_request_kind || null,
         })
       );
+      counts.pending_waiting_for_correction += (result.unchanged || []).filter((u) => u.waiting_for_correction).length;
+      (result.deferred || []).forEach((d) => {
+        counts.deferred_dates += 1;
+        if (d.recorded) counts.deferred_newly_recorded += 1;
+        counts.deferred_eligible_minutes += Number(d.eligible_ot_minutes) || 0;
+        const kind = d.blocking_request_kind || "OTHER";
+        deferredByKind[kind] = (deferredByKind[kind] || 0) + 1;
+      });
 
       counts.new_pending += created.length;
       counts.new_pending_minutes += created.reduce((n, c) => n + (Number(c.ot_minutes) || 0), 0);
@@ -343,7 +365,7 @@ async function run({
         rejected.filter((r) => pos(r.eligible_ot_minutes)).length +
         held.filter((h) => pos(h.eligible_ot_minutes)).length +
         locked.filter((l) => pos(l.eligible_ot_minutes)).length +
-        blocked.length;
+        blocked.filter((b) => pos(b.eligible_ot_minutes)).length;
 
       // Every new record must have somebody active to decide it.
       for (const c of created) {
@@ -386,6 +408,16 @@ async function run({
       log(`FAILED employee ${plan.employee_id}: ${(err && err.message) || err}`);
     }
     /* eslint-enable no-await-in-loop */
+  }
+
+  // ---- 3b. remembered dates whose correction is already decided (apply only) ----
+  let deferredSweep = null;
+  if (apply && typeof resolveDeferredOt === "function") {
+    try {
+      deferredSweep = await resolveDeferredOt({ source: "BACKFILL_SWEEP" });
+    } catch (err) {
+      failures.push({ employee_id: null, stage: "DEFERRED_SWEEP", message: String((err && err.message) || err) });
+    }
   }
 
   // ---- 4. Telegram: ONE summary per named first approver (apply only) ----
@@ -448,10 +480,21 @@ async function run({
       blocked_by_open_request_minutes: counts.blocked_by_open_request_minutes,
     },
     employees_without_valid_approval_chain: chainProblems,
-    // Eligible OT on a date another PENDING request holds: NOT raised. Decide
-    // the blocking request, then re-run the backfill while the date is still
-    // in the employee's window.
+    // A date an ATTENDANCE CORRECTION (regularization, HR correction, shift
+    // change, permission) holds open: no OT is raised from the uncorrected
+    // day. Each is REMEMBERED (--apply only) so the correction's final
+    // decision re-runs OT for that exact date, before the cutover if need be.
     blocked_by_open_request: blockedByOpenRequest,
+    deferred_historical_ot: {
+      [apply ? "dates_tracked" : "dates_would_be_tracked"]: counts.deferred_dates,
+      newly_recorded: apply ? counts.deferred_newly_recorded : 0,
+      eligible_minutes_on_uncorrected_days: counts.deferred_eligible_minutes,
+      by_blocking_request_kind: deferredByKind,
+      // A pending OT already raised on a date whose correction is now open:
+      // kept, not approvable until the correction is decided.
+      pending_ot_waiting_for_correction: counts.pending_waiting_for_correction,
+      sweep: deferredSweep ? { checked: deferredSweep.checked, resolved: deferredSweep.resolved.length } : null,
+    },
     telegram: {
       mode: "ONE_SUMMARY_PER_APPROVER",
       summaries: apply ? telegramSent : telegramPlan,
@@ -485,6 +528,7 @@ async function main() {
     const report = await run({
       calculateRange: calculation.calculateRange,
       syncAutoOt: regularization.syncAutoOt,
+      resolveDeferredOt: regularization.resolveDeferredOt,
       listEmployees: ({ from_date, to_date }) => calcRepo.listEmployeesForRecalculation({ from_date, to_date }),
       listApprovalAuthority: () => regRepo.listApprovalAuthority(),
       listAttendedDates: (args) => regRepo.listAttendedDates(args),

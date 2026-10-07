@@ -753,10 +753,12 @@ The preview prints each employee's attended dates, the raw last-5 punch dates,
 `sources_differ`, and `dates_evaluated`. The cutover is **not** moved: each
 backfill call carries its own `allow_creation_from` (see Gates).
 
-A date whose one open-request slot is held by another PENDING request (a
-regularization or permission) is not raised; preview and apply both list it
-under `blocked_by_open_request` with its minutes. Decide that request, then
-re-run the backfill while the date is still in the employee's window.
+A date an attendance correction (regularization, HR correction, shift change,
+permission) holds open is not evaluated from the uncorrected day; preview and
+apply list it under `blocked_by_open_request` (minutes, blocking request id,
+type and kind) and `deferred_historical_ot`, and `--apply` remembers it in
+`attendance_ot_deferred_sync` so the correction's decision re-runs OT for it
+(see "Attendance correction comes before system OT").
 `--today` re-points a preview only: it is refused with `--apply` and in the
 future.
 
@@ -775,6 +777,66 @@ the first approver. `/ot` lists 10 at a time.
 PENDING OT, when the engine still finds eligible OT; none when it is zero. The
 revoked record stays (CANCELLED, its steps and decision untouched) with its
 revocation row; the new record's creation is logged `REVOKE_OT`.
+
+## Attendance correction comes before system OT (migration 20261126120000)
+
+The OT figure may itself be wrong until attendance is corrected, so a
+correction always wins over a **system-raised** OT on the same date.
+
+**Conflict model.** `open_request_group` gives a pending system OT
+(`auto_created = 1`) its own group, `AUTO_OT`; manual requests keep theirs
+(`ATT` - one open regularization or legacy employee OT a date - `SHIFT`,
+`PERM`). A second key, `uq_aareq_open_ot_per_employee_date`, allows at most
+one pending OT-carrying request (OT or REGULARIZATION_WITH_OT) a date,
+whoever raised it. So a correction can always be raised beside a system OT,
+two manual corrections still exclude each other, and a date never holds two
+pending OTs.
+
+**While a correction (regularization, HR correction, shift change or
+permission) is pending on the date:**
+
+| | Behaviour |
+|---|---|
+| raising the correction / voiding a punch | allowed - a pending system OT does not block it (`findOpenRequest` leaves it out) |
+| the existing system OT | kept as it is for audit: not re-figured, not withdrawn |
+| approving / rejecting it (DnDS, bulk, Telegram) | refused, `409 ATTENDANCE_CORRECTION_PENDING`: *"Attendance is being corrected. OT will be recalculated before approval."* |
+| DnDS approval queue | "Waiting for attendance correction", no Approve button, not bulk-selectable |
+| new system OT on the date | not raised from the uncorrected day |
+| payroll | it is still PENDING: never payable, counted by `PENDING_OT_APPROVAL` |
+
+**The guard is in the database.** A correction's `createRequest` locks the
+date's pending OT row (by primary key) before inserting; an OT decision
+(`decideStage`, `refuseWhileCorrectionPending`) locks the same row first and
+then reads the pending corrections with a locking read. They serialize on one
+row: if the approval commits first, the correction follows the approved-OT
+rules (the approval stands; the engine clamps payment to the corrected day's
+eligible OT); if the correction commits first, the approval is refused.
+
+**After the correction's final decision** (approved or rejected) the OT sync
+runs for the date: the pending OT's minutes follow the corrected day (down,
+or up while no stage has approved), it is withdrawn if the OT is gone, it
+returns to Pending Approval if nothing changed, and it is created if the date
+had none. Approved and rejected OT are never overwritten.
+
+### Deferred historical OT (`attendance_ot_deferred_sync`)
+
+A backfill date held by an open correction is not evaluated from the
+uncorrected day. On `--apply` only (a preview writes nothing) it is
+REMEMBERED: one row per employee and date (`uq_aods_employee_date`), status
+`WAITING_FOR_CORRECTION`, with the blocking request and the minutes the
+uncorrected day computes. It is a trigger, not an OT record.
+
+When the date is free (the correction's final decision, or the 07:20 daily
+safety-net sweep `attendance_ot_deferred_sweep`, or a backfill re-run), the
+ordinary OT sync runs for that date and the marker is `RESOLVED` with what it
+did (`CREATED`, `UPDATED`, `UNCHANGED`, `NO_OT`, `WITHDRAWN`,
+`PRESERVED_DECIDED`, `PAYROLL_LOCKED`, ...). A date still held by another
+correction stays waiting (`STILL_BLOCKED`). The marker lets the sync create
+OT before the global cutover **for that employee and date only**; the cutover
+is never moved, and no other old date gains anything. Every step is logged in
+`attendance_ot_deferred_sync_log` (`DEFERRED`, `STILL_BLOCKED`,
+`SYNC_ATTEMPTED`, `RESOLVED`); the OT's own creation/update/withdrawal is in
+`attendance_ot_auto_pending_log` as before.
 
 ## Prior-Month OT carry-forward (late approval after payroll lock)
 

@@ -34,6 +34,7 @@ describe("the migration", () => {
       "20261123120000-payroll-reports",
       "20261124120000-attendance-ot-auto-pending",
       "20261125120000-attendance-ot-late-settlement",
+      "20261126120000-attendance-ot-correction-priority",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");

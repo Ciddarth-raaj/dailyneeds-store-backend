@@ -163,7 +163,15 @@ function build(state = {}) {
 
   const stepsOf = (id) => store.steps.filter((s) => s.attendance_approval_request_id === id);
   const decidedSteps = (id) => stepsOf(id).filter((s) => s.decision === "APPROVED" || s.decision === "REJECTED").length;
-  const group = (type) => (type === "SHIFT_CHANGE" ? "SHIFT" : type === "PERMISSION" ? "PERM" : "ATT");
+  // The open-request groups, as migration 20261126120000 generates them: a
+  // SYSTEM OT has its own, so it never holds the slot a correction needs.
+  const group = (type, auto) =>
+    type === "SHIFT_CHANGE" ? "SHIFT" : type === "PERMISSION" ? "PERM" : type === "OT" && auto ? "AUTO_OT" : "ATT";
+  const CORRECTIONS = ["REGULARIZATION", "REGULARIZATION_WITH_OT", "SHIFT_CHANGE", "PERMISSION"];
+  const pendingCorrections = (employeeId, dates) =>
+    store.requests.filter((r) => r.requested_for_employee_id === employeeId && dates.includes(r.attendance_date) && r.status === "PENDING" && CORRECTIONS.includes(r.request_type));
+  store.deferred = store.deferred || [];
+  store.deferredLog = store.deferredLog || [];
 
   const regRepo = {
     store,
@@ -174,7 +182,40 @@ function build(state = {}) {
         return e ? { employee_id: e.employee_id, employee_name: e.employee_name, outlet_id: e.store_id, outlet_name: `Outlet ${e.store_id}`, designation_id: e.designation_id, designation_name: "STAFF", approver_role: null, requester_class: null } : null;
       })(),
     findOpenRequest: async (employeeId, date) =>
-      store.requests.find((r) => r.requested_for_employee_id === employeeId && r.attendance_date === date && r.status === "PENDING") || null,
+      store.requests.find(
+        (r) => r.requested_for_employee_id === employeeId && r.attendance_date === date && r.status === "PENDING" && !(r.request_type === "OT" && r.auto_created === 1)
+      ) || null,
+    findPendingCorrections: async (employeeId, dates) => pendingCorrections(employeeId, dates),
+    listPendingCorrectionsForPairs: async (pairs) =>
+      pairs.flatMap((p) => pendingCorrections(p.employee_id, [p.attendance_date]).map((r) => ({ ...r, employee_id: r.requested_for_employee_id }))),
+    // ---- deferred historical OT (attendance_ot_deferred_sync) ----
+    upsertDeferredOt: async ({ employee_id, attendance_date, blocking_request_id, blocking_request_type, eligible_ot_minutes, source }) => {
+      const found = store.deferred.find((d) => d.employee_id === employee_id && d.attendance_date === attendance_date);
+      if (found && found.status === "WAITING_FOR_CORRECTION") return { deferred_sync_id: found.deferred_sync_id, recorded: false };
+      const row = found || { deferred_sync_id: store.deferred.length + 1, employee_id, attendance_date };
+      Object.assign(row, { status: "WAITING_FOR_CORRECTION", resolution: null, blocking_request_id, blocking_request_type, eligible_ot_minutes, source });
+      if (!found) store.deferred.push(row);
+      store.deferredLog.push({ deferred_sync_id: row.deferred_sync_id, action: "DEFERRED", trigger_source: source });
+      return { deferred_sync_id: row.deferred_sync_id, recorded: true };
+    },
+    listWaitingDeferredOt: async (employeeId, dates) =>
+      store.deferred.filter((d) => d.employee_id === employeeId && dates.includes(d.attendance_date) && d.status === "WAITING_FOR_CORRECTION"),
+    markDeferredOtStillBlocked: async ({ deferred_sync_id, blocking_request_id, trigger_source }) => {
+      const d = store.deferred.find((x) => x.deferred_sync_id === deferred_sync_id);
+      if (d && d.status === "WAITING_FOR_CORRECTION" && d.blocking_request_id !== blocking_request_id) {
+        d.blocking_request_id = blocking_request_id;
+        store.deferredLog.push({ deferred_sync_id, action: "STILL_BLOCKED", trigger_source });
+      }
+    },
+    resolveDeferredOt: async ({ deferred_sync_id, resolution, ot_request_id, trigger_source }) => {
+      const d = store.deferred.find((x) => x.deferred_sync_id === deferred_sync_id);
+      if (!d || d.status !== "WAITING_FOR_CORRECTION") return { resolved: false };
+      Object.assign(d, { status: "RESOLVED", resolution, resolved_request_id: ot_request_id });
+      store.deferredLog.push({ deferred_sync_id, action: "SYNC_ATTEMPTED", trigger_source }, { deferred_sync_id, action: "RESOLVED", resolution, trigger_source });
+      return { resolved: true };
+    },
+    listResolvableDeferredOt: async () =>
+      store.deferred.filter((d) => d.status === "WAITING_FOR_CORRECTION" && pendingCorrections(d.employee_id, [d.attendance_date]).length === 0),
     findRequestsForDates: async (employeeId, dates) =>
       store.requests.filter((r) => r.requested_for_employee_id === employeeId && dates.includes(r.attendance_date) && r.status !== "CANCELLED"),
     getRegularizationPolicy: async () => null,
@@ -184,9 +225,14 @@ function build(state = {}) {
       if (request.refuse_when_payroll_locked && lockHits([{ employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date }]).length > 0) {
         throw lockedError();
       }
+      const sameDatePending = (r) =>
+        r.requested_for_employee_id === request.requested_for_employee_id && r.attendance_date === request.attendance_date && r.status === "PENDING";
+      const carriesOt = (t) => t === "OT" || t === "REGULARIZATION_WITH_OT";
       const clash = store.requests.find(
-        (r) => r.requested_for_employee_id === request.requested_for_employee_id && r.attendance_date === request.attendance_date &&
-          r.status === "PENDING" && group(r.request_type) === group(request.request_type)
+        (r) =>
+          sameDatePending(r) &&
+          (group(r.request_type, r.auto_created === 1) === group(request.request_type, !!request.auto_created) ||
+            (carriesOt(r.request_type) && carriesOt(request.request_type)))
       );
       if (clash) {
         const err = new Error("Duplicate entry for key uq_aareq_open_per_employee_date");
@@ -221,8 +267,18 @@ function build(state = {}) {
       if (isLocked && !args.lateOt && !(args.allowRejectWhenLocked && args.decision === "REJECTED")) throw lockedError();
       const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
       const st = stepsOf(args.requestId).find((s) => s.stage_no === args.stageNo);
+      // ATTENDANCE CORRECTION FIRST, as the SQL proves it under the OT row lock.
+      if (args.refuseWhileCorrectionPending) {
+        const [blocker] = pendingCorrections(args.refuseWhileCorrectionPending.employee_id, [args.refuseWhileCorrectionPending.attendance_date]);
+        if (blocker) {
+          return { code: 409, waiting_for_correction: true, reason_code: "ATTENDANCE_CORRECTION_PENDING", blocking_request_id: blocker.attendance_approval_request_id, blocking_request_type: blocker.request_type, msg: "Attendance is being corrected. OT will be recalculated before approval." };
+        }
+      }
       if (!st || st.decision !== "PENDING") return { code: 409, msg: "That stage has already been decided - reload and try again" };
       if (r.status !== "PENDING" || r.current_stage_no !== args.stageNo) return { code: 409, msg: "This request moved" };
+      if (args.expectCandidateOtMinutes !== null && args.expectCandidateOtMinutes !== undefined && (r.candidate_ot_minutes || 0) !== args.expectCandidateOtMinutes) {
+        return { code: 409, ot_minutes_changed: true, candidate_ot_minutes: r.candidate_ot_minutes, msg: "moved" };
+      }
       Object.assign(st, { decision: args.decision, decided_by_employee_id: args.actorId, decided_at: "2026-09-20 10:00:00", remarks: args.remarks, decision_source: args.decisionSource });
       r.status = args.next.status; r.current_stage_no = args.next.current_stage_no; r.approved_ot_minutes = args.next.approved_ot_minutes;
       r.finalization_state = args.next.status === "PENDING" ? "NOT_REQUIRED" : "SETTLED";
@@ -988,7 +1044,7 @@ describe("16. existing attendance regularisation behaviour continues working", (
     assert.equal(done.ot_auto_pending.created.length, 1);
   });
 
-  it("a stale system OT on a day that has since lost a punch does not block the correction", async () => {
+  it("a stale system OT on a day that has since lost a punch does not block the correction; it waits, and follows the decided day", async () => {
     const w = build({ rawPunches: day(42, DATE) });
     await recalc(w, 42);
     // The out punch is voided at the source; nobody has recalculated yet.
@@ -998,7 +1054,7 @@ describe("16. existing attendance regularisation behaviour continues working", (
       reason: "Terminal offline at close", punch_time: `${DATE} 23:00:00`, now: NOW,
     });
     assert.ok(raised.attendance_approval_request_id);
-    assert.equal(otOf(w, 42)[0].status, "CANCELLED", "the stale OT was withdrawn");
+    assert.equal(otOf(w, 42)[0].status, "PENDING", "kept for audit - waiting for the correction, not withdrawn from a day about to change");
   });
 });
 
@@ -1328,5 +1384,205 @@ describe("PRIOR-MONTH OT: deciding OT after its payroll month is locked", () => 
     assert.equal(out.late_settlement, null);
     assert.equal(lastStored(w, 43).approved_ot_minutes, 90);
     assert.equal(w.store.settlements.length, 0);
+  });
+});
+
+/* ===================== ATTENDANCE CORRECTION COMES BEFORE SYSTEM OT ===== */
+
+/**
+ * The date has a pending system OT of 90 min (out at 23:30). The out punch
+ * then turns out to be wrong - voided at the source - and a correction is
+ * raised with the right time. The correction comes first: it is raised, the
+ * OT waits (not approvable anywhere), and the correction's decision re-runs
+ * the OT from the corrected day.
+ */
+const correctionScenario = async (newOut, by = 42) => {
+  const w = build({ rawPunches: day(42, DATE) });
+  await recalc(w, 42);
+  const [ot] = otOf(w, 42);
+  w.rawPunches.splice(w.rawPunches.findIndex((p) => p.employee_id === 42 && p.io_time.endsWith("23:30:00")), 1);
+  const reg = await w.regularization.raiseRequest({
+    actor: by === 42 ? actor(42) : HR, requested_for_employee_id: 42, attendance_date: DATE,
+    reason: "Terminal offline at close", punch_time: `${DATE} ${newOut}`, now: NOW,
+  });
+  return { w, ot, reg };
+};
+const otList = (w, who = SM3) => w.regularization.listApprovals({ actor: who, request_type: REQUEST_TYPE.OT, status: "PENDING" });
+
+describe("ATTENDANCE CORRECTION FIRST: a pending system OT never blocks a correction", () => {
+  it("1. the employee's regularization is raised while the system OT is pending; the OT is kept for audit", async () => {
+    const { w, ot, reg } = await correctionScenario("23:00:00");
+    assert.ok(reg.attendance_approval_request_id);
+    assert.equal(otOf(w, 42)[0].attendance_approval_request_id, ot.attendance_approval_request_id);
+    assert.equal(otOf(w, 42)[0].status, "PENDING");
+    assert.equal(otOf(w, 42)[0].candidate_ot_minutes, 90, "not re-figured from a day about to change");
+  });
+
+  it("2. an HR correction for the employee is raised the same way", async () => {
+    const { w, reg } = await correctionScenario("23:00:00", "HR");
+    assert.ok(reg.attendance_approval_request_id);
+    assert.equal(otOf(w, 42)[0].status, "PENDING");
+  });
+
+  it("3. while the correction is pending the OT shows 'Waiting for attendance correction' and is not actionable", async () => {
+    const { w, reg } = await correctionScenario("23:00:00");
+    const out = await otList(w);
+    const row = (out.rows || out.items || out).find((r) => r.request_type === "OT");
+    assert.equal(row.waiting_for_correction, true);
+    assert.equal(row.actionable, false);
+    assert.equal(row.waiting_status_label, "Waiting for attendance correction");
+    assert.equal(row.blocking_request_id, reg.attendance_approval_request_id);
+  });
+
+  it("9. DnDS cannot approve (or reject) the stale OT meanwhile - single and bulk", async () => {
+    const { w, ot } = await correctionScenario("23:00:00");
+    for (const decision of [STEP_DECISION.APPROVED, STEP_DECISION.REJECTED]) {
+      // eslint-disable-next-line no-await-in-loop
+      const out = await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision, remarks: "Not worked", now: NOW });
+      assert.equal(out.code, 409);
+      assert.equal(out.waiting_for_correction, true);
+      assert.equal(out.msg, "Attendance is being corrected. OT will be recalculated before approval.");
+    }
+    const bulk = await w.regularization.bulkAction({
+      actor: SM3, action: "APPROVE", request_type: REQUEST_TYPE.OT, items: [{ request_id: ot.attendance_approval_request_id, current_stage_no: 1 }], now: NOW,
+    });
+    assert.equal(bulk.results[0].outcome, "SKIPPED");
+    assert.equal(bulk.results[0].code, "ATTENDANCE_CORRECTION_PENDING");
+    assert.equal(otOf(w, 42)[0].status, "PENDING");
+  });
+
+  it("8. an old Telegram Approve cannot approve it meanwhile", async () => {
+    const { w, ot } = await correctionScenario("23:00:00");
+    const out = await w.otTelegram.handle(tap(`ot:${ot.attendance_approval_request_id}:A:90`, 7));
+    assert.equal(out.outcome, "WAITING_FOR_CORRECTION");
+    assert.match(w.telegramLog.answered.pop(), /Attendance is being corrected\. OT will be recalculated before approval\./);
+    assert.equal(otOf(w, 42)[0].status, "PENDING");
+  });
+
+  it("18. a waiting OT pays nothing: the day carries 0 approved OT, and payroll counts it as pending", async () => {
+    const { w } = await correctionScenario("23:00:00");
+    assert.equal(lastStored(w, 42).approved_ot_minutes, 0);
+    assert.equal(liveOt(w, 42).filter((r) => r.status === "PENDING").length, 1, "counted by PENDING_OT_APPROVAL - never payable");
+  });
+});
+
+describe("ATTENDANCE CORRECTION FIRST: the correction's decision re-runs the OT", () => {
+  it("4/5. approved with an earlier out time: the pending OT follows the corrected day DOWN (90 -> 60) and is decidable again", async () => {
+    const { w, ot, reg } = await correctionScenario("23:00:00");
+    await approveRoleChain(w, reg.attendance_approval_request_id);
+    const [now] = otOf(w, 42);
+    assert.equal(now.attendance_approval_request_id, ot.attendance_approval_request_id, "the same OT record");
+    assert.deepEqual([now.status, now.candidate_ot_minutes], ["PENDING", 60]);
+    const row = (await otList(w)).rows.find((r) => r.request_type === "OT");
+    assert.equal(row.waiting_for_correction, false);
+    assert.equal(row.actionable, true, "back to Pending Approval");
+    const decided = await approveRoleChain(w, ot.attendance_approval_request_id);
+    assert.equal(decided.status, "APPROVED");
+    assert.equal(decided.approved_ot_minutes, 60);
+  });
+
+  it("6. approved with a later out time: the pending OT follows it UP (90 -> 119)", async () => {
+    const { w, reg } = await correctionScenario("23:59:00");
+    await approveRoleChain(w, reg.attendance_approval_request_id);
+    assert.deepEqual([otOf(w, 42)[0].status, otOf(w, 42)[0].candidate_ot_minutes], ["PENDING", 119]);
+  });
+
+  it("7. corrected to no OT at all: the system's pending OT is withdrawn", async () => {
+    const { w, reg } = await correctionScenario("21:30:00");
+    await approveRoleChain(w, reg.attendance_approval_request_id);
+    assert.equal(otOf(w, 42)[0].status, "CANCELLED");
+    assert.equal(liveOt(w, 42).length, 0);
+  });
+
+  it("17. an OT APPROVED before the correction is never overwritten; the day pays what the corrected day supports", async () => {
+    const w = build({ rawPunches: day(42, DATE) });
+    await recalc(w, 42);
+    const [ot] = otOf(w, 42);
+    await approveRoleChain(w, ot.attendance_approval_request_id);
+    w.rawPunches.splice(w.rawPunches.findIndex((p) => p.employee_id === 42 && p.io_time.endsWith("23:30:00")), 1);
+    const reg = await w.regularization.raiseRequest({
+      actor: actor(42), requested_for_employee_id: 42, attendance_date: DATE, reason: "Terminal offline at close", punch_time: `${DATE} 23:00:00`, now: NOW,
+    });
+    await approveRoleChain(w, reg.attendance_approval_request_id);
+    const [after] = otOf(w, 42);
+    assert.deepEqual([after.status, after.approved_ot_minutes], ["APPROVED", 90], "the decision itself is untouched");
+    assert.equal(lastStored(w, 42).approved_ot_minutes, 60, "the existing clamp: never paid beyond the corrected day's eligible OT");
+  });
+});
+
+describe("DEFERRED HISTORICAL OT: the backfill remembers a date a correction holds", () => {
+  const backfillArgs = (w, apply) => ({
+    calculateRange: w.calculation.calculateRange,
+    syncAutoOt: w.regularization.syncAutoOt,
+    resolveDeferredOt: w.regularization.resolveDeferredOt,
+    listEmployees: async () => [{ employee_id: 42 }],
+    listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+    listAttendedDates: attendedFromSaved(w),
+    // As deployed: the cutover is the deploy date - every backfill date is before it.
+    setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+    today: "2026-09-20",
+    days: 5,
+    lookback: 31,
+    apply,
+    telegram: false,
+  });
+  const openCorrection = (w, date, by = 42) => {
+    w.store.requests.push({
+      attendance_approval_request_id: 5000, request_type: "REGULARIZATION", requested_for_employee_id: 42, requested_by_employee_id: by,
+      attendance_date: date, status: "PENDING", current_stage_no: 1, total_stages: 1, auto_created: 0, candidate_ot_minutes: 0,
+    });
+    return w.store.requests[w.store.requests.length - 1];
+  };
+
+  it("10/11. preview reports it (minutes, blocker id, type and kind) and writes nothing; --apply records ONE marker; a re-run adds none", async () => {
+    const dates = ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
+    const w = build({ wireAuto: false, rawPunches: dates.flatMap((d) => day(42, d)) });
+    await persistAll(w, [42]);
+    openCorrection(w, "2026-09-17", 8); // an HR correction
+    const preview = await backfill.run(backfillArgs(w, false));
+    assert.deepEqual(preview.blocked_by_open_request.map((b) => [b.attendance_date, b.eligible_ot_minutes, b.blocking_request_id, b.blocking_request_type, b.blocking_request_kind]),
+      [["2026-09-17", 90, 5000, "REGULARIZATION", "HR_CORRECTION"]]);
+    assert.equal(preview.deferred_historical_ot.dates_would_be_tracked, 1);
+    assert.equal(preview.deferred_historical_ot.eligible_minutes_on_uncorrected_days, 90);
+    assert.deepEqual(preview.deferred_historical_ot.by_blocking_request_kind, { HR_CORRECTION: 1 });
+    assert.equal(w.store.deferred.length, 0, "11. a preview records nothing");
+    assert.equal(preview.totals.new_pending_would_be_created, 4, "the four free dates");
+
+    const applied = await backfill.run(backfillArgs(w, true));
+    assert.equal(applied.deferred_historical_ot.dates_tracked, 1);
+    assert.equal(applied.deferred_historical_ot.newly_recorded, 1);
+    assert.deepEqual(w.store.deferred.map((d) => [d.attendance_date, d.status]), [["2026-09-17", "WAITING_FOR_CORRECTION"]]);
+    assert.equal(liveOt(w, 42, "2026-09-17").length, 0, "no OT from the uncorrected day");
+    const again = await backfill.run(backfillArgs(w, true));
+    assert.equal(again.deferred_historical_ot.newly_recorded, 0);
+    assert.equal(w.store.deferred.length, 1, "15. never a second marker");
+  });
+
+  it("12/13/14. deciding the correction re-runs OT for that pre-cutover date only, through the decision path itself", async () => {
+    const dates = ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
+    // As at deploy: the cutover is the deploy date, so every window date is before it.
+    const w = build({ wireAuto: false, setting: { enabled: 1, auto_pending_from_date: "2026-09-20" }, rawPunches: dates.flatMap((d) => day(42, d)) });
+    await persistAll(w, [42]);
+    // The correction: raised for real, on a date whose out punch was wrong.
+    w.rawPunches.splice(w.rawPunches.findIndex((p) => p.employee_id === 42 && p.io_time === "2026-09-17 23:30:00"), 1);
+    const reg = await w.regularization.raiseRequest({
+      actor: actor(42), requested_for_employee_id: 42, attendance_date: "2026-09-17", reason: "Terminal offline at close", punch_time: "2026-09-17 23:00:00", now: NOW,
+    });
+    await backfill.run(backfillArgs(w, true));
+    assert.equal(w.store.deferred.length, 1);
+    // An unrelated pre-cutover date nobody remembered: eligible, never auto-created.
+    w.rawPunches.push(...day(42, "2026-09-10"));
+    await recalc(w, 42, "2026-09-10", "2026-09-10");
+    const ordinary = await w.regularization.syncAutoOt({ employee_id: 42, dates: ["2026-09-10"], now: NOW, source: "RECALCULATION" });
+    assert.deepEqual(ordinary.skipped.map((x) => [x.attendance_date, x.reason]), [["2026-09-10", "BEFORE_CUTOVER"]]);
+    assert.equal(liveOt(w, 42, "2026-09-10").length, 0, "14. no broad historical creation");
+    // The correction is decided: its decision re-runs the sync for 17 Sep.
+    await approveRoleChain(w, reg.attendance_approval_request_id);
+    const [ot] = liveOt(w, 42, "2026-09-17");
+    assert.ok(ot, "12. the remembered date's OT is raised from the corrected day");
+    assert.equal(ot.candidate_ot_minutes, 60);
+    assert.deepEqual(w.store.deferred.map((d) => [d.status, d.resolution]), [["RESOLVED", "CREATED"]]);
+    assert.deepEqual(w.store.deferredLog.map((l) => l.action), ["DEFERRED", "SYNC_ATTEMPTED", "RESOLVED"]);
+    assert.equal((await w.regRepo.getAutoOtSetting()).auto_pending_from_date, "2026-09-20", "13. the cutover is untouched by any of it");
   });
 });

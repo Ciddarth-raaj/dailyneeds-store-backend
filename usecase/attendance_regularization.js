@@ -35,6 +35,7 @@ function monthBounds(date) {
 }
 const { istToday, istDateOf } = require("../utils/istDate");
 const payrunCalc = require("../utils/payrun_calculation");
+const { correctionPendingRefusal, CORRECTION_PENDING_LABEL } = require("../utils/ot_correction_priority");
 const {
   PERMISSION_CLOSURE_LABEL,
   resolvePermissionWindows,
@@ -346,15 +347,11 @@ module.exports = (
 
     await assertEmployedOn(forEmployeeId, date, "an attendance correction");
 
-    let open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
-    // An OT the SYSTEM raised for a day that has since lost a punch (a void,
-    // a late device correction) is stale, not an open question: re-sync the
-    // date - which withdraws it when the live day has no eligible OT - and
-    // look again.
-    if (open && open.request_type === REQUEST_TYPE.OT && tinyBool(open.auto_created)) {
-      await syncAutoOtSafely({ employee_id: forEmployeeId, dates: [date], now, today, source: "REGULARIZATION_RAISE" });
-      open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
-    }
+    // ATTENDANCE CORRECTION COMES FIRST: a pending SYSTEM OT on the date does
+    // not block this (`findOpenRequest` leaves it out; it has its own open
+    // group). The OT waits - not approvable while this is pending - and is
+    // re-synced from the corrected day when this is decided.
+    const open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
     if (open) {
       throw validationError(
         `There is already an open request for ${date} (#${open.attendance_approval_request_id})`
@@ -1781,6 +1778,18 @@ module.exports = (
       };
     }
 
+    // ATTENDANCE CORRECTION COMES FIRST: an OT is not decided while a
+    // regularization, shift change or permission is pending on its date (the
+    // OT figure may change with it). Re-proved under the row lock in
+    // `decideStage`; answered here first so no work is done for nothing.
+    if (request.request_type === REQUEST_TYPE.OT && typeof attendanceRegularizationRepo.findPendingCorrections === "function") {
+      const [blocker] = await attendanceRegularizationRepo.findPendingCorrections(
+        Number(request.requested_for_employee_id),
+        [toDateOnly(request.attendance_date)]
+      );
+      if (blocker) return { ...correctionPendingRefusal(blocker), status: request.status, attendance_approval_request_id: Number(request_id), attendance_date: request.attendance_date };
+    }
+
     const step = (request.steps || []).find(
       (s) => Number(s.stage_no) === Number(request.current_stage_no)
     );
@@ -2062,6 +2071,10 @@ module.exports = (
         request.request_type === REQUEST_TYPE.OT
           ? Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0))
           : null,
+      refuseWhileCorrectionPending:
+        request.request_type === REQUEST_TYPE.OT
+          ? { employee_id: Number(request.requested_for_employee_id), attendance_date: toDateOnly(request.attendance_date) }
+          : null,
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -2110,11 +2123,18 @@ module.exports = (
     // one-day shift, a permission) can move the day's eligible OT: the date's
     // pending OT follows it, or is raised now. After the commit, never inside
     // it - it pays nothing, and a failure is reported, not thrown.
+    //
+    // ANY FINAL DECISION OF A CORRECTION re-runs it - an approval that rewrote
+    // the day, and a rejection too: either frees the date, so its waiting OT
+    // returns to approval (re-figured if the day moved) and a date the
+    // backfill remembered (`attendance_ot_deferred_sync`) is evaluated now.
     const otAutoPending =
-      !isOtRequest && calculations.length > 0 && saved.status !== REQUEST_STATUS.PENDING
+      !isOtRequest && saved.status !== REQUEST_STATUS.PENDING
         ? await syncAutoOtSafely({
             employee_id: request.requested_for_employee_id,
-            days: correctedDay ? [correctedDay] : [],
+            ...(calculations.length > 0 && correctedDay
+              ? { days: [correctedDay] }
+              : { dates: [toDateOnly(request.attendance_date)] }),
             now,
             source: `DECISION_${request.request_type}`,
           })
@@ -2365,30 +2385,25 @@ module.exports = (
     PAYROLL_LOCKED: "PAYROLL_LOCKED",
     NO_OT: "NO_OT",
     /*
-     * Another PENDING request on the date (a regularization or a permission)
-     * holds the date's one open slot - the open-request key refuses a second.
-     * Reported with its minutes and the blocking request, never dropped: the
-     * OT can be raised once that request is decided.
+     * An attendance correction (regularization, shift change, permission) is
+     * PENDING on the date: attendance comes first, so no OT is raised from
+     * the uncorrected day. Reported with its minutes and the blocking
+     * request; the correction's final decision re-runs the sync for the date.
      */
     BLOCKED_BY_OPEN_REQUEST: "BLOCKED_BY_OPEN_REQUEST",
   });
 
-  /**
-   * A PENDING non-OT, non-shift request on the date - it shares the open-request
-   * slot OT needs (`uq_aareq_open_per_employee_date`, group 'ATT').
-   */
-  const openRequestBlocking = async (employeeId, date) => {
-    if (typeof attendanceRegularizationRepo.findRequestsForDates !== "function") return null;
-    const rows = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [date]);
-    return (
-      (rows || []).find(
-        (r) =>
-          r.status === REQUEST_STATUS.PENDING &&
-          r.request_type !== REQUEST_TYPE.OT &&
-          r.request_type !== REQUEST_TYPE.SHIFT_CHANGE
-      ) || null
-    );
-  };
+  /** What kind of correction holds a date: for reports and the approval screen. */
+  const correctionKind = (c, employeeId) =>
+    c.request_type === REQUEST_TYPE.PERMISSION
+      ? "PERMISSION"
+      : c.request_type === REQUEST_TYPE.SHIFT_CHANGE
+      ? "SHIFT_CHANGE"
+      : c.request_type === REQUEST_TYPE.REGULARIZATION || c.request_type === REQUEST_TYPE.REGULARIZATION_WITH_OT
+      ? Number(c.requested_by_employee_id) === Number(employeeId)
+        ? "EMPLOYEE_REGULARIZATION"
+        : "HR_CORRECTION"
+      : "OTHER";
 
   let otNotifier = null;
   /** Telegram, set by `server.js`: messages the first approver of a new auto OT. */
@@ -2503,6 +2518,13 @@ module.exports = (
      * recalculation of some other date can create OT before it.
      */
     allow_creation_from = null,
+    /*
+     * THE DEPLOY BACKFILL ONLY: a date in the window that an attendance
+     * correction holds open is REMEMBERED (`attendance_ot_deferred_sync`,
+     * written only when not a dry run), so the correction's final decision
+     * re-runs this sync for that date even though it is before the cutover.
+     */
+    track_deferred = false,
   }) => {
     const employeeId = Number(employee_id);
     const result = {
@@ -2510,6 +2532,10 @@ module.exports = (
       enabled: false,
       dry_run: !!dry_run,
       created: [],
+      // Backfill dates an open correction holds: remembered on --apply.
+      deferred: [],
+      // Remembered dates this run re-evaluated (the correction was decided).
+      deferred_resolved: [],
       updated: [],
       withdrawn: [],
       unchanged: [],
@@ -2560,14 +2586,49 @@ module.exports = (
      */
     const creationFrom = toDateOnly(allow_creation_from);
     const effectiveCutover = cutover && creationFrom && creationFrom < cutover ? creationFrom : cutover;
+    const inScope = calculated.filter((day) => day.attendance_date <= businessToday);
+    if (inScope.length === 0) return result;
+    const scopeDates = inScope.map((d) => d.attendance_date);
+
+    /*
+     * ATTENDANCE CORRECTION COMES FIRST. The dates' pending corrections (a
+     * regularization, a shift change, a permission), in one read: on such a
+     * date no OT is raised, and a pending system OT is left exactly as it is
+     * (its approval is refused meanwhile) until the correction's final
+     * decision re-runs this sync from the corrected day.
+     */
+    const correctionOn = new Map();
+    if (typeof attendanceRegularizationRepo.findPendingCorrections === "function") {
+      ((await attendanceRegularizationRepo.findPendingCorrections(employeeId, scopeDates)) || []).forEach((c) => {
+        const d = toDateOnly(c.attendance_date);
+        if (!correctionOn.has(d)) correctionOn.set(d, c);
+      });
+    }
+    /*
+     * REMEMBERED HISTORICAL DATES (`attendance_ot_deferred_sync`): the ONLY
+     * dates on which this sync may create OT before the cutover or outside the
+     * backdate window without the backfill's own `allow_creation_from` - and
+     * only that employee's, only those dates. The cutover is never moved.
+     */
+    const markerOn = new Map();
+    if (typeof attendanceRegularizationRepo.listWaitingDeferredOt === "function") {
+      ((await attendanceRegularizationRepo.listWaitingDeferredOt(employeeId, scopeDates)) || []).forEach((m) =>
+        markerOn.set(toDateOnly(m.attendance_date), m)
+      );
+    }
     const creationGate = (date) =>
-      effectiveCutover && date < effectiveCutover
+      markerOn.has(date)
+        ? null
+        : effectiveCutover && date < effectiveCutover
         ? AUTO_OT_SKIP.BEFORE_CUTOVER
         : date < oldest && !(creationFrom && date >= creationFrom)
         ? AUTO_OT_SKIP.OUTSIDE_WINDOW
         : null;
-    const inScope = calculated.filter((day) => day.attendance_date <= businessToday);
-    if (inScope.length === 0) return result;
+    const blockerOf = (c) => ({
+      blocking_request_id: Number(c.attendance_approval_request_id),
+      blocking_request_type: c.request_type,
+      blocking_request_kind: correctionKind(c, employeeId),
+    });
 
     // EMPLOYMENT: no OT before joining or after the last working date.
     let window = null;
@@ -2616,6 +2677,65 @@ module.exports = (
         const locked = lockedDates.has(date);
         const request = byDate.get(date) || null;
         const requestId = request ? Number(request.attendance_approval_request_id) : null;
+        const correction = correctionOn.get(date) || null;
+
+        /*
+         * A DATE AN ATTENDANCE CORRECTION HOLDS OPEN. No new OT from the
+         * uncorrected day; a pending system OT waits as it is (never re-figured
+         * or withdrawn from a day about to change). The backfill remembers a
+         * date it could not evaluate - on --apply only - and the correction's
+         * final decision re-runs this sync for it.
+         */
+        if (correction && (!request || request.status === REQUEST_STATUS.PENDING)) {
+          if (request) {
+            result.unchanged.push({
+              attendance_date: date,
+              attendance_approval_request_id: requestId,
+              waiting_for_correction: true,
+              ...blockerOf(correction),
+            });
+            continue;
+          }
+          const deferrable =
+            !locked && verdict.reason !== AUTO_OT_SKIP.NOT_EMPLOYED && verdict.reason !== AUTO_OT_SKIP.PRESENT_ABSENT_ONLY;
+          // The OT the UNCORRECTED day computes - reported, never raised. (A
+          // day with a pending regularization is not FINAL, so the verdict's
+          // own figure is 0; the day still says what it would claim.)
+          const uncorrectedMinutes = verdict.eligible ? verdict.minutes : Math.max(0, claimableOtOf(day) || 0);
+          result.skipped.push({
+            attendance_date: date,
+            reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
+            eligible_ot_minutes: uncorrectedMinutes,
+            ...blockerOf(correction),
+          });
+          if (track_deferred && deferrable) {
+            const entry = { attendance_date: date, eligible_ot_minutes: uncorrectedMinutes, ...blockerOf(correction), recorded: false };
+            if (!dry_run && typeof attendanceRegularizationRepo.upsertDeferredOt === "function") {
+              const saved = await attendanceRegularizationRepo.upsertDeferredOt({
+                employee_id: employeeId,
+                attendance_date: date,
+                blocking_request_id: entry.blocking_request_id,
+                blocking_request_type: entry.blocking_request_type,
+                eligible_ot_minutes: uncorrectedMinutes,
+                source,
+              });
+              entry.deferred_sync_id = saved.deferred_sync_id;
+              entry.recorded = saved.recorded;
+            }
+            result.deferred.push(entry);
+          } else if (!dry_run && markerOn.has(date) && typeof attendanceRegularizationRepo.markDeferredOtStillBlocked === "function") {
+            const m = markerOn.get(date);
+            await attendanceRegularizationRepo.markDeferredOtStillBlocked({
+              deferred_sync_id: m.deferred_sync_id,
+              employee_id: employeeId,
+              attendance_date: date,
+              blocking_request_id: Number(correction.attendance_approval_request_id),
+              blocking_request_type: correction.request_type,
+              trigger_source: source,
+            });
+          }
+          continue;
+        }
 
         // A FINAL DECISION IS NEVER TOUCHED.
         if (request && request.status === REQUEST_STATUS.APPROVED) {
@@ -2747,19 +2867,6 @@ module.exports = (
           result.skipped.push({ attendance_date: date, reason: AUTO_OT_SKIP.PAYROLL_LOCKED, eligible_ot_minutes: verdict.minutes });
           continue;
         }
-        // THE DATE'S OPEN SLOT, checked in a dry run too, so a preview does not
-        // promise a record the open-request key would refuse.
-        const blocker = await openRequestBlocking(employeeId, date);
-        if (blocker) {
-          result.skipped.push({
-            attendance_date: date,
-            reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
-            eligible_ot_minutes: verdict.minutes,
-            blocking_request_id: Number(blocker.attendance_approval_request_id),
-            blocking_request_type: blocker.request_type,
-          });
-          continue;
-        }
         if (!identity) identity = await resolveIdentity(employeeId);
         const who = identity;
         // THE CHAIN, resolved in a dry run too, so a preview can name every
@@ -2815,21 +2922,10 @@ module.exports = (
             punch: null,
           });
         } catch (err) {
-          // THE RACE, LOST: a concurrent run raised it first (idempotent) - or
-          // another request took the date's open slot meanwhile (reported).
+          // THE RACE, LOST: a concurrent run (or the remembered-date sync)
+          // raised it first - the one-pending-OT keys refuse a second.
           if (err && err.code === "ER_DUP_ENTRY") {
-            const raced = await openRequestBlocking(employeeId, date);
-            if (raced) {
-              result.skipped.push({
-                attendance_date: date,
-                reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
-                eligible_ot_minutes: verdict.minutes,
-                blocking_request_id: Number(raced.attendance_approval_request_id),
-                blocking_request_type: raced.request_type,
-              });
-            } else {
-              result.unchanged.push({ attendance_date: date, duplicate_prevented: true });
-            }
+            result.unchanged.push({ attendance_date: date, duplicate_prevented: true });
             continue;
           }
           if (err && err.code === "PAYROLL_MONTH_LOCKED") {
@@ -2869,7 +2965,81 @@ module.exports = (
         result.errors.push({ attendance_date: date, message: err && err.message ? err.message : String(err) });
       }
     }
+
+    /*
+     * REMEMBERED DATES THIS RUN COULD EVALUATE: the correction is decided, the
+     * ordinary sync above ran on the corrected day - RESOLVED with what it
+     * did. One still held by a correction, still open, or that failed, waits.
+     */
+    if (!dry_run && markerOn.size > 0 && typeof attendanceRegularizationRepo.resolveDeferredOt === "function") {
+      for (const [date, marker] of markerOn) {
+        if (correctionOn.has(date)) continue;
+        const hit = (list) => (list || []).find((x) => x.attendance_date === date);
+        if (hit(result.errors)) continue;
+        const skipped = hit(result.skipped);
+        if (skipped && skipped.reason === AUTO_OT_SKIP.DAY_OPEN) continue;
+        const created = hit(result.created);
+        const updated = hit(result.updated);
+        const withdrawn = hit(result.withdrawn);
+        const decided = hit(result.preserved_approved) || hit(result.preserved_rejected);
+        const kept = hit(result.unchanged) || hit(result.held);
+        const resolution = created
+          ? "CREATED"
+          : updated
+          ? "UPDATED"
+          : withdrawn
+          ? "WITHDRAWN"
+          : decided
+          ? "PRESERVED_DECIDED"
+          : kept
+          ? "UNCHANGED"
+          : skipped
+          ? skipped.reason
+          : "NO_OT";
+        const otRequestId = (created || updated || withdrawn || decided || kept || {}).attendance_approval_request_id || null;
+        /* eslint-disable no-await-in-loop */
+        const done = await attendanceRegularizationRepo.resolveDeferredOt({
+          deferred_sync_id: marker.deferred_sync_id,
+          employee_id: employeeId,
+          attendance_date: date,
+          resolution,
+          ot_request_id: otRequestId,
+          trigger_source: source,
+        });
+        /* eslint-enable no-await-in-loop */
+        if (done && done.resolved) {
+          result.deferred_resolved.push({ attendance_date: date, deferred_sync_id: marker.deferred_sync_id, resolution, attendance_approval_request_id: otRequestId });
+        }
+      }
+    }
     return result;
+  };
+
+  /**
+   * THE SAFETY NET for remembered historical dates: every WAITING marker
+   * whose date has no pending correction any more is re-synced - the same
+   * sync a correction's final decision runs. Idempotent; scheduled daily
+   * after the attendance recalculation, and run by the backfill on --apply.
+   */
+  const resolveDeferredOt = async ({ now = null, source = "DEFERRED_SWEEP", limit = 500 } = {}) => {
+    const out = { checked: 0, resolved: [], errors: [] };
+    if (typeof attendanceRegularizationRepo.listResolvableDeferredOt !== "function") return out;
+    const markers = (await attendanceRegularizationRepo.listResolvableDeferredOt(limit)) || [];
+    out.checked = markers.length;
+    const byEmployee = new Map();
+    markers.forEach((m) => {
+      const id = Number(m.employee_id);
+      if (!byEmployee.has(id)) byEmployee.set(id, []);
+      byEmployee.get(id).push(toDateOnly(m.attendance_date));
+    });
+    for (const [employeeId, dates] of byEmployee) {
+      /* eslint-disable no-await-in-loop */
+      const synced = await syncAutoOtSafely({ employee_id: employeeId, dates, now, source });
+      /* eslint-enable no-await-in-loop */
+      if (synced && Array.isArray(synced.deferred_resolved)) out.resolved.push(...synced.deferred_resolved.map((r) => ({ employee_id: employeeId, ...r })));
+      if (synced && Array.isArray(synced.errors) && synced.errors.length) out.errors.push({ employee_id: employeeId, errors: synced.errors });
+    }
+    return out;
   };
 
   /**
@@ -3085,10 +3255,28 @@ module.exports = (
       stepsByRequest.get(id).push(st);
     });
 
+    // ATTENDANCE CORRECTION FIRST: a pending OT whose date has a pending
+    // correction is shown waiting and is not actionable - one read for the page.
+    const waitingOn = new Map();
+    const otPending = rows.filter((r) => r.request_type === REQUEST_TYPE.OT && r.status === REQUEST_STATUS.PENDING);
+    if (otPending.length > 0 && typeof attendanceRegularizationRepo.listPendingCorrectionsForPairs === "function") {
+      const blockers = await attendanceRegularizationRepo.listPendingCorrectionsForPairs(
+        otPending.map((r) => ({ employee_id: Number(r.requested_for_employee_id), attendance_date: toDateOnly(r.attendance_date) }))
+      );
+      (blockers || []).forEach((b) => {
+        const key = `${Number(b.employee_id)}:${toDateOnly(b.attendance_date)}`;
+        if (!waitingOn.has(key)) waitingOn.set(key, b);
+      });
+    }
+
     const shaped = [];
     for (const row of rows) {
       const id = Number(row.attendance_approval_request_id);
       const chain = stepsByRequest.get(id) || [];
+      const waitingFor =
+        row.request_type === REQUEST_TYPE.OT && row.status === REQUEST_STATUS.PENDING
+          ? waitingOn.get(`${Number(row.requested_for_employee_id)}:${toDateOnly(row.attendance_date)}`) || null
+          : null;
       const currentStep = chain.find((st) => Number(st.stage_no) === Number(row.current_stage_no)) || null;
 
       let day = null;
@@ -3202,8 +3390,14 @@ module.exports = (
             ? Number(currentStep.approver_employee_id)
             : null,
         current_stage_approver_name: currentStep ? currentStep.approver_name || null : null,
-        actionable: !!verdict.allowed,
-        not_actionable_reason: verdict.allowed ? null : verdict.reason,
+        actionable: !!verdict.allowed && !waitingFor,
+        not_actionable_reason: waitingFor ? CORRECTION_PENDING_LABEL : verdict.allowed ? null : verdict.reason,
+        // OT: an attendance correction is pending on the date - the OT waits
+        // for it and is re-synced from the corrected day.
+        waiting_for_correction: Boolean(waitingFor),
+        waiting_status_label: waitingFor ? CORRECTION_PENDING_LABEL : null,
+        blocking_request_id: waitingFor ? Number(waitingFor.attendance_approval_request_id) : null,
+        blocking_request_type: waitingFor ? waitingFor.request_type : null,
         // The proposed missing punch (regularization only).
         proposed_punch_time: row.proposed_punch_time || null,
         // SHIFT_CHANGE: the two shifts, as the Shift tab's table names them.
@@ -3790,6 +3984,7 @@ module.exports = (
     setOtNotifier,
     syncAutoOt,
     syncAutoOtSafely,
+    resolveDeferredOt,
     otApprovalContext,
     AUTO_OT_SKIP,
     MAX_FORWARD_DAYS,

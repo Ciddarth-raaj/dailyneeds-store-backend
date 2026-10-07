@@ -235,7 +235,16 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
 
       if (result && result.code === 409 && result.wrong_type) {
         await answer("This button is not for an OT request.");
-        return result;
+        return { handled: true, outcome: "WRONG_TYPE", wrong_type: true };
+      }
+
+      // ATTENDANCE CORRECTION FIRST: nothing is decided while the date's
+      // attendance is being corrected. The buttons stay - once the OT is
+      // re-synced they decide the current figure (a moved one is refused and
+      // re-presented by the minutes check above).
+      if (result && result.code === 409 && result.waiting_for_correction) {
+        await answer(result.msg || "Attendance is being corrected. OT will be recalculated before approval.");
+        return { handled: true, outcome: "WAITING_FOR_CORRECTION", waiting_for_correction: true };
       }
 
       if (result && result.code === 409 && result.ot_minutes_changed) {

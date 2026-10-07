@@ -45,6 +45,7 @@ describe(NAME, () => {
       "20261123120000-payroll-reports.js",
       "20261124120000-attendance-ot-auto-pending.js",
       "20261125120000-attendance-ot-late-settlement.js",
+      "20261126120000-attendance-ot-correction-priority.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

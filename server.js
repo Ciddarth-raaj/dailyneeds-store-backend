@@ -2569,6 +2569,20 @@ class Server {
     });
 
     /**
+     * REMEMBERED HISTORICAL OT DATES - 07:20 IST, a safety net.
+     *
+     * The deploy backfill remembers each date in an employee's window that an
+     * attendance correction held open (`attendance_ot_deferred_sync`). The
+     * correction's final decision normally re-runs OT for that date itself;
+     * this re-syncs any remembered date whose correction is no longer pending
+     * but was not re-synced (a failure, a path that wrote no day). Idempotent:
+     * a date is resolved once, and the one-pending-OT keys refuse a duplicate.
+     */
+    this.cronService.register("attendance_ot_deferred_sweep", "20 7 * * *", async () => {
+      await this.attendanceRegularizationUsecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    });
+
+    /**
      * MISSING ATTENDANCE ALERTS - 07:00 IST, yesterday only.
      *
      * "0 7 * * *" in `CRON_TIMEZONE`, which `services/cron_service.js` pins

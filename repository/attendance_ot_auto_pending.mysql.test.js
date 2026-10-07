@@ -31,6 +31,10 @@ const { addDays } = require("../utils/attendance_engine");
 const SQL_DIR = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const UP = fs.readFileSync(path.join(SQL_DIR, "20261124120000-attendance-ot-auto-pending-up.sql"), "utf8");
 const DOWN = fs.readFileSync(path.join(SQL_DIR, "20261124120000-attendance-ot-auto-pending-down.sql"), "utf8");
+// Attendance correction before system OT: the AUTO_OT group, the one-pending-OT
+// key and the deferred-sync tables.
+const PRIORITY_UP = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-up.sql"), "utf8");
+const PRIORITY_DOWN = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-down.sql"), "utf8");
 
 const EMP = 601;
 const EMP2 = 602;
@@ -58,6 +62,7 @@ const SCHEMA = [
      finalization_state ENUM('NOT_REQUIRED','PENDING','SETTLED') NOT NULL DEFAULT 'NOT_REQUIRED',
      chain_source VARCHAR(16) NULL,
      requested_work_shift_id INT NULL, base_work_shift_id INT NULL,
+     telegram_chat_id VARCHAR(64) NULL, telegram_message_id VARCHAR(64) NULL,
      created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
      decided_at TIMESTAMP(3) NULL,
      updated_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
@@ -86,8 +91,18 @@ const SCHEMA = [
      employee_id INT NOT NULL, period_year INT NOT NULL, period_month INT NOT NULL,
      status VARCHAR(32) NOT NULL, PRIMARY KEY (employee_id, period_year, period_month)
    ) ENGINE=InnoDB`,
+  `CREATE TABLE attendance_regularized_punch (
+     attendance_regularized_punch_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+     attendance_approval_request_id BIGINT UNSIGNED NOT NULL, employee_id INT NOT NULL,
+     attendance_date DATE NOT NULL, punch_time DATETIME NOT NULL,
+     punch_source VARCHAR(16) NOT NULL DEFAULT 'REGULARIZED', created_by INT NOT NULL,
+     created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
+   ) ENGINE=InnoDB`,
 ];
 const TABLES = [
+  "attendance_regularized_punch",
+  "attendance_ot_deferred_sync_log",
+  "attendance_ot_deferred_sync",
   "attendance_ot_auto_pending_log",
   "attendance_ot_auto_pending_setting",
   "payrun_employee_calculation",
@@ -118,6 +133,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     for (const t of TABLES) await q(pool, `DROP TABLE IF EXISTS ${t}`);
     for (const ddl of SCHEMA) await q(pool, ddl);
     await q(pool, UP);
+    await q(pool, PRIORITY_UP);
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
     const engine = {
@@ -326,6 +342,216 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [reg.id]);
     const freed = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
     assert.equal(freed.created.length, 1);
+  });
+
+
+  /* ============ ATTENDANCE CORRECTION BEFORE SYSTEM OT, as SQL (migration 20261126120000) ==== */
+
+  const CHAIN = [{ stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: 3, approver_employee_id: null, approval_level: null }];
+  const raise = (type, { emp = EMP, date = D1, auto = false, minutes = 0, by = emp } = {}) =>
+    repo.createRequest({
+      request: {
+        request_type: type, requested_for_employee_id: emp, requested_by_employee_id: by, attendance_date: date,
+        outlet_id: 3, requester_class: "STAFF", reason: `${type} for the test`, candidate_ot_minutes: minutes,
+        auto_created: auto, chain_source: "ROLE",
+      },
+      chain: CHAIN,
+      punch: null,
+    });
+  const requests = (emp = EMP) =>
+    q(pool, `SELECT attendance_approval_request_id AS id, request_type AS type, status, auto_created AS auto, open_request_group AS grp
+               FROM attendance_approval_request WHERE requested_for_employee_id = ? ORDER BY id`, [emp]);
+  const deferredRows = () => q(pool, "SELECT employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS d, status, resolution, blocking_request_type AS type FROM attendance_ot_deferred_sync ORDER BY deferred_sync_id");
+  const deferredLog = () => q(pool, "SELECT action, trigger_source AS src FROM attendance_ot_deferred_sync_log ORDER BY deferred_sync_log_id");
+
+  it("1/2. a pending SYSTEM OT does not block a regularization (employee or HR) or a permission; manual requests still exclude each other", async () => {
+    eligible.set(`${EMP}:${D1}`, 60);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    assert.equal((await requests())[0].grp, "AUTO_OT", "the system OT holds its own group, not the correction's slot");
+    // The date can never hold a second pending OT, system or manual - the
+    // one-pending-OT key, on its own.
+    await assert.rejects(raise("OT", { minutes: 30 }), (err) => err.code === "ER_DUP_ENTRY" && /uq_aareq_open_ot_per_employee_date/.test(err.message));
+    await assert.rejects(raise("OT", { auto: true, minutes: 30 }), (err) => err.code === "ER_DUP_ENTRY");
+    // An employee's own regularization, and an HR correction for another date.
+    assert.ok((await raise("REGULARIZATION")).attendance_approval_request_id);
+    await raise("PERMISSION");
+    // ...but two manual corrections on one date still cannot coexist.
+    await assert.rejects(raise("REGULARIZATION", { by: SM3 }), (err) => err.code === "ER_DUP_ENTRY");
+    // An HR correction on a date with a pending system OT is raised too.
+    eligible.set(`${EMP}:${D2}`, 45);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D2] });
+    assert.ok((await raise("REGULARIZATION", { date: D2, by: SM3 })).attendance_approval_request_id);
+    assert.equal((await repo.findOpenRequest(EMP, D2)).request_type, "REGULARIZATION");
+    assert.equal((await repo.findOpenRequest(EMP, D1)).request_type, "REGULARIZATION", "the open request a correction waits on is never the system OT");
+  });
+
+  it("3/9. while a correction is pending the OT is not decided: refused under the OT row lock, nothing written", async () => {
+    eligible.set(`${EMP}:${D1}`, 60);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    const [ot] = await otRows();
+    const reg = await raise("REGULARIZATION");
+    const out = await repo.decideStage({
+      requestId: ot.id, stageNo: 1, decision: "APPROVED", actorId: SM3, remarks: null, adminOverride: false,
+      next: { status: "APPROVED", current_stage_no: 1, approved_ot_minutes: 60 }, calculations: [],
+      expectCandidateOtMinutes: 60, refuseWhileCorrectionPending: { employee_id: EMP, attendance_date: D1 },
+    });
+    assert.equal(out.code, 409);
+    assert.equal(out.waiting_for_correction, true);
+    assert.equal(out.reason_code, "ATTENDANCE_CORRECTION_PENDING");
+    assert.equal(out.blocking_request_id, Number(reg.attendance_approval_request_id));
+    assert.equal(out.msg, "Attendance is being corrected. OT will be recalculated before approval.");
+    assert.equal((await otRows())[0].status, "PENDING");
+    const steps = await q(pool, "SELECT decision FROM attendance_approval_step WHERE attendance_approval_request_id = ?", [ot.id]);
+    assert.ok(steps.every((x) => x.decision === "PENDING"));
+    // The usecase answers the same before any work (DnDS, bulk, Telegram).
+    const early = await usecase.decide({ actor: { employee_id: SM3, user_type: 2 }, request_id: ot.id, decision: "APPROVED" });
+    assert.equal(early.waiting_for_correction, true);
+  });
+
+  it("concurrency: a correction raised while an approval runs - they serialize on the OT row; the approval sees the correction and is refused", async () => {
+    eligible.set(`${EMP}:${D1}`, 60);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    const [ot] = await otRows();
+    // The correction's transaction takes the OT row first (as createRequest does) and has not committed yet.
+    const conn = await new Promise((resolve, reject) => pool.getConnection((e, c) => (e ? reject(e) : resolve(c))));
+    const cq = (sql, params = []) => new Promise((resolve, reject) => conn.query(sql, params, (e, r) => (e ? reject(e) : resolve(r))));
+    await cq("START TRANSACTION");
+    await cq("SELECT attendance_approval_request_id FROM attendance_approval_request WHERE requested_for_employee_id = ? AND attendance_date = ? AND request_type = 'OT' AND status = 'PENDING' FOR UPDATE", [EMP, D1]);
+    await cq(`INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, reason, candidate_ot_minutes, auto_created, total_stages)
+              VALUES ('REGULARIZATION', ?, ?, ?, 'Missed punch', 0, 0, 1)`, [EMP, EMP, D1]);
+    let settled = false;
+    const approval = repo.decideStage({
+      requestId: ot.id, stageNo: 1, decision: "APPROVED", actorId: SM3, remarks: null, adminOverride: false,
+      next: { status: "APPROVED", current_stage_no: 1, approved_ot_minutes: 60 }, calculations: [],
+      expectCandidateOtMinutes: 60, refuseWhileCorrectionPending: { employee_id: EMP, attendance_date: D1 },
+    }).then((r) => { settled = true; return r; });
+    await new Promise((r) => setTimeout(r, 400));
+    assert.equal(settled, false, "the approval waits on the OT row the correction holds");
+    await cq("COMMIT");
+    conn.release();
+    const out = await approval;
+    assert.equal(out.waiting_for_correction, true, "the correction won: the approval is refused, never committed over it");
+    assert.equal((await otRows())[0].status, "PENDING");
+  });
+
+  it("concurrency: the approval first - the correction waits on the OT row and then follows the approved OT (no silent overpayment)", async () => {
+    eligible.set(`${EMP}:${D1}`, 60);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    const [ot] = await otRows();
+    const [approve, correction] = await Promise.all([
+      repo.decideStage({
+        requestId: ot.id, stageNo: 1, decision: "APPROVED", actorId: SM3, remarks: null, adminOverride: false,
+        next: { status: "APPROVED", current_stage_no: 1, approved_ot_minutes: 60 }, calculations: [],
+        expectCandidateOtMinutes: 60, refuseWhileCorrectionPending: { employee_id: EMP, attendance_date: D1 },
+      }),
+      raise("REGULARIZATION"),
+    ]);
+    const [o] = await otRows();
+    // Exactly one consistent outcome, whichever transaction won the OT row.
+    if (approve.code === 200) assert.equal(o.status, "APPROVED");
+    else { assert.equal(approve.waiting_for_correction, true); assert.equal(o.status, "PENDING"); }
+    assert.ok(correction.attendance_approval_request_id, "the correction is always raised");
+  });
+
+  it("10/11/15. backfill: a date a correction holds is REMEMBERED on --apply only; a preview writes nothing; a re-run adds no second marker", async () => {
+    // A pre-cutover date: the cutover is the deploy date.
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
+    eligible.set(`${EMP}:${D1}`, 90);
+    await raise("REGULARIZATION");
+    const args = { employee_id: EMP, dates: [D1], source: "BACKFILL", notify: false, allow_creation_from: D1, track_deferred: true };
+    const preview = await usecase.syncAutoOt({ ...args, dry_run: true });
+    assert.deepEqual(preview.deferred.map((d) => [d.attendance_date, d.eligible_ot_minutes, d.blocking_request_type, d.blocking_request_kind, d.recorded]),
+      [[D1, 90, "REGULARIZATION", "EMPLOYEE_REGULARIZATION", false]]);
+    assert.deepEqual(await deferredRows(), [], "11. a preview creates no marker");
+    const applied = await usecase.syncAutoOt(args);
+    assert.equal(applied.deferred[0].recorded, true);
+    assert.deepEqual((await deferredRows()).map((r) => [r.employee_id, r.d, r.status, r.type]), [[EMP, D1, "WAITING_FOR_CORRECTION", "REGULARIZATION"]]);
+    assert.equal((await otRows()).length, 0, "no OT from the uncorrected day");
+    const again = await usecase.syncAutoOt(args);
+    assert.equal(again.deferred[0].recorded, false);
+    assert.equal((await deferredRows()).length, 1, "15. one marker per employee and date");
+    assert.deepEqual((await deferredLog()).map((l) => l.action), ["DEFERRED"]);
+  });
+
+  it("12/13/14. the correction decided: OT is re-run for THAT pre-cutover date only; the cutover does not move; other old dates stay closed", async () => {
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
+    eligible.set(`${EMP}:${D1}`, 90);
+    eligible.set(`${EMP}:${D2}`, 45); // eligible too, but nobody remembered it
+    const reg = await raise("REGULARIZATION");
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "BACKFILL", notify: false, allow_creation_from: D1, track_deferred: true });
+    // The correction is decided (its decision re-runs the sync for its date).
+    await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [reg.attendance_approval_request_id]);
+    eligible.set(`${EMP}:${D1}`, 120); // the corrected day has more OT
+    const decided = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1, D2], source: "DECISION_REGULARIZATION" });
+    assert.deepEqual(decided.created.map((c) => [c.attendance_date, c.ot_minutes]), [[D1, 120]], "12. the remembered date only");
+    assert.deepEqual(decided.skipped.map((x) => [x.attendance_date, x.reason]), [[D2, "BEFORE_CUTOVER"]], "14. no broad historical creation");
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, TODAY, "13. the cutover is untouched");
+    const [m] = await deferredRows();
+    assert.deepEqual([m.status, m.resolution], ["RESOLVED", "CREATED"]);
+    assert.deepEqual((await deferredLog()).map((l) => l.action), ["DEFERRED", "SYNC_ATTEMPTED", "RESOLVED"]);
+    // Resolved once: a later sync of the date is ordinary (no second create, no allowance left).
+    const later = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    assert.equal(later.created.length, 0);
+    assert.equal((await otRows()).length, 1);
+  });
+
+  it("4 (zero). a remembered date whose corrected day has no OT: nothing created, resolved NO_OT; another correction still open keeps it waiting", async () => {
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
+    eligible.set(`${EMP}:${D1}`, 60);
+    const reg = await raise("REGULARIZATION");
+    const perm = await raise("PERMISSION");
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "BACKFILL", notify: false, allow_creation_from: D1, track_deferred: true });
+    // The regularization is decided, the permission still pending: still blocked.
+    await q(pool, "UPDATE attendance_approval_request SET status = 'REJECTED' WHERE attendance_approval_request_id = ?", [reg.attendance_approval_request_id]);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_REGULARIZATION" });
+    const [waiting] = await deferredRows();
+    assert.deepEqual([waiting.status, waiting.type], ["WAITING_FOR_CORRECTION", "PERMISSION"]);
+    assert.ok((await deferredLog()).some((l) => l.action === "STILL_BLOCKED"));
+    // Now the permission is decided too, and the corrected day has no OT.
+    await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [perm.attendance_approval_request_id]);
+    eligible.delete(`${EMP}:${D1}`);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_PERMISSION" });
+    assert.deepEqual((await deferredRows()).map((r) => [r.status, r.resolution]), [["RESOLVED", "NO_OT"]]);
+    assert.equal((await otRows()).length, 0);
+  });
+
+  it("16. a remembered date's sync and an ordinary sync at once create ONE OT; the safety-net sweep resolves what a decision left", async () => {
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
+    eligible.set(`${EMP}:${D1}`, 60);
+    const reg = await raise("REGULARIZATION");
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "BACKFILL", notify: false, allow_creation_from: D1, track_deferred: true });
+    await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [reg.attendance_approval_request_id]);
+    const runs = await Promise.all([
+      usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_REGULARIZATION" }),
+      usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" }),
+      usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "RECALCULATION" }),
+    ]);
+    assert.equal((await otRows()).filter((r) => r.status === "PENDING").length, 1, "one pending OT, whoever ran first");
+    assert.equal((await deferredRows())[0].status, "RESOLVED");
+    assert.equal((await deferredLog()).filter((l) => l.action === "RESOLVED").length, 1, "resolved exactly once");
+    assert.ok(runs);
+  });
+
+  it("17. a remembered date whose OT was already decided is never overwritten: PRESERVED_DECIDED", async () => {
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
+    await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, reason, candidate_ot_minutes, auto_created, total_stages, status, approved_ot_minutes)
+                   VALUES ('OT', ?, ?, ?, 'decided before', 60, 1, 1, 'APPROVED', 60)`, [EMP, EMP, D1]);
+    await repo.upsertDeferredOt({ employee_id: EMP, attendance_date: D1, blocking_request_id: 999, blocking_request_type: "REGULARIZATION", eligible_ot_minutes: 60 });
+    eligible.set(`${EMP}:${D1}`, 15);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_REGULARIZATION" });
+    const [o] = await otRows();
+    assert.deepEqual([o.status, o.minutes], ["APPROVED", 60]);
+    assert.deepEqual((await deferredRows()).map((r) => r.resolution), ["PRESERVED_DECIDED"]);
+  });
+
+  it("the migration: down restores the old groups, up again is clean (no rows rewritten)", async () => {
+    await q(pool, PRIORITY_DOWN);
+    const groups = await q(pool, "SELECT COLUMN_TYPE AS t FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance_approval_request' AND COLUMN_NAME = 'open_request_group'");
+    assert.equal(groups[0].t, "enum('ATT','SHIFT','PERM')");
+    assert.equal((await q(pool, "SHOW TABLES LIKE 'attendance_ot_deferred_sync'")).length, 0);
+    await q(pool, PRIORITY_UP);
+    const again = await q(pool, "SELECT COLUMN_TYPE AS t FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance_approval_request' AND COLUMN_NAME = 'open_request_group'");
+    assert.equal(again[0].t, "enum('ATT','SHIFT','PERM','AUTO_OT')");
   });
 
   it("a payroll-locked month: nothing is raised, and the insert itself refuses under FOR UPDATE", async () => {
