@@ -481,6 +481,61 @@ class EmployeeMasterUsecase {
     });
   }
 
+  /* ================================================================== */
+  /*  payroll eligible (Salary Not Applicable)                          */
+  /* ================================================================== */
+  /**
+   * Whether this employee is paid through DnDS payroll.
+   *
+   * WHAT `false` MEANS, AND WHAT IT DOES NOT. Salary Not Applicable: the
+   * employee is left out of the payroll population for every month not yet
+   * initialized - not listed, counted, initialized, calculated, paid or
+   * reported by payroll (`repository/payrun.js#listPopulation`). It is not a
+   * resignation, not an inactive status and not an attendance switch: nothing
+   * here touches `status`, `resignation_date`, `attendance_required`, any
+   * salary row or any existing payrun.
+   *
+   * ADMINISTRATORS ONLY, on the route (`middlewares/admin_only.js`), exactly
+   * like Attendance Required - it decides whether somebody is paid. The field
+   * is off `EDITABLE_FIELDS`, so the generic edit refuses it by name.
+   */
+  async getPayrollEligible(employeeId) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    const row = await this.repo.getPayrollEligible(id);
+    if (!row) throw new NotFoundError(`employee ${id} does not exist`);
+    return { code: 200, ...row };
+  }
+
+  async setPayrollEligible(employeeId, eligible, { actorEmployeeId = null } = {}) {
+    const id = Number(employeeId);
+    if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
+    if (typeof eligible !== "boolean") {
+      throw new ValidationError("payroll_eligible must be true or false");
+    }
+
+    return this.repo.withTransaction(async (tx) => {
+      const before = await this.repo.lockEmployee(tx, id);
+      if (!before) throw new NotFoundError(`employee ${id} does not exist`);
+
+      const result = await this.repo.setPayrollEligible(tx, id, eligible);
+
+      this._log(
+        logger.LEVEL.INFO,
+        "PAYROLL-ELIGIBLE",
+        `employee ${id}: payroll_eligible set to ${eligible ? 1 : 0}`,
+        { employeeId: id, actorEmployeeId, payroll_eligible: eligible }
+      );
+
+      return {
+        code: 200,
+        employee_id: id,
+        payroll_eligible: eligible,
+        changed: result.changed > 0,
+      };
+    });
+  }
+
   /* ---------------------------------------------------- location scope -- */
 
   /**

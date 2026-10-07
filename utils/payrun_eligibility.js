@@ -251,6 +251,29 @@ function exitedByMonthEnd({ year, month, ended_on = null }) {
 }
 
 /**
+ * IS THIS EMPLOYEE PAID THROUGH DnDS PAYROLL AT ALL?
+ *
+ * `new_employee.payroll_eligible` - 1 (the default) is the normal payroll
+ * flow; 0 is Salary Not Applicable, and the employee is left out of the
+ * payroll population entirely: never listed, counted, initialized,
+ * calculated, paid or reported by payroll. It is MEMBERSHIP, not a blocking
+ * reason - a Salary Not Applicable employee is not "Blocked", they are not
+ * there.
+ *
+ * ONLY AN EXPLICIT NO EXCLUDES. A row that does not carry the column (an
+ * older caller, a test fixture) reads as eligible, which is what every
+ * employee was before the column existed and what the column defaults to.
+ *
+ * NOT AN ATTENDANCE OR EMPLOYMENT FACT. Attendance, the Employee Master and
+ * every attendance report ignore it.
+ */
+function isPayrollEligible(employee = {}) {
+  const v = employee ? employee.payroll_eligible : undefined;
+  if (v === undefined || v === null || v === "") return true;
+  return !(v === false || Number(v) === 0);
+}
+
+/**
  * A reason, in the three lengths the screens need.
  *
  *   code     what a test asserts and a filter could group on
@@ -604,6 +627,7 @@ function attendanceStatusOf({
 }
 
 module.exports = {
+  isPayrollEligible,
   toDateOnly,
   daysInMonth,
   monthWindow,

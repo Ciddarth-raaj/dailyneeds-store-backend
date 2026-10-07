@@ -428,6 +428,37 @@ class EmployeeMasterRepository {
     return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
   }
 
+  /* ------------------------------------------------- payroll eligible ---- */
+
+  /**
+   * Whether this employee is paid through DnDS payroll (Salary Not
+   * Applicable when 0). DELIBERATELY NOT ON `EDITABLE_FIELDS`, for the reason
+   * `attendance_required` is not: the switch is administrators only, and the
+   * generic edit path must refuse it by name.
+   */
+  async getPayrollEligible(employeeId) {
+    const rows = await this._read(
+      "GET-PAYROLL-ELIGIBLE",
+      `SELECT employee_id, employee_name, payroll_eligible
+         FROM new_employee WHERE employee_id = ?`,
+      [employeeId]
+    );
+    if (!rows || !rows[0]) return null;
+    return {
+      employee_id: Number(rows[0].employee_id),
+      employee_name: rows[0].employee_name,
+      payroll_eligible: Number(rows[0].payroll_eligible) === 1,
+    };
+  }
+
+  async setPayrollEligible(tx, employeeId, eligible) {
+    const res = await tx.query(
+      "UPDATE new_employee SET payroll_eligible = ? WHERE employee_id = ?",
+      [eligible ? 1 : 0, employeeId]
+    );
+    return { matched: Number(res.affectedRows || 0), changed: Number(res.changedRows || 0) };
+  }
+
   /* -------------------------------------------------- location scope ---- */
 
   /**

@@ -124,6 +124,7 @@ test("THE COLUMNS THIS TASK ADDED ARE ACTUALLY REACHABLE", () => {
     employment_type: "employment_type",
     grade: "grade",
     attendance_required: "attendance_required",
+    payroll_eligible: "payroll_eligible",
     work_shift: "default_work_shift_id",
     pf_applicable: "pf_applicable",
     esi_applicable: "esi_applicable",
@@ -157,6 +158,14 @@ test("ATTENDANCE REQUIRED IS NOT NULL, SO IT HAS ONLY TWO", () => {
   assert.strictEqual(field.transform(1), "Yes");
   assert.strictEqual(field.transform(0), "No");
   // The column is NOT NULL DEFAULT 1; the default is the answer, not a gap.
+  assert.strictEqual(field.transform(null), "Yes");
+});
+
+test("PAYROLL ELIGIBLE IS NOT NULL TOO: Yes, or No for Salary Not Applicable", () => {
+  const field = catalogue.getField("payroll_eligible");
+  assert.strictEqual(field.label, "Payroll Eligible");
+  assert.strictEqual(field.transform(1), "Yes");
+  assert.strictEqual(field.transform(0), "No");
   assert.strictEqual(field.transform(null), "Yes");
 });
 

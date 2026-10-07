@@ -16,6 +16,7 @@ const {
   evaluateEmployee,
   summarize,
   attendanceStatusOf,
+  isPayrollEligible,
 } = require("../utils/payrun_eligibility");
 const { absenceReview, reviewWindow } = require("../utils/payrun_absence_review");
 const { latestReportableDate } = require("../utils/attendance_missing");
@@ -256,7 +257,18 @@ class PayrunUsecase {
     const pendingOf = byEmployee(pending);
     const existingOf = byEmployee(existing);
 
-    const rows = population.map((employee) => {
+    /*
+     * SALARY NOT APPLICABLE IS NOT IN THE MONTH. The population query already
+     * leaves them out; this is the same rule held again here, so no counted
+     * card, Select All Ready or Initialize can ever see one. Somebody whose
+     * month was initialized before they were marked is kept - that month is
+     * history (see `repository/payrun.js#listPopulation`).
+     */
+    const members = population.filter(
+      (employee) => isPayrollEligible(employee) || existingOf.has(employee.employee_id)
+    );
+
+    const rows = members.map((employee) => {
       const salary = salaryOf.get(employee.employee_id) || null;
       const attendanceRow = attendanceOf.get(employee.employee_id) || null;
       const counts = pendingOf.get(employee.employee_id) || {};
