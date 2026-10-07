@@ -7,19 +7,29 @@
  *
  * ================================== WHAT "5 ATTENDANCE DAYS" MEANS HERE ====
  *
- * Not five calendar days. This schema has no holiday calendar and no leave
- * module: the only non-working days are a shift's weekly offs
- * (`work_shift_weekly_schedule.is_working_day`). So, per employee, the SAFEST
- * reading - the one that cannot miss OT because of a weekly off, a holiday,
- * leave or an absence - is:
+ * Not five calendar days. The source is the one DnDS already uses for
+ * attendance and payroll: the PERSISTED day rows with
+ * `attendance_day_count > 0` (the rows behind Salary Days and the payrun's
+ * "last present date"). A date is one when it has an effective punch - a
+ * device punch that was not voided or ignored as a duplicate, or an APPROVED
+ * regularized punch. Per employee:
  *
- *   the employee's 5 most recent dates WITH PUNCHES (OT can only exist on a
- *   day somebody worked), up to yesterday, looking back at most `--lookback`
- *   days (default 31) - and EVERY date from the oldest of those five to
- *   yesterday is evaluated, so a worked weekly off in between is checked too.
+ *   the employee's 5 most recent such dates up to yesterday, looking back at
+ *   most `--lookback` days (default 31) - and EVERY date from the oldest of
+ *   those five to yesterday is evaluated, so a weekly off, holiday, leave or
+ *   absence in between can never hide OT.
  *
- * An employee with fewer than 5 punched dates in the lookback has the whole
- * lookback evaluated. Today is never evaluated (its day is still open).
+ * Fewer than 5 such dates in the lookback: the whole lookback is evaluated.
+ * Today is never evaluated (its day is still open). The preview also prints,
+ * per employee, the five dates RAW PUNCHES alone would have chosen, and flags
+ * every employee where the two differ.
+ *
+ * ================================================ THE CUTOVER IS NOT MOVED
+ *
+ * Each employee's sync is allowed to create OT from THEIR window's first
+ * date, for THEIR dates only (`allow_creation_from`). The global cutover
+ * stays at the deploy date, so no later recalculation of some other date can
+ * create OT before it.
  *
  * ========================================================== PER DATE =====
  *
@@ -97,34 +107,42 @@ function parseArgs(argv) {
   return out;
 }
 
-/** Did the employee attend this date? Any punch at all - raw or effective. */
-const attended = (day) =>
+/** Source A (comparison only): any raw device punch on the calculated day. */
+const punched = (day) =>
   !!day &&
-  (Number(day.punch_count) > 0 ||
-    (Array.isArray(day.raw_punches) && day.raw_punches.length > 0) ||
-    (Array.isArray(day.effective_punches) && day.effective_punches.length > 0));
+  ((Array.isArray(day.raw_punches) && day.raw_punches.length > 0) ||
+    (Array.isArray(day.excluded_punches) && day.excluded_punches.length > 0) ||
+    Number(day.punch_count) > 0);
 
 /**
- * One employee's window: the oldest of their last `days` attended dates (or
- * the whole lookback when they attended fewer), to yesterday.
+ * One employee's window: the oldest of their last `days` ATTENDANCE dates
+ * (`attendedDates` - the persisted rows DnDS counts), or the whole lookback
+ * when there are fewer, to yesterday; every calculated date in between.
  *
- * @param {object[]} calculated  the engine's days for [today-lookback, yesterday]
+ * @param {object[]} calculated     the engine's days for [today-lookback, yesterday]
+ * @param {string[]} attendedDates  persisted attendance dates (attendance_day_count > 0)
  */
-function windowFor({ calculated, today, days, lookback }) {
+function windowFor({ calculated, attendedDates, today, days, lookback }) {
   const yesterday = addDays(today, -1);
   const lookbackStart = addDays(today, -lookback);
   const inRange = (calculated || [])
     .filter((d) => d && d.attendance_date >= lookbackStart && d.attendance_date <= yesterday)
     .sort((a, b) => (a.attendance_date < b.attendance_date ? -1 : 1));
-  const attendedDates = inRange.filter(attended).map((d) => d.attendance_date);
-  const counted = attendedDates.slice(-days);
+  const attended = [...new Set(attendedDates || [])]
+    .filter((d) => d >= lookbackStart && d <= yesterday)
+    .sort();
+  const counted = attended.slice(-days);
   const from = counted.length >= days ? counted[0] : lookbackStart;
   const evaluated = inRange.filter((d) => d.attendance_date >= from);
+  // SOURCE A, for the comparison only: the last N dates with any raw punch.
+  const punchDates = inRange.filter(punched).map((d) => d.attendance_date).slice(-days);
   return {
     from_date: from,
     to_date: yesterday,
     complete: counted.length >= days,
     attendance_dates_counted: counted,
+    punch_dates_last_n: punchDates,
+    sources_differ: punchDates.join(",") !== counted.join(","),
     dates_evaluated: evaluated.map((d) => d.attendance_date),
     days: evaluated,
   };
@@ -168,8 +186,8 @@ async function run({
   syncAutoOt,
   listEmployees,
   listApprovalAuthority = async () => null,
+  listAttendedDates,
   setting = null,
-  lowerCutover = null,
   notifySummary = null,
   today,
   days = DEFAULT_DAYS,
@@ -194,29 +212,39 @@ async function run({
       ? employee_ids.map((employee_id) => ({ employee_id }))
       : await listEmployees({ from_date: lookbackStart, to_date: yesterday });
 
-  // ---- 1. the windows, from the engine's own days ----
+  // ---- 1. the windows: persisted attendance days, evaluated on the engine's live days ----
+  const attendedRows = await listAttendedDates({
+    employee_ids: population.map((p) => Number(p.employee_id)),
+    from_date: lookbackStart,
+    to_date: yesterday,
+  });
+  const attendedOf = new Map();
+  (attendedRows || []).forEach((r) => {
+    const id = Number(r.employee_id);
+    if (!attendedOf.has(id)) attendedOf.set(id, []);
+    attendedOf.get(id).push(String(r.attendance_date).slice(0, 10));
+  });
   const plans = [];
   const failures = [];
   for (const { employee_id } of population) {
     /* eslint-disable no-await-in-loop */
     try {
       const calculated = await calculateRange({ employee_id, from_date: lookbackStart, to_date: yesterday });
-      const w = windowFor({ calculated, today, days, lookback });
+      const w = windowFor({ calculated, attendedDates: attendedOf.get(Number(employee_id)) || [], today, days, lookback });
       plans.push({ employee_id: Number(employee_id), ...w });
     } catch (err) {
       failures.push({ employee_id, stage: "WINDOW", message: String((err && err.message) || err) });
     }
     /* eslint-enable no-await-in-loop */
   }
-  const withAttendance = plans.filter((p) => p.attendance_dates_counted.length > 0);
+  // Anyone with a persisted attendance day - or, so nothing is missed where
+  // days were never persisted, any punch at all (their window is then the
+  // whole lookback, because they have fewer than N persisted days).
+  const withAttendance = plans.filter((p) => p.attendance_dates_counted.length > 0 || p.punch_dates_last_n.length > 0);
   const earliest = withAttendance.reduce((m, p) => (m === null || p.from_date < m ? p.from_date : m), null);
 
-  // ---- 2. the cutover reaches back to the earliest window (apply only) ----
-  let cutover = setting ? setting.auto_pending_from_date : null;
-  if (apply && earliest && lowerCutover) {
-    const after = await lowerCutover(earliest);
-    cutover = after ? after.auto_pending_from_date : cutover;
-  }
+  // ---- 2. the global cutover is NOT moved (see the header) ----
+  const cutover = setting ? setting.auto_pending_from_date : null;
 
   const authority = await listApprovalAuthority();
 
@@ -252,7 +280,9 @@ async function run({
         dry_run: !apply,
         // NO PER-DATE CARDS: one summary per approver is sent below.
         notify: false,
-        assume_setting: apply ? null : { enabled: 1, auto_pending_from_date: plan.from_date },
+        // THIS employee's window, for THIS call only.
+        allow_creation_from: plan.from_date,
+        assume_setting: apply ? null : setting && enabled ? setting : { enabled: 1, auto_pending_from_date: plan.from_date },
       });
       if (!result.enabled) {
         failures.push({ employee_id: plan.employee_id, stage: "SYNC", message: "automatic pending OT is disabled" });
@@ -311,6 +341,8 @@ async function run({
         to_date: plan.to_date,
         attendance_dates_counted: plan.attendance_dates_counted,
         dates_evaluated: plan.dates_evaluated,
+        punch_dates_last_n: plan.punch_dates_last_n,
+        sources_differ: plan.sources_differ,
       };
       ["created", "updated", "withdrawn", "preserved_approved", "preserved_rejected", "held"].forEach((c) => {
         if ((result[c] || []).length > 0) {
@@ -357,7 +389,16 @@ async function run({
       distinct_dates: [...allDates].sort(),
       rule: `per employee: from the oldest of their last ${days} dates with punches (max ${lookback} days back) to yesterday; every date in between is evaluated`,
     },
-    cutover: apply ? cutover : earliest,
+    // Unchanged by the backfill: ongoing automatic OT starts at the deploy cutover.
+    global_cutover: cutover,
+    attendance_day_source: "attendance_day_calculation.attendance_day_count > 0 (persisted)",
+    source_comparison: {
+      employees_where_raw_punch_dates_differ: plans.filter((p) => p.sources_differ).map((p) => ({
+        employee_id: p.employee_id,
+        persisted_attendance_dates: p.attendance_dates_counted,
+        raw_punch_dates: p.punch_dates_last_n,
+      })),
+    },
     employees_checked: population.length,
     employees_with_attendance: withAttendance.length,
     employees_with_short_history: withAttendance.filter((p) => !p.complete).map((p) => p.employee_id),
@@ -413,8 +454,8 @@ async function main() {
       syncAutoOt: regularization.syncAutoOt,
       listEmployees: ({ from_date, to_date }) => calcRepo.listEmployeesForRecalculation({ from_date, to_date }),
       listApprovalAuthority: () => regRepo.listApprovalAuthority(),
+      listAttendedDates: (args) => regRepo.listAttendedDates(args),
       setting: await regRepo.getAutoOtSetting(),
-      lowerCutover: (date) => regRepo.lowerAutoOtCutover(date),
       notifySummary: otTelegram ? otTelegram.notifyBacklogSummary : null,
       today: istToday(args.today),
       days: args.days,
@@ -442,4 +483,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { parseArgs, windowFor, chainProblem, attended, run, DEFAULT_DAYS, DEFAULT_LOOKBACK };
+module.exports = { parseArgs, windowFor, chainProblem, punched, run, DEFAULT_DAYS, DEFAULT_LOOKBACK };

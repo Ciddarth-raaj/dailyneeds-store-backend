@@ -167,7 +167,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
               WHERE requested_for_employee_id = ? AND request_type = 'OT' ORDER BY id`, [emp]);
   const log = () => q(pool, "SELECT action, previous_ot_minutes AS prev, new_ot_minutes AS next, trigger_source AS src FROM attendance_ot_auto_pending_log ORDER BY attendance_ot_auto_pending_log_id");
 
-  it("the migration seeds ONE enabled cutover row at the IST date five days back, idempotently", async () => {
+  it("the migration seeds ONE enabled cutover row at the IST deploy date (ongoing automation starts at deploy), idempotently", async () => {
     await q(pool, "DROP TABLE attendance_ot_auto_pending_log");
     await q(pool, "DROP TABLE attendance_ot_auto_pending_setting");
     await q(pool, UP);
@@ -175,8 +175,8 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     const rows = await q(pool, "SELECT setting_id, enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS d FROM attendance_ot_auto_pending_setting");
     assert.equal(rows.length, 1);
     assert.equal(Number(rows[0].enabled), 1);
-    assert.equal(rows[0].d, addDays(TODAY, -5));
-    assert.deepEqual({ ...(await repo.getAutoOtSetting()) }, { enabled: 1, auto_pending_from_date: addDays(TODAY, -5) });
+    assert.equal(rows[0].d, TODAY);
+    assert.deepEqual({ ...(await repo.getAutoOtSetting()) }, { enabled: 1, auto_pending_from_date: TODAY });
   });
 
   it("the down drops exactly the two new tables; the setting reads null (disabled) without them", async () => {
@@ -307,7 +307,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.equal(Number(counts.pending_ot), 1);
   });
 
-  it("the backfill: 5 ATTENDANCE days per employee; preview writes nothing; apply creates once; the cutover is lowered", async () => {
+  it("the backfill: 5 ATTENDANCE days per employee; preview writes nothing; apply creates once; the cutover is NOT moved", async () => {
     // EMP did not punch on -1, -4, -5, -6: its last 5 attendance days are
     // -2, -3, -7, -8, -9, so -9 (120 min) is in its window and -10 is not.
     [1, 4, 5, 6].forEach((n) => absent.add(`${EMP}:${addDays(TODAY, -n)}`));
@@ -315,12 +315,25 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     eligible.set(`${EMP}:${addDays(TODAY, -9)}`, 120);
     eligible.set(`${EMP}:${addDays(TODAY, -10)}`, 200);
     eligible.set(`${EMP2}:${D2}`, 45);
+    // As deployed: the migration seeds the cutover at the deploy date, so
+    // every date the backfill raises is BEFORE the cutover.
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = ? WHERE setting_id = 1", [TODAY]);
     const args = {
       calculateRange: engineCalc,
       syncAutoOt: usecase.syncAutoOt,
       listEmployees: async () => [{ employee_id: EMP }, { employee_id: EMP2 }],
       listApprovalAuthority: () => repo.listApprovalAuthority(),
-      lowerCutover: (d) => repo.lowerAutoOtCutover(d),
+      // The persisted attendance days: the stub engine's punched dates.
+      listAttendedDates: async ({ employee_ids, from_date, to_date }) => {
+        const out = [];
+        for (const employee_id of employee_ids) {
+          // eslint-disable-next-line no-await-in-loop
+          (await engineCalc({ employee_id, from_date, to_date }))
+            .filter((d) => d.punch_count > 0)
+            .forEach((d) => out.push({ employee_id, attendance_date: d.attendance_date }));
+        }
+        return out;
+      },
       setting: await repo.getAutoOtSetting(),
       today: TODAY, days: 5, lookback: 31, telegram: false,
     };
@@ -332,18 +345,28 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.equal(preview.totals.new_pending_would_be_created, 3);
     assert.equal(preview.totals.new_pending_ot_minutes, 225);
     assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_request"))[0].n, 0);
-    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -5), "preview leaves the cutover alone");
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, TODAY, "preview leaves the cutover alone");
 
     const applied = await backfill.run({ ...args, apply: true });
     assert.equal(applied.totals.new_pending_created, 3);
-    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -9), "lowered to the earliest window");
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, TODAY, "the global cutover is untouched");
     const again = await backfill.run({ ...args, setting: await repo.getAutoOtSetting(), apply: true });
     assert.equal(again.totals.new_pending_created, 0);
     assert.equal(again.totals.already_pending_unchanged, 3);
     assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_request"))[0].n, 3);
-    // The cutover is only ever lowered.
-    await repo.lowerAutoOtCutover(TODAY);
-    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -9));
+    // Ongoing automation does not reach back: -10 (eligible, in nobody's
+    // window, before the cutover) is still not raised by a later sync.
+    const later = await usecase.syncAutoOt({ employee_id: EMP, dates: [addDays(TODAY, -10)] });
+    assert.deepEqual(later.created, []);
+    // ...and not even inside a backfilled window: a newly eligible date
+    // there (-7) is not raised by ongoing automation, which starts at deploy.
+    eligible.set(`${EMP}:${addDays(TODAY, -7)}`, 30);
+    const inWindow = await usecase.syncAutoOt({ employee_id: EMP, dates: [addDays(TODAY, -7)] });
+    assert.deepEqual(inWindow.created, []);
+    // But a record the backfill created is still followed by recalculation.
+    eligible.set(`${EMP}:${D1}`, 75);
+    const followed = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    assert.equal(followed.updated.length, 1);
   });
 
   it("the chain check reads active employees and their mapped roles", async () => {

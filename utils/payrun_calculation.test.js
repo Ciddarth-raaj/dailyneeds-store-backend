@@ -1074,3 +1074,76 @@ describe("the month read's card filter", () => {
     );
   });
 });
+
+/* ===================================================== PRIOR-MONTH OT */
+
+describe("Prior-Month OT: priced and treated exactly like OT", () => {
+  const item = (amount, extra = {}) => ({
+    late_settlement_id: 1, attendance_approval_request_id: 501, attendance_date: "2026-07-10",
+    source_year: 2026, source_month: 7, approved_ot_minutes: 120, nrm_minutes: 480, daily_rate: 1000,
+    ot_hourly_rate: 125, amount, ...extra,
+  });
+
+  it("9. priceLateOt is the month's own per-NRM formula: daily rate / NRM hours x hours", () => {
+    // The month's own OT: 120 min at NRM 480 on 1,000/day = 250.00
+    const month = run({ attendance: { approved_ot_minutes: 120 } });
+    const late = calc.priceLateOt({ approved_ot_minutes: 120, daily_rate: 1000, nrm_minutes: 480 });
+    assert.equal(late.amount, month.ot_amount);
+    assert.equal(late.ot_hourly_rate, month.ot_hourly_rate);
+    assert.equal(late.amount, 250);
+  });
+
+  it("9. it prices on the ORIGINAL month's daily rate it is given, not the settlement month's salary", () => {
+    const july = calc.priceLateOt({ approved_ot_minutes: 120, daily_rate: 900, nrm_minutes: 480 });
+    assert.equal(july.amount, 225, "900/8 x 2");
+    // The settlement month pays 1,200/day now - and that is NOT used.
+    const settled = calc.computeCalculation(settledInput(31200));
+    const withLate = calc.computeCalculation({ ...settledInput(31200), prior_month_ot: [item(july.amount)] });
+    assert.equal(Number(withLate.total_earnings) - Number(settled.total_earnings), 225);
+  });
+
+  it("10. in Total Earnings and Net Pay; NOT in the PF wage, the ESI wage or any contribution - exactly as OT", () => {
+    const base = run();
+    const withOt = run({ attendance: { approved_ot_minutes: 120 } });
+    const withLate = calc.computeCalculation({ ...settledInput(26000), prior_month_ot: [item(250)] });
+    for (const k of ["pf_wage", "employee_pf", "employer_pf_total", "employer_epf", "employer_eps", "esi_wage", "employee_esi", "employer_esi"]) {
+      assert.equal(withLate[k], base[k], `${k} unchanged by prior-month OT`);
+      assert.equal(withOt[k], base[k], `${k} unchanged by this month's OT either`);
+    }
+    assert.equal(Number(withLate.total_earnings) - Number(base.total_earnings), 250);
+    assert.equal(withLate.total_earnings, withOt.total_earnings, "the same 250 either way");
+    assert.equal(withLate.net_pay, withOt.net_pay);
+    assert.equal(withLate.ot_amount, base.ot_amount, "never merged into this month's OT");
+    assert.equal(withLate.arrears, base.arrears, "never Arrears");
+    assert.equal(withLate.prior_month_ot_amount, 250);
+    assert.equal(withLate.prior_month_ot[0].attendance_date, "2026-07-10");
+  });
+
+  it("an unpriced item is an error, never a zero", () => {
+    const out = calc.computeCalculation({ ...settledInput(26000), prior_month_ot: [item(null)] });
+    assert.match(out.errors.join(" "), /Prior-month OT for 2026-07-10 has no settled price/);
+  });
+
+  it("16. an ordinary month hashes exactly as before: nothing is appended without prior-month OT", () => {
+    const base = run();
+    assert.equal(base.prior_month_ot_amount, 0);
+    const hash = calc.calculationHash(base);
+    assert.equal(calc.calculationHash({ ...base, prior_month_ot_amount: 0 }), hash);
+    assert.notEqual(calc.calculationHash({ ...base, prior_month_ot_amount: 250 }), hash);
+    assert.equal(calc.inputsHash({ amounts: {}, pay_type: "BANK" }), calc.inputsHash({ amounts: {}, pay_type: "BANK", prior_month_ot: [] }));
+    assert.notEqual(calc.inputsHash({ amounts: {}, pay_type: "BANK" }), calc.inputsHash({ amounts: {}, pay_type: "BANK", prior_month_ot: [item(250)] }));
+  });
+
+  function settledInput(gross) {
+    const attendance = { ...ATTENDANCE, salary_day_earnings: gross };
+    return {
+      snapshot: { ...SNAPSHOT, monthly_gross: gross },
+      attendance,
+      nrm: nrmFor(attendance),
+      amounts: {},
+      statutory: STATUTORY,
+      as_of: "2026-08-31",
+      coverage_entry_salary: ENTRY_SALARY,
+    };
+  }
+});

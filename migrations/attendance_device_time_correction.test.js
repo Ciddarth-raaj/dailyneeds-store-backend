@@ -44,6 +44,7 @@ describe(NAME, () => {
       "20261122120000-payroll-export-payslips-permission.js",
       "20261123120000-payroll-reports.js",
       "20261124120000-attendance-ot-auto-pending.js",
+      "20261125120000-attendance-ot-late-settlement.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

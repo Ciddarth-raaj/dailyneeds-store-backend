@@ -304,15 +304,43 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
   const incentive = paiseOr0(c.incentive);
   const bonus = paiseOr0(c.bonus);
   const arrears = paiseOr0(c.arrears);
+
+  /*
+   * PRIOR-MONTH OT - OT approved after its own month was locked, settled in
+   * this payroll. ONE LINE PER SOURCE MONTH, never merged into this month's
+   * OT and never into Arrears: "Prior-Month OT - Sep 2026: 180 min". The
+   * per-request detail (date, minutes, rate, amount) is kept on the snapshot.
+   */
+  const priorItems = parseJsonList(c.prior_month_ot);
+  const priorByMonth = new Map();
+  priorItems.forEach((item) => {
+    const key = `${item.source_year}-${String(item.source_month).padStart(2, "0")}`;
+    const e = priorByMonth.get(key) || { year: Number(item.source_year), month: Number(item.source_month), minutes: 0, paise: 0 };
+    e.minutes += Math.max(0, Math.trunc(Number(item.approved_ot_minutes) || 0));
+    e.paise += paiseOr0(item.amount);
+    priorByMonth.set(key, e);
+  });
+  const priorLines = [...priorByMonth.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([key, e]) => ({
+      ...line(`prior_month_ot_${key}`, `Prior-Month OT — ${MONTH_SHORT[e.month - 1]} ${e.year}: ${e.minutes} min`, e.paise),
+      prior_month_ot: { source_year: e.year, source_month: e.month, approved_ot_minutes: e.minutes },
+    }));
+  const priorSum = [...priorByMonth.values()].reduce((n, e) => n + e.paise, 0);
+  if (priorItems.length > 0 && priorSum !== paiseOr0(c.prior_month_ot_amount)) {
+    throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored prior-month OT items do not add up to their total");
+  }
+
   const earningsLines = [
     ...salaryLines,
     line("extra_day_amount", "Extra Days", extraDay, true),
     line("ot_amount", "Overtime (OT)", ot, true),
+    ...priorLines,
     line("incentive", "Incentive", incentive, true),
     line("bonus", "Bonus", bonus, true),
     line("arrears", "Arrears", arrears, true),
   ];
-  const earningsSum = salaryEarnings + extraDay + ot + incentive + bonus + arrears;
+  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears;
   const totalEarnings = toPaise(c.total_earnings);
   if (totalEarnings === null || earningsSum !== totalEarnings) {
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored earnings do not add up to the stored total");
@@ -417,6 +445,17 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
       ot_hourly_rate: moneyOf(c.ot_hourly_rate),
       ot_amount: money(ot),
       ot_groups: otGroups,
+      // Prior-month OT settled here, request by request, for audit.
+      prior_month_ot_amount: money(priorSum),
+      prior_month_ot: priorItems.map((item) => ({
+        attendance_approval_request_id: Number(item.attendance_approval_request_id),
+        attendance_date: item.attendance_date,
+        source_year: Number(item.source_year),
+        source_month: Number(item.source_month),
+        approved_ot_minutes: Number(item.approved_ot_minutes),
+        ot_hourly_rate: moneyOf(item.ot_hourly_rate),
+        amount: moneyOf(item.amount),
+      })),
     },
     earnings: {
       lines: earningsLines,

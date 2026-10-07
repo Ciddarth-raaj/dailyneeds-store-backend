@@ -371,6 +371,85 @@ async function writeCalculationsOnConnection(connection, rows) {
   return upsertCalculationRows(connection, rows);
 }
 
+const APPROVAL_STATE_SQL = `SELECT attendance_approval_request_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              request_type, status, current_stage_no, total_stages,
+              candidate_ot_minutes, approved_ot_minutes, finalization_state,
+              auto_created, reason, closure_reason,
+              -- SHIFT_CHANGE only, and NULL on every other row: the shift the
+              -- employee asked for. The day's own shift is the resolver's
+              -- answer and is not this - a pending request changes nothing -
+              -- but the employee's own screen has to be able to say what they
+              -- asked for while it is still pending.
+              requested_work_shift_id,
+              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP
+              -- that rejected, not on the request, and a rejection ends the
+              -- chain at exactly one step - so the latest REJECTED step is
+              -- the rejection. Read here rather than in a second round trip
+              -- because the employee's own screens show the reason beside
+              -- the status, and a status without its reason is what sends
+              -- people to ask their manager what happened.
+              (SELECT s.remarks
+                 FROM attendance_approval_step s
+                WHERE s.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND s.decision = 'REJECTED'
+                ORDER BY s.stage_no DESC
+                LIMIT 1) AS rejection_remarks
+         FROM attendance_approval_request r
+        WHERE requested_for_employee_id = ?
+          AND attendance_date BETWEEN ? AND ?
+          AND status <> 'CANCELLED'
+        ORDER BY attendance_date ASC, attendance_approval_request_id ASC`;
+
+const APPROVAL_STATE_WITH_LATE_SETTLEMENT_SQL = `SELECT attendance_approval_request_id,
+              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+              request_type, status, current_stage_no, total_stages,
+              candidate_ot_minutes, approved_ot_minutes, finalization_state,
+              auto_created, reason, closure_reason,
+              -- SHIFT_CHANGE only, and NULL on every other row: the shift the
+              -- employee asked for. The day's own shift is the resolver's
+              -- answer and is not this - a pending request changes nothing -
+              -- but the employee's own screen has to be able to say what they
+              -- asked for while it is still pending.
+              requested_work_shift_id,
+              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
+              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
+              -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP
+              -- that rejected, not on the request, and a rejection ends the
+              -- chain at exactly one step - so the latest REJECTED step is
+              -- the rejection. Read here rather than in a second round trip
+              -- because the employee's own screens show the reason beside
+              -- the status, and a status without its reason is what sends
+              -- people to ask their manager what happened.
+              (SELECT s.remarks
+                 FROM attendance_approval_step s
+                WHERE s.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND s.decision = 'REJECTED'
+                ORDER BY s.stage_no DESC
+                LIMIT 1) AS rejection_remarks,
+              -- PRIOR-MONTH OT: approved after its month was locked and
+              -- settled FORWARD in a later payroll. The day itself must
+              -- never pay it as well (see the calculation usecase).
+              (SELECT ls.settlement_status FROM attendance_ot_late_settlement ls
+                WHERE ls.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND ls.settlement_status <> 'CANCELLED') AS late_settlement_status,
+              (SELECT ls.settlement_year FROM attendance_ot_late_settlement ls
+                WHERE ls.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND ls.settlement_status <> 'CANCELLED') AS late_settlement_year,
+              (SELECT ls.settlement_month FROM attendance_ot_late_settlement ls
+                WHERE ls.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND ls.settlement_status <> 'CANCELLED') AS late_settlement_month,
+              (SELECT ls.approved_ot_minutes FROM attendance_ot_late_settlement ls
+                WHERE ls.attendance_approval_request_id = r.attendance_approval_request_id
+                  AND ls.settlement_status <> 'CANCELLED') AS late_settlement_minutes
+         FROM attendance_approval_request r
+        WHERE requested_for_employee_id = ?
+          AND attendance_date BETWEEN ? AND ?
+          AND status <> 'CANCELLED'
+        ORDER BY attendance_date ASC, attendance_approval_request_id ASC`;
+
 class AttendanceCalculationRepository {
   constructor(db) {
     this.db = db;
@@ -805,41 +884,25 @@ class AttendanceCalculationRepository {
    * many OT minutes have been finally approved.
    */
   async getApprovalStateByDate(employeeId, fromDate, toDate) {
-    return this._read(
-      "GET-APPROVAL-STATE",
-      `SELECT attendance_approval_request_id,
-              DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
-              request_type, status, current_stage_no, total_stages,
-              candidate_ot_minutes, approved_ot_minutes, finalization_state,
-              auto_created, reason, closure_reason,
-              -- SHIFT_CHANGE only, and NULL on every other row: the shift the
-              -- employee asked for. The day's own shift is the resolver's
-              -- answer and is not this - a pending request changes nothing -
-              -- but the employee's own screen has to be able to say what they
-              -- asked for while it is still pending.
-              requested_work_shift_id,
-              DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at,
-              DATE_FORMAT(decided_at, '%Y-%m-%d %H:%i:%s') AS decided_at,
-              -- WHY A REJECTION WAS REJECTED. The remarks live on the STEP
-              -- that rejected, not on the request, and a rejection ends the
-              -- chain at exactly one step - so the latest REJECTED step is
-              -- the rejection. Read here rather than in a second round trip
-              -- because the employee's own screens show the reason beside
-              -- the status, and a status without its reason is what sends
-              -- people to ask their manager what happened.
-              (SELECT s.remarks
-                 FROM attendance_approval_step s
-                WHERE s.attendance_approval_request_id = r.attendance_approval_request_id
-                  AND s.decision = 'REJECTED'
-                ORDER BY s.stage_no DESC
-                LIMIT 1) AS rejection_remarks
-         FROM attendance_approval_request r
-        WHERE requested_for_employee_id = ?
-          AND attendance_date BETWEEN ? AND ?
-          AND status <> 'CANCELLED'
-        ORDER BY attendance_date ASC, attendance_approval_request_id ASC`,
-      [employeeId, fromDate, toDate]
-    );
+    const params = [employeeId, fromDate, toDate];
+    if (this._lateSettlementMissing !== true) {
+      try {
+        return await new Promise((resolve, reject) =>
+          readTiming.timedQuery(this.db, "GET-APPROVAL-STATE", APPROVAL_STATE_WITH_LATE_SETTLEMENT_SQL, params, (err, rows) =>
+            err ? reject(err) : resolve(rows || [])
+          )
+        );
+      } catch (err) {
+        // A database without migration 20261125120000 has no late
+        // settlements: read exactly as before.
+        if (!err || err.code !== "ER_NO_SUCH_TABLE") {
+          this._log("GET-APPROVAL-STATE", err);
+          throw err;
+        }
+        this._lateSettlementMissing = true;
+      }
+    }
+    return this._read("GET-APPROVAL-STATE", APPROVAL_STATE_SQL, params);
   }
 
   /**

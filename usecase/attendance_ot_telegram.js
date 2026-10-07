@@ -250,9 +250,14 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
 
       const final = result.status === "APPROVED" || result.status === "REJECTED";
       const date = displayDate(result.attendance_date);
+      // THE PAYROLL MONTH WAS ALREADY LOCKED: say where the money goes, and
+      // never imply it was added to the locked month's salary.
+      const late = result.late_settlement || null;
       const text =
         decision === "APPROVED"
-          ? final
+          ? final && late
+            ? `Approved — will be settled in the next eligible payroll as Prior-Month OT: ${late.approved_ot_minutes} min for ${date}, Rs ${late.amount}. The ${displayDate(`${late.source_year}-${String(late.source_month).padStart(2, "0")}-01`).slice(3)} payroll is locked and is not changed.`
+            : final
             ? `Approved: ${result.approved_ot_minutes || 0} min OT for ${date}. It will be paid with that month's payroll.`
             : "Approved, and passed to the next approver in DnDS."
           : `Rejected: no OT will be paid for ${date}.`;

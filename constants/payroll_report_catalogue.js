@@ -257,6 +257,10 @@ const PAYROLL_FIELDS = [
     note: "Blank when the month was priced at more than one rate (see the payslip's OT breakup).",
   }),
   f("ot_amount", "OT Amount", G.EARNINGS, { select: "c.ot_amount", type: TYPE.AMOUNT, transform: asAmount }),
+  f("prior_month_ot_amount", "Prior-Month OT", G.EARNINGS, {
+    select: "c.prior_month_ot_amount", type: TYPE.AMOUNT, transform: asAmount,
+    note: "OT approved after its own month was locked, settled in this month (see the payslip for each source month).",
+  }),
   f("gross_salary", "Gross Salary", G.EARNINGS, { select: "c.total_earnings", type: TYPE.AMOUNT, transform: asAmount }),
 
   /* ----------------------------------------------------------- deductions */

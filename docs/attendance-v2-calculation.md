@@ -696,12 +696,17 @@ approved shift); not Present/Absent Only; inside employment.
 | PENDING record an employee raised, OT gone | left for an approver (approval is clamped to 0) |
 | APPROVED / REJECTED / payroll-lock closure | never touched — an approval is clamped by the engine to the day's eligible OT on every recalculation, and payroll flags `APPROVED_OT_CHANGED` (the existing correction path) |
 
-**Gates.** Nothing is raised before the cutover date
+**Gates.** Nothing is *created* before the cutover date
 (`attendance_ot_auto_pending_setting.auto_pending_from_date`, seeded by
-migration 20261124120000 to the deploy date less five days), older than the
-45-day request window, on an open day, or in a payroll-locked month (checked
-before, and again under `FOR UPDATE` inside the insert). `enabled = 0` on that
-row is the kill switch.
+migration 20261124120000 to the deploy date), older than the 45-day request
+window, on an open day, or in a payroll-locked month (checked before, and again
+under `FOR UPDATE` inside the insert). `enabled = 0` on that row is the kill
+switch. The cutover and the window gate **creation only**: a record that
+already exists (for example one the backfill raised before the cutover) is
+still followed — its minutes updated or withdrawn — by later recalculations.
+The backfill never moves the cutover; it passes its own per-employee start
+date (`allow_creation_from`) on each call, so its historical window can never
+widen ongoing automatic creation for anyone.
 
 **Idempotent and race-safe.** One OT record per date; the open-request key
 (`uq_aareq_open_per_employee_date`) refuses a second PENDING one, and the loser
@@ -721,24 +726,29 @@ their chain names a person (Attendance Approver Setup), exactly like a shift
 request. Any approver can send `/ot` to the bot to list the pending OT they may
 decide now, with Approve / Reject buttons. Reject asks for a reason by reply.
 
-**Payroll.** Unchanged: only APPROVED + SETTLED OT is in `approved_ot_minutes`.
-Pending OT is counted by `listPendingApprovals` and blocks Approve & Lock as
-`PENDING_OT_APPROVAL` unless HR closes the employee's attendance for payroll;
-approval in a locked month is refused.
+**Payroll.** Unchanged for an open month: only APPROVED + SETTLED OT is in
+`approved_ot_minutes`. Pending OT is counted by `listPendingApprovals` and
+blocks Approve & Lock as `PENDING_OT_APPROVAL` unless HR closes the employee's
+attendance for payroll. OT decided after its month is locked is settled forward
+as **Prior-Month OT** (below).
 
 **Deploy backfill.** `scripts/attendance/ot-auto-pending-backfill.js` — preview
 by default (read-only), `--apply` to write, through the same sync; approved and
 rejected preserved; idempotent.
 
-*"Previous 5 attendance days"*, not 5 calendar days. There is no holiday
-calendar or leave module in this schema (the only non-working days are a
-shift's weekly offs), so per employee the window is: their **5 most recent
-dates with punches** up to yesterday (at most 31 days back, `--lookback`), and
-**every date** from the oldest of those to yesterday is evaluated — a weekly
-off, holiday, leave or absence in between can never hide OT. Fewer than 5
-punched dates: the whole lookback is evaluated. The preview prints each
-employee's `attendance_dates_counted` and `dates_evaluated`. `--apply` lowers
-the cutover to the earliest window (never raises it).
+*"Previous 5 attendance days"*, not 5 calendar days. **Source of truth: the
+persisted attendance days** — `attendance_day_calculation.attendance_day_count
+> 0`, the same figure payroll counts as Salary Days. It counts effective
+punches (approved regularized punches included) and excludes voided and
+duplicate-ignored punches, which a raw punch-date list (the alternative
+compared) would wrongly count. Per employee the window is their **5 most
+recent attended dates** up to yesterday (at most 31 days back, `--lookback`),
+and **every date** from the oldest of those to yesterday is evaluated — a
+weekly off, holiday, leave or absence in between can never hide OT. Fewer than
+5 attended dates (or dates never persisted): the whole lookback is evaluated.
+The preview prints each employee's attended dates, the raw last-5 punch dates,
+`sources_differ`, and `dates_evaluated`. The cutover is **not** moved: each
+backfill call carries its own `allow_creation_from` (see Gates).
 
 The preview reports: dates covered, employees checked, eligible OT days, already
 approved / rejected / pending, new pending, pending whose minutes would change,
@@ -756,13 +766,71 @@ PENDING OT, when the engine still finds eligible OT; none when it is zero. The
 revoked record stays (CANCELLED, its steps and decision untouched) with its
 revocation row; the new record's creation is logged `REVOKE_OT`.
 
-**Payroll lock / late approval (not yet built — awaiting decision).** OT still
-PENDING when its month is locked is preserved as PENDING (nothing closes it;
-`closeOtForPayrollLock` is not called by any lock action). Approving it is
-refused while the month is locked. The only existing adjustment mechanism is
-the manual `ARREARS` payrun adjustment (one money amount per employee per
-month, no PF/ESI, no link to the OT); it is not a clean fit, so late-approval
-settlement into a later payroll needs a design decision first.
+## Prior-Month OT carry-forward (late approval after payroll lock)
+
+OT still PENDING when its month is locked stays PENDING (nothing closes it).
+It may then be **approved** or **rejected** — from DnDS or Telegram, on the
+same record, through the same guarded `decide` — and the decision never
+touches the locked month: no attendance summary, calculation, payslip or net
+pay is rewritten. A late **approval** is paid forward, in the next eligible
+open payroll, as a separate *Prior-Month OT* line. It does **not** use the
+manual `ARREARS` adjustment.
+
+**Two statuses, kept apart.** The request keeps its approval status
+(`PENDING` → `APPROVED` / `REJECTED`). Settlement lives in its own table:
+
+```
+attendance_ot_late_settlement   (one row per OT request: UNIQUE attendance_approval_request_id)
+  employee_id, attendance_date, source_year, source_month
+  eligible_ot_minutes, approved_ot_minutes
+  source_payrun_calculation_id, source_daily_rate, nrm_minutes, ot_hourly_rate, amount
+  settlement_status  PENDING_SETTLEMENT -> INCLUDED -> SETTLED   (or CANCELLED)
+  settlement_year, settlement_month, settlement_payrun_calculation_id
+  approved_by, approved_at, included_at, settled_at, cancelled_at
+attendance_ot_late_settlement_log   (every transition, actor, note)
+payrun_employee_calculation.prior_month_ot_amount / prior_month_ot (JSON breakdown)
+```
+
+| Event | Settlement status |
+|---|---|
+| final approval while the source month is locked | row created `PENDING_SETTLEMENT`, priced |
+| a later open month is calculated (save) | claimed `INCLUDED` for that month, under `FOR UPDATE`; a row already claimed elsewhere rolls the whole save back (`PRIOR_MONTH_OT_MOVED`) |
+| that month is recalculated | stays `INCLUDED` for the same month (re-read, not re-claimed) |
+| that month's calculation is reset | back to `PENDING_SETTLEMENT` |
+| that month is Approved & Locked | `SETTLED` |
+| that month is unlocked | back to `INCLUDED` |
+| revoke | refused once `SETTLED` (`PRIOR_MONTH_OT_SETTLED`); otherwise `CANCELLED` |
+
+The unique request key plus the claim-under-lock make paying the same OT twice
+impossible; a later month never reads a row settled elsewhere. The day itself
+shows the OT as approved but pays 0 minutes, and keeps paying 0 even if the
+source month is later unlocked.
+
+**Pricing — exactly normal OT's formula, on the source month's basis:**
+
+```
+daily_rate  = the locked source-month calculation's daily rate (monthly gross / 26)
+hourly_rate = daily_rate / (nrm_minutes / 60)        nrm_minutes = that day's stored NRM
+amount      = round((approved_ot_minutes / 60) * hourly_rate)   (in paise)
+```
+
+Priced once at approval (`utils/payrun_calculation#priceLateOt`, the same
+`otAmountPaise` the monthly OT groups use) and stored; an unpriceable item
+refuses the approval with a sentence rather than paying 0.
+
+**Statutory treatment — the same as normal OT.** Prior-Month OT is added to
+total earnings (gross) and net pay only. Like normal OT it is outside the PF
+wage (earned basic) and the ESI wage (normal salary earnings), so it carries no
+employee or employer PF/ESI. There is no TDS or professional-tax module.
+
+**Payslip.** One line per source month, e.g.
+`Prior-Month OT — Sep 2026: 180 min   ₹xxx.xx`, with the per-request detail
+(date, minutes, rate, amount) under `attendance.prior_month_ot` in the
+snapshot and in the calculation breakup. Payroll reports gain
+`prior_month_ot_amount`.
+
+**Messages.** A late approval answers, in DnDS (single and bulk) and Telegram:
+*"Approved — will be settled in the next eligible payroll as Prior-Month OT"*.
 
 ---
 

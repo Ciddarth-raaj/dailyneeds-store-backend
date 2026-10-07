@@ -250,6 +250,23 @@ function otClaimFor({ day, otRequest, otSettled }) {
     // human rejected it - a payroll-lock closure has `ot_closure_reason`
     // instead, and an approval has nothing to explain.
     ot_rejection_remarks: otRequest ? otRequest.rejection_remarks || null : null,
+    // PRIOR-MONTH OT: approved after the month locked; paid in a later
+    // payroll, not on this day. Null on every ordinary OT.
+    ot_late_settlement:
+      otRequest && otRequest.late_settlement_status
+        ? {
+            status: otRequest.late_settlement_status,
+            approved_ot_minutes: Number(otRequest.late_settlement_minutes) || 0,
+            settlement_year:
+              otRequest.late_settlement_year === null || otRequest.late_settlement_year === undefined
+                ? null
+                : Number(otRequest.late_settlement_year),
+            settlement_month:
+              otRequest.late_settlement_month === null || otRequest.late_settlement_month === undefined
+                ? null
+                : Number(otRequest.late_settlement_month),
+          }
+        : null,
   };
 
   /*
@@ -1188,7 +1205,13 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       // REGULARIZATION_WITH_OT request that was approved before the flows
       // were separated still pays what it approved, so history is not
       // silently re-priced.
-      const approvedOt = otSettled
+      // PRIOR-MONTH OT: approved after this date's payroll month was
+      // locked, and paid FORWARD in a later payroll (attendance_ot_late_
+      // settlement). The day never pays it as well - not now, and not if
+      // the locked month is ever unlocked and recalculated.
+      const lateSettled =
+        !!otRequest && otRequest.late_settlement_status !== null && otRequest.late_settlement_status !== undefined;
+      const approvedOt = otSettled && !lateSettled
         ? Number(otRequest.approved_ot_minutes || 0)
         : regularizationSettled && approval.request_type === "REGULARIZATION_WITH_OT"
         ? Number(approval.approved_ot_minutes || 0)

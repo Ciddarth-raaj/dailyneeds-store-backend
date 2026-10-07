@@ -25,7 +25,7 @@ describe("the company details permission migration", () => {
     // The only migrations after it are the ones added since, named here so a
     // new one is a deliberate addition (the convention of
     // attendance_device_time_correction.test.js).
-    assert.deepEqual(all.filter((f) => f > NAME).sort(), ["20261122120000-payroll-export-payslips-permission", "20261123120000-payroll-reports", "20261124120000-attendance-ot-auto-pending"]);
+    assert.deepEqual(all.filter((f) => f > NAME).sort(), ["20261122120000-payroll-export-payslips-permission", "20261123120000-payroll-reports", "20261124120000-attendance-ot-auto-pending", "20261125120000-attendance-ot-late-settlement"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });

@@ -57,6 +57,54 @@ const { istToday } = require("../utils/istDate");
  * `1 = 0` - and a second copy of it is a second chance to get the empty case
  * backwards, which is the case that leaks a whole company's payroll.
  */
+/**
+ * Move one employee-month's prior-month OT from one settlement status to the
+ * next, on the caller's connection and transaction, with a log row per item.
+ * A database without the table (before migration 20261125120000) has nothing
+ * to move. Returns how many moved.
+ */
+async function moveLateOt(conn, repo, { employee_id, year, month, from, to, actor = null, note = null }) {
+  const run = (code, sql, params) =>
+    new Promise((resolve, reject) => conn.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+  try {
+    const items = await run(
+      "LATE-OT-FOR-MOVE",
+      `SELECT late_settlement_id, attendance_approval_request_id
+         FROM attendance_ot_late_settlement
+        WHERE employee_id = ? AND settlement_status = ? AND settlement_year = ? AND settlement_month = ?
+        FOR UPDATE`,
+      [employee_id, from, year, month]
+    );
+    if (!Array.isArray(items) || items.length === 0) return 0;
+    const ids = items.map((i) => i.late_settlement_id);
+    await run(
+      "LATE-OT-MOVE",
+      `UPDATE attendance_ot_late_settlement
+          SET settlement_status = ?,
+              settled_at = CASE WHEN ? = 'SETTLED' THEN CURRENT_TIMESTAMP(3) WHEN ? = 'INCLUDED' THEN NULL ELSE settled_at END,
+              settlement_year = CASE WHEN ? = 'PENDING_SETTLEMENT' THEN NULL ELSE settlement_year END,
+              settlement_month = CASE WHEN ? = 'PENDING_SETTLEMENT' THEN NULL ELSE settlement_month END,
+              settlement_payrun_calculation_id = CASE WHEN ? = 'PENDING_SETTLEMENT' THEN NULL ELSE settlement_payrun_calculation_id END,
+              included_at = CASE WHEN ? = 'PENDING_SETTLEMENT' THEN NULL ELSE included_at END
+        WHERE late_settlement_id IN (?) AND settlement_status = ?`,
+      [to, to, to, to, to, to, to, ids, from]
+    );
+    await run(
+      "LATE-OT-MOVE-LOG",
+      `INSERT INTO attendance_ot_late_settlement_log
+         (late_settlement_id, attendance_approval_request_id, from_status, to_status,
+          settlement_year, settlement_month, actor_employee_id, note)
+       VALUES ?`,
+      [items.map((i) => [i.late_settlement_id, i.attendance_approval_request_id, from, to, year, month, actor, note])]
+    );
+    return ids.length;
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return 0;
+    repo._log("MOVE-LATE-OT", err);
+    throw err;
+  }
+}
+
 class PayrunCalculationRepository {
   constructor(db) {
     this.db = db;
@@ -365,6 +413,7 @@ class PayrunCalculationRepository {
               extra_days, extra_day_amount,
               approved_ot_minutes, approved_ot_hours, ot_hourly_rate, ot_amount,
               ot_groups, attendance_ot_earnings,
+              prior_month_ot_amount, prior_month_ot,
               incentive, bonus, arrears, advance_recovery, shortage_recovery,
               balance_advance,
               pf_status, pf_wage, employee_pf, employer_pf_total, employer_epf, employer_eps,
@@ -393,6 +442,44 @@ class PayrunCalculationRepository {
       params,
       conn
     );
+  }
+
+  /**
+   * PRIOR-MONTH OT THIS PAYROLL MONTH SETTLES, per employee: every
+   * late-approved OT still PENDING_SETTLEMENT from an EARLIER month, and
+   * every one this month already INCLUDED - or, once it is locked, SETTLED -
+   * so a recalculation keeps exactly what it had, never picks one up twice,
+   * and a locked month's inputs still read as what it consumed (publish
+   * compares them). One read for the population.
+   * A database without the table (before migration 20261125120000) has none.
+   */
+  async listLateOtForSettlement(employeeIds, year, month) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    try {
+      return await new Promise((resolve, reject) => {
+        this.db.query(
+          `SELECT late_settlement_id, attendance_approval_request_id, employee_id,
+                  DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                  source_year, source_month, eligible_ot_minutes, approved_ot_minutes,
+                  source_daily_rate AS daily_rate, nrm_minutes, ot_hourly_rate, amount,
+                  settlement_status, settlement_year, settlement_month
+             FROM attendance_ot_late_settlement
+            WHERE employee_id IN (?)
+              AND (
+                    (settlement_status = 'PENDING_SETTLEMENT'
+                       AND (source_year * 12 + source_month) < (? * 12 + ?))
+                 OR (settlement_status IN ('INCLUDED','SETTLED') AND settlement_year = ? AND settlement_month = ?)
+                  )
+            ORDER BY employee_id, attendance_date, attendance_approval_request_id`,
+          [employeeIds, year, month, year, month],
+          (err, rows) => (err ? reject(err) : resolve(rows || []))
+        );
+      });
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      this._log("LIST-LATE-OT-FOR-SETTLEMENT", err);
+      throw err;
+    }
   }
 
   /**
@@ -453,6 +540,7 @@ class PayrunCalculationRepository {
       "extra_days", "extra_day_amount",
       "approved_ot_minutes", "approved_ot_hours", "ot_hourly_rate", "ot_amount",
       "ot_groups", "attendance_ot_earnings",
+      "prior_month_ot_amount", "prior_month_ot",
       "incentive", "bonus", "arrears", "advance_recovery", "shortage_recovery",
       "balance_advance",
       "pf_status", "pf_wage", "employee_pf", "employer_pf_total",
@@ -575,6 +663,74 @@ class PayrunCalculationRepository {
             row.calculated_by,
           ];
         });
+
+      /*
+       * PRIOR-MONTH OT IS CLAIMED BY THIS MONTH, IN THIS TRANSACTION. Every
+       * item the calculation priced moves to INCLUDED for this month - guarded
+       * on still being PENDING_SETTLEMENT, or already INCLUDED in THIS month -
+       * and if any one of them is not claimable any more (another month took
+       * it, it was cancelled) the whole save rolls back. That is what makes a
+       * second month unable to pay the same OT.
+       */
+      for (const row of rows) {
+        const w = byEmployee.get(Number(row.employee_id));
+        const items = Array.isArray(row.late_ot_settlement_ids) ? row.late_ot_settlement_ids : [];
+        if (!w || w.status === STORED_STATUS.APPROVED_LOCKED || items.length === 0) continue;
+        /* eslint-disable no-await-in-loop */
+        const before = await this._read(
+          "LOCK-LATE-OT-FOR-CLAIM",
+          `SELECT late_settlement_id, attendance_approval_request_id, settlement_status
+             FROM attendance_ot_late_settlement
+            WHERE late_settlement_id IN (?) AND employee_id = ?
+            FOR UPDATE`,
+          [items, row.employee_id],
+          conn
+        );
+        const claimable = (before || []).filter(
+          (b) =>
+            b.settlement_status === "PENDING_SETTLEMENT" ||
+            b.settlement_status === "INCLUDED"
+        );
+        const claimed = await this._read(
+          "CLAIM-LATE-OT",
+          `UPDATE attendance_ot_late_settlement
+              SET settlement_status = 'INCLUDED',
+                  settlement_year = ?, settlement_month = ?,
+                  settlement_payrun_calculation_id = ?,
+                  included_at = COALESCE(included_at, CURRENT_TIMESTAMP(3))
+            WHERE late_settlement_id IN (?)
+              AND employee_id = ?
+              AND (settlement_status = 'PENDING_SETTLEMENT'
+                   OR (settlement_status = 'INCLUDED' AND settlement_year = ? AND settlement_month = ?))`,
+          [row.period_year, row.period_month, w.payrun_calculation_id, items, row.employee_id, row.period_year, row.period_month],
+          conn
+        );
+        if (claimable.length !== items.length || !claimed || Number(claimed.affectedRows) !== items.length) {
+          const err = new Error(
+            `Prior-month OT for employee ${row.employee_id} changed while it was being calculated - recalculate`
+          );
+          err.name = "ValidationError";
+          err.code = "PRIOR_MONTH_OT_MOVED";
+          throw err;
+        }
+        const newlyIncluded = claimable.filter((b) => b.settlement_status === "PENDING_SETTLEMENT");
+        if (newlyIncluded.length > 0) {
+          await this._read(
+            "LOG-LATE-OT-INCLUDED",
+            `INSERT INTO attendance_ot_late_settlement_log
+               (late_settlement_id, attendance_approval_request_id, from_status, to_status,
+                settlement_year, settlement_month, actor_employee_id, note)
+             VALUES ?`,
+            [newlyIncluded.map((b) => [
+              b.late_settlement_id, b.attendance_approval_request_id, "PENDING_SETTLEMENT", "INCLUDED",
+              row.period_year, row.period_month, row.calculated_by === undefined ? null : row.calculated_by,
+              "included in the payroll calculation",
+            ])],
+            conn
+          );
+        }
+        /* eslint-enable no-await-in-loop */
+      }
 
       if (auditValues.length > 0) {
         await this._read(
@@ -1032,12 +1188,25 @@ class PayrunCalculationRepository {
           month,
         });
 
+        // PRIOR-MONTH OT THIS MONTH INCLUDED IS NOW PAID: SETTLED, in the
+        // same transaction as the lock, and never again claimable.
+        const lateOtSettled = await moveLateOt(conn, this, {
+          employee_id: row.employee_id,
+          year,
+          month,
+          from: "INCLUDED",
+          to: "SETTLED",
+          actor: approved_by,
+          note: "settled: payroll approved and locked",
+        });
+
         results.push({
           employee_id: entry.employee_id,
           outcome: "APPROVED",
           calculation_hash: row.calculation_hash,
           net_pay: row.net_pay,
           permissions_closed: permissionClosure.closed,
+          prior_month_ot_settled: lateOtSettled,
         });
       }
 
@@ -1186,6 +1355,13 @@ class PayrunCalculationRepository {
           `Reset removed ${deleted ? deleted.affectedRows : "no"} rows for employee ${employee_id}; rolled back`
         );
       }
+      // The month no longer has a calculation, so it no longer holds any
+      // prior-month OT: released back to PENDING_SETTLEMENT for the next
+      // calculation (of this month or a later one) to claim.
+      await moveLateOt(conn, this, {
+        employee_id, year, month, from: "INCLUDED", to: "PENDING_SETTLEMENT",
+        actor: reset_by, note: "released: payroll calculation reset",
+      });
 
       await commitAsync(conn);
       return {
@@ -1398,6 +1574,12 @@ class PayrunCalculationRepository {
         payslip_id: payslipId,
       });
       if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK) {
+        // An unlocked month is not paid yet: its prior-month OT goes back
+        // from SETTLED to INCLUDED with it (a re-lock settles it again).
+        await moveLateOt(conn, this, {
+          employee_id: row.employee_id, year, month, from: "SETTLED", to: "INCLUDED",
+          actor: actorEmployee, note: "payroll month unlocked",
+        });
         // The calculation history's own UNLOCK verb, reserved for this.
         await this._read(
           "INSERT-UNLOCK-CALCULATION-AUDIT",

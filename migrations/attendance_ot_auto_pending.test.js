@@ -40,8 +40,9 @@ describe(NAME, () => {
     up.forEach((s) => assert.ok(!/attendance_approval_request`|attendance_approval_step`|biomax_punch|permissions/i.test(s), s));
   });
 
-  it("seeds the cutover once, at the IST business date five days back", () => {
-    assert.match(up[1], /DATE\(UTC_TIMESTAMP\(\) \+ INTERVAL 330 MINUTE\) - INTERVAL 5 DAY/);
+  it("seeds the cutover once, at the IST business date of the deploy", () => {
+    assert.match(up[1], /DATE\(UTC_TIMESTAMP\(\) \+ INTERVAL 330 MINUTE\) FROM DUAL/);
+    assert.doesNotMatch(up[1], /INTERVAL 5 DAY/, "ongoing automation starts at deploy");
     assert.match(up[1], /WHERE NOT EXISTS/);
   });
 

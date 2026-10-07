@@ -443,6 +443,7 @@ class PayrunCalculationUsecase {
       states,
       calculations,
       periodRow,
+      lateOt,
     ] = await Promise.all([
       this.repo.listAttendanceMonths(ids, period.year, period.month),
       typeof this.repo.listAttendanceDayRows === "function"
@@ -462,6 +463,10 @@ class PayrunCalculationUsecase {
       this.adjustmentRepo.listStates({ year: period.year, month: period.month, employee_ids: ids }),
       this.repo.listCalculations({ year: period.year, month: period.month, employee_ids: ids }),
       this.payrunRepo.getPeriod(period.year, period.month),
+      // PRIOR-MONTH OT this month settles (approved after its own month locked).
+      typeof this.repo.listLateOtForSettlement === "function"
+        ? this.repo.listLateOtForSettlement(ids, period.year, period.month)
+        : Promise.resolve([]),
     ]);
 
     const index = (rows) => {
@@ -557,6 +562,7 @@ class PayrunCalculationUsecase {
       amountsOf,
       stateOf: index(states),
       calculationOf: index(calculations),
+      lateOtOf: group(lateOt),
     };
   }
 
@@ -640,7 +646,8 @@ class PayrunCalculationUsecase {
       },
     });
     const currentSourceHash = calc.sourceHash(currentMarkers);
-    const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type });
+    const priorMonthOt = (context.lateOtOf && context.lateOtOf.get(id)) || [];
+    const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type, prior_month_ot: priorMonthOt });
 
     /*
      * THE SHARED PAYROLL READINESS. A dry run of the very calculation
@@ -658,6 +665,7 @@ class PayrunCalculationUsecase {
         as_of: context.window.to,
         coverage_entry_salary: entrySalary,
         day_rows: context.dayRowsOf ? context.dayRowsOf.get(id) || [] : null,
+        prior_month_ot: priorMonthOt,
       });
       readiness = evaluatePayrollReadiness({
         year: context.period.year,
@@ -766,6 +774,7 @@ class PayrunCalculationUsecase {
         nrm,
         statutory,
         amounts,
+        priorMonthOt,
         entrySalary,
         currentMarkers,
         currentSourceHash,
@@ -1152,6 +1161,13 @@ class PayrunCalculationUsecase {
                */
               ot_groups: pending ? [] : this._json(stored.ot_groups),
               attendance_ot_earnings: provisional(stored.attendance_ot_earnings),
+              /**
+               * PRIOR-MONTH OT: OT approved after its own month was locked,
+               * paid in this month at its source month's rate. Not part of
+               * `ot_amount` (this month's OT); added to total earnings only.
+               */
+              prior_month_ot_amount: provisional(stored.prior_month_ot_amount),
+              prior_month_ot: pending ? [] : this._json(stored.prior_month_ot),
             },
             adjustments: {
               incentive: stored.incentive,
@@ -1600,7 +1616,7 @@ class PayrunCalculationUsecase {
    * own. Nothing here writes either.
    */
   _buildRow(context, presented, actor) {
-    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary } = presented.internals;
+    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary, priorMonthOt } = presented.internals;
 
     const result = calc.computeCalculation({
       /* Priced on the one resolved salary; its markers below are the same object's. */
@@ -1623,6 +1639,12 @@ class PayrunCalculationUsecase {
        * else; null when the repository cannot read them.
        */
       day_rows: context.dayRowsOf ? context.dayRowsOf.get(Number(employee.employee_id)) || [] : null,
+      /*
+       * PRIOR-MONTH OT: approved after its own month locked, priced on that
+       * month's basis when it was approved, settled here. Claimed by this
+       * month in the save's own transaction (see `saveCalculations`).
+       */
+      prior_month_ot: priorMonthOt || [],
     });
 
     const hash = calc.calculationHash(result);
@@ -1675,6 +1697,12 @@ class PayrunCalculationUsecase {
         ot_amount: result.ot_amount,
         ot_groups: JSON.stringify(result.ot_groups || []),
         attendance_ot_earnings: result.attendance_ot_earnings,
+        prior_month_ot_amount: (result.prior_month_ot || []).length > 0 ? result.prior_month_ot_amount : null,
+        prior_month_ot: (result.prior_month_ot || []).length > 0 ? JSON.stringify(result.prior_month_ot) : null,
+        // Not a column: the settlement rows this calculation claims.
+        late_ot_settlement_ids: (result.prior_month_ot || [])
+          .map((i) => i.late_settlement_id)
+          .filter((v) => v !== null && v !== undefined),
 
         incentive: result.incentive,
         bonus: result.bonus,

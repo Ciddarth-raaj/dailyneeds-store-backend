@@ -729,6 +729,17 @@ class AttendanceRegularizationRepository {
     // (it forgives nothing and pays nothing). Every other request type keeps
     // the existing rule - any decision in a locked month is refused here.
     allowRejectWhenLocked = false,
+    /*
+     * OT IN A LOCKED MONTH - the PRIOR-MONTH OT CARRY-FORWARD. Present only
+     * when the usecase found the month locked and the request is OT. Any
+     * stage may then be decided (approve or reject) with NO attendance write;
+     * a FINAL approval also writes the settlement row - priced on the
+     * original month's basis - in THIS transaction. `expect_locked` is
+     * re-proved under the lock: a month unlocked meanwhile is refused (409)
+     * rather than decided on the wrong path.
+     *   { expect_locked: true, settlement: { ...priced row } | null }
+     */
+    lateOt = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -757,8 +768,15 @@ class AttendanceRegularizationRepository {
         const hits = await lockPayrollMonthsOnConnection(connection, [
           { employee_id: attendanceLock.employee_id, attendance_date: attendanceLock.attendance_date },
         ]);
+        if (lateOt && lateOt.expect_locked && hits.length === 0) {
+          await rollbackAsync(connection);
+          return {
+            code: 409,
+            msg: "This OT's payroll month was unlocked while it was being decided - reload and decide it again",
+          };
+        }
         if (hits.length > 0) {
-          if (!(allowRejectWhenLocked && decision === "REJECTED")) throw payrollLockedError(hits);
+          if (!lateOt && !(allowRejectWhenLocked && decision === "REJECTED")) throw payrollLockedError(hits);
           monthLocked = true;
         }
       }
@@ -817,6 +835,35 @@ class AttendanceRegularizationRepository {
         return { code: 409, msg: "This request moved while you were deciding it - reload and try again" };
       }
 
+      // PRIOR-MONTH OT: the final approval of an OT whose month is locked is
+      // a FORWARD settlement - one row per request (the unique key makes a
+      // second impossible), priced on the original month, and logged.
+      let lateSettlementId = null;
+      if (lateOt && lateOt.settlement && next.status === "APPROVED") {
+        const st = lateOt.settlement;
+        const inserted = await queryAsync(
+          connection,
+          `INSERT INTO attendance_ot_late_settlement
+             (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+              eligible_ot_minutes, approved_ot_minutes, source_payrun_calculation_id, source_daily_rate,
+              nrm_minutes, ot_hourly_rate, amount, settlement_status, approved_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_SETTLEMENT', ?)`,
+          [
+            requestId, st.employee_id, st.attendance_date, st.source_year, st.source_month,
+            st.eligible_ot_minutes, st.approved_ot_minutes, st.source_payrun_calculation_id, st.daily_rate,
+            st.nrm_minutes, st.ot_hourly_rate, st.amount, actorId,
+          ]
+        );
+        lateSettlementId = inserted.insertId;
+        await queryAsync(
+          connection,
+          `INSERT INTO attendance_ot_late_settlement_log
+             (late_settlement_id, attendance_approval_request_id, from_status, to_status, actor_employee_id, note)
+           VALUES (?, ?, NULL, 'PENDING_SETTLEMENT', ?, ?)`,
+          [lateSettlementId, requestId, actorId, `approved after the ${st.source_year}-${String(st.source_month).padStart(2, "0")} payroll was locked`]
+        );
+      }
+
       // THE APPROVED ONE-DAY SHIFT, written in THIS transaction.
       //
       // A final approval of a SHIFT_CHANGE request is the only thing that
@@ -865,6 +912,7 @@ class AttendanceRegularizationRepository {
         finalization_state: finalizationState,
         calculations_written: stored.written,
         attendance_date_shift_override_id: overrideId,
+        late_settlement_id: lateSettlementId,
       };
     } catch (err) {
       await rollbackAsync(connection);
@@ -1231,6 +1279,46 @@ class AttendanceRegularizationRepository {
           (calculations || []).length,
         ]
       );
+
+      // 7b. PRIOR-MONTH OT. A late approval already PAID in a locked payroll
+      // cannot be revoked here (that money left in a published month); one
+      // not yet paid is CANCELLED with it, logged, and leaves its payroll.
+      try {
+        const late = await queryAsync(
+          connection,
+          `SELECT late_settlement_id, settlement_status, settlement_year, settlement_month
+             FROM attendance_ot_late_settlement
+            WHERE attendance_approval_request_id = ? AND settlement_status <> 'CANCELLED'
+            FOR UPDATE`,
+          [requestId]
+        );
+        if (late && late[0]) {
+          if (late[0].settlement_status === "SETTLED") {
+            return refuseRule(
+              "PRIOR_MONTH_OT_SETTLED",
+              `This OT was already paid as Prior-Month OT in the ${late[0].settlement_year}-${String(late[0].settlement_month).padStart(2, "0")} payroll and cannot be revoked`
+            );
+          }
+          await queryAsync(
+            connection,
+            `UPDATE attendance_ot_late_settlement
+                SET settlement_status = 'CANCELLED', cancelled_at = CURRENT_TIMESTAMP(3)
+              WHERE late_settlement_id = ?`,
+            [late[0].late_settlement_id]
+          );
+          await queryAsync(
+            connection,
+            `INSERT INTO attendance_ot_late_settlement_log
+               (late_settlement_id, attendance_approval_request_id, from_status, to_status,
+                settlement_year, settlement_month, actor_employee_id, note)
+             VALUES (?, ?, ?, 'CANCELLED', ?, ?, ?, ?)`,
+            [late[0].late_settlement_id, requestId, late[0].settlement_status, late[0].settlement_year,
+              late[0].settlement_month, actor ? actor.employee_id : null, "approval revoked before settlement"]
+          );
+        }
+      } catch (err) {
+        if (!err || err.code !== "ER_NO_SUCH_TABLE") throw err;
+      }
 
       // 8. The day without it. A failure here rolls everything above back.
       const stored = await writeCalculationsOnConnection(connection, calculations || []);
@@ -1934,19 +2022,71 @@ class AttendanceRegularizationRepository {
   }
 
   /**
-   * Lower (never raise) the automatic-OT cutover, so the deploy backfill can
-   * reach back over weekly offs and absences to each employee's previous
-   * attendance days. Returns the cutover now in force.
+   * THE ATTENDANCE DAYS DnDS ITSELF COUNTS, for the deploy backfill: the
+   * persisted day rows with `attendance_day_count > 0` - the same rows and
+   * the same test payroll's Salary Days and "last present date" use. A date
+   * becomes one through an effective punch (a device punch that was not
+   * voided or ignored as a duplicate, or an APPROVED regularized punch).
    */
-  async lowerAutoOtCutover(date) {
-    await queryAsync(
-      this.db,
-      `UPDATE attendance_ot_auto_pending_setting
-          SET auto_pending_from_date = LEAST(auto_pending_from_date, ?)
-        WHERE setting_id = 1`,
-      [date]
+  async listAttendedDates({ employee_ids, from_date, to_date }) {
+    if (!Array.isArray(employee_ids) || employee_ids.length === 0) return [];
+    return this._read(
+      "LIST-ATTENDED-DATES",
+      `SELECT employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+         FROM attendance_day_calculation
+        WHERE employee_id IN (?)
+          AND attendance_date BETWEEN ? AND ?
+          AND attendance_day_count > 0
+        ORDER BY employee_id, attendance_date`,
+      [employee_ids, from_date, to_date]
     );
-    return this.getAutoOtSetting();
+  }
+
+  /**
+   * PRIOR-MONTH OT PRICING BASIS: the LOCKED payroll calculation of the OT's
+   * own month (its daily rate - the month's gross / 26) and the OT date's
+   * stored day row (its NRM). Read before the decision transaction; the
+   * transaction re-proves the month is still locked.
+   */
+  async getLateOtPricingBasis({ employee_id, attendance_date }) {
+    const year = Number(String(attendance_date).slice(0, 4));
+    const month = Number(String(attendance_date).slice(5, 7));
+    const [calc] = await this._read(
+      "LATE-OT-SOURCE-CALCULATION",
+      `SELECT payrun_calculation_id, daily_rate, monthly_gross, status
+         FROM payrun_employee_calculation
+        WHERE employee_id = ? AND period_year = ? AND period_month = ? AND status = 'APPROVED_LOCKED'`,
+      [employee_id, year, month]
+    );
+    const [day] = await this._read(
+      "LATE-OT-SOURCE-DAY",
+      `SELECT nrm_minutes, break_allowance_source, candidate_ot_minutes, approved_ot_minutes
+         FROM attendance_day_calculation
+        WHERE employee_id = ? AND attendance_date = ?`,
+      [employee_id, attendance_date]
+    );
+    return { year, month, calculation: calc || null, day: day || null };
+  }
+
+  /** The prior-month settlement of one OT request (not cancelled), or null. */
+  async getLateSettlement(requestId) {
+    try {
+      const rows = await queryAsync(
+        this.db,
+        `SELECT late_settlement_id, attendance_approval_request_id, employee_id,
+                DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                source_year, source_month, eligible_ot_minutes, approved_ot_minutes,
+                source_daily_rate, nrm_minutes, ot_hourly_rate, amount,
+                settlement_status, settlement_year, settlement_month
+           FROM attendance_ot_late_settlement
+          WHERE attendance_approval_request_id = ? AND settlement_status <> 'CANCELLED'`,
+        [requestId]
+      );
+      return rows && rows[0] ? rows[0] : null;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return null;
+      throw err;
+    }
   }
 
   /** The automation's audit rows for some requests, oldest first. */

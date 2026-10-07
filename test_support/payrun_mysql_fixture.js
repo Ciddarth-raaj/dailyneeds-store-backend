@@ -17,11 +17,16 @@ const MIGRATIONS = [
   "20261110120000-payrun-calculation-reset-up.sql",
   "20261111120000-payrun-lifecycle-up.sql",
   "20261112120000-payrun-payslip-up.sql",
+  // Prior-Month OT carry-forward: the settlement tables and the two
+  // calculation columns the repository now reads and writes.
+  "20261125120000-attendance-ot-late-settlement-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 
 /** Every table this suite creates, children first so they drop cleanly. */
 const TABLES = [
+  "attendance_ot_late_settlement_log",
+  "attendance_ot_late_settlement",
   "payrun_payslip_notification",
   "payrun_payslip",
   "payrun_employee_lifecycle_audit",

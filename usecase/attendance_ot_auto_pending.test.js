@@ -96,7 +96,7 @@ const NOW = Date.parse("2026-09-20T12:00:00+05:30");
 function build(state = {}) {
   const rawPunches = state.rawPunches || [];
   const saved = { calculations: [] };
-  const store = { requests: [], steps: [], log: [] };
+  const store = { requests: [], steps: [], log: [], settlements: [] };
   const lockedMonths = new Set(state.lockedMonths || []); // "42:2026-9"
   const setting = state.setting === undefined ? { enabled: 1, auto_pending_from_date: "2026-09-01" } : state.setting;
   let nextId = 900;
@@ -134,9 +134,17 @@ function build(state = {}) {
         .map((r) => ({ employee_id: employeeId, attendance_date: r.attendance_date, punch_id: `R${r.attendance_approval_request_id}`, io_time: r.punch.punch_time, attendance_approval_request_id: r.attendance_approval_request_id })),
     getBreakOverride: async () => null,
     getApprovalStateByDate: async (employeeId, from, to) =>
-      store.requests.filter(
-        (r) => r.requested_for_employee_id === employeeId && r.status !== "CANCELLED" && r.attendance_date >= from && r.attendance_date <= to
-      ),
+      store.requests
+        .filter(
+          (r) => r.requested_for_employee_id === employeeId && r.status !== "CANCELLED" && r.attendance_date >= from && r.attendance_date <= to
+        )
+        .map((r) => {
+          // As the repository's correlated read: the request's prior-month settlement.
+          const ls = store.settlements.find((x) => x.attendance_approval_request_id === r.attendance_approval_request_id && x.settlement_status !== "CANCELLED");
+          return ls
+            ? { ...r, late_settlement_status: ls.settlement_status, late_settlement_year: ls.settlement_year, late_settlement_month: ls.settlement_month, late_settlement_minutes: ls.approved_ot_minutes }
+            : r;
+        }),
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     findPayrollLockedPeriods: async (rows) => lockHits(rows),
@@ -208,7 +216,9 @@ function build(state = {}) {
     // The guarded transaction, as the SQL guards it: the step must still be
     // PENDING and the request still PENDING at this stage, else 409.
     decideStage: async (args) => {
-      if (args.attendanceLock && lockHits([args.attendanceLock]).length > 0) throw lockedError();
+      const isLocked = !!args.attendanceLock && lockHits([args.attendanceLock]).length > 0;
+      if (args.lateOt && args.lateOt.expect_locked && !isLocked) return { code: 409, msg: "unlocked meanwhile" };
+      if (isLocked && !args.lateOt && !(args.allowRejectWhenLocked && args.decision === "REJECTED")) throw lockedError();
       const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
       const st = stepsOf(args.requestId).find((s) => s.stage_no === args.stageNo);
       if (!st || st.decision !== "PENDING") return { code: 409, msg: "That stage has already been decided - reload and try again" };
@@ -217,15 +227,32 @@ function build(state = {}) {
       r.status = args.next.status; r.current_stage_no = args.next.current_stage_no; r.approved_ot_minutes = args.next.approved_ot_minutes;
       r.finalization_state = args.next.status === "PENDING" ? "NOT_REQUIRED" : "SETTLED";
       if (args.next.status !== "PENDING") r.decided_at = "2026-09-20 10:00:00";
-      if ((args.calculations || []).length > 0) saved.calculations.push(args.calculations);
-      return { code: 200, status: r.status, current_stage_no: r.current_stage_no, finalization_state: r.finalization_state, calculations_written: (args.calculations || []).length };
+      // A locked month's day is never written with a decision.
+      if (!isLocked && (args.calculations || []).length > 0) saved.calculations.push(args.calculations);
+      let lateSettlementId = null;
+      if (args.lateOt && args.lateOt.settlement && args.next.status === "APPROVED") {
+        if (store.settlements.some((x) => x.attendance_approval_request_id === args.requestId)) {
+          const err = new Error("Duplicate entry for key uq_aols_request");
+          err.code = "ER_DUP_ENTRY";
+          throw err;
+        }
+        lateSettlementId = store.settlements.length + 1;
+        store.settlements.push({ late_settlement_id: lateSettlementId, attendance_approval_request_id: args.requestId, ...args.lateOt.settlement, settlement_status: "PENDING_SETTLEMENT", settlement_year: null, settlement_month: null, approved_by: args.actorId });
+      }
+      return { code: 200, status: r.status, current_stage_no: r.current_stage_no, finalization_state: r.finalization_state, calculations_written: isLocked ? 0 : (args.calculations || []).length, late_settlement_id: lateSettlementId };
+    },
+    // PRIOR-MONTH OT: the locked calculation's daily rate and the date's stored NRM.
+    getLateOtPricingBasis: async ({ employee_id, attendance_date }) => {
+      const day = saved.calculations.flat().filter((r) => r.employee_id === employee_id && r.attendance_date === attendance_date).pop() || null;
+      return {
+        year: Number(attendance_date.slice(0, 4)),
+        month: Number(attendance_date.slice(5, 7)),
+        calculation: (state.lockedCalc || {})[`${employee_id}:${attendance_date.slice(0, 7)}`] || null,
+        day,
+      };
     },
     // ---- automatic pending OT ----
     getAutoOtSetting: async () => setting,
-    lowerAutoOtCutover: async (date) => {
-      if (setting && date < setting.auto_pending_from_date) setting.auto_pending_from_date = date;
-      return setting;
-    },
     // Active employees and their roles: the approvers above plus staff.
     listApprovalAuthority: async () => [
       ...Object.values(IDENTITIES).map((i) => ({ employee_id: i.employee_id, outlet_id: i.outlet_id, approver_role: i.approver_role })),
@@ -329,6 +356,21 @@ function build(state = {}) {
 
 const recalc = (w, employee_id, from = DATE, to = DATE) =>
   w.calculation.recalculateRange({ employee_id, from_date: from, to_date: to, now: NOW });
+/** The persisted attendance days (attendance_day_count > 0), as the repository reads them. */
+const attendedFromSaved = (w) => async ({ employee_ids, from_date, to_date }) => {
+  const latest = new Map();
+  w.saved.calculations.flat().forEach((r) => latest.set(`${r.employee_id}|${r.attendance_date}`, r));
+  return [...latest.values()]
+    .filter((r) => employee_ids.includes(r.employee_id) && r.attendance_date >= from_date && r.attendance_date <= to_date && Number(r.attendance_day_count) > 0)
+    .map((r) => ({ employee_id: r.employee_id, attendance_date: r.attendance_date }));
+};
+/** What the daily runs had stored before the deploy: every employee's days, persisted. */
+const persistAll = async (w, ids = [42, 43, 44]) => {
+  for (const id of ids) {
+    // eslint-disable-next-line no-await-in-loop
+    await w.calculation.recalculateRange({ employee_id: id, from_date: "2026-08-21", to_date: "2026-09-19", now: NOW });
+  }
+};
 const otOf = (w, employee_id, date = DATE) =>
   w.store.requests.filter((r) => r.request_type === "OT" && r.requested_for_employee_id === employee_id && r.attendance_date === date);
 const liveOt = (w, employee_id, date = DATE) => otOf(w, employee_id, date).filter((r) => r.status !== "CANCELLED");
@@ -712,6 +754,7 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
         ...day(42, "2026-09-12", "22:00:00"),
         ...day(42, "2026-09-15", "22:00:00"),
         ...day(42, "2026-09-18", "22:00:00"),
+        ...day(44, "2026-09-11"), // 90 min, but NOT one of 44's last 5 attendance days
         ...day(44, "2026-09-14", "22:00:00"),
         ...day(44, "2026-09-15", "22:00:00"),
         ...day(44, "2026-09-16", "22:00:00"),
@@ -727,8 +770,8 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
     syncAutoOt: w.regularization.syncAutoOt,
     listEmployees: async () => EMPLOYEES,
     listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+    listAttendedDates: attendedFromSaved(w),
     setting: { enabled: 1, auto_pending_from_date: "2026-09-15" },
-    lowerCutover: (d) => w.regRepo.lowerAutoOtCutover(d),
     notifySummary: w.otTelegram.notifyBacklogSummary,
     today: TODAY,
     days: 5,
@@ -736,6 +779,7 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
     ...extra,
   });
   const decideExisting = async (w) => {
+    await persistAll(w);
     await w.regularization.raiseOtRequest({ actor: actor(44), attendance_date: "2026-09-18", reason: "Stock count ran late", today: TODAY, now: NOW });
     await approveRoleChain(w, otOf(w, 44, "2026-09-18")[0].attendance_approval_request_id, SM5);
     await w.regularization.raiseOtRequest({ actor: actor(44), attendance_date: "2026-09-17", reason: "Stock count ran late", today: TODAY, now: NOW });
@@ -743,16 +787,27 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
   };
   const detailOf = (report, id) => report.detail.find((d) => d.employee_id === id);
 
-  it("13. the window is per employee: their last 5 dates with punches, and every date in between", () => {
-    const calculated = ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"]
-      .map((d) => ({ attendance_date: d, punch_count: ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"].includes(d) ? 2 : 0 }));
-    const w = backfill.windowFor({ calculated, today: TODAY, days: 5, lookback: 31 });
-    assert.deepEqual(w.attendance_dates_counted, ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"]);
+  it("13/14. the window is per employee: their last 5 PERSISTED attendance days, and every date in between", () => {
+    const all = ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
+    const persisted = ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"];
+    // The 19th has a raw punch that was VOIDED: the engine counts no
+    // attendance day there (attendance_day_count 0), so it is not persisted
+    // as one - raw punches alone would have counted it.
+    const calculated = all.map((d) => ({
+      attendance_date: d,
+      punch_count: persisted.includes(d) ? 2 : 0,
+      raw_punches: persisted.includes(d) || d === "2026-09-19" ? [{ punch_id: 1 }] : [],
+    }));
+    const w = backfill.windowFor({ calculated, attendedDates: persisted, today: TODAY, days: 5, lookback: 31 });
+    assert.deepEqual(w.attendance_dates_counted, persisted);
     assert.equal(w.from_date, "2026-09-10");
     assert.equal(w.to_date, "2026-09-19");
     assert.equal(w.dates_evaluated.length, 10, "weekly offs, leave and absences in between are evaluated too");
-    // Fewer than 5 attended dates: the whole lookback is evaluated.
-    const short = backfill.windowFor({ calculated: calculated.slice(-2).map((d) => ({ ...d, punch_count: 2 })), today: TODAY, days: 5, lookback: 31 });
+    // SOURCE A (raw punches) would have picked 11 Sep onward and missed the 10th.
+    assert.deepEqual(w.punch_dates_last_n, ["2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18", "2026-09-19"]);
+    assert.equal(w.sources_differ, true);
+    // Fewer than 5 persisted days: the whole lookback is evaluated.
+    const short = backfill.windowFor({ calculated, attendedDates: persisted.slice(-2), today: TODAY, days: 5, lookback: 31 });
     assert.equal(short.from_date, "2026-08-20");
     assert.equal(short.complete, false);
   });
@@ -798,8 +853,23 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
     assert.deepEqual(otOf(w, 44, "2026-09-17"), [rejected], "rejected: untouched");
     assert.equal(otOf(w, 42, "2026-09-05").length, 0, "older than the 5 attendance days");
     assert.equal(otOf(w, 43, "2026-09-20").length, 0, "today is never in the window");
-    assert.equal(report.cutover, "2026-09-10", "lowered to the earliest window, never raised");
+    assert.equal(report.global_cutover, "2026-09-15", "the global cutover is NOT moved");
+    assert.equal(otOf(w, 44, "2026-09-11").length, 0, "44's 11 Sep is not one of ITS five attendance days");
     assert.ok(w.store.log.filter((l) => l.action === "CREATED").every((l) => l.trigger_source === "BACKFILL"));
+  });
+
+  it("15. the backfill does not widen automatic OT: a later recalculation of a date outside every window raises nothing", async () => {
+    const w = seed();
+    await decideExisting(w);
+    await backfill.run(deps(w, { apply: true }));
+    assert.equal(otOf(w, 42, "2026-09-10").length, 1, "the backfill created 42's 10 Sep (its window)");
+    // Ongoing automation, after the deploy: 44's 11 Sep is before the global
+    // cutover and was in no window of 44's, so it is NOT raised - even though
+    // 42's window reached back to the 10th.
+    w.calculation.setOtAutoSync(w.regularization);
+    const out = await w.calculation.recalculateRange({ employee_id: 44, from_date: "2026-09-11", to_date: "2026-09-11", now: NOW });
+    assert.equal(otOf(w, 44, "2026-09-11").length, 0);
+    assert.deepEqual(out.ot_auto_pending.skipped.map((x) => x.reason), ["BEFORE_CUTOVER"]);
   });
 
   it("15. running the backfill twice produces no duplicates", async () => {
@@ -815,13 +885,16 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
 
   it("an employee with nobody active to decide their chain is named in the preview", async () => {
     const w = seed({ inactive: [7] }); // the only Store Manager of outlet 3 has left
+    await persistAll(w);
     const report = await backfill.run(deps(w, { apply: false }));
     const problems = report.employees_without_valid_approval_chain;
     assert.ok(problems.some((p) => p.employee_id === 42 && /no active Store Manager mapped for outlet 3/.test(p.problem)), JSON.stringify(problems));
   });
 
   it("payroll-locked months: OT is NOT raised there, but reported with its minutes", async () => {
-    const w = seed({ lockedMonths: ["42:2026-9"] });
+    const w = seed({ lockedMonths: [] });
+    await persistAll(w);
+    w.lockedMonths.add("42:2026-9");
     const report = await backfill.run(deps(w, { apply: true }));
     assert.equal(otOf(w, 42, "2026-09-10").length, 0);
     assert.equal(report.totals.payroll_locked_eligible_days_not_raised, 1);
@@ -847,13 +920,14 @@ describe("Telegram volume: the backfill sends ONE summary per approver, never a 
     const dates = ["2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
     // 43's chain names its first approver: 7.
     const w = build({ wireAuto: false, rawPunches: dates.flatMap((d) => day(43, d)) });
+    await persistAll(w, [43]);
     const report = await backfill.run({
       calculateRange: w.calculation.calculateRange,
       syncAutoOt: w.regularization.syncAutoOt,
       listEmployees: async () => [{ employee_id: 43 }],
       listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+      listAttendedDates: attendedFromSaved(w),
       setting: { enabled: 1, auto_pending_from_date: "2026-09-01" },
-      lowerCutover: (d) => w.regRepo.lowerAutoOtCutover(d),
       notifySummary: w.otTelegram.notifyBacklogSummary,
       today: "2026-09-20",
       days: 12,
@@ -919,7 +993,7 @@ describe("17. existing locked-month protections continue working", () => {
     assert.deepEqual(out.skipped.map((s) => s.reason), ["PAYROLL_LOCKED"]);
   });
 
-  it("a pending OT in a month that locks is frozen: not updated, and not approvable", async () => {
+  it("a pending OT in a month that locks is frozen: a recalculation does not change it (deciding it is the carry-forward)", async () => {
     const w = build({ rawPunches: day(42, DATE) });
     await recalc(w, 42);
     const [ot] = otOf(w, 42);
@@ -927,10 +1001,16 @@ describe("17. existing locked-month protections continue working", () => {
     w.rawPunches.find((p) => p.employee_id === 42 && p.io_time.endsWith("23:30:00")).io_time = `${DATE} 23:00:00`;
     await w.regularization.syncAutoOt({ employee_id: 42, dates: [DATE], now: NOW });
     assert.equal(otOf(w, 42)[0].candidate_ot_minutes, 90, "unchanged");
+    assert.equal(otOf(w, 42)[0].status, "PENDING", "preserved, still decidable");
+    // A NON-OT approval in a locked month is still refused, exactly as before.
+    const reg = { attendance_approval_request_id: 990, request_type: "REGULARIZATION", requested_for_employee_id: 42, requested_by_employee_id: 42, attendance_date: DATE, status: "PENDING", current_stage_no: 1, total_stages: 1, candidate_ot_minutes: 0 };
+    w.store.requests.push(reg);
+    w.store.steps.push({ attendance_approval_request_id: 990, stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: 3, approver_employee_id: null, decision: "PENDING" });
     await assert.rejects(
-      w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW }),
+      w.regularization.decide({ actor: SM3, request_id: 990, decision: STEP_DECISION.APPROVED, now: NOW }),
       /payroll|locked/i
     );
+    void ot;
   });
 
   it("the race: a month locked between the check and the insert is refused under the lock", async () => {
@@ -1103,5 +1183,132 @@ describe("revoke: an OT decision goes back to Pending Approval - only while OT i
     assert.equal(out.code, 200);
     assert.deepEqual(otOf(w, 42).map((r) => r.status), ["CANCELLED"], "nothing recreated");
     assert.equal(out.ot_auto_pending.created.length, 0);
+  });
+});
+
+describe("PRIOR-MONTH OT: deciding OT after its payroll month is locked", () => {
+  const { priceLateOt } = require("../utils/payrun_calculation");
+  /**
+   * September is Approved & Locked for 43 (employee-level chain, one stage:
+   * 7) and for 42 (role chain). The locked calculation priced September at
+   * Rs 800 a day; the day row stores NRM 660 (the late shift's).
+   */
+  const lockedWorld = async (employee_id = 43) => {
+    const w = build({
+      rawPunches: day(employee_id, DATE),
+      lockedCalc: { [`${employee_id}:2026-09`]: { payrun_calculation_id: 7001, daily_rate: 800, monthly_gross: 20800, status: "APPROVED_LOCKED" } },
+    });
+    await recalc(w, employee_id); // OT raised PENDING before the lock
+    w.lockedMonths.add(`${employee_id}:2026-9`);
+    return w;
+  };
+
+  it("1/3/13. DnDS: a pending OT is approved after the lock -> APPROVED, Pending Settlement, and the screen is told so", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    const out = await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(out.code, 200);
+    assert.equal(out.status, "APPROVED", "the APPROVAL status");
+    assert.equal(out.payroll_locked, true);
+    assert.equal(out.late_settlement.settlement_status, "PENDING_SETTLEMENT", "the MONEY status, kept apart");
+    assert.equal(out.late_settlement.message, "Approved — will be settled in the next eligible payroll as Prior-Month OT");
+    assert.equal(w.store.settlements.length, 1);
+  });
+
+  it("2. nothing of the locked month is written: no day row, no month refresh", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    const rowsBefore = JSON.stringify(w.saved.calculations);
+    const out = await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(JSON.stringify(w.saved.calculations), rowsBefore, "the locked day is byte-identical");
+    assert.equal(out.attendance_persisted, false);
+    assert.equal(out.month_refresh, null);
+  });
+
+  it("8/9. traceable, and priced on the ORIGINAL month: September's daily rate and the date's own NRM", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    const [s] = w.store.settlements;
+    const nrm = lastStored(w, 43).nrm_minutes;
+    const expected = priceLateOt({ approved_ot_minutes: 90, daily_rate: 800, nrm_minutes: nrm });
+    assert.deepEqual(
+      [s.attendance_approval_request_id, s.attendance_date, s.source_year, s.source_month, s.eligible_ot_minutes, s.approved_ot_minutes, s.source_payrun_calculation_id, s.daily_rate, s.nrm_minutes, s.amount],
+      [ot.attendance_approval_request_id, DATE, 2026, 9, 90, 90, 7001, 800, nrm, expected.amount]
+    );
+    // 800 / (660/60 h) = 72.73 an hour; 1.5 h = 109.09
+    assert.equal(expected.ot_hourly_rate, 72.73);
+    assert.equal(expected.amount, 109.09);
+  });
+
+  it("the day never pays it as well: it reads Approved, paid as Prior-Month OT, with 0 approved minutes on the day", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    const [live] = await w.calculation.calculateRange({ employee_id: 43, from_date: DATE, to_date: DATE });
+    assert.equal(live.ot_claim_state, "APPROVED");
+    assert.equal(live.approved_ot_minutes, 0, "not paid on the original day - even if the month is ever unlocked");
+    assert.deepEqual(live.ot_late_settlement, { status: "PENDING_SETTLEMENT", approved_ot_minutes: 90, settlement_year: null, settlement_month: null });
+  });
+
+  it("7. Pending -> Rejected after the lock, fully audited; no settlement", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    const out = await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "Not authorised by store", now: NOW });
+    assert.equal(out.status, "REJECTED");
+    assert.equal(out.late_settlement, null);
+    const step = w.store.steps.find((x) => x.attendance_approval_request_id === ot.attendance_approval_request_id);
+    assert.deepEqual([step.decision, step.decided_by_employee_id, step.remarks, step.decision_source], ["REJECTED", 7, "Not authorised by store", "WEB"]);
+    assert.equal(w.store.settlements.length, 0);
+  });
+
+  it("a role chain decides stage by stage after the lock; only the FINAL approval settles", async () => {
+    const w = await lockedWorld(42);
+    const [ot] = otOf(w, 42);
+    await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    await w.regularization.decide({ actor: OPS, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(w.store.settlements.length, 0, "intermediate stages pay nothing");
+    const out = await w.regularization.decide({ actor: HR, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(out.late_settlement.settlement_status, "PENDING_SETTLEMENT");
+    assert.equal(w.store.settlements.length, 1);
+  });
+
+  it("12. Telegram: the late approval says 'next eligible payroll' - never the locked month - on the same record", async () => {
+    const w = await lockedWorld();
+    const [ot] = otOf(w, 43);
+    const card = w.telegramLog.sent.find((m) => m.replyMarkup);
+    const outcome = await w.otTelegram.handle(tap(card.replyMarkup.inline_keyboard[0][0].callback_data, 7));
+    assert.equal(outcome.outcome, "APPROVED");
+    const said = w.telegramLog.sent[w.telegramLog.sent.length - 1].text;
+    assert.match(said, /^Approved — will be settled in the next eligible payroll as Prior-Month OT: 90 min for 14 Sep 2026, Rs 109\.09\./);
+    assert.match(said, /Sep 2026 payroll is locked and is not changed/);
+    assert.equal(w.store.settlements[0].attendance_approval_request_id, ot.attendance_approval_request_id);
+    // ... and an old button cannot decide it again.
+    const again = await w.otTelegram.handle(tap(card.replyMarkup.inline_keyboard[0][0].callback_data, 7, 99));
+    assert.equal(again.outcome, "ALREADY_DECIDED");
+    assert.equal(w.store.settlements.length, 1);
+  });
+
+  it("an OT that cannot be priced on its month is refused in a sentence, never settled at zero", async () => {
+    const w = build({ rawPunches: day(43, DATE), lockedCalc: {} }); // no locked calculation to price from
+    await recalc(w, 43);
+    w.lockedMonths.add("43:2026-9");
+    const [ot] = otOf(w, 43);
+    await assert.rejects(
+      w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW }),
+      /cannot be settled as Prior-Month OT: The original month's locked calculation has no daily rate/
+    );
+    assert.equal(otOf(w, 43)[0].status, "PENDING");
+  });
+
+  it("16. an ordinary (unlocked) OT approval is unchanged: paid on its day, no settlement", async () => {
+    const w = build({ rawPunches: day(43, DATE) });
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    const out = await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(out.payroll_locked, false);
+    assert.equal(out.late_settlement, null);
+    assert.equal(lastStored(w, 43).approved_ot_minutes, 90);
+    assert.equal(w.store.settlements.length, 0);
   });
 });

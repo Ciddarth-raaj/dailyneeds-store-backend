@@ -43,6 +43,7 @@ const DATE = "2026-09-10";
 const SQL_DIR = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const REVOCATION_MIGRATION = path.join(SQL_DIR, "20261103120000-attendance-approval-revocation-up.sql");
 const BULK_MIGRATION = path.join(SQL_DIR, "20261105120000-attendance-approval-bulk-action-up.sql");
+const LATE_OT_MIGRATION = path.join(SQL_DIR, "20261125120000-attendance-ot-late-settlement-up.sql");
 
 const SCHEMA = [
   `CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), store_id INT NULL, designation_id INT NULL)`,
@@ -102,7 +103,9 @@ const SCHEMA = [
   `CREATE TABLE work_shift (work_shift_id INT PRIMARY KEY, shift_code VARCHAR(20), shift_name VARCHAR(80))`,
   `CREATE TABLE payrun_employee_calculation (
      employee_id INT NOT NULL, period_year INT NOT NULL, period_month INT NOT NULL,
-     status VARCHAR(32) NOT NULL, PRIMARY KEY (employee_id, period_year, period_month)
+     status VARCHAR(32) NOT NULL,
+     payrun_calculation_id BIGINT NULL, daily_rate DECIMAL(12,2) NULL, monthly_gross DECIMAL(12,2) NULL,
+     PRIMARY KEY (employee_id, period_year, period_month)
    ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_day_calculation (
      ${CALCULATION_COLUMNS.map((c) =>
@@ -118,6 +121,8 @@ const SCHEMA = [
    ) ENGINE=InnoDB`,
 ];
 const TABLES = [
+  "attendance_ot_late_settlement_log",
+  "attendance_ot_late_settlement",
   "attendance_approval_bulk_action_item",
   "attendance_approval_revocation",
   "attendance_day_calculation",
@@ -151,6 +156,7 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     await q(pool, fs.readFileSync(REVOCATION_MIGRATION, "utf8"));
     await q(pool, fs.readFileSync(OUTCOME_MIGRATION, "utf8"));
     await q(pool, fs.readFileSync(BULK_MIGRATION, "utf8"));
+    await q(pool, fs.readFileSync(LATE_OT_MIGRATION, "utf8"));
     repo = buildRepo(pool);
     calcRepo = buildCalcRepo(pool);
     // The ENGINE, stubbed: a closed day; approved OT follows the assumed
@@ -219,6 +225,22 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
           decision === "PENDING" ? null : remarks || null,
           decision === "PENDING" ? null : "WEB",
         ])]
+    );
+  };
+  /*
+   * September locked for one employee: the locked calculation (its daily
+   * rate is what Prior-Month OT is priced on) and the stored day (its NRM).
+   */
+  const lockSeptember = async (emp) => {
+    await q(
+      pool,
+      "INSERT INTO payrun_employee_calculation (employee_id, period_year, period_month, status, payrun_calculation_id, daily_rate, monthly_gross) VALUES (?, 2026, 9, 'APPROVED_LOCKED', 9000 + ?, 800.00, 20800.00)",
+      [emp, emp]
+    );
+    await q(
+      pool,
+      "INSERT IGNORE INTO attendance_day_calculation (employee_id, attendance_date, nrm_minutes, break_allowance_source, candidate_ot_minutes, approved_ot_minutes, attendance_day_count) VALUES (?, ?, 480, 'SHIFT', 180, 0, 1)",
+      [emp, DATE]
     );
   };
   const PENDING_FINAL = [[33, "FINAL", "PENDING"]];
@@ -353,16 +375,30 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.deepEqual(overrides.map((o) => [o.employee_id, o.work_shift_id, Number(o.attendance_approval_request_id)]), [[EMP, 2, 100]]);
   });
 
-  it("7. a payroll-LOCKED month is SKIPPED with the reason; the rest of the batch still completes", async () => {
+  it("7. a payroll-LOCKED month: pending OT is approved and carried forward as Prior-Month OT; other types are still SKIPPED", async () => {
     await seed({ id: 100, status: "PENDING", stage: 1, steps: PENDING_FINAL });
     await seed({ id: 101, emp: EMP2, status: "PENDING", stage: 1, steps: PENDING_FINAL });
-    await q(pool, "INSERT INTO payrun_employee_calculation VALUES (?, 2026, 9, 'APPROVED_LOCKED')", [EMP2]);
+    await lockSeptember(EMP2);
+    const lockedBefore = await q(pool, "SELECT * FROM payrun_employee_calculation");
     const out = await bulk({ action: "APPROVE", request_type: "OT", items: [{ request_id: 100 }, { request_id: 101 }] });
-    assert.deepEqual(out.summary, { requested: 2, succeeded: 1, skipped: 1, failed: 0 });
-    assert.equal(byId(out)[101].code, "PAYROLL_LOCKED");
-    assert.match(byId(out)[101].message, /payroll for 09\/2026 is approved and locked/);
+    assert.deepEqual(out.summary, { requested: 2, succeeded: 2, skipped: 0, failed: 0 });
+    assert.equal(byId(out)[101].new_status, "APPROVED");
+    assert.match(byId(out)[101].message, /^Approved — will be settled in the next eligible payroll/);
+    assert.equal(byId(out)[100].message, "Finally approved", "an open month's OT is unchanged");
     assert.equal((await request(100)).status, "APPROVED");
-    assert.equal((await request(101)).status, "PENDING", "untouched");
+    assert.equal((await request(101)).status, "APPROVED");
+    const settlements = await q(pool, "SELECT attendance_approval_request_id AS id, settlement_status AS st, approved_ot_minutes AS m, amount FROM attendance_ot_late_settlement");
+    assert.deepEqual(settlements.map((r) => [Number(r.id), r.st, r.m, Number(r.amount)]), [[101, "PENDING_SETTLEMENT", 180, 300]],
+      "180 min at Rs 800/day over an 8h NRM = Rs 100/h -> Rs 300");
+    assert.deepEqual(await q(pool, "SELECT * FROM payrun_employee_calculation"), lockedBefore, "the locked payroll is untouched");
+
+    // A non-OT request in the locked month is still refused, with the reason.
+    await seed({ id: 103, type: "REGULARIZATION", emp: EMP2, date: "2026-09-14", status: "PENDING", stage: 1, steps: PENDING_FINAL });
+    const reg = await bulk({ action: "APPROVE", request_type: "REGULARIZATION", items: [{ request_id: 103 }] });
+    assert.equal(reg.results[0].outcome, "SKIPPED");
+    assert.equal(reg.results[0].code, "PAYROLL_LOCKED");
+    assert.match(reg.results[0].message, /payroll for 09\/2026 is approved and locked/);
+    assert.equal((await request(103)).status, "PENDING", "untouched");
 
     // Revoke too.
     await seed({ id: 102, emp: EMP2, date: "2026-09-12", status: "APPROVED", stage: 1, approvedOt: 30, finalization: "SETTLED", steps: APPROVED_FINAL });
@@ -412,12 +448,14 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     await seed({ id: 102, emp: EMP3, status: "PENDING", stage: 1, steps: [[11, "FINAL", "PENDING"]] });
     await seed({ id: 103, emp: EMP, date: "2026-09-12", status: "APPROVED", stage: 1, approvedOt: 10, finalization: "SETTLED", steps: APPROVED_FINAL });
     await seed({ id: 104, emp: EMP3, date: "2026-09-13", status: "PENDING", stage: 1, steps: PENDING_FINAL });
-    await q(pool, "INSERT INTO payrun_employee_calculation VALUES (?, 2026, 9, 'APPROVED_LOCKED')", [EMP2]);
+    await lockSeptember(EMP2);
     const out = await bulk({ action: "APPROVE", request_type: "OT", items: [100, 101, 102, 103, 999, 104].map((id) => ({ request_id: id })) });
-    assert.deepEqual(out.summary, { requested: 6, succeeded: 2, skipped: 3, failed: 1 });
+    assert.deepEqual(out.summary, { requested: 6, succeeded: 3, skipped: 2, failed: 1 });
     const r = byId(out);
     assert.equal(r[100].outcome, "SUCCEEDED");
-    assert.equal(r[101].code, "PAYROLL_LOCKED");
+    // Locked month: approved, and carried forward as Prior-Month OT.
+    assert.equal(r[101].outcome, "SUCCEEDED");
+    assert.match(r[101].message, /next eligible payroll/);
     assert.equal(r[102].code, "NOT_PERMITTED");
     assert.equal(r[103].code, "STATE_CHANGED");
     assert.equal(r[103].outcome, "FAILED");
@@ -458,7 +496,11 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     ]);
     for (const id of ids) {
       const outcomes = [byId(a)[id].outcome, byId(b)[id].outcome].sort();
-      assert.deepEqual(outcomes, ["FAILED", "SUCCEEDED"], `request ${id}: exactly one of the two decided it`);
+      // The loser is FAILED when it lost inside the guarded UPDATE, or
+      // SKIPPED when its own re-read already saw the winner's decision -
+      // which one depends only on timing. Either way exactly one decided it.
+      assert.equal(outcomes.filter((o) => o === "SUCCEEDED").length, 1, `request ${id}: exactly one of the two decided it`);
+      assert.ok(["FAILED", "SKIPPED"].includes(outcomes.find((o) => o !== "SUCCEEDED")), `request ${id}: ${outcomes}`);
       /* eslint-disable-next-line no-await-in-loop */
       const decided = (await steps(id)).filter((s) => s[1] !== "PENDING");
       assert.equal(decided.length, 1);
@@ -468,7 +510,7 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
   it("12. AUDIT: one log row PER RECORD (never one per batch), with employee, statuses, action, actor, time, reason and the operation id", async () => {
     await seed({ id: 100, status: "PENDING", stage: 1, steps: PENDING_FINAL });
     await seed({ id: 101, emp: EMP2, status: "PENDING", stage: 1, steps: PENDING_FINAL });
-    await q(pool, "INSERT INTO payrun_employee_calculation VALUES (?, 2026, 9, 'APPROVED_LOCKED')", [EMP2]);
+    await lockSeptember(EMP2);
     const out = await bulk({ action: "REJECT", request_type: "OT", items: [{ request_id: 100 }, { request_id: 101 }], reason: "not authorised" });
     const rows = await log();
     assert.equal(rows.length, 2);
@@ -488,14 +530,21 @@ describe("bulk approval actions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     assert.equal(first.new_status, "REJECTED");
     assert.equal(first.outcome, "SUCCEEDED");
     assert.equal(first.outcome_reason, null);
-    // A SKIPPED record is logged too, with why. (The single decision's
-    // transaction refuses ANY decision in a locked month - a rejection
-    // included - and bulk inherits exactly that.)
+    // Pending OT in a LOCKED month may be rejected too (nothing is paid, so
+    // nothing is carried forward), and it is logged exactly the same way.
     assert.equal(Number(rows[1].attendance_approval_request_id), 101);
-    assert.equal(rows[1].outcome, "SKIPPED");
-    assert.equal(rows[1].new_status, null);
-    assert.match(rows[1].outcome_reason, /payroll for this month is approved and locked/);
-    assert.equal((await request(101)).status, "PENDING");
+    assert.equal(rows[1].outcome, "SUCCEEDED");
+    assert.equal(rows[1].new_status, "REJECTED");
+    assert.equal((await request(101)).status, "REJECTED");
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_late_settlement"))[0].n, 0);
+    // A SKIPPED record is logged too, with why: a non-OT request in the locked month.
+    await seed({ id: 105, type: "REGULARIZATION", emp: EMP2, date: "2026-09-14", status: "PENDING", stage: 1, steps: PENDING_FINAL });
+    const reg = await bulk({ action: "REJECT", request_type: "REGULARIZATION", items: [{ request_id: 105 }], reason: "not authorised" });
+    const [skipped] = (await log()).filter((row) => row.bulk_operation_id === reg.bulk_operation_id);
+    assert.equal(skipped.outcome, "SKIPPED");
+    assert.equal(skipped.new_status, null);
+    assert.match(skipped.outcome_reason, /payroll for this month is approved and locked/);
+    assert.equal((await request(105)).status, "PENDING");
     // The request's own history is written exactly as a single decision's.
     assert.deepEqual(await steps(100), [[1, "REJECTED", 33, "not authorised"]]);
     assert.deepEqual(out.results.map((r) => r.logged), [true, true]);

@@ -102,6 +102,50 @@ const intOr0 = (value) => {
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 };
 
+/* ------------------------------------------------------------ OT PRICE */
+
+/**
+ * THE ONE OT PRICE: approved minutes against ONE NRM, at ONE daily rate.
+ *
+ *   amount = round( (minutes / 60) x (daily rate / (NRM minutes / 60)) )   [paise]
+ *
+ * The same arithmetic prices a month's OT group by group (`computeCalculation`)
+ * and a PRIOR-MONTH OT approved after its month was locked
+ * (`priceLateOt`) - one formula, so a late approval can never be worth more
+ * or less than the same minutes approved on time. No weekday multiplier, as
+ * the agreed Daily Needs payrun formula has none. Rounded once, at the total.
+ */
+function otAmountPaise({ minutes, nrm_minutes, daily_rate_paise }) {
+  const perHour = daily_rate_paise / (nrm_minutes / 60);
+  return { per_hour_paise: Math.round(perHour), amount_paise: Math.round((minutes / 60) * perHour) };
+}
+
+/**
+ * PRICE AN OT APPROVED AFTER ITS MONTH WAS LOCKED - on the ORIGINAL month's
+ * basis, never the settlement month's: the daily rate the locked calculation
+ * of that month used (monthly gross of that month / 26) and the NRM the
+ * attendance engine stored for that very date. Returns `{ error }` instead
+ * of a zero when it cannot be priced, exactly as the month's own pricing
+ * refuses to pay nothing for approved OT.
+ */
+function priceLateOt({ approved_ot_minutes, daily_rate, nrm_minutes }) {
+  const minutes = intOr0(approved_ot_minutes);
+  const dailyRatePaise = toPaise(daily_rate);
+  const nrm = intOr0(nrm_minutes);
+  if (minutes <= 0) return { error: "No approved OT minutes to price" };
+  if (dailyRatePaise === null) return { error: "The original month's locked calculation has no daily rate" };
+  if (nrm <= 0) return { error: "No NRM is stored for the OT date, so its hourly rate cannot be derived" };
+  const { per_hour_paise, amount_paise } = otAmountPaise({ minutes, nrm_minutes: nrm, daily_rate_paise: dailyRatePaise });
+  return {
+    error: null,
+    approved_ot_minutes: minutes,
+    nrm_minutes: nrm,
+    daily_rate: toRupees(dailyRatePaise),
+    ot_hourly_rate: toRupees(per_hour_paise),
+    amount: toRupees(amount_paise),
+  };
+}
+
 /* ------------------------------------------------------- the effective NRM */
 
 /**
@@ -430,7 +474,7 @@ function attendanceSourceChanges(storedRow = {}, currentMarkers = {}) {
  * after calculation would otherwise be a locked record that disagrees with the
  * month beside it.
  */
-function inputsHash({ amounts = {}, pay_type = null } = {}) {
+function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [] } = {}) {
   const contract = computeContract(amounts);
   return hashOf([
     contract.by_component[COMPONENT.INCENTIVE],
@@ -440,6 +484,18 @@ function inputsHash({ amounts = {}, pay_type = null } = {}) {
     contract.by_component[COMPONENT.SHORTAGE_RECOVERY],
     contract.by_component[COMPONENT.BALANCE_ADVANCE],
     pay_type,
+    // PRIOR-MONTH OT IS AN INPUT: an OT approved after its month locked makes
+    // the next open month's stored calculation stale until it is
+    // recalculated. Appended only when there is some, so every existing
+    // calculation keeps the hash it was stored with.
+    ...(Array.isArray(prior_month_ot) && prior_month_ot.length > 0
+      ? [
+          prior_month_ot
+            .map((i) => `${i.attendance_approval_request_id}:${i.approved_ot_minutes}:${i.amount}`)
+            .sort()
+            .join(","),
+        ]
+      : []),
   ]);
 }
 
@@ -605,6 +661,13 @@ function computeCalculation(input = {}, config = CONFIG) {
      * paid. They never change Salary Days or the earned Basic.
      */
     day_rows = null,
+    /**
+     * PRIOR-MONTH OT: OT whose own month was already approved & locked when
+     * it was approved, settled forward here. Each item is PRICED ALREADY, on
+     * its original month's basis (`priceLateOt`); this stage adds the money
+     * and decides nothing about it.
+     */
+    prior_month_ot = [],
   } = input;
 
   const errors = [];
@@ -683,7 +746,7 @@ function computeCalculation(input = {}, config = CONFIG) {
    * thirty OT hours do not carry thirty rounding errors - and the group
    * amounts are summed as integer paise.
    */
-  let otAmountPaise = 0;
+  let monthOtPaise = 0;
   let otHourlyRatePaise = null;
   const otBreakdown = [];
 
@@ -705,15 +768,15 @@ function computeCalculation(input = {}, config = CONFIG) {
   } else if (otGroups.length > 0) {
     otGroups.forEach((group) => {
       const minutes = intOr0(group.approved_ot_minutes);
-      const perHour = dailyRatePaise / (group.nrm_minutes / 60);
-      const amount = Math.round((minutes / 60) * perHour);
-      otAmountPaise += amount;
+      const priced = otAmountPaise({ minutes, nrm_minutes: group.nrm_minutes, daily_rate_paise: dailyRatePaise });
+      const amount = priced.amount_paise;
+      monthOtPaise += amount;
       otBreakdown.push({
         nrm_minutes: group.nrm_minutes,
         nrm_source: group.nrm_source,
         approved_ot_minutes: minutes,
         approved_ot_hours: Math.round((minutes / 60) * 10000) / 10000,
-        ot_hourly_rate: toRupees(Math.round(perHour)),
+        ot_hourly_rate: toRupees(priced.per_hour_paise),
         ot_amount: toRupees(amount),
       });
     });
@@ -745,6 +808,38 @@ function computeCalculation(input = {}, config = CONFIG) {
     // the month should be able to see what an hour would have cost.
     otHourlyRatePaise = Math.round(dailyRatePaise / (nrmMinutes / 60));
   }
+
+  /* ---------------------------------------------------- PRIOR-MONTH OT */
+
+  /*
+   * OT APPROVED AFTER ITS OWN MONTH WAS LOCKED, settled forward. It is OT and
+   * is treated as OT everywhere below: in Total Earnings and Net Pay, and -
+   * like this month's OT - in NEITHER the PF wage NOR the ESI wage, by the
+   * same construction (neither base ever adds it). It is NOT an adjustment
+   * and never touches Arrears. An item that could not be priced is an error,
+   * never a zero.
+   */
+  const priorMonthOt = (Array.isArray(prior_month_ot) ? prior_month_ot : []).map((item) => ({
+    late_settlement_id: item.late_settlement_id === undefined ? null : Number(item.late_settlement_id),
+    attendance_approval_request_id: Number(item.attendance_approval_request_id),
+    attendance_date: item.attendance_date,
+    source_year: Number(item.source_year),
+    source_month: Number(item.source_month),
+    approved_ot_minutes: intOr0(item.approved_ot_minutes),
+    nrm_minutes: item.nrm_minutes === undefined ? null : intOr0(item.nrm_minutes),
+    daily_rate: item.daily_rate === undefined ? null : item.daily_rate,
+    ot_hourly_rate: item.ot_hourly_rate === undefined ? null : item.ot_hourly_rate,
+    amount: item.amount,
+  }));
+  let priorMonthOtPaise = 0;
+  priorMonthOt.forEach((item) => {
+    const p = toPaise(item.amount);
+    if (p === null) {
+      errors.push(`Prior-month OT for ${item.attendance_date} has no settled price`);
+      return;
+    }
+    priorMonthOtPaise += p;
+  });
 
   /* -------------------------------------------------------- ADJUSTMENTS */
 
@@ -1046,7 +1141,7 @@ function computeCalculation(input = {}, config = CONFIG) {
    * eventual payslip can print the employee's remaining advance balance.
    */
   const totalEarningsPaise =
-    salaryEarningsPaise + extraDayAmountPaise + otAmountPaise + additionsPaise;
+    salaryEarningsPaise + extraDayAmountPaise + monthOtPaise + priorMonthOtPaise + additionsPaise;
 
   const totalEmployeeDeductionsPaise = contributionsResolved
     ? missingDeductionPaise + employeePfPaise + employeeEsiPaise + deductionsFromNetPaise
@@ -1090,7 +1185,7 @@ function computeCalculation(input = {}, config = CONFIG) {
      * rate here would be a figure that priced none of it.
      */
     ot_hourly_rate: toRupees(otHourlyRatePaise),
-    ot_amount: toRupees(otAmountPaise),
+    ot_amount: toRupees(monthOtPaise),
     /**
      * HOW THE OVERTIME WAS ACTUALLY PRICED: one entry per NRM that carried
      * approved OT, each with its own minutes, its own source and its own rate.
@@ -1108,6 +1203,10 @@ function computeCalculation(input = {}, config = CONFIG) {
      * difference is visible rather than silent.
      */
     attendance_ot_earnings: attendance.approved_ot_earnings ?? null,
+
+    /* ------------------------------------------------- PRIOR-MONTH OT */
+    prior_month_ot_amount: toRupees(priorMonthOtPaise),
+    prior_month_ot: priorMonthOt,
 
     /* --------------------------------------------------- ADJUSTMENTS */
     incentive: toRupees(incentivePaise),
@@ -1628,12 +1727,16 @@ function calculationHash(result = {}) {
     result.net_pay,
     result.net_pay_rounding === undefined ? null : result.net_pay_rounding,
     result.pay_type,
+    // Appended only when present: an ordinary month hashes exactly as before.
+    ...(toPaise(result.prior_month_ot_amount) ? [result.prior_month_ot_amount] : []),
   ]);
 }
 
 module.exports = {
   toPaise,
   toRupees,
+  otAmountPaise,
+  priceLateOt,
   resolveEffectiveNrm,
   sourceMarkers,
   storedMarkers,

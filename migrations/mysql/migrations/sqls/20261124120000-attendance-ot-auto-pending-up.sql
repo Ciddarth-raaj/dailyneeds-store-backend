@@ -11,9 +11,10 @@
 
 -- ============================================== 1. the cutover, one row ====
 -- From which attendance date the system raises OT on its own. Seeded to the
--- IST business date five days before this migration runs, so the deploy
--- covers the previous five attendance days (the backfill) and no older date
--- is suddenly asked about by a later recalculation of an old month.
+-- IST business date this migration runs (the deploy): ongoing automation
+-- starts at deploy, and no older date is suddenly asked about by a later
+-- recalculation. The one-off backfill of each employee's previous five
+-- attendance days does NOT move this; it carries its own per-call start date.
 --
 -- `enabled` = 0 is the kill switch: auto-raising stops at once (nothing is
 -- deleted or undone, and decisions continue exactly as before).
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS `attendance_ot_auto_pending_setting` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 INSERT INTO `attendance_ot_auto_pending_setting` (`setting_id`, `enabled`, `auto_pending_from_date`)
-  SELECT 1, 1, DATE(UTC_TIMESTAMP() + INTERVAL 330 MINUTE) - INTERVAL 5 DAY FROM DUAL
+  SELECT 1, 1, DATE(UTC_TIMESTAMP() + INTERVAL 330 MINUTE) FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `attendance_ot_auto_pending_setting` WHERE `setting_id` = 1);
 
 -- ======================================== 2. what the automation did ======

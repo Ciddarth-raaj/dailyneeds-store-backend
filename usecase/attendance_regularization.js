@@ -34,6 +34,7 @@ function monthBounds(date) {
   return [`${date.slice(0, 7)}-01`, `${date.slice(0, 7)}-${String(last).padStart(2, "0")}`];
 }
 const { istToday, istDateOf } = require("../utils/istDate");
+const payrunCalc = require("../utils/payrun_calculation");
 const {
   PERMISSION_CLOSURE_LABEL,
   resolvePermissionWindows,
@@ -1798,11 +1799,25 @@ module.exports = (
      * nothing - it closes a request that would otherwise sit open for ever
      * against a month nobody can reopen.
      */
-    if (decision === STEP_DECISION.APPROVED && typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+    /*
+     * OT IS THE EXCEPTION: PRIOR-MONTH OT CARRY-FORWARD. An OT whose payroll
+     * month is already Approved & Locked may still be decided - approved or
+     * rejected, at any stage - because leaving it undecidable would make the
+     * overtime permanently unpayable. Nothing of the locked month is touched:
+     * no day row is written, no summary refreshed. A FINAL approval is
+     * settled FORWARD instead (`attendance_ot_late_settlement`), priced on
+     * the ORIGINAL month's basis, and paid in the next eligible open payroll
+     * as "Prior-Month OT".
+     */
+    let lateOtMode = false;
+    if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
       const locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "This approval");
+      if (locked.length > 0) {
+        if (request.request_type === REQUEST_TYPE.OT) lateOtMode = true;
+        else if (decision === STEP_DECISION.APPROVED) throw payrollLockedActionError(locked, "This approval");
+      }
     }
 
     /*
@@ -1941,8 +1956,50 @@ module.exports = (
           " can be finally approved once the day has closed; the request stays pending until then."
       );
     }
+    // A locked month's day is never rewritten - not even by the approval of
+    // its own OT (see `lateOtMode`).
     const calculations =
-      dayState.closed && correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [];
+      !lateOtMode && dayState.closed && correctedDay ? [attendanceCalculationUsecase.toStorageRow(correctedDay)] : [];
+
+    /*
+     * THE FORWARD SETTLEMENT, PRICED NOW ON THE ORIGINAL MONTH'S BASIS: the
+     * locked calculation's daily rate (that month's gross / 26) and the OT
+     * date's stored NRM, through the SAME per-NRM formula a month's own OT is
+     * priced with. Unpriceable is refused in a sentence, never paid as zero.
+     */
+    let lateSettlement = null;
+    if (lateOtMode && next.status === REQUEST_STATUS.APPROVED) {
+      if (!(approvedOt > 0)) {
+        throw validationError(
+          `${request.attendance_date} no longer has eligible overtime, so there is nothing to approve - reject it instead`
+        );
+      }
+      const basis = await attendanceRegularizationRepo.getLateOtPricingBasis({
+        employee_id: request.requested_for_employee_id,
+        attendance_date: request.attendance_date,
+      });
+      const priced = payrunCalc.priceLateOt({
+        approved_ot_minutes: approvedOt,
+        daily_rate: basis.calculation ? basis.calculation.daily_rate : null,
+        nrm_minutes: basis.day ? basis.day.nrm_minutes : null,
+      });
+      if (priced.error) {
+        throw validationError(`This OT cannot be settled as Prior-Month OT: ${priced.error}`);
+      }
+      lateSettlement = {
+        employee_id: Number(request.requested_for_employee_id),
+        attendance_date: request.attendance_date,
+        source_year: basis.year,
+        source_month: basis.month,
+        eligible_ot_minutes: Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0)),
+        approved_ot_minutes: priced.approved_ot_minutes,
+        source_payrun_calculation_id: basis.calculation.payrun_calculation_id,
+        daily_rate: priced.daily_rate,
+        nrm_minutes: priced.nrm_minutes,
+        ot_hourly_rate: priced.ot_hourly_rate,
+        amount: priced.amount,
+      };
+    }
 
     const saved = await attendanceRegularizationRepo.decideStage({
       requestId: Number(request_id),
@@ -1962,6 +2019,7 @@ module.exports = (
       // A Permission may be REJECTED in a locked month (it pays nothing);
       // every other type keeps the existing refusal.
       allowRejectWhenLocked: isPermissionRequest,
+      lateOt: lateOtMode ? { expect_locked: true, settlement: lateSettlement } : null,
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -2024,6 +2082,22 @@ module.exports = (
       code: 200,
       month_refresh: monthRefresh,
       ot_auto_pending: otAutoPending,
+      // PRIOR-MONTH OT: decided after its payroll month was locked. On a final
+      // approval, the forward settlement - and the sentence both surfaces say.
+      payroll_locked: lateOtMode,
+      late_settlement:
+        lateSettlement && saved.status === REQUEST_STATUS.APPROVED
+          ? {
+              late_settlement_id: saved.late_settlement_id === undefined ? null : saved.late_settlement_id,
+              settlement_status: "PENDING_SETTLEMENT",
+              source_year: lateSettlement.source_year,
+              source_month: lateSettlement.source_month,
+              approved_ot_minutes: lateSettlement.approved_ot_minutes,
+              ot_hourly_rate: lateSettlement.ot_hourly_rate,
+              amount: lateSettlement.amount,
+              message: "Approved — will be settled in the next eligible payroll as Prior-Month OT",
+            }
+          : null,
       attendance_approval_request_id: Number(request_id),
       stage_no: Number(step.stage_no),
       decision,
@@ -2233,7 +2307,7 @@ module.exports = (
    * retried or concurrent run creates nothing twice.
    *
    * GATED. Nothing is raised before the cutover date (migration
-   * 20261124120000, the deploy date less five days), older than the request
+   * 20261124120000, the deploy date), older than the request
    * backdate window, on a date whose day is still open, or in a payroll-locked
    * month - and a locked month's pending OT is not changed either.
    */
@@ -2356,6 +2430,13 @@ module.exports = (
     // DRY RUN ONLY: the cutover to assume, so a preview can be taken before
     // the migration has seeded the real row. Ignored when writing.
     assume_setting = null,
+    /*
+     * THE DEPLOY BACKFILL ONLY: create OT from this date for THIS call, for
+     * the exact dates the caller passes - an employee's own previous five
+     * attendance days. The global cutover is NOT moved, so no later
+     * recalculation of some other date can create OT before it.
+     */
+    allow_creation_from = null,
   }) => {
     const employeeId = Number(employee_id);
     const result = {
@@ -2404,20 +2485,22 @@ module.exports = (
     }
 
     const skip = (date, reason) => result.skipped.push({ attendance_date: date, reason });
-    const inScope = [];
-    for (const day of calculated) {
-      const date = day.attendance_date;
-      if (date > businessToday) continue;
-      if (cutover && date < cutover) {
-        skip(date, AUTO_OT_SKIP.BEFORE_CUTOVER);
-        continue;
-      }
-      if (date < oldest) {
-        skip(date, AUTO_OT_SKIP.OUTSIDE_WINDOW);
-        continue;
-      }
-      inScope.push(day);
-    }
+    /*
+     * THE TWO DATE GATES ARE FOR CREATING OT, NOT FOR FOLLOWING IT. A date
+     * before the cutover (or the backdate window) never has OT RAISED on it
+     * - but an OT record that already exists there (an employee's historical
+     * request, a backfilled one) still follows the engine and is still
+     * withdrawn when its OT goes, wherever its date falls.
+     */
+    const creationFrom = toDateOnly(allow_creation_from);
+    const effectiveCutover = cutover && creationFrom && creationFrom < cutover ? creationFrom : cutover;
+    const creationGate = (date) =>
+      effectiveCutover && date < effectiveCutover
+        ? AUTO_OT_SKIP.BEFORE_CUTOVER
+        : date < oldest && !(creationFrom && date >= creationFrom)
+        ? AUTO_OT_SKIP.OUTSIDE_WINDOW
+        : null;
+    const inScope = calculated.filter((day) => day.attendance_date <= businessToday);
     if (inScope.length === 0) return result;
 
     // EMPLOYMENT: no OT before joining or after the last working date.
@@ -2584,6 +2667,11 @@ module.exports = (
         // NO OT RECORD ON THE DATE.
         if (!verdict.eligible) {
           if (verdict.reason !== AUTO_OT_SKIP.NO_OT && verdict.reason !== AUTO_OT_SKIP.NO_DAY) skip(date, verdict.reason);
+          continue;
+        }
+        const gated = creationGate(date);
+        if (gated) {
+          result.skipped.push({ attendance_date: date, reason: gated, eligible_ot_minutes: verdict.minutes });
           continue;
         }
         if (locked) {
@@ -3383,10 +3471,13 @@ module.exports = (
                     : done.status === REQUEST_STATUS.PENDING
                     ? "Passed to the next stage"
                     : done.status === REQUEST_STATUS.APPROVED
-                    ? "Finally approved"
+                    ? done.late_settlement && done.late_settlement.message
+                      ? done.late_settlement.message
+                      : "Finally approved"
                     : "Rejected",
               });
               if (done.current_stage_no !== undefined) result.current_stage_no = done.current_stage_no;
+              if (done.late_settlement) result.late_settlement = done.late_settlement;
             } else if (done && done.code === 409 && done.reason_code) {
               // A RULE the transaction applied on the locked rows (an OT
               // claim standing on the date, a competing request) - skipped,
