@@ -66,9 +66,12 @@ differently can therefore be traced to the configuration change that caused it.
 * **Four or more punches**: every OUT → next IN gap is summed and charged. No gap
   is labelled "the lunch one". The old separate 15-minute extra-break allowance
   does not exist.
-* **Two-punch OT guard**: OT on a two-punch day is limited to time worked beyond
-  the shift span, because an unused break has no OUT/IN evidence. Asserted
-  exhaustively over every finish minute up to the rostered end.
+* **Lunch savings never become OT**: the whole permitted break is reserved for
+  OT purposes on every punch count, whether the employee took all of it, part
+  of it or punched no lunch at all. OT = eligible pre-shift + eligible
+  post-shift time only; an unused lunch contributes 0. (The shortage still
+  charges the gaps actually taken.) On a two-punch day this was already the
+  rule, asserted exhaustively over every finish minute up to the rostered end.
 * **Odd punch count** → `REVIEW_REQUIRED` / `MISSING_PUNCH`, not final. Raw
   punches are preserved unchanged.
 * **Presence** is binary: present at all (even ten minutes) is
@@ -312,9 +315,9 @@ split the earned surplus into its pre-shift and post-shift parts
 * The pre-shift minimum is a **qualifying threshold only** — Shift Management has
   no `..._threshold_only` column for it, and reading it as a floor would pay for
   minutes nobody worked.
-* "Post-shift" means *the rest of it*: time after the out-time plus, on a
-  four-or-more-punch day, the minutes of an unused break. Those are ordinary
-  overtime and take the ordinary rules.
+* "Post-shift" means *the rest of it* beyond the pre-shift part. An unused
+  break is never in it: the permitted break is reserved for OT on every punch
+  count, so lunch savings add 0 minutes of OT.
 * The offsets subtract from **overtime only**, never below zero, and create no
   second wage deduction. The old Full/Half/Quarter Day payroll rules and the
   monetary late/early deductions are **not** revived.

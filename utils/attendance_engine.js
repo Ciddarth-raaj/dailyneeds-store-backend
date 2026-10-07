@@ -487,12 +487,10 @@ function applyPreShiftOvertimeRules(rawMinutes, snapshot) {
  * would let a shift with both kinds of OT pay twice its own maximum.
  *
  * "POST-SHIFT" HERE MEANS "THE REST OF IT". The pre-shift part is exactly the
- * surplus that sits before the shift's in-time; everything else earned - time
- * after the out-time, and on a four-or-more-punch day the minutes of an unused
- * break - falls under the ordinary `overtime_*` rules. That is deliberate:
- * `overtime_allowed`, its minimum and its rounding are the rules for ordinary
- * overtime, and an unused break is ordinary overtime rather than a third kind
- * with no configuration of its own.
+ * surplus that sits before the shift's in-time; everything else earned falls
+ * under the ordinary `overtime_*` rules. An unused break is never part of the
+ * surplus handed in here: the caller reserves the whole permitted break for OT
+ * purposes, so lunch savings contribute 0 minutes to OT on every punch count.
  *
  * Offsets come off the post-shift part first. A late arrival and an early
  * finish are both failures against the shift's own hours, and the minutes the
@@ -1356,7 +1354,13 @@ function calculateAttendanceDay(input = {}) {
       actualGaps += effectivePunches[i + 1].minute - effectivePunches[i].minute;
     }
     breakCharged = actualGaps;
-    otBasis = null; // computed from worked vs NRM below
+    // LUNCH SAVINGS NEVER BECOME OT. The permitted break is reserved in
+    // full for OT purposes, whether the employee took all of it or not: a
+    // 30-minute lunch on a 60-minute allowance adds 0 to OT, not 30. So OT
+    // can only come from time worked beyond the shift span plus the whole
+    // permitted break - the same basis the two-punch day uses. The shortage
+    // still uses the gaps actually taken; only OT is held to the allowance.
+    otBasis = Math.max(0, span - Math.max(actualGaps, allowedBreak) - payrollNrm);
   }
 
   const worked = Math.max(0, span - breakCharged);
@@ -1490,7 +1494,7 @@ function calculateAttendanceDay(input = {}) {
     );
   }
 
-  const rawOt = otBasis === null ? surplus : Math.min(surplus, otBasis);
+  const rawOt = Math.min(surplus, otBasis);
   base.raw_ot_minutes = rawOt;
 
   // Every Shift Management OT rule, in one place: the pre/post split, the two

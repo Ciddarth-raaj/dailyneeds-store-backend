@@ -203,8 +203,8 @@ describe("4 punches: only the EXCESS over the combined allowance is short", () =
   });
 });
 
-describe("4 punches: a break shorter than the combined allowance keeps today's OT rule", () => {
-  it("a 30 minute break against a 1.5 hour allowance is 60 surplus minutes, priced as ordinary OT", () => {
+describe("4 punches: a break shorter than the combined allowance never becomes OT", () => {
+  it("a 30 minute break against a 1.5 hour allowance is 60 surplus minutes, none of them OT", () => {
     const result = day({
       punches: punches("09:00", "13:00", "13:30", "21:00"), // a 30 minute gap
       extra_break_minutes: 30,
@@ -214,10 +214,11 @@ describe("4 punches: a break shorter than the combined allowance keeps today's O
     assert.equal(result.nrm_minutes, 630);
     assert.equal(result.worked_minutes, 690);
     assert.equal(result.shortage_minutes, 0);
-    // The SAME rule as today: surplus over NRM is candidate OT, and no new
-    // kind of overtime was invented for the unused extra break.
+    // Lunch savings never become OT: the whole permitted break, extra
+    // included, is reserved, with or without the extra half hour.
+    assert.equal(result.candidate_ot_minutes, 0);
     const withoutExtra = day({ punches: punches("09:00", "13:00", "13:30", "21:00") });
-    assert.equal(withoutExtra.candidate_ot_minutes + 30, result.candidate_ot_minutes);
+    assert.equal(withoutExtra.candidate_ot_minutes, 0);
   });
 });
 
