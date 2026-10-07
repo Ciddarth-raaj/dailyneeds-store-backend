@@ -119,10 +119,11 @@ class PayrunCalculationRepository {
     const run = (sql, params) =>
       new Promise((resolve, reject) => conn.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
     try {
-      const [stored] = await run(
+      const storedRows = await run(
         "SELECT prior_month_ot FROM payrun_employee_calculation WHERE payrun_calculation_id = ?",
         [row.payrun_calculation_id]
       );
+      const stored = Array.isArray(storedRows) ? storedRows[0] : null;
       let paid = stored && stored.prior_month_ot;
       if (typeof paid === "string") paid = JSON.parse(paid);
       const paidIds = (Array.isArray(paid) ? paid : [])
@@ -135,7 +136,7 @@ class PayrunCalculationRepository {
           FOR UPDATE`,
         [row.employee_id, year, month]
       );
-      const includedIds = (included || []).map((i) => Number(i.late_settlement_id)).sort((a, b) => a - b);
+      const includedIds = (Array.isArray(included) ? included : []).map((i) => Number(i.late_settlement_id)).sort((a, b) => a - b);
       return paidIds.join(",") !== includedIds.join(",");
     } catch (err) {
       if (err && (err.code === "ER_NO_SUCH_TABLE" || err.code === "ER_BAD_FIELD_ERROR")) return false;
