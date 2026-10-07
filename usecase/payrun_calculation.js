@@ -341,6 +341,9 @@ const paiseOf = (value) => {
   return Number.isFinite(n) ? Math.round(n * 100) : null;
 };
 
+/** The audit remark for a Reset made without a reason (the one-click Reset). */
+const RESET_NO_REASON_REMARK = "No reason given (one-click reset)";
+
 class PayrunCalculationUsecase {
   /**
    * @param calculationRepo  this stage's own two tables
@@ -2082,16 +2085,25 @@ class PayrunCalculationUsecase {
     const period = normalizeMonth(year, month);
     const ids = normalizeEmployeeIds(employee_ids);
 
-    const reasonCode = String(reason === null || reason === undefined ? "" : reason)
+    /*
+     * NO REASON IS ASKED FOR: Reset is a one-click act on the payroll screen.
+     * The audit column still needs one of the fixed reasons, and "Other"
+     * needs a remark (a database CHECK), so a reset with no reason is stored
+     * as OTHER with a remark saying exactly that. A reason that IS sent must
+     * still be one of the fixed values.
+     */
+    const givenReason = String(reason === null || reason === undefined ? "" : reason)
       .trim()
       .toUpperCase();
-    if (!Object.values(RESET_REASON).includes(reasonCode)) {
+    if (givenReason !== "" && !Object.values(RESET_REASON).includes(givenReason)) {
       throw validationError(
-        `A reset reason is required: one of ${Object.values(RESET_REASON).join(", ")}`
+        `The reset reason must be one of ${Object.values(RESET_REASON).join(", ")}`
       );
     }
+    const reasonCode = givenReason === "" ? RESET_REASON.OTHER : givenReason;
+    const givenRemark = remark === null || remark === undefined ? "" : String(remark).trim();
     const remarkText =
-      remark === null || remark === undefined ? "" : String(remark).trim();
+      givenReason === "" && givenRemark === "" ? RESET_NO_REASON_REMARK : givenRemark;
     if (reasonCode === RESET_REASON.OTHER && remarkText === "") {
       throw validationError("A remark is required when the reset reason is Other");
     }

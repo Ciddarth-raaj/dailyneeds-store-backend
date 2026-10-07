@@ -232,12 +232,13 @@ describe("the employee/outlet scope is the server's", () => {
 });
 
 describe("the body is validated before the usecase is reached", () => {
-  it("the reset reason is mandatory and must be one of the five", async () => {
+  it("the reset reason is optional, but when sent it must be one of the five", async () => {
     const { reason, ...noReason } = BODY;
-    for (const body of [noReason, { ...BODY, reason: "" }, { ...BODY, reason: "TYPO" }]) {
-      const res = await post(HR, body);
-      assert.equal(res.status, 400, JSON.stringify(body));
-    }
+    const res = await post(HR, { ...BODY, reason: "TYPO" });
+    assert.equal(res.status, 400, "an unknown reason is refused");
+    assert.equal((await post(HR, noReason)).body.code, 200, "no reason: the one-click reset");
+    assert.equal((await post(HR, { ...BODY, reason: "" })).body.code, 200, "an empty reason is no reason");
+    seen = [];
     for (const r of [
       "ATTENDANCE_CORRECTED",
       "SALARY_MASTER_CORRECTED",
