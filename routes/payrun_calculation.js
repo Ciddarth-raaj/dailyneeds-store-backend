@@ -431,9 +431,11 @@ class PayrunCalculationRoutes {
               .min(1)
               .max(MAX_BULK_EMPLOYEES)
               .required(),
+            // Optional: Reset is a one-click act on the payroll screen.
             reason: Joi.string()
               .valid(...Object.values(RESET_REASON))
-              .required(),
+              .allow("", null)
+              .optional(),
             remark: Joi.string().trim().max(RESET_REMARK_MAX).allow("", null).optional(),
             mode: Joi.string()
               .valid(...Object.values(RESET_MODE))
