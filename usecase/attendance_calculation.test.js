@@ -253,8 +253,8 @@ describe("calculating a range", () => {
     const punches = [
       punch(1, "2026-09-14 09:00:00"),
       punch(2, "2026-09-14 13:00:00"),
-      punch(3, "2026-09-14 13:45:00"),
-      punch(4, "2026-09-14 21:00:00"),
+      punch(3, "2026-09-14 14:00:00"),
+      punch(4, "2026-09-14 21:15:00"),
     ];
 
     const pending = buildUsecase(

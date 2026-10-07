@@ -2025,7 +2025,7 @@ describe("BACKFILL PREVIEW: the NEW Pending OT candidates, read-only and reconci
   /*
    * 42 (shift 11, role chain SM of outlet 3):
    *   15 Sep  10:00-23:30, two punches          -> 90 min post-shift
-   *   16 Sep  10:00, 14:00 / 14:20, 23:00       -> 100 min: a 20-min break of 60 allowed adds 40
+   *   16 Sep  10:00, 14:00 / 14:20, 23:00       -> 60 min: post-shift only; the 40 unused break minutes are not OT
    *   17 Sep  08:30-22:00                       -> 90 min pre-shift (came early)
    *   18 Sep  07:00-23:30                       -> 270 min: 180 pre + 90 post, over 120
    *   19 Sep  10:00-22:00                       -> no OT, no candidate
@@ -2075,9 +2075,11 @@ describe("BACKFILL PREVIEW: the NEW Pending OT candidates, read-only and reconci
     assert.equal(summary.candidate_count, report.totals.new_pending_would_be_created);
     assert.equal(summary.candidate_minutes, report.totals.new_pending_ot_minutes);
     assert.deepEqual(candidates.map((c) => [c.attendance_date, c.final_eligible_ot_minutes]), [
-      ["2026-09-15", 90], ["2026-09-16", 100], ["2026-09-17", 90], ["2026-09-18", 270],
+      // 16 Sep: a 20 minute lunch on a 60 minute allowance - the 40 unused
+      // minutes are reserved, so only the hour after 22:00 is OT.
+      ["2026-09-15", 90], ["2026-09-16", 60], ["2026-09-17", 90], ["2026-09-18", 270],
     ]);
-    assert.deepEqual([summary.candidate_count, summary.candidate_minutes, summary.min_ot_minutes, summary.max_ot_minutes, summary.avg_ot_minutes], [4, 550, 90, 270, 137.5]);
+    assert.deepEqual([summary.candidate_count, summary.candidate_minutes, summary.min_ot_minutes, summary.max_ot_minutes, summary.avg_ot_minutes], [4, 510, 60, 270, 127.5]);
     assert.deepEqual([summary.count_ge_60, summary.count_ge_120, summary.count_ge_180], [4, 1, 1]);
     assert.equal(summary.reconciliation.ok, true);
     assert.deepEqual(report.failures, []);
@@ -2097,24 +2099,26 @@ describe("BACKFILL PREVIEW: the NEW Pending OT candidates, read-only and reconci
     assert.deepEqual(c.approver, { role: "STORE_MANAGER", outlet_id: 3, holders: [{ employee_id: 7, employee_name: "Mgr3" }] });
   });
 
-  it("flags pre-shift OT, an early arrival, a short break that adds to the surplus, and OT over 120 min", async () => {
+  it("flags pre-shift OT, an early arrival and OT over 120 min - and never a short break, which adds nothing", async () => {
     const w = seed();
     await persistAll(w, [42]);
     const report = await backfill.run(args(w));
     const c = byDate(report);
-    assert.deepEqual([c.get("2026-09-16").break_allowed_minutes, c.get("2026-09-16").break_deducted_minutes, c.get("2026-09-16").unused_break_minutes_in_surplus], [60, 20, 40]);
-    assert.deepEqual(c.get("2026-09-16").flags, ["BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS"]);
+    // Lunch savings never become OT: the 40 unused minutes add nothing.
+    assert.deepEqual([c.get("2026-09-16").break_allowed_minutes, c.get("2026-09-16").break_deducted_minutes, c.get("2026-09-16").unused_break_minutes_in_surplus], [60, 20, 0]);
+    assert.deepEqual([c.get("2026-09-16").post_shift_ot_minutes, c.get("2026-09-16").final_eligible_ot_minutes], [60, 60]);
+    assert.deepEqual(c.get("2026-09-16").flags, []);
     assert.deepEqual([c.get("2026-09-17").pre_shift_ot_minutes, c.get("2026-09-17").eligibility_category], [90, "PRE_SHIFT_OT"]);
     assert.deepEqual(c.get("2026-09-17").flags, ["PRE_SHIFT_OT", "EARLY_ARRIVAL_BEFORE_SHIFT"]);
     assert.deepEqual(c.get("2026-09-18").flags, ["PRE_SHIFT_OT", "EARLY_ARRIVAL_BEFORE_SHIFT", "OT_OVER_120_MIN"]);
     assert.equal(c.get("2026-09-18").eligibility_category, "PRE_AND_POST_SHIFT_OT");
     const s = report.new_pending_candidates.summary;
     assert.deepEqual(s.flagged, {
-      pre_shift_ot: 2, early_arrival_before_shift: 2, break_shorter_than_allowed_adds_to_surplus: 1,
+      pre_shift_ot: 2, early_arrival_before_shift: 2, break_shorter_than_allowed_adds_to_surplus: 0,
       early_arrival_with_break_contribution: 0, ot_over_120_min: 1, invalid_approval_chain: 0,
     });
     assert.deepEqual(s.top_20_by_ot_minutes.map((t) => [t.attendance_date, t.final_eligible_ot_minutes]), [
-      ["2026-09-18", 270], ["2026-09-16", 100], ["2026-09-15", 90], ["2026-09-17", 90],
+      ["2026-09-18", 270], ["2026-09-15", 90], ["2026-09-17", 90], ["2026-09-16", 60],
     ]);
   });
 
@@ -2143,13 +2147,125 @@ describe("BACKFILL PREVIEW: the NEW Pending OT candidates, read-only and reconci
     await persistAll(w, [42]);
     await assert.rejects(
       backfill.run(args(w, { apply: true, expect_candidates: 124, expect_minutes: 11735 })),
-      /Refusing --apply: the candidate preview does not reconcile - preview now finds 4 candidates, 124 were approved; preview now finds 550 minutes, 11735 were approved/
+      /Refusing --apply: the candidate preview does not reconcile - preview now finds 4 candidates, 124 were approved; preview now finds 510 minutes, 11735 were approved/
     );
     assert.equal(w.store.requests.length, 0, "nothing written");
     assert.equal(w.store.deferred.length, 0);
-    const applied = await backfill.run(args(w, { apply: true, expect_candidates: 4, expect_minutes: 550 }));
+    const applied = await backfill.run(args(w, { apply: true, expect_candidates: 4, expect_minutes: 510 }));
     assert.equal(applied.totals.new_pending_created, 4);
     assert.equal(w.store.requests.filter((r) => r.request_type === "OT" && r.status === "PENDING").length, 4);
     assert.deepEqual(backfill.parseArgs(["--apply", "--expect-candidates", "124", "--expect-minutes", "11735"]).expect_minutes, 11735);
+  });
+});
+
+/* ================================= the one-off lunch-OT correction ==== */
+
+describe("lunch OT correction: days stored under the old rule, brought in line", () => {
+  const lunchCorrection = require("../scripts/attendance/lunch-ot-correction");
+  // 10:00-22:00, 60 minute allowance, a 30 minute lunch. The old rule paid the
+  // 30 unused minutes as OT; the new one pays only time after 22:00.
+  const shortLunch = (employee_id, date, out) => [
+    punch(employee_id, `${date} 10:00:00`),
+    punch(employee_id, `${date} 13:00:00`),
+    punch(employee_id, `${date} 13:30:00`),
+    punch(employee_id, `${date} ${out}`),
+  ];
+  const oldOt = (w, employee_id, date, minutes, status = "PENDING") => {
+    const stores = { 42: 3, 43: 3, 44: 5 };
+    return w.regRepo
+      .createRequest({
+        request: { requested_for_employee_id: employee_id, requested_by_employee_id: employee_id, attendance_date: date, request_type: "OT", auto_created: true, candidate_ot_minutes: minutes, outlet_id: stores[employee_id] },
+        chain: [{ stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: stores[employee_id] }],
+      })
+      .then(({ attendance_approval_request_id: id }) => {
+        const r = w.store.requests.find((x) => x.attendance_approval_request_id === id);
+        if (status === "APPROVED") Object.assign(r, { status: "APPROVED", approved_ot_minutes: minutes });
+        return r;
+      });
+  };
+  const oldRow = (employee_id, attendance_date, raw, approved = 0) => ({
+    employee_id, attendance_date, raw_ot_minutes: raw, candidate_ot_minutes: raw, pre_shift_ot_minutes: 0, post_shift_ot_minutes: raw, approved_ot_minutes: approved,
+  });
+
+  const scenario = async () => {
+    const w = build({
+      rawPunches: [
+        ...shortLunch(42, DATE, "22:00:00"), // old 30 -> new 0
+        ...shortLunch(42, DATE2, "23:00:00"), // old 90 -> new 60
+        ...shortLunch(44, DATE, "23:00:00"), // approved 90 -> day clamps to 60, request untouched
+        ...shortLunch(43, "2026-08-20", "22:00:00"), // locked month: untouched
+      ],
+      lockedMonths: ["43:2026-8"],
+    });
+    const pending0 = await oldOt(w, 42, DATE, 30);
+    const pending60 = await oldOt(w, 42, DATE2, 90);
+    const approved = await oldOt(w, 44, DATE, 90, "APPROVED");
+    const lockedPending = await oldOt(w, 43, "2026-08-20", 30);
+    const rows = [oldRow(42, DATE, 30), oldRow(42, DATE2, 90), oldRow(44, DATE, 90, 90), oldRow(43, "2026-08-20", 30)];
+    const deps = {
+      listAffected: async () => rows,
+      findLocked: (r) => w.calcRepo.findPayrollLockedPeriods(r),
+      calculateRange: w.calculation.calculateRange,
+      syncAutoOt: w.regularization.syncAutoOt,
+      recalculateRange: w.calculation.recalculateRange,
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-01" },
+      today: "2026-09-20",
+      now: NOW,
+    };
+    return { w, deps, pending0, pending60, approved, lockedPending };
+  };
+
+  it("preview writes nothing and names what would change", async () => {
+    const { w, deps, pending60 } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, apply: false });
+    assert.equal(w.saved.calculations.length, 0);
+    assert.equal(pending60.candidate_ot_minutes, 90);
+    assert.equal(report.summary.attendance_days_corrected, 3);
+    assert.equal(report.summary.pending_ot_requests_reduced, 1);
+    assert.equal(report.summary.pending_ot_requests_withdrawn, 1);
+    assert.equal(report.summary.days_skipped_payroll_locked, 1);
+    assert.equal(report.summary.ot_would_increase, 0);
+    const lines = lunchCorrection.table(report).split("\n");
+    assert.equal(lines.length, 5, "a header and one line per affected day");
+    assert.ok(lines.some((l) => l.startsWith(`42\t${DATE2}\tCORRECTED\t0+90=90\t0+60=60`) && l.includes("PENDING_REDUCED")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("PENDING_WITHDRAWN")));
+    assert.ok(lines.some((l) => l.includes("APPROVED_UNCHANGED")));
+    assert.ok(lines.some((l) => l.includes("SKIPPED_PAYROLL_LOCKED")));
+  });
+
+  it("a day whose OT would go UP is reported and never written", async () => {
+    const { w, deps } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, listAffected: async () => [oldRow(42, DATE2, 10)], apply: true });
+    assert.equal(report.summary.ot_would_increase, 1);
+    assert.equal(report.summary.attendance_days_corrected, 0);
+    assert.equal(w.saved.calculations.length, 0);
+  });
+
+  it("apply recalculates, reduces or withdraws pending OT, never raises an approval, never touches a locked month", async () => {
+    const { w, deps, pending0, pending60, approved, lockedPending } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, apply: true });
+
+    assert.equal(report.failures.length, 0, JSON.stringify(report.failures));
+    assert.equal(report.summary.attendance_days_corrected, 3);
+    assert.equal(report.summary.pending_ot_requests_corrected, 2);
+    assert.equal(report.summary.ot_requests_created, 0);
+
+    assert.equal(pending0.status, "CANCELLED", "only unused lunch: the pending OT is withdrawn");
+    assert.equal(pending60.status, "PENDING");
+    assert.equal(pending60.candidate_ot_minutes, 60, "reduced to the post-shift hour");
+    assert.ok(w.store.log.every((l) => l.trigger_source === "LUNCH_OT_CORRECTION"));
+
+    assert.equal(approved.status, "APPROVED");
+    assert.equal(approved.approved_ot_minutes, 90, "the approved request itself is never rewritten");
+    assert.ok(lastStored(w, 44).approved_ot_minutes <= 60, "the day's approved figure only ever comes down");
+
+    assert.equal(lockedPending.candidate_ot_minutes, 30);
+    assert.equal(lastStored(w, 43, "2026-08-20"), undefined, "no row written in a locked month");
+    assert.equal(report.skipped_payroll_locked.length, 1);
+
+    const d1 = lastStored(w, 42, DATE2);
+    assert.equal(d1.pre_shift_ot_minutes, 0);
+    assert.equal(d1.post_shift_ot_minutes, 60);
+    assert.equal(d1.candidate_ot_minutes, 60);
   });
 });

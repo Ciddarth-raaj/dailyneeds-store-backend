@@ -175,18 +175,15 @@ describe("A2 case 6 - gaps above the allowance reduce worked minutes", () => {
   });
 });
 
-describe("A2 case 7 - gaps below the allowance can feed OT", () => {
-  it("45 minutes of gaps is 675 worked and 15 candidate OT minutes", () => {
+describe("A2 case 7 - gaps below the allowance never feed OT", () => {
+  it("45 minutes of gaps is 675 worked and 0 candidate OT minutes: lunch savings are not OT", () => {
     const result = day({ punches: punches("09:00", "13:00", "13:45", "21:00") });
 
     assert.equal(result.actual_gap_minutes, 45);
     assert.equal(result.worked_minutes, 675);
     assert.equal(result.shortage_minutes, 0);
-    assert.equal(result.raw_ot_minutes, 15);
-    assert.equal(result.candidate_ot_minutes, 15);
-    // Earned is not payable. Nothing is owed until the OT request is finally
-    // approved - and the day itself is FINAL regardless: the OT claim is a
-    // separate state, not an attendance status.
+    assert.equal(result.raw_ot_minutes, 0);
+    assert.equal(result.candidate_ot_minutes, 0);
     assert.equal(result.approved_ot_minutes, 0);
     assert.equal(result.status, CALC_STATUS.FINAL);
     assert.equal(result.is_final, true);
@@ -523,7 +520,7 @@ describe("A2 case 15 - the Work Shift's own OT minimum, rounding and cap", () =>
       employee_id: 42,
       attendance_date: DATE,
       shift: shift({ config: { overtime_allowed: 1, overtime_minimum_minutes: 30 } }),
-      punches: punches("09:00", "13:00", "13:45", "21:00"),
+      punches: punches("09:00", "13:00", "14:00", "21:15"),
     });
     assert.equal(result.raw_ot_minutes, 15);
     assert.equal(result.candidate_ot_minutes, 0, "15 is below the 30 minute minimum");
@@ -532,7 +529,7 @@ describe("A2 case 15 - the Work Shift's own OT minimum, rounding and cap", () =>
 
   it("approved OT can never exceed the candidate", () => {
     const result = day({
-      punches: punches("09:00", "13:00", "13:45", "21:00"),
+      punches: punches("09:00", "13:00", "14:00", "21:15"),
       approved_ot_minutes: 999,
     });
     assert.equal(result.candidate_ot_minutes, 15);
@@ -575,14 +572,15 @@ describe("A2 case 16 - a two-punch day can never create unused-break OT", () => 
     assert.equal(result.raw_ot_minutes, 60);
   });
 
-  it("a four-punch day with the same span DOES get the surplus, because there is evidence", () => {
+  it("a four-punch day with the same span gets no OT either: the unused lunch is reserved", () => {
     const twoPunch = day({ punches: punches("09:00", "20:45") });
     const fourPunch = day({ punches: punches("09:00", "13:00", "13:15", "20:45") });
 
     assert.equal(twoPunch.raw_ot_minutes, 0);
     assert.equal(fourPunch.actual_gap_minutes, 15);
     assert.equal(fourPunch.worked_minutes, 690);
-    assert.equal(fourPunch.raw_ot_minutes, 30);
+    assert.equal(fourPunch.raw_ot_minutes, 0);
+    assert.equal(fourPunch.candidate_ot_minutes, 0);
   });
 });
 

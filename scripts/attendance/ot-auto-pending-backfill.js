@@ -64,9 +64,9 @@
  * NEW PENDING OT CANDIDATES (read-only, always printed, --summary-only too):
  * every record the run would create, with the day's own figures (shift,
  * punches, worked, NRM, break deducted, pre/post-shift OT), the approver and
- * flags - PRE_SHIFT_OT, EARLY_ARRIVAL_BEFORE_SHIFT,
- * BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS, OT_OVER_120_MIN,
- * INVALID_APPROVAL_CHAIN - plus a summary (count, minutes, min/max/avg,
+ * flags - PRE_SHIFT_OT, EARLY_ARRIVAL_BEFORE_SHIFT, OT_OVER_120_MIN,
+ * INVALID_APPROVAL_CHAIN (BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS no longer
+ * fires: an unused lunch is never OT) - plus a summary (count, minutes, min/max/avg,
  * >=60/120/180, top 20). The count and minutes must reconcile exactly with
  * totals.new_pending_*; if not, the preview reports a failure, and --apply
  * runs this preview first and refuses to write anything. --apply also takes
@@ -248,12 +248,12 @@ function describeCandidate({ employee_id, created, day, identity, chainProblemTe
   const postShiftOt = num(d.post_shift_ot_minutes) || 0;
   const preShiftTime = num(d.pre_shift_minutes) || 0;
   const minutes = Number(created.ot_minutes) || 0;
-  // A break taken SHORTER than allowed adds its unused minutes to the surplus
-  // - only on a 4+ punch day: a two-punch day's OT basis takes the uncharged
-  // break back out (no OUT/IN evidence that it was skipped).
-  const unusedBreak =
-    punchCount >= 4 && breakAllowed !== null && breakCharged !== null ? Math.max(0, breakAllowed - breakCharged) : 0;
-  const breakContribution = Math.min(unusedBreak, num(d.raw_ot_minutes) || minutes);
+  // LUNCH SAVINGS NEVER BECOME OT. The engine reserves the whole permitted
+  // break for OT on every punch count, so a break taken shorter than allowed
+  // adds nothing to the surplus: its contribution is 0 by rule, and the two
+  // break flags below can no longer fire. Kept so the report's shape (and
+  // any reader of it) is unchanged.
+  const breakContribution = 0;
   const flags = [];
   if (preShiftOt > 0) flags.push("PRE_SHIFT_OT");
   if (preShiftTime > 0) flags.push("EARLY_ARRIVAL_BEFORE_SHIFT");

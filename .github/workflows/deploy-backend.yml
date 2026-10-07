@@ -118,3 +118,28 @@ jobs:
              # The script exits non-zero if a process that had to reload did
              # not come back, and `set -e` fails the deploy with it.
              node scripts/deploy/pm2-reload.js'
+
+      # LUNCH OT CORRECTION - PREVIEW ONLY. Read-only: it never passes
+      # --apply and writes no attendance, OT or payroll row. It runs after the
+      # reload so it reads with the new engine rule, and prints the summary
+      # and one line per affected day here for a person to approve; the full
+      # JSON stays on the server under logs/. Applying is a separate,
+      # approved action (scripts/attendance/lunch-ot-correction.js --apply).
+      # A preview failure is reported but does not mark the deploy failed.
+      - name: Lunch OT correction preview (read-only)
+        continue-on-error: true
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'set -euo pipefail
+             cd ~/dailyneeds-store-backend
+             mkdir -p logs
+             OUT="logs/lunch-ot-correction-preview-$(date -u +%Y%m%dT%H%M%SZ).json"
+             NODE_ENV=production node scripts/attendance/lunch-ot-correction.js --preview > "$OUT"
+             echo "Full preview report: $OUT"'

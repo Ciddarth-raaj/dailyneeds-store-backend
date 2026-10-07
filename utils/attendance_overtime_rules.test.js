@@ -127,17 +127,18 @@ describe("post-shift overtime", () => {
   });
 
   it("a MINIMUM acts as a floor by default: work more than it and you get at least it", () => {
-    // 21:00 -> 21:40 with a 30 minute break taken: 40 surplus minutes.
+    // 21:00 -> 22:10 with a 30 minute break taken: 70 minutes past the out-time.
+    // The 30 unused lunch minutes are reserved, so they add nothing.
     const result = day(
       { overtime_minimum_minutes: 60, overtime_minimum_threshold_only: 0 },
-      ["09:00", "13:00", "13:30", "21:40"]
+      ["09:00", "13:00", "13:30", "22:10"]
     );
     assert.equal(result.raw_ot_minutes, 70);
     assert.equal(result.candidate_ot_minutes, 70, "already above the floor");
 
     const short = day(
       { overtime_minimum_minutes: 120, overtime_minimum_threshold_only: 0 },
-      ["09:00", "13:00", "13:30", "21:40"]
+      ["09:00", "13:00", "13:30", "22:10"]
     );
     assert.equal(short.candidate_ot_minutes, 0, "below the minimum qualifies for nothing");
   });
@@ -145,13 +146,13 @@ describe("post-shift overtime", () => {
   it("a THRESHOLD-ONLY minimum qualifies the day and then pays the exact minutes", () => {
     const result = day(
       { overtime_minimum_minutes: 30, overtime_minimum_threshold_only: 1 },
-      ["09:00", "13:00", "13:30", "21:40"]
+      ["09:00", "13:00", "13:30", "22:10"]
     );
     assert.equal(result.candidate_ot_minutes, 70, "exact minutes, not inflated to a floor");
   });
 
   it("rounds UP, DOWN and to the NEAREST interval, and not at all when NONE", () => {
-    const times = ["09:00", "13:00", "13:30", "21:40"]; // 70 raw OT minutes
+    const times = ["09:00", "13:00", "13:30", "22:10"]; // 70 raw OT minutes
     assert.equal(day({}, times).candidate_ot_minutes, 70);
     assert.equal(
       day({ overtime_rounding_method: "UP", overtime_rounding_interval_minutes: 30 }, times)
@@ -179,6 +180,49 @@ describe("post-shift overtime", () => {
   it("caps the day at maximum_ot_minutes_per_day", () => {
     const result = day({ maximum_ot_minutes_per_day: 45 }, ["09:00", "13:00", "13:30", "23:00"]);
     assert.equal(result.candidate_ot_minutes, 45);
+  });
+});
+
+/* ================================================ unused lunch is not OT === */
+
+describe("lunch savings never become OT", () => {
+  // 10:00-22:00 with a 60 minute lunch allowance: NRM 660.
+  const tenToTen = { in_time: "10:00", out_time: "22:00" };
+  const early = { pre_shift_overtime_allowed: 1 };
+
+  it("09:00 start, 30 minute lunch, out at 22:00: 60 pre-shift OT and 0 for the unused lunch", () => {
+    const result = day(early, ["09:00", "13:00", "13:30", "22:00"], tenToTen);
+    assert.equal(result.actual_gap_minutes, 30);
+    assert.equal(result.pre_shift_ot_minutes, 60);
+    assert.equal(result.post_shift_ot_minutes, 0, "the 30 unused lunch minutes add nothing");
+    assert.equal(result.candidate_ot_minutes, 60);
+  });
+
+  it("the same day staying to 22:45 adds exactly the 45 post-shift minutes", () => {
+    const result = day(early, ["09:00", "13:00", "13:30", "22:45"], tenToTen);
+    assert.equal(result.pre_shift_ot_minutes, 60);
+    assert.equal(result.post_shift_ot_minutes, 45);
+    assert.equal(result.candidate_ot_minutes, 105);
+  });
+
+  it("no lunch punched at all is the same as a short lunch: the allowance stays reserved", () => {
+    const fourPunch = day(early, ["09:00", "13:00", "13:01", "22:45"], tenToTen);
+    const twoPunch = day(early, ["09:00", "22:45"], tenToTen);
+    assert.equal(fourPunch.candidate_ot_minutes, 105);
+    assert.equal(twoPunch.candidate_ot_minutes, 105);
+  });
+
+  it("an on-time day with a short lunch earns no OT", () => {
+    const result = day({}, ["10:00", "13:00", "13:15", "22:00"], tenToTen);
+    assert.equal(result.raw_ot_minutes, 0);
+    assert.equal(result.candidate_ot_minutes, 0);
+  });
+
+  it("a lunch longer than the allowance still charges the real gap", () => {
+    const result = day({}, ["10:00", "13:00", "14:30", "22:30"], tenToTen);
+    assert.equal(result.break_charged_minutes, 90);
+    assert.equal(result.shortage_minutes, 0);
+    assert.equal(result.candidate_ot_minutes, 0, "the extra 30 after 22:00 only makes up the long lunch");
   });
 });
 

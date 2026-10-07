@@ -89,8 +89,8 @@ authorised = MAX(0, candidate_ot_minutes - excess)
 **outside** the approved window (before the in-time, after the out-time), and
 each side is priced separately. The post term is bounded by both the raw minutes
 beyond the out-time and the OT actually priced in that bucket, because
-`post_shift_ot_minutes` also carries in-window earnings (an unused break) that
-the shift change *did* authorise. That bound can only move minutes from the
+`post_shift_ot_minutes` can carry in-window minutes the shift change *did*
+authorise (an unused lunch is never among them: it is reserved and is not OT). That bound can only move minutes from the
 automatic side to the requestable one, never the reverse.
 
 The **excess keeps the ordinary path**: the employee requests it, an approver
