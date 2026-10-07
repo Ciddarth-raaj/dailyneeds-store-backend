@@ -2234,7 +2234,9 @@ class PayrunCalculationUsecase {
     }
     const why = reason === null || reason === undefined ? "" : String(reason).trim();
     const note = remark === null || remark === undefined ? "" : String(remark).trim();
-    if (action !== LIFECYCLE_ACTION.PUBLISH && why.length < LIFECYCLE_REASON_MIN) {
+    // Only UNLOCK needs a reason. Publish and Unpublish are confirmations; the
+    // audit row still records who did it, when, and the mode.
+    if (action === LIFECYCLE_ACTION.UNLOCK && why.length < LIFECYCLE_REASON_MIN) {
       throw validationError(`A reason of at least ${LIFECYCLE_REASON_MIN} characters is required`);
     }
     if (why.length > RESET_REMARK_MAX || note.length > RESET_REMARK_MAX) {
