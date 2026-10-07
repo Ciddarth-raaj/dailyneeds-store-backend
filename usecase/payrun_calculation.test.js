@@ -2215,13 +2215,25 @@ describe("Reset Calculation", () => {
     assert.equal(world.resets.length, 1);
   });
 
-  it("requires a reason from the closed list", async () => {
+  it("a reason, when sent, must be from the closed list", async () => {
     world.add(1);
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
-    for (const reason of [undefined, null, "", "BECAUSE"]) {
-      await assert.rejects(() => reset({ employee_ids: [1], reason }), /reset reason is required/);
-    }
+    await assert.rejects(() => reset({ employee_ids: [1], reason: "BECAUSE" }), /reset reason must be one of/);
     assert.equal(world.calculations.has(1), true);
+  });
+
+  it("no reason: the one-click reset is audited as Other with a system remark", async () => {
+    for (const [id, reason] of [[1, undefined], [2, null], [3, ""]]) {
+      world.add(id);
+      await calculation.calculate({ ...MONTH, employee_ids: [id], actor: ACTOR });
+      const out = await reset({ employee_ids: [id], reason });
+      assert.equal(out.reset_count, 1, `reason ${JSON.stringify(reason)}`);
+    }
+    assert.equal(world.resets.length, 3);
+    for (const row of world.resets) {
+      assert.equal(row.reset_reason, "OTHER");
+      assert.equal(row.reset_remark, "No reason given (one-click reset)");
+    }
   });
 
   it("requires a remark for Other, and caps its length", async () => {
