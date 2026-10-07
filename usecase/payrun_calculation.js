@@ -13,7 +13,6 @@ const {
   RESET_REMARK_MAX,
   isLockedStatus,
   LIFECYCLE_ACTION,
-  LIFECYCLE_REASON_MIN,
 } = require("../constants/payrun_calculation");
 const { monthWindow, statutorySetupComplete, statutorySetupGaps } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
@@ -2264,11 +2263,9 @@ class PayrunCalculationUsecase {
     }
     const why = reason === null || reason === undefined ? "" : String(reason).trim();
     const note = remark === null || remark === undefined ? "" : String(remark).trim();
-    // Only UNLOCK needs a reason. Publish and Unpublish are confirmations; the
-    // audit row still records who did it, when, and the mode.
-    if (action === LIFECYCLE_ACTION.UNLOCK && why.length < LIFECYCLE_REASON_MIN) {
-      throw validationError(`A reason of at least ${LIFECYCLE_REASON_MIN} characters is required`);
-    }
+    // No action needs a reason: Unlock, Publish and Unpublish are one-click
+    // acts. A reason or remark, when one is sent, is still stored, and the
+    // audit row always records who did it, when, and the mode.
     if (why.length > RESET_REMARK_MAX || note.length > RESET_REMARK_MAX) {
       throw validationError(`The reason and remark may be at most ${RESET_REMARK_MAX} characters each`);
     }
