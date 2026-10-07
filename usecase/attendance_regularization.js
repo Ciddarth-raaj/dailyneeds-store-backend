@@ -2489,6 +2489,21 @@ module.exports = (
     REGULARIZATION_PENDING: "REGULARIZATION_PENDING",
     NOT_FINAL: "CALCULATION_NOT_FINAL",
   });
+  /*
+   * WHICH INCOMPLETE DAYS ARE WORTH REMEMBERING FOR OT. Only a day with a
+   * realistic correction path that could later produce OT: punches are
+   * missing (an odd count, a MISSING_PUNCH review reason), or an attendance
+   * correction is pending on it. (A pending system OT withdrawn from a day
+   * that became incomplete is remembered on its own path.) An ordinary
+   * zero-punch absence - or any other not-FINAL day with no punch evidence
+   * and no correction - is reported, never remembered.
+   */
+  const OT_REEVALUATION = Object.freeze({
+    MISSING_PUNCH_INCOMPLETE: "MISSING_PUNCH_INCOMPLETE",
+    ACTIVE_CORRECTION: "ACTIVE_CORRECTION",
+    ORDINARY_ABSENT: "ORDINARY_ABSENT_NO_OT_REEVALUATION",
+    OTHER_NOT_FINAL: "OTHER_NOT_FINAL_NO_OT_REEVALUATION",
+  });
   const DEFERRED_REASON = Object.freeze({
     CORRECTION: "BLOCKED_BY_OPEN_REQUEST",
     INCOMPLETE: "INCOMPLETE_ATTENDANCE",
@@ -2588,6 +2603,27 @@ module.exports = (
       punch_count: punches,
       review_reasons: Array.isArray(day.review_reasons) ? day.review_reasons : [],
     };
+  };
+
+  /**
+   * Whether an incomplete day has a realistic correction path that could
+   * later produce OT - and so is worth remembering - with its category.
+   */
+  const otReevaluationOf = (incomplete, correction) => {
+    const missingPunch =
+      incomplete.punch_count % 2 === 1 ||
+      incomplete.incomplete_reason === INCOMPLETE_ATTENDANCE.MISSING_PUNCH ||
+      incomplete.incomplete_reason === INCOMPLETE_ATTENDANCE.INCOMPLETE_PUNCH_PAIR ||
+      incomplete.review_reasons.includes("MISSING_PUNCH");
+    const activeCorrection = Boolean(correction) || incomplete.incomplete_reason === INCOMPLETE_ATTENDANCE.REGULARIZATION_PENDING;
+    const category = missingPunch
+      ? OT_REEVALUATION.MISSING_PUNCH_INCOMPLETE
+      : activeCorrection
+      ? OT_REEVALUATION.ACTIVE_CORRECTION
+      : incomplete.punch_count === 0
+      ? OT_REEVALUATION.ORDINARY_ABSENT
+      : OT_REEVALUATION.OTHER_NOT_FINAL;
+    return { ot_reevaluation_category: category, missing_punch: missingPunch, active_correction: activeCorrection, remember: missingPunch || activeCorrection };
   };
 
   /** "09:00" from "09:00:00"; "11:42" from "2026-10-06 11:42:10". */
@@ -2868,20 +2904,26 @@ module.exports = (
          * below: withdrawn, never kept waiting.)
          */
         if (incomplete && !request) {
+          const reevaluation = otReevaluationOf(incomplete, correction);
+          const { remember, ...category } = reevaluation;
           result.skipped.push({
             attendance_date: date,
             reason: verdict.reason,
             eligible_ot_minutes: 0,
             attendance_incomplete: true,
             ...incomplete,
+            ...category,
             ...(correction ? blockerOf(correction) : {}),
           });
-          if (track_deferred && !locked) {
+          // Only a realistic correction path is remembered: missing punches
+          // or an active correction - never an ordinary absence.
+          if (track_deferred && !locked && remember) {
             const entry = {
               attendance_date: date,
               eligible_ot_minutes: 0,
               deferred_reason: DEFERRED_REASON.INCOMPLETE,
               incomplete_reason: incomplete.incomplete_reason,
+              ot_reevaluation_category: category.ot_reevaluation_category,
               ...(correction ? blockerOf(correction) : {}),
               recorded: false,
             };

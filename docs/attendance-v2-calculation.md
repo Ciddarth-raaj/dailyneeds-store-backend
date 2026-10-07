@@ -800,6 +800,17 @@ complete:
 | an OT in a payroll-locked month | unchanged: frozen with the month (the lock rule below) |
 | the attendance becomes complete (regularization approved, punch restored) | the ordinary sync runs for the date - from the remembered marker even before the cutover, outside the backdate window, or in a month locked meanwhile - and creates Pending OT only if the completed day has eligible OT |
 
+**Only a realistic correction path is remembered.** The backfill remembers an
+incomplete window date only when (1) punches are missing - an odd punch
+count, a `MISSING_PUNCH` review reason - or (2) an attendance correction
+(regularization, HR correction, permission, shift change) is pending on it;
+and any date whose pending system OT is withdrawn because it became
+incomplete is remembered (3). An **ordinary absence** - zero punches, no
+correction, no missing-punch evidence - is reported as
+`ORDINARY_ABSENT_NO_OT_REEVALUATION` and never remembered, nor counted in
+`dates_would_be_tracked`; any other not-FINAL day with no punch evidence and
+no correction is `OTHER_NOT_FINAL_NO_OT_REEVALUATION`, likewise reported only.
+
 A remembered incomplete date is **never resolved from the broken day**: it
 stays `WAITING_FOR_CORRECTION` through every sync and sweep until the day is
 complete (its reason logged once as `STILL_BLOCKED`; each re-check moves it to

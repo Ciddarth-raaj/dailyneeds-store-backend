@@ -302,6 +302,10 @@ async function run({
     deferred_incomplete_dates: 0,
     incomplete_attendance_days: 0,
   };
+  // Incomplete days by whether they have a realistic OT correction path.
+  const incompleteByCategory = {};
+  // Remembered incomplete dates, by why they are worth re-evaluating.
+  const deferredByCategory = {};
   const incompleteAttendance = [];
   const chainChecked = new Set();
   const deferredByKind = {};
@@ -363,6 +367,8 @@ async function run({
         if (d.deferred_reason === "INCOMPLETE_ATTENDANCE") {
           counts.deferred_incomplete_dates += 1;
           deferredByKind.INCOMPLETE_ATTENDANCE = (deferredByKind.INCOMPLETE_ATTENDANCE || 0) + 1;
+          const cat = d.ot_reevaluation_category || "OTHER";
+          deferredByCategory[cat] = (deferredByCategory[cat] || 0) + 1;
           return;
         }
         const kind = d.blocking_request_kind || "OTHER";
@@ -382,9 +388,23 @@ async function run({
         ...(result.held || []).filter((x) => x.attendance_incomplete).map((x) => ({ x, existing: "HELD_FOR_APPROVER" })),
       ].forEach(({ x, existing }) => {
         const d = deferredOn.get(x.attendance_date) || null;
-        // Remembered: a backfill marker, or one written when its pending OT was
-        // withdrawn. A locked month's date is not (its attendance is settled).
+        // Remembered: a backfill marker (missing punches or an active
+        // correction only - never an ordinary absence), or one written when
+        // a pending system OT was withdrawn. A locked month's date is not.
         const remembers = existing === "WITHDRAWN" ? (apply ? Boolean(x.remembered) : true) : Boolean(d);
+        const category =
+          existing === "WITHDRAWN"
+            ? "SYSTEM_OT_WITHDRAWN"
+            : existing === "HELD_FOR_APPROVER"
+            ? "PENDING_OT_HELD_FOR_APPROVER"
+            : x.ot_reevaluation_category || "OTHER_NOT_FINAL_NO_OT_REEVALUATION";
+        incompleteByCategory[category] = (incompleteByCategory[category] || 0) + 1;
+        // A withdrawn system OT's date is remembered on --apply too: tracked.
+        if (existing === "WITHDRAWN" && remembers) {
+          counts.deferred_dates += 1;
+          counts.deferred_incomplete_dates += 1;
+          deferredByCategory.SYSTEM_OT_WITHDRAWN = (deferredByCategory.SYSTEM_OT_WITHDRAWN || 0) + 1;
+        }
         counts.incomplete_attendance_days += 1;
         incompleteAttendance.push({
           employee_id: plan.employee_id,
@@ -392,6 +412,10 @@ async function run({
           // ATTENDANCE_OPEN / MISSING_IN_OR_OUT_PUNCH / INCOMPLETE_PUNCH_PAIR /
           // REGULARIZATION_PENDING / CALCULATION_NOT_FINAL
           incomplete_reason: x.incomplete_reason,
+          // MISSING_PUNCH_INCOMPLETE / ACTIVE_CORRECTION / SYSTEM_OT_WITHDRAWN
+          // (remembered) or ORDINARY_ABSENT_NO_OT_REEVALUATION /
+          // OTHER_NOT_FINAL_NO_OT_REEVALUATION (reported only).
+          ot_reevaluation_category: category,
           attendance_status: x.attendance_status || null,
           punch_count: x.punch_count === undefined ? null : x.punch_count,
           review_reasons: x.review_reasons || [],
@@ -575,6 +599,8 @@ async function run({
       blocked_by_open_request_minutes: counts.blocked_by_open_request_minutes,
       // Never eligible, never blocked minutes: listed under incomplete_attendance.
       incomplete_attendance_days: counts.incomplete_attendance_days,
+      incomplete_attendance_by_category: incompleteByCategory,
+      ordinary_absent_excluded_from_reevaluation: incompleteByCategory.ORDINARY_ABSENT_NO_OT_REEVALUATION || 0,
     },
     employees_without_valid_approval_chain: chainProblems,
     // A date an ATTENDANCE CORRECTION (regularization, HR correction, shift
@@ -593,6 +619,9 @@ async function run({
       eligible_minutes_on_uncorrected_days: counts.deferred_eligible_minutes,
       // Of those, dates remembered because their attendance is incomplete.
       incomplete_attendance_dates: counts.deferred_incomplete_dates,
+      // MISSING_PUNCH_INCOMPLETE / ACTIVE_CORRECTION / SYSTEM_OT_WITHDRAWN.
+      // An ordinary absence is never among them.
+      incomplete_by_reevaluation_category: deferredByCategory,
       by_blocking_request_kind: deferredByKind,
       // A pending OT already raised on a date whose correction is now open:
       // kept, not approvable until the correction is decided.

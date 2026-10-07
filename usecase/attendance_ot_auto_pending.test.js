@@ -1895,3 +1895,126 @@ describe("BACKFILL PREVIEW: approval-chain problems and source mismatches stay v
     assert.notDeepEqual(row.raw_punch_dates, row.persisted_attendance_dates);
   });
 });
+
+describe("DEFERRED OT IS REMEMBERED ONLY WHERE A CORRECTION COULD PRODUCE OT", () => {
+  /*
+   * 42's window: 15, 16 and 19 Sep complete (90 min OT each); 17 Sep no
+   * punch at all (an ordinary absence); 18 Sep one punch (out missing);
+   * 13 Sep no punch but an HR regularization pending on it; 12 Sep three
+   * punches (an odd pair) with a regularization pending as well.
+   */
+  const world = () => {
+    const w = build({
+      wireAuto: false,
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+      rawPunches: [
+        ...day(42, "2026-09-15"), ...day(42, "2026-09-16"), ...day(42, "2026-09-19"),
+        punch(42, "2026-09-18 10:00:00"),
+        ...day(42, "2026-09-12"), punch(42, "2026-09-12 23:50:00"),
+      ],
+    });
+    return w;
+  };
+  const pendingReg = (w, id, date) =>
+    w.store.requests.push({
+      attendance_approval_request_id: id, request_type: "REGULARIZATION", requested_for_employee_id: 42, requested_by_employee_id: 8,
+      attendance_date: date, status: "PENDING", current_stage_no: 1, total_stages: 1, auto_created: 0, candidate_ot_minutes: 0,
+    });
+  const args = (w, apply) => ({
+    calculateRange: w.calculation.calculateRange,
+    syncAutoOt: w.regularization.syncAutoOt,
+    resolveDeferredOt: w.regularization.resolveDeferredOt,
+    listEmployees: async () => [{ employee_id: 42 }],
+    listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+    listAttendedDates: attendedFromSaved(w),
+    setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+    today: "2026-09-20",
+    apply,
+    telegram: false,
+  });
+  const entry = (report, date) => report.incomplete_attendance.find((x) => x.attendance_date === date);
+
+  it("1/6/8. a zero-punch ABSENT day with no correction: reported, never remembered, not counted as tracked", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    const preview = await backfill.run(args(w, false));
+    const absent = entry(preview, "2026-09-17");
+    assert.equal(absent.attendance_status, "ABSENT");
+    assert.equal(absent.punch_count, 0);
+    assert.equal(absent.blocking_request_id, null);
+    assert.equal(absent.ot_reevaluation_category, "ORDINARY_ABSENT_NO_OT_REEVALUATION");
+    assert.equal(absent.ot_created, false);
+    assert.equal(absent.would_be_remembered_for_reevaluation, false);
+    // Every remembered date is a missing-punch one: no absence is tracked.
+    const remembered = preview.incomplete_attendance.filter((x) => x.would_be_remembered_for_reevaluation);
+    assert.deepEqual(remembered.map((x) => [x.attendance_date, x.ot_reevaluation_category]), [
+      ["2026-09-12", "MISSING_PUNCH_INCOMPLETE"],
+      ["2026-09-18", "MISSING_PUNCH_INCOMPLETE"],
+    ]);
+    assert.equal(preview.deferred_historical_ot.dates_would_be_tracked, 2, "8. ordinary absences are not tracked");
+    assert.ok(preview.totals.ordinary_absent_excluded_from_reevaluation >= 1);
+    assert.equal(preview.totals.incomplete_attendance_by_category.ORDINARY_ABSENT_NO_OT_REEVALUATION, preview.totals.ordinary_absent_excluded_from_reevaluation);
+    const applied = await backfill.run(args(w, true));
+    assert.equal(entry(applied, "2026-09-17").remembered_for_reevaluation, false);
+    assert.ok(!w.store.deferred.some((d) => d.attendance_date === "2026-09-17"), "1. no marker for an ordinary absence");
+    assert.equal(w.store.deferred.length, 2);
+  });
+
+  it("2. a zero-punch day WITH an active regularization: remembered (ACTIVE_CORRECTION)", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    pendingReg(w, 6100, "2026-09-17");
+    const preview = await backfill.run(args(w, false));
+    const e = entry(preview, "2026-09-17");
+    assert.deepEqual([e.ot_reevaluation_category, e.blocking_request_id, e.would_be_remembered_for_reevaluation], ["ACTIVE_CORRECTION", 6100, true]);
+    await backfill.run(args(w, true));
+    const marker = w.store.deferred.find((d) => d.attendance_date === "2026-09-17");
+    assert.deepEqual([marker.reason, marker.blocking_request_id, marker.status], ["INCOMPLETE_ATTENDANCE", 6100, "WAITING_FOR_CORRECTION"]);
+  });
+
+  it("3/7. an odd punch count (missing punch): remembered (MISSING_PUNCH_INCOMPLETE)", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    const preview = await backfill.run(args(w, false));
+    const e = entry(preview, "2026-09-18");
+    assert.deepEqual([e.punch_count, e.review_reasons, e.ot_reevaluation_category, e.would_be_remembered_for_reevaluation], [1, ["MISSING_PUNCH"], "MISSING_PUNCH_INCOMPLETE", true]);
+    assert.equal(preview.deferred_historical_ot.incomplete_by_reevaluation_category.MISSING_PUNCH_INCOMPLETE, 2);
+  });
+
+  it("4. a missing punch WITH an active regularization (the 2279 pattern): ONE marker, carrying the regularization", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    pendingReg(w, 920, "2026-09-12");
+    const preview = await backfill.run(args(w, false));
+    const e = entry(preview, "2026-09-12");
+    assert.deepEqual([e.punch_count, e.ot_reevaluation_category, e.blocking_request_id, e.would_be_remembered_for_reevaluation], [3, "MISSING_PUNCH_INCOMPLETE", 920, true]);
+    await backfill.run(args(w, true));
+    await backfill.run(args(w, true));
+    const markers = w.store.deferred.filter((d) => d.attendance_date === "2026-09-12");
+    assert.equal(markers.length, 1, "one marker, however many runs");
+    assert.equal(markers[0].blocking_request_id, 920);
+  });
+
+  it("9. none of it moves the global cutover", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    await backfill.run(args(w, true));
+    assert.equal((await w.regRepo.getAutoOtSetting()).auto_pending_from_date, "2026-09-20");
+  });
+
+  it("10. an ordinary absence is no locked-month exception: punches arriving after the lock raise nothing", async () => {
+    const w = world();
+    await persistAll(w, [42]);
+    await backfill.run(args(w, true));
+    w.lockedMonths.add("42:2026-9");
+    w.rawPunches.push(...day(42, "2026-09-17"));
+    await w.regularization.resolveDeferredOt({ now: NOW });
+    const out = await w.regularization.syncAutoOt({ employee_id: 42, dates: ["2026-09-17"], now: NOW });
+    assert.deepEqual(out.skipped.map((x) => x.reason), ["BEFORE_CUTOVER"]);
+    assert.equal(otOf(w, 42, "2026-09-17").length, 0);
+    // A genuine remembered date (the missing punch) still is one, once complete.
+    w.rawPunches.push(punch(42, "2026-09-18 23:30:00"));
+    await w.regularization.resolveDeferredOt({ now: NOW });
+    assert.deepEqual(liveOt(w, 42, "2026-09-18").map((r) => [r.status, r.candidate_ot_minutes]), [["PENDING", 90]]);
+  });
+});
