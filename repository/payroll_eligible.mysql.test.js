@@ -65,6 +65,9 @@ describe("payroll eligible over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQ
   });
 
   after(async () => {
+    // The audit table's foreign key would stop other suites sharing this
+    // scratch database from dropping `new_employee`.
+    if (pool) await q(pool, "DROP TABLE IF EXISTS `employee_payroll_eligible_audit`").catch(() => {});
     if (pool) await new Promise((r) => pool.end(r));
   });
 
