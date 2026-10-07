@@ -2655,9 +2655,13 @@ describe("Unlock, Publish and Unpublish", () => {
     assert.equal((await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR })).approved_count, 1);
   });
 
-  it("Unlock: a reason is required; Publish and Unpublish need none", async () => {
+  it("Unlock, Publish and Unpublish need no reason", async () => {
     await approved(1);
-    await assert.rejects(() => act("UNLOCK", [1], { reason: "" }), /reason of at least 5/);
+    const unlocked = await act("UNLOCK", [1], { reason: "", remark: "" });
+    assert.deepEqual(unlocked.results.map((r) => r.result), ["UNLOCKED"]);
+    assert.equal(world.lifecycle.filter((a) => a.action === "UNLOCK").length, 1, "the unlock is still audited");
+    await calculation.calculate({ ...MONTH, employee_ids: [1], mode: "RECALCULATE", actor: ACTOR });
+    await calculation.approve({ ...MONTH, employee_ids: [1], actor: ACTOR });
     assert.equal((await act("PUBLISH", [1])).published_count, 1);
     const out = await act("UNPUBLISH", [1], { reason: "", remark: "" });
     assert.deepEqual(out.results.map((r) => r.result), ["UNPUBLISHED"]);
