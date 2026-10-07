@@ -1824,7 +1824,8 @@ module.exports = (
         to_date: date,
       });
       const incomplete = incompleteAttendanceOf(liveDay, autoOtVerdict(liveDay, { now, today: null }));
-      if (incomplete) {
+      // An OPEN day keeps its own rule (refused below, ATTENDANCE_DAY_OPEN).
+      if (incomplete && incomplete.incomplete_reason !== INCOMPLETE_ATTENDANCE.OPEN) {
         const synced = await syncAutoOtSafely({
           employee_id: Number(request.requested_for_employee_id),
           days: liveDay ? [liveDay] : [],
@@ -2632,6 +2633,34 @@ module.exports = (
   };
 
   /**
+   * A remembered date a sync could not evaluate: it stays WAITING, with what
+   * holds it now (a correction, or the incomplete attendance itself).
+   */
+  const noteDeferredMarkerWaiting = async ({ employeeId, source, marker, correction, incomplete }) => {
+    if (correction) {
+      if (typeof attendanceRegularizationRepo.markDeferredOtStillBlocked !== "function") return;
+      await attendanceRegularizationRepo.markDeferredOtStillBlocked({
+        deferred_sync_id: marker.deferred_sync_id,
+        employee_id: employeeId,
+        attendance_date: marker.attendance_date,
+        blocking_request_id: Number(correction.attendance_approval_request_id),
+        blocking_request_type: correction.request_type,
+        trigger_source: source,
+      });
+      return;
+    }
+    if (typeof attendanceRegularizationRepo.noteDeferredOtWaiting !== "function") return;
+    await attendanceRegularizationRepo.noteDeferredOtWaiting({
+      deferred_sync_id: marker.deferred_sync_id,
+      employee_id: employeeId,
+      attendance_date: toDateOnly(marker.attendance_date),
+      reason: incomplete ? DEFERRED_REASON.INCOMPLETE : null,
+      detail: incomplete ? incomplete.incomplete_reason : null,
+      trigger_source: source,
+    });
+  };
+
+  /**
    * Bring one employee's OT approval records in line with the engine for some
    * dates.
    *
@@ -2814,31 +2843,8 @@ module.exports = (
     let identity = null;
     // Dates whose attendance is incomplete: their markers wait, whatever happened.
     const incompleteDates = new Map();
-    // A remembered date this run could not evaluate: it stays WAITING, with
-    // what holds it now (a correction, or the incomplete attendance itself).
-    const noteMarkerWaiting = async (marker, correction, incomplete) => {
-      if (correction) {
-        if (typeof attendanceRegularizationRepo.markDeferredOtStillBlocked !== "function") return;
-        await attendanceRegularizationRepo.markDeferredOtStillBlocked({
-          deferred_sync_id: marker.deferred_sync_id,
-          employee_id: employeeId,
-          attendance_date: marker.attendance_date,
-          blocking_request_id: Number(correction.attendance_approval_request_id),
-          blocking_request_type: correction.request_type,
-          trigger_source: source,
-        });
-        return;
-      }
-      if (typeof attendanceRegularizationRepo.noteDeferredOtWaiting !== "function") return;
-      await attendanceRegularizationRepo.noteDeferredOtWaiting({
-        deferred_sync_id: marker.deferred_sync_id,
-        employee_id: employeeId,
-        attendance_date: toDateOnly(marker.attendance_date),
-        reason: incomplete ? DEFERRED_REASON.INCOMPLETE : null,
-        detail: incomplete ? incomplete.incomplete_reason : null,
-        trigger_source: source,
-      });
-    };
+    const noteMarkerWaiting = (marker, correction, incomplete) =>
+      noteDeferredMarkerWaiting({ employeeId, source, marker, correction, incomplete });
 
     for (const day of inScope) {
       const date = day.attendance_date;
