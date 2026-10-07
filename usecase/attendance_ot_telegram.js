@@ -229,7 +229,14 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
         remarks,
         source: "TELEGRAM",
         expected_ot_minutes: expectedMinutes === undefined ? null : expectedMinutes,
+        // These buttons decide OT and nothing else.
+        require_request_type: "OT",
       });
+
+      if (result && result.code === 409 && result.wrong_type) {
+        await answer("This button is not for an OT request.");
+        return result;
+      }
 
       if (result && result.code === 409 && result.ot_minutes_changed) {
         await answer(`OT changed to ${result.candidate_ot_minutes} min - nothing was approved.`);

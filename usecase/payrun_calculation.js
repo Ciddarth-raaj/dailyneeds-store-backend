@@ -2027,6 +2027,8 @@ class PayrunCalculationUsecase {
           message:
             entry.outcome === "CALCULATION_MOVED"
               ? "This employee was recalculated while you were reviewing them. Re-read the month and approve again."
+              : entry.outcome === "PRIOR_MONTH_OT_MOVED"
+              ? "A Prior-Month OT this calculation pays was revoked or moved after it was calculated. Recalculate this employee for the month, then approve."
               : "This employee has no calculation for this month.",
         });
       });

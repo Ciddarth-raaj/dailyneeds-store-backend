@@ -315,3 +315,49 @@ describe("POST /attendance/me/ot-request - RETIRED (OT is raised automatically)"
   });
 });
 
+
+/*
+ * THE DnDS DECISION CARRIES THE OT MINUTES THE APPROVER WAS SHOWN, as a
+ * Telegram card does: `decide` refuses a figure a recalculation has moved
+ * since (409 ot_minutes_changed). Optional, and validated - never paid.
+ */
+describe("POST /attendance/regularization/:request_id/decision - the minutes the approver saw", () => {
+  const stub = () => {
+    const seen = [];
+    const usecase = {
+      getRequest: async () => ({ attendance_approval_request_id: 9, request_type: "OT" }),
+      decide: async (args) => {
+        seen.push(args);
+        return { code: 200, status: "APPROVED" };
+      },
+    };
+    return { routes: buildRoutes(usecase, tagging, null), seen };
+  };
+  const decide = (routes, body) =>
+    invoke(routes, "POST", "/attendance/regularization/:request_id/decision", {
+      decoded: { id: 1, employee_id: 33, user_type: 1 },
+      params: { request_id: "9" },
+      query: {},
+      body,
+    });
+
+  it("passes expected_ot_minutes through to decide", async () => {
+    const { routes, seen } = stub();
+    const res = await decide(routes, { decision: "APPROVED", expected_ot_minutes: 120 });
+    assert.equal(res.statusCode, 200, JSON.stringify(res.body));
+    assert.equal(seen[0].expected_ot_minutes, 120);
+    assert.equal(seen[0].source, "WEB");
+  });
+
+  it("is optional (null when absent) and refused when it is not a whole number of minutes", async () => {
+    const { routes, seen } = stub();
+    await decide(routes, { decision: "REJECTED", remarks: "not worked" });
+    assert.equal(seen[0].expected_ot_minutes, null);
+    for (const bad of [-5, 1.5, "lots", 5000]) {
+      // eslint-disable-next-line no-await-in-loop
+      const res = await decide(routes, { decision: "APPROVED", expected_ot_minutes: bad });
+      assert.notEqual(res.statusCode, 200, String(bad));
+    }
+    assert.equal(seen.length, 1, "a malformed figure never reaches decide");
+  });
+});

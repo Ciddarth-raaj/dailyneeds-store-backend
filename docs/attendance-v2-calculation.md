@@ -717,9 +717,12 @@ commits first wins and the sync leaves the record alone.
 **Decisions.** Unchanged: `decide`, from DnDS (`WEB`) or Telegram
 (`TELEGRAM`, `usecase/attendance_ot_telegram.js`). `decide` now answers an
 already-processed request with `409 already_decided` up front, and accepts an
-optional `expected_ot_minutes` — a Telegram Approve button carries the minutes
-it showed, so a figure that moved since the message was sent is refused
-(`409 ot_minutes_changed`) and a fresh card is sent.
+optional `expected_ot_minutes` — a Telegram Approve button and the DnDS
+approval queue carry the minutes they showed, so a figure that moved since is
+refused (`409 ot_minutes_changed`) and the current one is re-presented. The
+decision transaction also re-proves the minutes it was computed from under
+the row lock, so a recalculation that lands between the read and the commit
+can never be approved over. Telegram's OT buttons decide OT requests only.
 
 **Telegram.** A newly raised OT messages the employee's first approver when
 their chain names a person (Attendance Approver Setup), exactly like a shift
@@ -749,6 +752,13 @@ weekly off, holiday, leave or absence in between can never hide OT. Fewer than
 The preview prints each employee's attended dates, the raw last-5 punch dates,
 `sources_differ`, and `dates_evaluated`. The cutover is **not** moved: each
 backfill call carries its own `allow_creation_from` (see Gates).
+
+A date whose one open-request slot is held by another PENDING request (a
+regularization or permission) is not raised; preview and apply both list it
+under `blocked_by_open_request` with its minutes. Decide that request, then
+re-run the backfill while the date is still in the employee's window.
+`--today` re-points a preview only: it is refused with `--apply` and in the
+future.
 
 The preview reports: dates covered, employees checked, eligible OT days, already
 approved / rejected / pending, new pending, pending whose minutes would change,
@@ -797,9 +807,13 @@ payrun_employee_calculation.prior_month_ot_amount / prior_month_ot (JSON breakdo
 | a later open month is calculated (save) | claimed `INCLUDED` for that month, under `FOR UPDATE`; a row already claimed elsewhere rolls the whole save back (`PRIOR_MONTH_OT_MOVED`) |
 | that month is recalculated | stays `INCLUDED` for the same month (re-read, not re-claimed) |
 | that month's calculation is reset | back to `PENDING_SETTLEMENT` |
-| that month is Approved & Locked | `SETTLED` |
+| that month is Approved & Locked | `SETTLED` — refused (`PRIOR_MONTH_OT_MOVED`) if, under the lock, the INCLUDED items no longer match what the calculation pays |
 | that month is unlocked | back to `INCLUDED` |
-| revoke | refused once `SETTLED` (`PRIOR_MONTH_OT_SETTLED`); otherwise `CANCELLED` |
+| revoke | refused once `SETTLED` (`PRIOR_MONTH_OT_SETTLED`); otherwise `CANCELLED` — allowed even while the **source** month is locked (nothing locked is written); the settlement month then needs recalculating |
+
+A month whose own calculation is locked reads only the items it claimed: an
+OT approved after that month locked (but before it is published) waits for
+the next open month, so the locked month's Publish is never blocked by it.
 
 The unique request key plus the claim-under-lock make paying the same OT twice
 impossible; a later month never reads a row settled elsewhere. The day itself

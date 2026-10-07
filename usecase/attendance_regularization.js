@@ -1526,11 +1526,37 @@ module.exports = (
 
     const employeeId = Number(request.requested_for_employee_id);
     let locked = [];
+    /*
+     * PRIOR-MONTH OT NOT YET PAID MAY BE REVOKED IN ITS LOCKED MONTH. An OT
+     * approved after its month locked was never paid by that month - its
+     * money is a forward settlement - so revoking it touches nothing locked:
+     * no day row is written, and the settlement is CANCELLED (the repository
+     * re-checks it under its own lock and refuses one already SETTLED). Every
+     * other revocation in a locked month is still refused.
+     */
+    let lateOtRevoke = null;
     if (typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
       locked = await attendanceCalculationUsecase.findPayrollLockedPeriods([
         { employee_id: employeeId, attendance_date: request.attendance_date },
       ]);
-      if (locked.length > 0) throw payrollLockedActionError(locked, "This revocation");
+      if (locked.length > 0) {
+        const late =
+          request.request_type === REQUEST_TYPE.OT &&
+          request.status === REQUEST_STATUS.APPROVED &&
+          typeof attendanceRegularizationRepo.getLateSettlement === "function"
+            ? await attendanceRegularizationRepo.getLateSettlement(requestId)
+            : null;
+        if (late && late.settlement_status === "SETTLED") {
+          throw validationError(
+            `This OT was already paid as Prior-Month OT in the ${String(late.settlement_month).padStart(2, "0")}/${late.settlement_year} payroll and cannot be revoked`
+          );
+        }
+        if (late && (late.settlement_status === "PENDING_SETTLEMENT" || late.settlement_status === "INCLUDED")) {
+          lateOtRevoke = late;
+        } else {
+          throw payrollLockedActionError(locked, "This revocation");
+        }
+      }
     }
 
     if (reopen) {
@@ -1570,7 +1596,9 @@ module.exports = (
     // calculated on the shift that applies without it and its authorised OT
     // is gone. Reopened: the day with the request PENDING again, which for a
     // shift request changes only the request state beside the day.
-    const [voidedDay] = await attendanceCalculationUsecase.calculateRange(
+    const [voidedDay] = lateOtRevoke
+      ? [null]
+      : await attendanceCalculationUsecase.calculateRange(
       reopen
         ? {
             employee_id: employeeId,
@@ -1597,8 +1625,9 @@ module.exports = (
       voidedDay || { attendance_date: request.attendance_date, shift_snapshot: null },
       { now }
     );
+    // A Prior-Month OT revoke writes no day: its month is locked.
     const calculations =
-      dayState.closed && voidedDay ? [attendanceCalculationUsecase.toStorageRow(voidedDay)] : [];
+      !lateOtRevoke && dayState.closed && voidedDay ? [attendanceCalculationUsecase.toStorageRow(voidedDay)] : [];
 
     const result = await attendanceRegularizationRepo.revokeRequest({
       requestId,
@@ -1614,6 +1643,7 @@ module.exports = (
       revocableTypes: REVOCABLE_TYPES,
       calculations,
       attendanceDate: request.attendance_date,
+      lateOtRevoke: Boolean(lateOtRevoke),
     });
     // Revoking a Permission request changes what its day forgives (its own
     // path, unchanged); revoking any other type that rewrote the day - OT,
@@ -1687,6 +1717,9 @@ module.exports = (
     // button carries them, so a message sent before a recalculation moved the
     // figure cannot approve a number the approver never saw.
     expected_ot_minutes = null,
+    // Optional: the request type this surface decides (Telegram's OT buttons
+    // pass "OT"), so a crafted callback cannot decide another type here.
+    require_request_type = null,
   }) => {
     if (decision !== STEP_DECISION.APPROVED && decision !== STEP_DECISION.REJECTED) {
       throw validationError("decision must be APPROVED or REJECTED");
@@ -1701,6 +1734,9 @@ module.exports = (
 
     const request = await attendanceRegularizationRepo.getRequest(request_id);
     if (!request) throw validationError(`No such request: ${request_id}`);
+    if (require_request_type && request.request_type !== require_request_type) {
+      return { code: 409, wrong_type: true, msg: "This action is not for this request" };
+    }
 
     /*
      * ALREADY PROCESSED - from DnDS, Telegram, the payroll lock or the system
@@ -2020,6 +2056,12 @@ module.exports = (
       // every other type keeps the existing refusal.
       allowRejectWhenLocked: isPermissionRequest,
       lateOt: lateOtMode ? { expect_locked: true, settlement: lateSettlement } : null,
+      // The OT minutes this decision was computed from, re-proved under the
+      // lock (a recalculation may have moved them since the read).
+      expectCandidateOtMinutes:
+        request.request_type === REQUEST_TYPE.OT
+          ? Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0))
+          : null,
       decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
@@ -2322,7 +2364,31 @@ module.exports = (
     NOT_EMPLOYED: "NOT_EMPLOYED",
     PAYROLL_LOCKED: "PAYROLL_LOCKED",
     NO_OT: "NO_OT",
+    /*
+     * Another PENDING request on the date (a regularization or a permission)
+     * holds the date's one open slot - the open-request key refuses a second.
+     * Reported with its minutes and the blocking request, never dropped: the
+     * OT can be raised once that request is decided.
+     */
+    BLOCKED_BY_OPEN_REQUEST: "BLOCKED_BY_OPEN_REQUEST",
   });
+
+  /**
+   * A PENDING non-OT, non-shift request on the date - it shares the open-request
+   * slot OT needs (`uq_aareq_open_per_employee_date`, group 'ATT').
+   */
+  const openRequestBlocking = async (employeeId, date) => {
+    if (typeof attendanceRegularizationRepo.findRequestsForDates !== "function") return null;
+    const rows = await attendanceRegularizationRepo.findRequestsForDates(employeeId, [date]);
+    return (
+      (rows || []).find(
+        (r) =>
+          r.status === REQUEST_STATUS.PENDING &&
+          r.request_type !== REQUEST_TYPE.OT &&
+          r.request_type !== REQUEST_TYPE.SHIFT_CHANGE
+      ) || null
+    );
+  };
 
   let otNotifier = null;
   /** Telegram, set by `server.js`: messages the first approver of a new auto OT. */
@@ -2681,6 +2747,19 @@ module.exports = (
           result.skipped.push({ attendance_date: date, reason: AUTO_OT_SKIP.PAYROLL_LOCKED, eligible_ot_minutes: verdict.minutes });
           continue;
         }
+        // THE DATE'S OPEN SLOT, checked in a dry run too, so a preview does not
+        // promise a record the open-request key would refuse.
+        const blocker = await openRequestBlocking(employeeId, date);
+        if (blocker) {
+          result.skipped.push({
+            attendance_date: date,
+            reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
+            eligible_ot_minutes: verdict.minutes,
+            blocking_request_id: Number(blocker.attendance_approval_request_id),
+            blocking_request_type: blocker.request_type,
+          });
+          continue;
+        }
         if (!identity) identity = await resolveIdentity(employeeId);
         const who = identity;
         // THE CHAIN, resolved in a dry run too, so a preview can name every
@@ -2736,9 +2815,21 @@ module.exports = (
             punch: null,
           });
         } catch (err) {
-          // THE RACE, LOST: a concurrent run raised it first. Idempotent.
+          // THE RACE, LOST: a concurrent run raised it first (idempotent) - or
+          // another request took the date's open slot meanwhile (reported).
           if (err && err.code === "ER_DUP_ENTRY") {
-            result.unchanged.push({ attendance_date: date, duplicate_prevented: true });
+            const raced = await openRequestBlocking(employeeId, date);
+            if (raced) {
+              result.skipped.push({
+                attendance_date: date,
+                reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
+                eligible_ot_minutes: verdict.minutes,
+                blocking_request_id: Number(raced.attendance_approval_request_id),
+                blocking_request_type: raced.request_type,
+              });
+            } else {
+              result.unchanged.push({ attendance_date: date, duplicate_prevented: true });
+            }
             continue;
           }
           if (err && err.code === "PAYROLL_MONTH_LOCKED") {

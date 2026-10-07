@@ -740,6 +740,15 @@ class AttendanceRegularizationRepository {
      *   { expect_locked: true, settlement: { ...priced row } | null }
      */
     lateOt = null,
+    /*
+     * OT ONLY: the eligible minutes this decision was computed from. The
+     * request UPDATE below is guarded on them, so a recalculation that moved
+     * the pending OT between the read and this transaction (the automatic
+     * sync updates `candidate_ot_minutes` under its own row lock) refuses the
+     * decision with a 409 `ot_minutes_changed` instead of approving a figure
+     * the day no longer supports. Null for every other request type.
+     */
+    expectCandidateOtMinutes = null,
   }) {
     const connection = await getConnectionAsync(this.db);
     try {
@@ -819,7 +828,7 @@ class AttendanceRegularizationRepository {
                 decided_at = CASE WHEN ? IN ('APPROVED','REJECTED') THEN CURRENT_TIMESTAMP(3) ELSE decided_at END
           WHERE attendance_approval_request_id = ?
             AND status = 'PENDING'
-            AND current_stage_no = ?`,
+            AND current_stage_no = ?${expectCandidateOtMinutes === null ? "" : "\n            AND COALESCE(candidate_ot_minutes, 0) = ?"}`,
         [
           next.status,
           next.current_stage_no,
@@ -828,10 +837,29 @@ class AttendanceRegularizationRepository {
           next.status,
           requestId,
           stageNo,
+          ...(expectCandidateOtMinutes === null ? [] : [expectCandidateOtMinutes]),
         ]
       );
       if (!requestResult || Number(requestResult.affectedRows) !== 1) {
         await rollbackAsync(connection);
+        if (expectCandidateOtMinutes !== null) {
+          // Tell a moved figure apart from a moved decision: the caller
+          // re-presents the OT with its current minutes.
+          const [now] = await queryAsync(
+            connection,
+            `SELECT status, current_stage_no, candidate_ot_minutes FROM attendance_approval_request WHERE attendance_approval_request_id = ?`,
+            [requestId]
+          );
+          if (now && now.status === "PENDING" && Number(now.current_stage_no) === Number(stageNo)) {
+            const minutes = Math.max(0, Math.trunc(Number(now.candidate_ot_minutes) || 0));
+            return {
+              code: 409,
+              ot_minutes_changed: true,
+              candidate_ot_minutes: minutes,
+              msg: `The eligible OT is now ${minutes} min after an attendance recalculation - review it again`,
+            };
+          }
+        }
         return { code: 409, msg: "This request moved while you were deciding it - reload and try again" };
       }
 
@@ -992,6 +1020,11 @@ class AttendanceRegularizationRepository {
     // The request's date, so the payroll row can be locked FIRST - see
     // `decideStage`. Optional for older callers, which keep the old order.
     attendanceDate = null,
+    // PRIOR-MONTH OT not yet paid, revoked in its LOCKED month: no day row is
+    // written (`calculations` is empty), so the month's lock does not refuse
+    // it; step 7b below re-checks the settlement under FOR UPDATE and
+    // refuses one already SETTLED.
+    lateOtRevoke = false,
   }) {
     const connection = await getConnectionAsync(this.db);
     const refuse = async (msg) => {
@@ -1012,7 +1045,7 @@ class AttendanceRegularizationRepository {
       // lock of the same month queue behind each other instead of
       // deadlocking. A revoke is refused in a locked month either way; this
       // only decides WHEN the lock is taken, and it is held to the end.
-      if (attendanceDate) {
+      if (attendanceDate && !(lateOtRevoke && (calculations || []).length === 0)) {
         await assertMonthsNotPayrollLocked(connection, [{ employee_id: employeeId, attendance_date: attendanceDate }]);
       }
 
@@ -1147,10 +1180,30 @@ class AttendanceRegularizationRepository {
         }
       }
 
-      // 5. The payroll lock, whether or not a day row goes with this.
-      await assertMonthsNotPayrollLocked(connection, [
-        { employee_id: employeeId, attendance_date: request.attendance_date },
-      ]);
+      // 5. The payroll lock, whether or not a day row goes with this - except
+      // for a Prior-Month OT not yet paid, re-proved here under FOR UPDATE:
+      // it writes nothing to its locked month. Anything else (no settlement,
+      // or one already SETTLED/CANCELLED) takes the ordinary lock check.
+      let lateUnpaid = false;
+      if (lateOtRevoke && (calculations || []).length === 0 && request.request_type === "OT" && request.status === "APPROVED") {
+        try {
+          const [late] = await queryAsync(
+            connection,
+            `SELECT settlement_status FROM attendance_ot_late_settlement
+              WHERE attendance_approval_request_id = ? AND settlement_status IN ('PENDING_SETTLEMENT','INCLUDED')
+              FOR UPDATE`,
+            [requestId]
+          );
+          lateUnpaid = Boolean(late);
+        } catch (err) {
+          if (!err || err.code !== "ER_NO_SUCH_TABLE") throw err;
+        }
+      }
+      if (!lateUnpaid) {
+        await assertMonthsNotPayrollLocked(connection, [
+          { employee_id: employeeId, attendance_date: request.attendance_date },
+        ]);
+      }
 
       // 6. VOID the request - or, for a rejected SHIFT_CHANGE, REOPEN it.
       if (reopen) {

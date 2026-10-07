@@ -596,6 +596,10 @@ class AttendanceRegularizationRoutes {
           const schema = {
             decision: Joi.string().valid("APPROVED", "REJECTED").required(),
             remarks: Joi.string().allow("").max(500).optional(),
+            // OT: the minutes the approver was shown. A figure a recalculation
+            // has moved since is refused (409 ot_minutes_changed), exactly as
+            // a Telegram card's is. It is compared, never paid.
+            expected_ot_minutes: Joi.number().integer().min(0).max(1440).optional(),
           };
           const isValid = Joi.validate(req.body, schema);
           if (isValid.error !== null) throw isValid.error;
@@ -605,6 +609,8 @@ class AttendanceRegularizationRoutes {
             request_id: Number(req.params.request_id),
             decision: req.body.decision,
             remarks: req.body.remarks || null,
+            expected_ot_minutes:
+              req.body.expected_ot_minutes === undefined ? null : Number(req.body.expected_ot_minutes),
             // The WEB app. The Telegram surface calls the same `decide` with
             // its own source, so the two act on one record and the step says
             // which of them did.

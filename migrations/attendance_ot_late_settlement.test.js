@@ -26,6 +26,8 @@ describe(NAME, () => {
 
   it("one settlement row per OT request, enforced by the database - no OT is settled twice", () => {
     assert.match(up, /UNIQUE KEY `uq_aols_request` \(`attendance_approval_request_id`\)/);
+    // ...and tied to it: a request with a settlement cannot be deleted.
+    assert.match(up, /CONSTRAINT `fk_aols_request` FOREIGN KEY \(`attendance_approval_request_id`\)\s+REFERENCES `attendance_approval_request` \(`attendance_approval_request_id`\) ON DELETE RESTRICT/);
   });
 
   it("keeps approval and money apart: its own settlement lifecycle", () => {

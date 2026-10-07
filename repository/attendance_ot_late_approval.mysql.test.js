@@ -263,6 +263,38 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     assert.deepEqual(logs.map((l) => l.to_status), ["PENDING_SETTLEMENT", "CANCELLED"]);
   });
 
+  it("revoke in the LOCKED source month: an unsettled late OT is CANCELLED with nothing locked written; a settled one, or a rejection, is refused", async () => {
+    const ot = await request();
+    await decideAll(ot.attendance_approval_request_id);
+    const before = await frozen();
+    // September stays APPROVED_LOCKED throughout.
+    await q(pool, "UPDATE attendance_ot_late_settlement SET settlement_status = 'SETTLED', settlement_year = 2026, settlement_month = 10");
+    await assert.rejects(
+      usecase.revokeDecision({ actor: ADMIN, request_id: ot.attendance_approval_request_id, reason: "approved by mistake" }),
+      /already paid as Prior-Month OT in the 10\/2026 payroll/
+    );
+    assert.equal((await request()).status, "APPROVED");
+
+    await q(pool, "UPDATE attendance_ot_late_settlement SET settlement_status = 'PENDING_SETTLEMENT', settlement_year = NULL, settlement_month = NULL");
+    const done = await usecase.revokeDecision({ actor: ADMIN, request_id: ot.attendance_approval_request_id, reason: "approved by mistake" });
+    assert.equal(done.code, 200, JSON.stringify(done));
+    assert.equal((await request()).status, "CANCELLED");
+    const [s] = await q(pool, "SELECT settlement_status FROM attendance_ot_late_settlement");
+    assert.equal(s.settlement_status, "CANCELLED");
+    assert.equal(await frozen(), before, "the locked calculation and the locked day are byte-identical");
+    assert.equal((await q(pool, "SELECT status FROM payrun_employee_calculation WHERE employee_id = ?", [EMP]))[0].status, "APPROVED_LOCKED");
+  });
+
+  it("revoke in the LOCKED source month of a late REJECTION is still refused (nothing to cancel, and it would re-raise nothing)", async () => {
+    const ot = await request();
+    await usecase.decide({ actor: ADMIN, request_id: ot.attendance_approval_request_id, decision: "REJECTED", remarks: "Not authorised" });
+    await assert.rejects(
+      usecase.revokeDecision({ actor: ADMIN, request_id: ot.attendance_approval_request_id, reason: "rejected by mistake" }),
+      /payroll/i
+    );
+    assert.equal((await request()).status, "REJECTED");
+  });
+
   it("the engine read: the request carries its settlement, so the day never pays it", async () => {
     const ot = await request();
     await decideAll(ot.attendance_approval_request_id);

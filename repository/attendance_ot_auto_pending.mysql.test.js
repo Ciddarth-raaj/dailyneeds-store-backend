@@ -279,6 +279,55 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.equal(again.code, 409, "approve after reject is refused by the guarded UPDATE");
   });
 
+  it("approval vs recalculation: an approval computed from minutes a recalculation has since moved is refused under the lock", async () => {
+    eligible.set(`${EMP}:${D1}`, 120);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    const [r] = await otRows();
+    // The approver read 120; a punch void is recalculated and the sync lowers
+    // the pending OT to 60 before the decision's transaction runs.
+    eligible.set(`${EMP}:${D1}`, 60);
+    await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    assert.equal((await otRows())[0].minutes, 60);
+    const stale = await repo.decideStage({
+      requestId: r.id, stageNo: 1, decision: "APPROVED", actorId: SM3, remarks: null, adminOverride: false,
+      next: { status: "APPROVED", current_stage_no: 1, approved_ot_minutes: 120 }, calculations: [],
+      expectCandidateOtMinutes: 120,
+    });
+    assert.equal(stale.code, 409);
+    assert.equal(stale.ot_minutes_changed, true, "told apart from a moved decision, so the card is re-presented");
+    assert.equal(stale.candidate_ot_minutes, 60);
+    const [after] = await otRows();
+    assert.deepEqual([after.status, after.minutes], ["PENDING", 60], "nothing approved, nothing over-approved");
+    const steps = await q(pool, "SELECT decision FROM attendance_approval_step WHERE attendance_approval_request_id = ?", [r.id]);
+    assert.ok(steps.every((x) => x.decision === "PENDING"), "the step write rolled back too");
+    // Decided on the current figure, it goes through.
+    const fresh = await repo.decideStage({
+      requestId: r.id, stageNo: 1, decision: "APPROVED", actorId: SM3, remarks: null, adminOverride: false,
+      next: { status: "APPROVED", current_stage_no: 2, approved_ot_minutes: 60 }, calculations: [],
+      expectCandidateOtMinutes: 60,
+    });
+    assert.equal(fresh.code, 200);
+  });
+
+  it("a date whose open slot a PENDING regularization holds: not raised, and REPORTED with its minutes - preview and apply alike", async () => {
+    eligible.set(`${EMP}:${D1}`, 60);
+    await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, reason, candidate_ot_minutes, auto_created, total_stages)
+                   VALUES ('REGULARIZATION', ?, ?, ?, 'Missed punch', 0, 0, 1)`, [EMP, EMP, D1]);
+    const [reg] = await q(pool, "SELECT attendance_approval_request_id AS id FROM attendance_approval_request WHERE request_type = 'REGULARIZATION'");
+    for (const dry_run of [true, false]) {
+      // eslint-disable-next-line no-await-in-loop
+      const out = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], dry_run });
+      assert.deepEqual(out.created, [], `dry_run=${dry_run}: nothing promised, nothing created`);
+      assert.deepEqual(out.skipped.map((x) => [x.reason, x.eligible_ot_minutes, x.blocking_request_id, x.blocking_request_type]),
+        [["BLOCKED_BY_OPEN_REQUEST", 60, Number(reg.id), "REGULARIZATION"]]);
+    }
+    assert.equal((await otRows()).length, 0);
+    // Once the regularization is no longer pending, the slot is free.
+    await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [reg.id]);
+    const freed = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
+    assert.equal(freed.created.length, 1);
+  });
+
   it("a payroll-locked month: nothing is raised, and the insert itself refuses under FOR UPDATE", async () => {
     eligible.set(`${EMP}:${D1}`, 60);
     await q(pool, "INSERT INTO payrun_employee_calculation VALUES (?, ?, ?, 'APPROVED_LOCKED')", [EMP, Number(D1.slice(0, 4)), Number(D1.slice(5, 7))]);

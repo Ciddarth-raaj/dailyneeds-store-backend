@@ -2,8 +2,8 @@
 /**
  * DEPLOY BACKFILL: each employee's PREVIOUS 5 ATTENDANCE DAYS of eligible OT,
  * into approval - through the SAME `syncAutoOt` the attendance engine calls
- * after every stored day. This script writes no SQL of its own except the
- * cutover row, which it only ever LOWERS (and only with --apply).
+ * after every stored day. This script writes no SQL of its own, and never
+ * moves the cutover row (see below). Without --apply it writes nothing.
  *
  * ================================== WHAT "5 ATTENDANCE DAYS" MEANS HERE ====
  *
@@ -41,6 +41,11 @@
  *   payroll-locked month                       -> NOT raised; reported with
  *                                                its minutes (and an existing
  *                                                pending one is preserved)
+ *   another PENDING request on the date        -> NOT raised (the date's one
+ *   (a regularization or permission)              open slot is taken); listed
+ *                                                under blocked_by_open_request
+ *                                                with its minutes - re-run once
+ *                                                that request is decided
  *
  * IDEMPOTENT: a second run creates nothing. TELEGRAM: no per-date cards - each
  * named first approver gets ONE summary ("12 OT approvals pending from
@@ -56,7 +61,8 @@
  *
  * Options: --days <n> attendance days (1..31, default 5), --lookback <n>
  * calendar days (5..45, default 31), --employee <id> (repeatable), --today
- * YYYY-MM-DD (default IST today), --no-telegram, --summary-only (omit the
+ * YYYY-MM-DD (default IST today; PREVIEW ONLY, never in the future - --apply
+ * always runs on the real IST today), --no-telegram, --summary-only (omit the
  * per-employee detail from the JSON). Exit code 1 if anything failed.
  */
 
@@ -104,6 +110,11 @@ function parseArgs(argv) {
     } else throw new Error(`unknown argument ${arg}`);
   }
   if (out.days > out.lookback) throw new Error("--days cannot exceed --lookback");
+  // --today only re-points a PREVIEW. A future date would judge open days as
+  // closed, and a past one would let --apply raise OT for an arbitrary old
+  // window, so --apply always runs on the real IST today.
+  if (out.today !== null && out.apply) throw new Error("--today is for a preview only; --apply runs on today's IST date");
+  if (out.today !== null && out.today > istToday()) throw new Error("--today cannot be in the future");
   return out;
 }
 
@@ -263,8 +274,11 @@ async function run({
     locked_month_eligible_days: 0,
     locked_month_eligible_minutes: 0,
     locked_month_pending_preserved: 0,
+    blocked_by_open_request_days: 0,
+    blocked_by_open_request_minutes: 0,
   };
   const chainProblems = [];
+  const blockedByOpenRequest = [];
   const detail = [];
   const summaryByApprover = new Map();
   let roleChainNotMessaged = 0;
@@ -296,6 +310,18 @@ async function run({
       const rejected = result.preserved_rejected || [];
       const held = result.held || [];
       const locked = (result.skipped || []).filter((s) => s.reason === "PAYROLL_LOCKED");
+      const blocked = (result.skipped || []).filter((s) => s.reason === "BLOCKED_BY_OPEN_REQUEST");
+      counts.blocked_by_open_request_days += blocked.length;
+      counts.blocked_by_open_request_minutes += blocked.reduce((n, b) => n + (Number(b.eligible_ot_minutes) || 0), 0);
+      blocked.forEach((b) =>
+        blockedByOpenRequest.push({
+          employee_id: plan.employee_id,
+          attendance_date: b.attendance_date,
+          eligible_ot_minutes: b.eligible_ot_minutes,
+          blocking_request_id: b.blocking_request_id,
+          blocking_request_type: b.blocking_request_type,
+        })
+      );
 
       counts.new_pending += created.length;
       counts.new_pending_minutes += created.reduce((n, c) => n + (Number(c.ot_minutes) || 0), 0);
@@ -316,7 +342,8 @@ async function run({
         approved.filter((a) => pos(a.eligible_ot_minutes)).length +
         rejected.filter((r) => pos(r.eligible_ot_minutes)).length +
         held.filter((h) => pos(h.eligible_ot_minutes)).length +
-        locked.filter((l) => pos(l.eligible_ot_minutes)).length;
+        locked.filter((l) => pos(l.eligible_ot_minutes)).length +
+        blocked.length;
 
       // Every new record must have somebody active to decide it.
       for (const c of created) {
@@ -417,8 +444,14 @@ async function run({
       payroll_locked_eligible_days_not_raised: counts.locked_month_eligible_days - counts.locked_month_pending_preserved,
       payroll_locked_pending_preserved: counts.locked_month_pending_preserved,
       payroll_locked_eligible_minutes: counts.locked_month_eligible_minutes,
+      blocked_by_open_request_days: counts.blocked_by_open_request_days,
+      blocked_by_open_request_minutes: counts.blocked_by_open_request_minutes,
     },
     employees_without_valid_approval_chain: chainProblems,
+    // Eligible OT on a date another PENDING request holds: NOT raised. Decide
+    // the blocking request, then re-run the backfill while the date is still
+    // in the employee's window.
+    blocked_by_open_request: blockedByOpenRequest,
     telegram: {
       mode: "ONE_SUMMARY_PER_APPROVER",
       summaries: apply ? telegramSent : telegramPlan,

@@ -110,6 +110,40 @@ class PayrunCalculationRepository {
     this.db = db;
   }
 
+  /**
+   * TRUE when the Prior-Month OT this stored calculation pays is no longer
+   * exactly the set INCLUDED for its month - read FOR UPDATE inside Approve &
+   * Lock's transaction. A database without the table or column has none.
+   */
+  async _lateOtMovedLocked(conn, { row, year, month }) {
+    const run = (sql, params) =>
+      new Promise((resolve, reject) => conn.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
+    try {
+      const [stored] = await run(
+        "SELECT prior_month_ot FROM payrun_employee_calculation WHERE payrun_calculation_id = ?",
+        [row.payrun_calculation_id]
+      );
+      let paid = stored && stored.prior_month_ot;
+      if (typeof paid === "string") paid = JSON.parse(paid);
+      const paidIds = (Array.isArray(paid) ? paid : [])
+        .map((i) => Number(i.late_settlement_id))
+        .filter((id) => Number.isFinite(id))
+        .sort((a, b) => a - b);
+      const included = await run(
+        `SELECT late_settlement_id FROM attendance_ot_late_settlement
+          WHERE employee_id = ? AND settlement_status = 'INCLUDED' AND settlement_year = ? AND settlement_month = ?
+          FOR UPDATE`,
+        [row.employee_id, year, month]
+      );
+      const includedIds = (included || []).map((i) => Number(i.late_settlement_id)).sort((a, b) => a - b);
+      return paidIds.join(",") !== includedIds.join(",");
+    } catch (err) {
+      if (err && (err.code === "ER_NO_SUCH_TABLE" || err.code === "ER_BAD_FIELD_ERROR")) return false;
+      this._log("LATE-OT-MOVED-LOCKED", err);
+      throw err;
+    }
+  }
+
   _log(code, err, ref = {}) {
     logger.Log({
       level: logger.LEVEL.ERROR,
@@ -463,15 +497,24 @@ class PayrunCalculationRepository {
                   source_year, source_month, eligible_ot_minutes, approved_ot_minutes,
                   source_daily_rate AS daily_rate, nrm_minutes, ot_hourly_rate, amount,
                   settlement_status, settlement_year, settlement_month
-             FROM attendance_ot_late_settlement
-            WHERE employee_id IN (?)
+             FROM attendance_ot_late_settlement s
+            WHERE s.employee_id IN (?)
               AND (
-                    (settlement_status = 'PENDING_SETTLEMENT'
-                       AND (source_year * 12 + source_month) < (? * 12 + ?))
-                 OR (settlement_status IN ('INCLUDED','SETTLED') AND settlement_year = ? AND settlement_month = ?)
+                    (s.settlement_status = 'PENDING_SETTLEMENT'
+                       AND (s.source_year * 12 + s.source_month) < (? * 12 + ?)
+                       /* A LOCKED month takes nothing new: an item approved
+                          after it locked waits for the next open month, and
+                          the locked month's inputs stay what it was locked
+                          with (otherwise its Publish reads "changed"). */
+                       AND NOT EXISTS (
+                             SELECT 1 FROM payrun_employee_calculation c
+                              WHERE c.employee_id = s.employee_id
+                                AND c.period_year = ? AND c.period_month = ?
+                                AND c.status = 'APPROVED_LOCKED'))
+                 OR (s.settlement_status IN ('INCLUDED','SETTLED') AND s.settlement_year = ? AND s.settlement_month = ?)
                   )
-            ORDER BY employee_id, attendance_date, attendance_approval_request_id`,
-          [employeeIds, year, month, year, month],
+            ORDER BY s.employee_id, s.attendance_date, s.attendance_approval_request_id`,
+          [employeeIds, year, month, year, month, year, month],
           (err, rows) => (err ? reject(err) : resolve(rows || []))
         );
       });
@@ -1132,6 +1175,14 @@ class PayrunCalculationRepository {
             outcome: "RECALCULATION_PENDING",
             pending_recalculations: pending,
           });
+          continue;
+        }
+
+        // AND THE PRIOR-MONTH OT IT PAYS MUST STILL BE EXACTLY WHAT IT
+        // CLAIMED, on the same held lock: an item revoked (CANCELLED) after
+        // this calculation was saved must not be locked in as paid.
+        if (await this._lateOtMovedLocked(conn, { row, year, month })) {
+          results.push({ employee_id: entry.employee_id, outcome: "PRIOR_MONTH_OT_MOVED" });
           continue;
         }
 

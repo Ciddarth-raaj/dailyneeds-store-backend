@@ -54,7 +54,11 @@ CREATE TABLE IF NOT EXISTS `attendance_ot_late_settlement` (
   PRIMARY KEY (`late_settlement_id`),
   UNIQUE KEY `uq_aols_request` (`attendance_approval_request_id`),
   KEY `idx_aols_employee_status` (`employee_id`, `settlement_status`),
-  KEY `idx_aols_settlement_month` (`settlement_year`, `settlement_month`)
+  KEY `idx_aols_settlement_month` (`settlement_year`, `settlement_month`),
+  -- RESTRICT, not CASCADE: a request with money settled against it must not
+  -- be deletable from under its settlement.
+  CONSTRAINT `fk_aols_request` FOREIGN KEY (`attendance_approval_request_id`)
+    REFERENCES `attendance_approval_request` (`attendance_approval_request_id`) ON DELETE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Every move of the money, append-only: who/what moved it, and to which

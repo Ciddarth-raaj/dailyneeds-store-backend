@@ -653,6 +653,17 @@ describe("10. an old Telegram button cannot process an already-decided OT", () =
     assert.deepEqual(w.telegramLog.edited.pop().markup, { inline_keyboard: [] }, "the buttons are taken away");
   });
 
+  it("an OT button pointed at a NON-OT request (a crafted callback) decides nothing", async () => {
+    const w = build({ rawPunches: day(43, DATE) });
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    ot.request_type = "REGULARIZATION"; // the id now names another type of request
+    const out = await w.otTelegram.handle(tap(`ot:${ot.attendance_approval_request_id}:A:90`, 7));
+    assert.equal(out.wrong_type, true);
+    assert.match(w.telegramLog.answered.pop(), /not for an OT request/);
+    assert.equal(ot.status, "PENDING", "nothing decided");
+  });
+
   it("Reject on an approved OT's old message is refused before even asking for a reason", async () => {
     const w = build({ rawPunches: day(43, DATE) });
     await recalc(w, 43);
@@ -835,6 +846,9 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
     assert.equal(report.totals.total_ot_minutes_added_to_queue, 150);
     assert.equal(report.totals.already_approved, 1);
     assert.equal(report.totals.already_rejected, 1);
+    // Always present, so a summary-only preview shows dates another request holds.
+    assert.equal(report.totals.blocked_by_open_request_days, 0);
+    assert.deepEqual(report.blocked_by_open_request, []);
     assert.equal(report.totals.eligible_ot_days_found, 4);
     assert.deepEqual(report.employees_without_valid_approval_chain, []);
     assert.deepEqual(report.failures, []);
@@ -910,6 +924,10 @@ describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days
     assert.deepEqual(backfill.parseArgs([]), { apply: false, days: 5, lookback: 31, employee_ids: [], today: null, telegram: true, summary_only: false });
     assert.equal(backfill.parseArgs(["--apply", "--no-telegram"]).telegram, false);
     assert.throws(() => backfill.parseArgs(["--days", "90"]), /1 to 31/);
+    // --today re-points a PREVIEW only, and never into the future.
+    assert.throws(() => backfill.parseArgs(["--apply", "--today", "2026-10-01"]), /preview only/);
+    assert.throws(() => backfill.parseArgs(["--today", "2999-01-01"]), /cannot be in the future/);
+    assert.equal(backfill.parseArgs(["--today", "2026-10-01"]).today, "2026-10-01");
     assert.throws(() => backfill.parseArgs(["--lookback", "60"]), /5 to 45/);
     assert.throws(() => backfill.parseArgs(["--force"]), /unknown argument/);
   });
