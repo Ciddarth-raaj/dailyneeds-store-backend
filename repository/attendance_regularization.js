@@ -48,6 +48,38 @@ const REVOKE_STEPS_SQL = `SELECT attendance_approval_step_id, stage_no, approver
 /** A request and its steps as one comparable string: every column, as text, in a fixed order. */
 const { CORRECTION_REQUEST_TYPES, correctionPendingRefusal } = require("../utils/ot_correction_priority");
 
+/**
+ * THE DEFERRED HISTORICAL EXCEPTION, proved on the connection that is about
+ * to insert: the backfill's marker for exactly this employee and date, still
+ * WAITING (locked FOR UPDATE, so a concurrent resolution cannot pass it by),
+ * and no attendance correction pending on the date (a locking read).
+ */
+async function deferredLockedExceptionHolds(connection, request) {
+  try {
+    const [marker] = await queryAsync(
+      connection,
+      `SELECT deferred_sync_id FROM attendance_ot_deferred_sync
+        WHERE deferred_sync_id = ? AND employee_id = ? AND attendance_date = ?
+          AND status = 'WAITING_FOR_CORRECTION' AND source = 'BACKFILL'
+        FOR UPDATE`,
+      [request.deferred_sync_id, request.requested_for_employee_id, request.attendance_date]
+    );
+    if (!marker) return false;
+    const [blocker] = await queryAsync(
+      connection,
+      `SELECT attendance_approval_request_id FROM attendance_approval_request
+        WHERE requested_for_employee_id = ? AND attendance_date = ?
+          AND status = 'PENDING' AND request_type IN (?)
+        LIMIT 1 FOR UPDATE`,
+      [request.requested_for_employee_id, request.attendance_date, CORRECTION_REQUEST_TYPES]
+    );
+    return !blocker;
+  } catch (err) {
+    if (err && err.code === "ER_NO_SUCH_TABLE") return false;
+    throw err;
+  }
+}
+
 function revocationFingerprint(request, steps) {
   const plain = (row) =>
     row
@@ -369,7 +401,7 @@ class AttendanceRegularizationRepository {
       return await this._read(
         "LIST-WAITING-DEFERRED-OT",
         `SELECT deferred_sync_id, employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
-                blocking_request_id, blocking_request_type
+                blocking_request_id, blocking_request_type, source
            FROM attendance_ot_deferred_sync
           WHERE employee_id = ? AND attendance_date IN (?) AND status = 'WAITING_FOR_CORRECTION'`,
         [employeeId, dates]
@@ -668,7 +700,7 @@ class AttendanceRegularizationRepository {
        * self-settling (auto-approved) correction, are refused in a locked
        * month below and at their own writes.
        */
-      await lockPayrollMonthsOnConnection(connection, [
+      const payrollHits = await lockPayrollMonthsOnConnection(connection, [
         { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
       ]);
 
@@ -714,10 +746,22 @@ class AttendanceRegularizationRepository {
        */
       // AN AUTOMATICALLY RAISED OT is refused in a locked month under the
       // same lock: the system never opens a question about settled pay.
+      //
+      // THE ONE EXCEPTION is a DEFERRED HISTORICAL DATE, re-proved here under
+      // the locks: the backfill's marker for THIS employee and date (WAITING,
+      // source BACKFILL), and no attendance correction still pending on the
+      // date. Then the ordinary pending OT approval request is inserted in
+      // the locked month - and nothing else is written to it.
       if (request.request_type === "OT" && request.refuse_when_payroll_locked) {
-        await assertMonthsNotPayrollLocked(connection, [
-          { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
-        ]);
+        const deferredException =
+          payrollHits.length > 0 && request.deferred_sync_id
+            ? await deferredLockedExceptionHolds(connection, request)
+            : false;
+        if (!deferredException) {
+          await assertMonthsNotPayrollLocked(connection, [
+            { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
+          ]);
+        }
       }
       if (request.request_type === "PERMISSION") {
         // The payroll row FIRST (the order every Permission write and Approve

@@ -829,9 +829,37 @@ uncorrected day computes. It is a trigger, not an OT record.
 When the date is free (the correction's final decision, or the 07:20 daily
 safety-net sweep `attendance_ot_deferred_sweep`, or a backfill re-run), the
 ordinary OT sync runs for that date and the marker is `RESOLVED` with what it
-did (`CREATED`, `UPDATED`, `UNCHANGED`, `NO_OT`, `WITHDRAWN`,
-`PRESERVED_DECIDED`, `PAYROLL_LOCKED`, ...). A date still held by another
-correction stays waiting (`STILL_BLOCKED`). The marker lets the sync create
+did:
+
+| resolution | when |
+|---|---|
+| `RESOLVED_OT_CREATED` | the pending OT approval request was created |
+| `RESOLVED_OT_UPDATED` / `RESOLVED_OT_WITHDRAWN` | an existing pending system OT followed the corrected day |
+| `RESOLVED_EXISTING_PENDING` | a pending OT already exists on the date |
+| `RESOLVED_EXISTING_DECISION` | an APPROVED or REJECTED OT exists - never overwritten |
+| `RESOLVED_NO_OT` | the corrected day has no eligible OT |
+
+It stays `WAITING_FOR_CORRECTION` - retried by the next decision, sweep or
+re-run - while another correction is pending (`STILL_BLOCKED` logged), and on
+anything that did not complete: an error, a day still open, a refused lock or
+gate, or a race lost to another sync (the winner resolves it). It is **never
+resolved merely because the month is locked**.
+
+**The source month is locked by then.** A remembered date is the ONE
+exception to "no automatic OT in a payroll-locked month": its ordinary
+pending OT approval request is created anyway. The exception holds only when
+all of these are true, re-proved inside the insert's transaction under row
+locks (`repository/attendance_regularization.js#deferredLockedExceptionHolds`):
+a marker for this exact employee and date, still `WAITING_FOR_CORRECTION`,
+created by the backfill (`source = 'BACKFILL'`); no attendance correction
+pending on the date; and no APPROVED/REJECTED OT on it (the sync preserves
+those first). Nothing is written to the locked month - no day row, no payroll
+figure, no settlement - and nothing is priced: approving it later is the
+existing Prior-Month OT flow (`PENDING_SETTLEMENT` priced on the source
+month, settled in the next open payroll); rejecting it is final. DnDS and the
+Telegram card say "Source payroll locked — if approved, this OT will be
+settled in the next eligible payroll." Every other date in a locked month -
+ordinary post-deploy dates included - keeps the lock rule (`PAYROLL_LOCKED`). The marker lets the sync create
 OT before the global cutover **for that employee and date only**; the cutover
 is never moved, and no other old date gains anything. Every step is logged in
 `attendance_ot_deferred_sync_log` (`DEFERRED`, `STILL_BLOCKED`,

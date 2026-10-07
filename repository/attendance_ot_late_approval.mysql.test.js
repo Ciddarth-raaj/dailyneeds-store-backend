@@ -29,6 +29,8 @@ const MIGRATIONS = [
   "20261125120000-attendance-ot-late-settlement-up.sql",
   "20261103120000-attendance-approval-revocation-up.sql",
   "20261106120000-attendance-approval-revocation-outcome-up.sql",
+  // Attendance correction before system OT: groups, the OT key, the deferred markers.
+  "20261126120000-attendance-ot-correction-priority-up.sql",
 ];
 
 const EMP = 601;
@@ -117,6 +119,8 @@ const SCHEMA = [
 ];
 
 const TABLES = [
+  "attendance_ot_deferred_sync_log",
+  "attendance_ot_deferred_sync",
   "attendance_approval_revocation",
   "attendance_regularized_punch",
   "attendance_date_shift_override",
@@ -142,6 +146,8 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
   let pool;
   let repo;
   let usecase;
+  // What the engine finds eligible on any date (the deferred tests vary it).
+  let eligibleMinutes = 60;
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}${URL.includes("?") ? "&" : "?"}connectionLimit=6&multipleStatements=true`);
@@ -157,7 +163,7 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
       calculateRange: async ({ employee_id, from_date }) => [{
         employee_id, attendance_date: from_date, status: "FINAL", is_final: true, punch_count: 2,
         shift_snapshot: { work_shift_id: 7, in_time: "09:00:00", out_time: "18:00:00" }, effective_punches: [],
-        candidate_ot_minutes: 60, excess_ot_minutes: 60, attendance_calculation_mode: "STANDARD",
+        candidate_ot_minutes: eligibleMinutes, excess_ot_minutes: eligibleMinutes, attendance_calculation_mode: "STANDARD",
       }],
       // If anything tried to store the locked day, this row would reach the table.
       toStorageRow: (d) => ({ employee_id: d.employee_id, attendance_date: d.attendance_date, approved_ot_minutes: 999 }),
@@ -172,6 +178,7 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
   });
 
   beforeEach(async () => {
+    eligibleMinutes = 60;
     for (const t of TABLES.filter((x) => !/auto_pending_setting/.test(x))) await q(pool, `DELETE FROM ${t}`);
     await q(pool, "UPDATE attendance_ot_auto_pending_setting SET enabled = 1, auto_pending_from_date = '2026-09-01'");
     await q(pool, "INSERT INTO designation VALUES (1, 'Staff'), (2, 'Store Manager')");
@@ -293,6 +300,165 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
       /payroll/i
     );
     assert.equal((await request()).status, "REJECTED");
+  });
+
+
+  /* ===================== DEFERRED HISTORICAL DATE, SOURCE MONTH LOCKED (the narrow exception) ==== */
+
+  /*
+   * 10 Sep had an attendance correction open when the deploy backfill ran, so
+   * the date was REMEMBERED. September has since been locked; the correction
+   * has now finished (here: a permission closed by the lock). The OT approval
+   * request must still be raised - as an ordinary pending OT - and approving
+   * it goes through the existing Prior-Month OT settlement.
+   */
+  const ADMIN_ACTOR = { employee_id: SM3, user_type: 2 };
+  const markers = () => q(pool, "SELECT deferred_sync_id AS id, status, resolution, source FROM attendance_ot_deferred_sync ORDER BY deferred_sync_id");
+  const otRequests = () => q(pool, "SELECT attendance_approval_request_id AS id, status, candidate_ot_minutes AS minutes, auto_created FROM attendance_approval_request WHERE requested_for_employee_id = ? AND request_type = 'OT' ORDER BY id", [EMP]);
+  const deferredLocked = async ({ source = "BACKFILL" } = {}) => {
+    // No OT record on the date yet: the backfill could not evaluate it.
+    await q(pool, "DELETE FROM attendance_approval_step");
+    await q(pool, "DELETE FROM attendance_approval_request");
+    // The date is BEFORE the global cutover (the deploy date).
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = '2026-10-01'");
+    // The blocking correction, finished (a permission closed by the lock).
+    await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, reason, candidate_ot_minutes, auto_created, total_stages, status)
+                   VALUES ('PERMISSION', ?, ?, ?, 'Left early', 0, 0, 1, 'REJECTED')`, [EMP, EMP, DATE]);
+    const saved = await repo.upsertDeferredOt({ employee_id: EMP, attendance_date: DATE, blocking_request_id: 1, blocking_request_type: "PERMISSION", eligible_ot_minutes: 0, source });
+    return saved.deferred_sync_id;
+  };
+
+  it("2/3/17. a remembered date in a LOCKED month: the ordinary pending OT is raised; nothing locked is written; RESOLVED_OT_CREATED", async () => {
+    await deferredLocked();
+    const before = await frozen();
+    const out = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal(out.resolved.length, 1);
+    const [ot] = await otRequests();
+    assert.deepEqual([ot.status, ot.minutes, Number(ot.auto_created)], ["PENDING", 60, 1], "the same ordinary system OT approval request");
+    assert.equal(await frozen(), before, "the locked calculation and the locked day are byte-identical");
+    assert.equal((await q(pool, "SELECT status FROM payrun_employee_calculation WHERE employee_id = ?", [EMP]))[0].status, "APPROVED_LOCKED");
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_late_settlement"))[0].n, 0, "5. not priced, not payable - only an approval item");
+    assert.deepEqual((await markers()).map((m) => [m.status, m.resolution]), [["RESOLVED", "RESOLVED_OT_CREATED"]]);
+  });
+
+  it("4/16. approved in DnDS: the existing Prior-Month OT settlement - PENDING_SETTLEMENT, priced on September; locked rows unchanged", async () => {
+    await deferredLocked();
+    await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    const [ot] = await otRequests();
+    const before = await frozen();
+    const out = await decideAll(ot.id);
+    assert.equal(out.status, "APPROVED");
+    assert.equal(out.late_settlement.message, "Approved — will be settled in the next eligible payroll as Prior-Month OT");
+    const [s] = await q(pool, "SELECT settlement_status, approved_ot_minutes, source_year, source_month, amount FROM attendance_ot_late_settlement");
+    assert.deepEqual([s.settlement_status, s.approved_ot_minutes, s.source_year, s.source_month, Number(s.amount)], ["PENDING_SETTLEMENT", 60, 2026, 9, 100],
+      "priced at approval on September's Rs 800 a day over 8 hours - the existing late-approval pricing");
+    assert.equal(await frozen(), before, "17. the locked payroll and day stay data-equivalent");
+  });
+
+  it("5. rejected: final REJECTED, no settlement", async () => {
+    await deferredLocked();
+    await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    const [ot] = await otRequests();
+    const out = await usecase.decide({ actor: ADMIN_ACTOR, request_id: ot.id, decision: "REJECTED", remarks: "Not authorised" });
+    assert.equal(out.status, "REJECTED");
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_late_settlement"))[0].n, 0);
+  });
+
+  it("6. the corrected day has no eligible OT: nothing raised, RESOLVED_NO_OT", async () => {
+    await deferredLocked();
+    eligibleMinutes = 0;
+    await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal((await otRequests()).length, 0);
+    assert.deepEqual((await markers()).map((m) => [m.status, m.resolution]), [["RESOLVED", "RESOLVED_NO_OT"]]);
+  });
+
+  it("7/8. an OT already APPROVED or REJECTED on the date wins: no new pending, RESOLVED_EXISTING_DECISION", async () => {
+    for (const decided of ["APPROVED", "REJECTED"]) {
+      /* eslint-disable no-await-in-loop */
+      await deferredLocked();
+      await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, reason, candidate_ot_minutes, auto_created, total_stages, status, approved_ot_minutes)
+                     VALUES ('OT', ?, ?, ?, 'decided before', 60, 1, 1, ?, ?)`, [EMP, EMP, DATE, decided, decided === "APPROVED" ? 60 : 0]);
+      await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+      const rows = await otRequests();
+      assert.deepEqual(rows.map((r) => r.status), [decided], `${decided}: never re-raised`);
+      assert.deepEqual((await markers()).map((m) => m.resolution), ["RESOLVED_EXISTING_DECISION"]);
+      await q(pool, "DELETE FROM attendance_ot_deferred_sync_log");
+      await q(pool, "DELETE FROM attendance_ot_deferred_sync");
+      /* eslint-enable no-await-in-loop */
+    }
+  });
+
+  it("9/10/11. ORDINARY dates keep the lock rule; an unrelated old date stays BEFORE_CUTOVER; the cutover never moves", async () => {
+    await deferredLocked();
+    // 10. An unrelated pre-cutover date in the same locked month, nobody remembered it.
+    const unrelated = await usecase.syncAutoOt({ employee_id: EMP, dates: ["2026-09-12"], source: "RECALCULATION" });
+    assert.deepEqual(unrelated.skipped.map((x) => x.reason), ["BEFORE_CUTOVER"]);
+    // 11. An ordinary date AFTER the cutover in a locked month: the existing lock rule.
+    await q(pool, "UPDATE attendance_ot_auto_pending_setting SET auto_pending_from_date = '2026-09-01'");
+    const ordinary = await usecase.syncAutoOt({ employee_id: EMP, dates: ["2026-09-15"], source: "RECALCULATION" });
+    assert.deepEqual(ordinary.skipped.map((x) => x.reason), ["PAYROLL_LOCKED"]);
+    assert.equal((await otRequests()).length, 0, "no OT on any date but the remembered one");
+    // 9. The cutover was only ever changed by this test itself.
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, "2026-09-01");
+  });
+
+  it("the exception is the database's, not the caller's: a marker not from the backfill, or already resolved, does not open a locked month", async () => {
+    const id = await deferredLocked({ source: "MANUAL" });
+    const out = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal(out.resolved.length, 0);
+    assert.equal((await otRequests()).length, 0);
+    assert.deepEqual((await markers()).map((m) => m.status), ["WAITING_FOR_CORRECTION"], "14. not resolved: nothing was created");
+    // A forged call straight to the repository with a non-qualifying marker is refused under the lock.
+    await assert.rejects(
+      repo.createRequest({
+        request: { request_type: "OT", requested_for_employee_id: EMP, requested_by_employee_id: EMP, attendance_date: DATE, outlet_id: 3,
+          requester_class: "STORE_EMPLOYEE", reason: "forged", candidate_ot_minutes: 60, auto_created: true, chain_source: "ROLE",
+          refuse_when_payroll_locked: true, deferred_sync_id: id },
+        chain: [{ stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: 3, approver_employee_id: null, approval_level: null }],
+        punch: null,
+      }),
+      (err) => /payroll/i.test(err.message)
+    );
+  });
+
+  it("14. a failed creation leaves the marker WAITING; the next run raises it and only then resolves", async () => {
+    await deferredLocked();
+    const real = repo.createRequest.bind(repo);
+    repo.createRequest = async () => { throw new Error("connection lost"); };
+    const first = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    repo.createRequest = real;
+    assert.equal(first.resolved.length, 0);
+    assert.deepEqual((await markers()).map((m) => m.status), ["WAITING_FOR_CORRECTION"]);
+    const second = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal(second.resolved.length, 1);
+    assert.equal((await otRequests()).length, 1);
+  });
+
+  it("12/13. the sweep, the correction's decision hook and a backfill re-run at once: exactly ONE pending OT, resolved once", async () => {
+    await deferredLocked();
+    await Promise.all([
+      usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" }),
+      usecase.syncAutoOt({ employee_id: EMP, dates: [DATE], source: "DECISION_PERMISSION" }),
+      usecase.syncAutoOt({ employee_id: EMP, dates: [DATE], source: "BACKFILL", notify: false, allow_creation_from: DATE, track_deferred: true }),
+      usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" }),
+    ]);
+    assert.deepEqual((await otRequests()).map((r) => r.status), ["PENDING"]);
+    assert.equal((await markers()).length, 1);
+    const resolvedLogs = await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_deferred_sync_log WHERE action = 'RESOLVED'");
+    assert.equal(resolvedLogs[0].n, 1);
+  });
+
+  it("deferred creation vs an approver: the request is created in one transaction, and a sweep re-run beside the approval never re-raises it", async () => {
+    await deferredLocked();
+    await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    const [ot] = await otRequests();
+    const [a, b] = await Promise.all([
+      decideAll(ot.id),
+      usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" }),
+    ]);
+    assert.equal(a.status, "APPROVED");
+    assert.ok(b);
+    assert.deepEqual((await otRequests()).map((r) => r.status), ["APPROVED"], "never re-raised beside the decision");
   });
 
   it("the engine read: the request carries its settlement, so the day never pays it", async () => {

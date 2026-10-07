@@ -223,7 +223,14 @@ function build(state = {}) {
     // and group - what makes a concurrent duplicate impossible.
     createRequest: async ({ request, chain, punch: manual }) => {
       if (request.refuse_when_payroll_locked && lockHits([{ employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date }]).length > 0) {
-        throw lockedError();
+        // THE DEFERRED HISTORICAL EXCEPTION, as the repository proves it: the
+        // backfill's WAITING marker for this employee and date, and no
+        // correction pending on the date.
+        const marker = request.deferred_sync_id
+          ? store.deferred.find((d) => d.deferred_sync_id === request.deferred_sync_id && d.employee_id === request.requested_for_employee_id &&
+              d.attendance_date === request.attendance_date && d.status === "WAITING_FOR_CORRECTION" && d.source === "BACKFILL")
+          : null;
+        if (!marker || pendingCorrections(request.requested_for_employee_id, [request.attendance_date]).length > 0) throw lockedError();
       }
       const sameDatePending = (r) =>
         r.requested_for_employee_id === request.requested_for_employee_id && r.attendance_date === request.attendance_date && r.status === "PENDING";
@@ -1581,8 +1588,61 @@ describe("DEFERRED HISTORICAL OT: the backfill remembers a date a correction hol
     const [ot] = liveOt(w, 42, "2026-09-17");
     assert.ok(ot, "12. the remembered date's OT is raised from the corrected day");
     assert.equal(ot.candidate_ot_minutes, 60);
-    assert.deepEqual(w.store.deferred.map((d) => [d.status, d.resolution]), [["RESOLVED", "CREATED"]]);
+    assert.deepEqual(w.store.deferred.map((d) => [d.status, d.resolution]), [["RESOLVED", "RESOLVED_OT_CREATED"]]);
     assert.deepEqual(w.store.deferredLog.map((l) => l.action), ["DEFERRED", "SYNC_ATTEMPTED", "RESOLVED"]);
     assert.equal((await w.regRepo.getAutoOtSetting()).auto_pending_from_date, "2026-09-20", "13. the cutover is untouched by any of it");
+  });
+});
+
+describe("DEFERRED HISTORICAL DATE IN A LOCKED MONTH: raised, then settled forward", () => {
+  /*
+   * 43's chain names its first approver (7). 14 Sep was remembered by the
+   * backfill (a correction held it); September has since been locked at
+   * Rs 800 a day; the correction has finished.
+   */
+  const lockedDeferredWorld = async () => {
+    const w = build({
+      wireAuto: false,
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+      rawPunches: day(43, DATE),
+      lockedCalc: { "43:2026-09": { payrun_calculation_id: 7001, daily_rate: 800, monthly_gross: 20800, status: "APPROVED_LOCKED" } },
+    });
+    await recalc(w, 43); // the day row the late pricing reads (no OT raised: automation not wired yet)
+    w.lockedMonths.add("43:2026-9");
+    await w.regRepo.upsertDeferredOt({ employee_id: 43, attendance_date: DATE, blocking_request_id: 1, blocking_request_type: "PERMISSION", eligible_ot_minutes: 0, source: "BACKFILL" });
+    return w;
+  };
+
+  it("2. the sweep raises the ordinary pending OT although September is locked; the card says it settles forward", async () => {
+    const w = await lockedDeferredWorld();
+    const out = await w.regularization.resolveDeferredOt({ now: NOW });
+    assert.equal(out.resolved[0].resolution, "RESOLVED_OT_CREATED");
+    const [ot] = otOf(w, 43);
+    assert.deepEqual([ot.status, ot.candidate_ot_minutes, ot.auto_created], ["PENDING", 90, 1]);
+    const card = w.telegramLog.sent.find((m) => m.replyMarkup);
+    assert.match(card.text, /Source payroll locked - if approved, this OT will be settled in the next eligible payroll\./);
+    assert.equal(w.store.settlements.length, 0, "not priced, not payable until approved");
+  });
+
+  it("15. approved from Telegram: the existing Prior-Month OT settlement, with the late-settlement answer", async () => {
+    const w = await lockedDeferredWorld();
+    await w.regularization.resolveDeferredOt({ now: NOW });
+    const [ot] = otOf(w, 43);
+    await w.otTelegram.handle(tap(`ot:${ot.attendance_approval_request_id}:A:90`, 7));
+    assert.equal(w.telegramLog.answered.pop(), "Approved");
+    const said = w.telegramLog.sent[w.telegramLog.sent.length - 1].text;
+    assert.match(said, /^Approved — will be settled in the next eligible payroll as Prior-Month OT: 90 min/);
+    assert.match(said, /payroll is locked and is not changed\./);
+    assert.equal(otOf(w, 43)[0].status, "APPROVED");
+    assert.deepEqual(w.store.settlements.map((x) => [x.settlement_status, x.approved_ot_minutes]), [["PENDING_SETTLEMENT", 90]]);
+  });
+
+  it("an ordinary locked-month date - no marker - is still not raised (the existing lock rule)", async () => {
+    const w = build({ wireAuto: false, rawPunches: day(43, DATE) });
+    await recalc(w, 43);
+    w.lockedMonths.add("43:2026-9");
+    const out = await w.regularization.syncAutoOt({ employee_id: 43, dates: [DATE], now: NOW });
+    assert.deepEqual(out.skipped.map((x) => x.reason), ["PAYROLL_LOCKED"]);
+    assert.equal(otOf(w, 43).length, 0);
   });
 });

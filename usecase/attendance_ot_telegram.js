@@ -97,7 +97,10 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
     if (ctx.worked_minutes !== null && ctx.worked_minutes !== undefined) {
       lines.push(`Worked: ${minutesAsHours(ctx.worked_minutes)}`);
     }
-    lines.push(`Eligible OT: ${Math.max(0, Math.trunc(Number(ctx.eligible_ot_minutes) || 0))} min`, "", `Request #${ctx.attendance_approval_request_id}`);
+    lines.push(`Eligible OT: ${Math.max(0, Math.trunc(Number(ctx.eligible_ot_minutes) || 0))} min`);
+    // The source payroll is locked: approving settles forward, never changes it.
+    if (ctx.source_payroll_locked) lines.push("Source payroll locked - if approved, this OT will be settled in the next eligible payroll.");
+    lines.push("", `Request #${ctx.attendance_approval_request_id}`);
     return lines.join("\n");
   };
 

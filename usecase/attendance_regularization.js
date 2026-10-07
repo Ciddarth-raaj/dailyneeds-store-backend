@@ -2393,6 +2393,31 @@ module.exports = (
     BLOCKED_BY_OPEN_REQUEST: "BLOCKED_BY_OPEN_REQUEST",
   });
 
+  /**
+   * HOW A REMEMBERED HISTORICAL DATE ENDED (`attendance_ot_deferred_sync.
+   * resolution`, status RESOLVED). Resolved only once the sync has actually
+   * done (or found) the thing it names - never merely because the month is
+   * locked.
+   */
+  const DEFERRED_RESOLUTION = Object.freeze({
+    OT_CREATED: "RESOLVED_OT_CREATED",
+    OT_UPDATED: "RESOLVED_OT_UPDATED",
+    OT_WITHDRAWN: "RESOLVED_OT_WITHDRAWN",
+    NO_OT: "RESOLVED_NO_OT",
+    EXISTING_DECISION: "RESOLVED_EXISTING_DECISION",
+    EXISTING_PENDING: "RESOLVED_EXISTING_PENDING",
+  });
+  /** Skips that leave a remembered date WAITING, to be tried again. */
+  const RETRYABLE_DEFERRED_SKIPS = Object.freeze([
+    "DAY_OPEN",
+    "PAYROLL_LOCKED",
+    "BEFORE_CUTOVER",
+    "OUTSIDE_WINDOW",
+  ]);
+
+  /** What an approver is told about a pending OT whose source payroll is locked. */
+  const LOCKED_SOURCE_NOTE = "Source payroll locked — if approved, this OT will be settled in the next eligible payroll.";
+
   /** What kind of correction holds a date: for reports and the approval screen. */
   const correctionKind = (c, employeeId) =>
     c.request_type === REQUEST_TYPE.PERMISSION
@@ -2471,6 +2496,8 @@ module.exports = (
       worked_minutes: day.worked_minutes === undefined ? null : day.worked_minutes,
       eligible_ot_minutes: request.candidate_ot_minutes,
       chain: request.chain || [],
+      // The source month's payroll is locked: approval settles it forward.
+      source_payroll_locked: Boolean(request.source_payroll_locked),
     };
   };
 
@@ -2860,10 +2887,24 @@ module.exports = (
           result.skipped.push({ attendance_date: date, reason: gated, eligible_ot_minutes: verdict.minutes });
           continue;
         }
-        if (locked) {
-          // Eligible OT in a payroll-locked month is NOT raised (no new
-          // question about settled pay), but it is REPORTED with its minutes
-          // so nothing is silently lost.
+        /*
+         * THE PAYROLL LOCK, for an ORDINARY date: eligible OT in a locked month
+         * is NOT raised (no new question about settled pay) - reported with
+         * its minutes so nothing is silently lost.
+         *
+         * THE ONE EXCEPTION - a DEFERRED HISTORICAL DATE. The deploy backfill
+         * remembered this employee's date (`attendance_ot_deferred_sync`,
+         * source BACKFILL, still WAITING) because an attendance correction
+         * held it; that correction has now finished (no correction is pending
+         * - checked above) and the engine finds eligible OT. Its ordinary
+         * PENDING OT approval request is created even though the month is now
+         * locked: nothing locked is written (no day row, no payroll figure),
+         * and approving it later goes through the existing Prior-Month OT
+         * settlement, priced then. The repository re-proves every condition
+         * under its row locks before it inserts.
+         */
+        const lockedException = locked ? markerOn.get(date) || null : null;
+        if (locked && !(lockedException && lockedException.source === "BACKFILL")) {
           result.skipped.push({ attendance_date: date, reason: AUTO_OT_SKIP.PAYROLL_LOCKED, eligible_ot_minutes: verdict.minutes });
           continue;
         }
@@ -2917,6 +2958,10 @@ module.exports = (
               auto_created: true,
               chain_source,
               refuse_when_payroll_locked: true,
+              // THE DEFERRED HISTORICAL EXCEPTION, and nothing else: the
+              // marker the repository must find (WAITING, BACKFILL, this
+              // employee and date) to insert in a locked month.
+              deferred_sync_id: lockedException ? Number(lockedException.deferred_sync_id) : null,
             },
             chain,
             punch: null,
@@ -2953,10 +2998,18 @@ module.exports = (
           chain,
           chain_source,
           first_approver_employee_id: firstApproverId,
+          // Raised in a LOCKED month under the deferred historical exception:
+          // if approved, it is settled forward as Prior-Month OT.
+          source_payroll_locked: Boolean(lockedException),
         };
         if (notify) {
           entry.telegram = await notifyOtApprover(
-            otContextFor(day, who, { attendance_approval_request_id: newId, candidate_ot_minutes: verdict.minutes, chain })
+            otContextFor(day, who, {
+              attendance_approval_request_id: newId,
+              candidate_ot_minutes: verdict.minutes,
+              chain,
+              source_payroll_locked: Boolean(lockedException),
+            })
           );
         }
         result.created.push(entry);
@@ -2975,28 +3028,31 @@ module.exports = (
       for (const [date, marker] of markerOn) {
         if (correctionOn.has(date)) continue;
         const hit = (list) => (list || []).find((x) => x.attendance_date === date);
+        // RETRYABLE - the marker stays WAITING: a failure, a day still open,
+        // a lock or gate the repository refused, or a race lost to another
+        // sync (the winner resolves it, or the next sweep finds its record).
         if (hit(result.errors)) continue;
         const skipped = hit(result.skipped);
-        if (skipped && skipped.reason === AUTO_OT_SKIP.DAY_OPEN) continue;
+        const unchanged = hit(result.unchanged);
+        if (unchanged && unchanged.duplicate_prevented) continue;
+        const pendingKept = unchanged || hit(result.held) || (skipped && skipped.existing_status === REQUEST_STATUS.PENDING ? skipped : null);
+        if (!pendingKept && skipped && RETRYABLE_DEFERRED_SKIPS.includes(skipped.reason)) continue;
         const created = hit(result.created);
         const updated = hit(result.updated);
         const withdrawn = hit(result.withdrawn);
         const decided = hit(result.preserved_approved) || hit(result.preserved_rejected);
-        const kept = hit(result.unchanged) || hit(result.held);
         const resolution = created
-          ? "CREATED"
+          ? DEFERRED_RESOLUTION.OT_CREATED
           : updated
-          ? "UPDATED"
+          ? DEFERRED_RESOLUTION.OT_UPDATED
           : withdrawn
-          ? "WITHDRAWN"
+          ? DEFERRED_RESOLUTION.OT_WITHDRAWN
           : decided
-          ? "PRESERVED_DECIDED"
-          : kept
-          ? "UNCHANGED"
-          : skipped
-          ? skipped.reason
-          : "NO_OT";
-        const otRequestId = (created || updated || withdrawn || decided || kept || {}).attendance_approval_request_id || null;
+          ? DEFERRED_RESOLUTION.EXISTING_DECISION
+          : pendingKept
+          ? DEFERRED_RESOLUTION.EXISTING_PENDING
+          : DEFERRED_RESOLUTION.NO_OT;
+        const otRequestId = (created || updated || withdrawn || decided || pendingKept || {}).attendance_approval_request_id || null;
         /* eslint-disable no-await-in-loop */
         const done = await attendanceRegularizationRepo.resolveDeferredOt({
           deferred_sync_id: marker.deferred_sync_id,
@@ -3269,10 +3325,29 @@ module.exports = (
       });
     }
 
+    // A pending OT whose SOURCE month's payroll is locked (raised under the
+    // deferred historical exception, or pending when the month locked):
+    // approving it settles forward as Prior-Month OT - said on the row, so
+    // nobody believes the old payroll changes.
+    const lockedSource = new Set();
+    if (otPending.length > 0 && typeof attendanceCalculationUsecase.findPayrollLockedPeriods === "function") {
+      const hits = await attendanceCalculationUsecase.findPayrollLockedPeriods(
+        otPending.map((r) => ({ employee_id: Number(r.requested_for_employee_id), attendance_date: toDateOnly(r.attendance_date) }))
+      );
+      (hits || []).forEach((p) =>
+        lockedSource.add(`${Number(p.employee_id)}:${Number(p.year !== undefined ? p.year : p.period_year)}-${Number(p.month !== undefined ? p.month : p.period_month)}`)
+      );
+    }
+
     const shaped = [];
     for (const row of rows) {
       const id = Number(row.attendance_approval_request_id);
       const chain = stepsByRequest.get(id) || [];
+      const rowDate = toDateOnly(row.attendance_date);
+      const sourceLocked =
+        row.request_type === REQUEST_TYPE.OT &&
+        row.status === REQUEST_STATUS.PENDING &&
+        lockedSource.has(`${Number(row.requested_for_employee_id)}:${Number(rowDate.slice(0, 4))}-${Number(rowDate.slice(5, 7))}`);
       const waitingFor =
         row.request_type === REQUEST_TYPE.OT && row.status === REQUEST_STATUS.PENDING
           ? waitingOn.get(`${Number(row.requested_for_employee_id)}:${toDateOnly(row.attendance_date)}`) || null
@@ -3395,6 +3470,8 @@ module.exports = (
         // OT: an attendance correction is pending on the date - the OT waits
         // for it and is re-synced from the corrected day.
         waiting_for_correction: Boolean(waitingFor),
+        source_payroll_locked: sourceLocked,
+        late_settlement_note: sourceLocked ? LOCKED_SOURCE_NOTE : null,
         waiting_status_label: waitingFor ? CORRECTION_PENDING_LABEL : null,
         blocking_request_id: waitingFor ? Number(waitingFor.attendance_approval_request_id) : null,
         blocking_request_type: waitingFor ? waitingFor.request_type : null,

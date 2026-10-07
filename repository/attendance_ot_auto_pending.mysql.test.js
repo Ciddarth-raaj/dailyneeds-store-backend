@@ -500,7 +500,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.deepEqual(decided.skipped.map((x) => [x.attendance_date, x.reason]), [[D2, "BEFORE_CUTOVER"]], "14. no broad historical creation");
     assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, TODAY, "13. the cutover is untouched");
     const [m] = await deferredRows();
-    assert.deepEqual([m.status, m.resolution], ["RESOLVED", "CREATED"]);
+    assert.deepEqual([m.status, m.resolution], ["RESOLVED", "RESOLVED_OT_CREATED"]);
     assert.deepEqual((await deferredLog()).map((l) => l.action), ["DEFERRED", "SYNC_ATTEMPTED", "RESOLVED"]);
     // Resolved once: a later sync of the date is ordinary (no second create, no allowance left).
     const later = await usecase.syncAutoOt({ employee_id: EMP, dates: [D1] });
@@ -524,7 +524,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     await q(pool, "UPDATE attendance_approval_request SET status = 'APPROVED' WHERE attendance_approval_request_id = ?", [perm.attendance_approval_request_id]);
     eligible.delete(`${EMP}:${D1}`);
     await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_PERMISSION" });
-    assert.deepEqual((await deferredRows()).map((r) => [r.status, r.resolution]), [["RESOLVED", "NO_OT"]]);
+    assert.deepEqual((await deferredRows()).map((r) => [r.status, r.resolution]), [["RESOLVED", "RESOLVED_NO_OT"]]);
     assert.equal((await otRows()).length, 0);
   });
 
@@ -554,7 +554,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     await usecase.syncAutoOt({ employee_id: EMP, dates: [D1], source: "DECISION_REGULARIZATION" });
     const [o] = await otRows();
     assert.deepEqual([o.status, o.minutes], ["APPROVED", 60]);
-    assert.deepEqual((await deferredRows()).map((r) => r.resolution), ["PRESERVED_DECIDED"]);
+    assert.deepEqual((await deferredRows()).map((r) => r.resolution), ["RESOLVED_EXISTING_DECISION"]);
   });
 
   it("the migration: down restores the old groups, up again is clean (no rows rewritten)", async () => {
