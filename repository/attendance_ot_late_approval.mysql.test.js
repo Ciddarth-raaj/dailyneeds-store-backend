@@ -148,6 +148,8 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
   let usecase;
   // What the engine finds eligible on any date (the deferred tests vary it).
   let eligibleMinutes = 60;
+  // Whether the engine finds the day's attendance complete (one punch when not).
+  let dayComplete = true;
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}${URL.includes("?") ? "&" : "?"}connectionLimit=6&multipleStatements=true`);
@@ -161,7 +163,10 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
       attendanceDayState: () => ({ closed: true, reason: null, closes_at: null }),
       employmentWindowFor: async () => ({ joined_on: "2020-01-01", ended_on: null }),
       calculateRange: async ({ employee_id, from_date }) => [{
-        employee_id, attendance_date: from_date, status: "FINAL", is_final: true, punch_count: 2,
+        employee_id, attendance_date: from_date,
+        ...(dayComplete
+          ? { status: "FINAL", is_final: true, punch_count: 2 }
+          : { status: "REVIEW_REQUIRED", is_final: false, punch_count: 1, review_reasons: ["MISSING_PUNCH"] }),
         shift_snapshot: { work_shift_id: 7, in_time: "09:00:00", out_time: "18:00:00" }, effective_punches: [],
         candidate_ot_minutes: eligibleMinutes, excess_ot_minutes: eligibleMinutes, attendance_calculation_mode: "STANDARD",
       }],
@@ -179,6 +184,7 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
 
   beforeEach(async () => {
     eligibleMinutes = 60;
+    dayComplete = true;
     for (const t of TABLES.filter((x) => !/auto_pending_setting/.test(x))) await q(pool, `DELETE FROM ${t}`);
     await q(pool, "UPDATE attendance_ot_auto_pending_setting SET enabled = 1, auto_pending_from_date = '2026-09-01'");
     await q(pool, "INSERT INTO designation VALUES (1, 'Staff'), (2, 'Store Manager')");
@@ -468,5 +474,92 @@ describe("Prior-Month OT decisions, as SQL", { skip: !URL && "ATTENDANCE_TEST_MY
     const mine = rows.find((r) => Number(r.attendance_approval_request_id) === Number(ot.attendance_approval_request_id));
     assert.equal(mine.late_settlement_status, "PENDING_SETTLEMENT");
     assert.equal(mine.late_settlement_minutes, 60);
+  });
+
+  /* ====================== INCOMPLETE ATTENDANCE: no OT at all; remembered; re-evaluated when complete ==== */
+
+  const unlockSeptember = () => q(pool, "DELETE FROM payrun_employee_calculation WHERE employee_id = ?", [EMP]);
+  const lockSeptember = () =>
+    q(pool, "INSERT INTO payrun_employee_calculation (employee_id, period_year, period_month, status, daily_rate, monthly_gross, net_pay) VALUES (?, 2026, 9, 'APPROVED_LOCKED', 800, 20800, 19000)", [EMP]);
+  const markerRows = () => q(pool, "SELECT status, resolution, reason, source, blocking_request_id FROM attendance_ot_deferred_sync ORDER BY deferred_sync_id");
+
+  it("INCOMPLETE: the day loses a punch -> the pending system OT is WITHDRAWN (not waiting) and the date remembered; once complete after the lock -> Pending OT -> Prior-Month OT", async () => {
+    await unlockSeptember();
+    const [ot] = await otRequests();
+    assert.equal(ot.status, "PENDING");
+    dayComplete = false;
+    const out = await usecase.syncAutoOt({ employee_id: EMP, dates: [DATE], source: "RECALCULATION" });
+    assert.equal(out.withdrawn[0].incomplete_reason, "MISSING_IN_OR_OUT_PUNCH");
+    assert.deepEqual((await otRequests()).map((r) => r.status), ["CANCELLED"], "no waiting OT");
+    assert.deepEqual((await markerRows()).map((m) => [m.status, m.reason, m.source, m.blocking_request_id]),
+      [["WAITING_FOR_CORRECTION", "INCOMPLETE_ATTENDANCE", "OT_WITHDRAWN_INCOMPLETE", null]]);
+    const [log] = await q(pool, "SELECT action, detail FROM attendance_ot_deferred_sync_log");
+    assert.equal(log.action, "DEFERRED");
+    assert.match(log.detail, /attendance incomplete \(MISSING_IN_OR_OUT_PUNCH; pending OT #\d+ \(60 min\) withdrawn\); no OT until complete/);
+    // The month locks while the attendance is still incomplete: nothing.
+    await lockSeptember();
+    const still = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal(still.resolved.length, 0);
+    assert.equal((await otRequests()).filter((r) => r.status === "PENDING").length, 0);
+    // Complete now (the missing punch arrived): an ordinary pending OT in the locked month.
+    dayComplete = true;
+    const before = await frozen();
+    const done = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+    assert.equal(done.resolved[0].resolution, "RESOLVED_OT_CREATED");
+    const fresh = (await otRequests()).find((r) => r.status === "PENDING");
+    assert.deepEqual([fresh.minutes, Number(fresh.auto_created)], [60, 1]);
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_late_settlement"))[0].n, 0, "not priced at creation");
+    const approved = await decideAll(fresh.id);
+    assert.equal(approved.status, "APPROVED");
+    const [s] = await q(pool, "SELECT settlement_status, approved_ot_minutes FROM attendance_ot_late_settlement");
+    assert.deepEqual([s.settlement_status, s.approved_ot_minutes], ["PENDING_SETTLEMENT", 60]);
+    assert.equal(await frozen(), before, "the locked payroll and day are untouched");
+  });
+
+  it("INCOMPLETE: a remembered date is never resolved from the broken day; the reason is logged once, and it moves to the back of the sweep", async () => {
+    const id = await deferredLocked({ source: "OT_WITHDRAWN_INCOMPLETE" });
+    dayComplete = false;
+    for (let i = 0; i < 3; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const out = await usecase.resolveDeferredOt({ source: "DEFERRED_SWEEP" });
+      assert.equal(out.resolved.length, 0);
+    }
+    assert.deepEqual((await markerRows()).map((m) => [m.status, m.reason]), [["WAITING_FOR_CORRECTION", "INCOMPLETE_ATTENDANCE"]]);
+    assert.deepEqual((await q(pool, "SELECT action FROM attendance_ot_deferred_sync_log ORDER BY deferred_sync_log_id")).map((l) => l.action), ["DEFERRED", "STILL_BLOCKED"]);
+    assert.equal((await otRequests()).length, 0);
+    // Rotation: a newer, untouched marker is swept first.
+    await q(pool, "INSERT INTO attendance_ot_deferred_sync (employee_id, attendance_date, source, updated_at) VALUES (?, '2026-09-11', 'BACKFILL', '2026-01-01 00:00:00')", [EMP]);
+    const order = await repo.listResolvableDeferredOt(10);
+    assert.deepEqual(order.map((m) => Number(m.deferred_sync_id) === Number(id)), [false, true]);
+  });
+
+  it("INCOMPLETE: an approver cannot approve an OT whose day is now incomplete - 409, and the system's OT is withdrawn", async () => {
+    await unlockSeptember();
+    const [ot] = await otRequests();
+    dayComplete = false;
+    const out = await usecase.decide({ actor: ADMIN, request_id: ot.id, decision: "APPROVED" });
+    assert.equal(out.code, 409);
+    assert.equal(out.reason_code, "ATTENDANCE_INCOMPLETE");
+    assert.equal(out.msg, "Attendance is incomplete. OT will be calculated after attendance is complete.");
+    assert.equal(out.withdrawn, true);
+    assert.deepEqual((await otRequests()).map((r) => r.status), ["CANCELLED"]);
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_step WHERE decision = 'APPROVED'"))[0].n, 0);
+  });
+
+  it("a database without the marker table (a preview before the migration) reads none - and logs nothing", async () => {
+    const logged = [];
+    const realLog = repo._log;
+    repo._log = (code, err) => logged.push([code, err && err.code]);
+    await q(pool, "RENAME TABLE attendance_ot_deferred_sync TO attendance_ot_deferred_sync_hidden");
+    try {
+      assert.deepEqual(await repo.listWaitingDeferredOt(EMP, [DATE]), []);
+      assert.deepEqual(await repo.listResolvableDeferredOt(10), []);
+      const preview = await usecase.syncAutoOt({ employee_id: EMP, dates: [DATE], dry_run: true, track_deferred: true, source: "BACKFILL" });
+      assert.equal(preview.errors.length, 0);
+    } finally {
+      await q(pool, "RENAME TABLE attendance_ot_deferred_sync_hidden TO attendance_ot_deferred_sync");
+      repo._log = realLog;
+    }
+    assert.deepEqual(logged, [], "no 'attendance_ot_deferred_sync doesn't exist' noise");
   });
 });

@@ -48,6 +48,18 @@
  *                                                attendance_ot_deferred_sync: the
  *                                                correction's final decision
  *                                                re-runs OT for that exact date
+ *   INCOMPLETE ATTENDANCE (missing in- or      -> NO OT AT ALL: none raised, a
+ *   out-punch, odd punch pair, pending            pending system OT withdrawn,
+ *   regularization, calculation open or not       no Telegram card. Listed under
+ *   FINAL)                                        incomplete_attendance (never as
+ *                                                eligible or blocked minutes)
+ *                                                and, on --apply only,
+ *                                                REMEMBERED: re-evaluated once
+ *                                                the attendance is complete,
+ *                                                without moving the cutover
+ *
+ * Every employee's approval chain is checked (read-only), so an invalid one
+ * is named even when no OT is raised for them in this run.
  *
  * IDEMPOTENT: a second run creates nothing. TELEGRAM: no per-date cards - each
  * named first approver gets ONE summary ("12 OT approvals pending from
@@ -201,6 +213,9 @@ async function run({
   resolveDeferredOt = null,
   listEmployees,
   listApprovalAuthority = async () => null,
+  // Read-only: the chain an employee's OT would follow, so an invalid chain
+  // is named even for an employee with no OT raised in this run.
+  previewChain = null,
   listAttendedDates,
   setting = null,
   notifySummary = null,
@@ -284,7 +299,11 @@ async function run({
     deferred_dates: 0,
     deferred_newly_recorded: 0,
     deferred_eligible_minutes: 0,
+    deferred_incomplete_dates: 0,
+    incomplete_attendance_days: 0,
   };
+  const incompleteAttendance = [];
+  const chainChecked = new Set();
   const deferredByKind = {};
   const chainProblems = [];
   const blockedByOpenRequest = [];
@@ -341,8 +360,50 @@ async function run({
         counts.deferred_dates += 1;
         if (d.recorded) counts.deferred_newly_recorded += 1;
         counts.deferred_eligible_minutes += Number(d.eligible_ot_minutes) || 0;
+        if (d.deferred_reason === "INCOMPLETE_ATTENDANCE") {
+          counts.deferred_incomplete_dates += 1;
+          deferredByKind.INCOMPLETE_ATTENDANCE = (deferredByKind.INCOMPLETE_ATTENDANCE || 0) + 1;
+          return;
+        }
         const kind = d.blocking_request_kind || "OTHER";
         deferredByKind[kind] = (deferredByKind[kind] || 0) + 1;
+      });
+
+      /*
+       * INCOMPLETE ATTENDANCE - reported on its own: no OT exists for it (none
+       * raised; a pending system OT already on it is withdrawn), and it is
+       * never counted as eligible or blocked minutes. Its window date is
+       * remembered (--apply) for re-evaluation once attendance is complete.
+       */
+      const deferredOn = new Map((result.deferred || []).map((d) => [d.attendance_date, d]));
+      [
+        ...(result.skipped || []).filter((x) => x.attendance_incomplete).map((x) => ({ x, existing: null })),
+        ...(result.withdrawn || []).filter((x) => x.attendance_incomplete).map((x) => ({ x, existing: "WITHDRAWN" })),
+        ...(result.held || []).filter((x) => x.attendance_incomplete).map((x) => ({ x, existing: "HELD_FOR_APPROVER" })),
+      ].forEach(({ x, existing }) => {
+        const d = deferredOn.get(x.attendance_date) || null;
+        // Remembered: a backfill marker, or one written when its pending OT was
+        // withdrawn. A locked month's date is not (its attendance is settled).
+        const remembers = existing === "WITHDRAWN" ? (apply ? Boolean(x.remembered) : true) : Boolean(d);
+        counts.incomplete_attendance_days += 1;
+        incompleteAttendance.push({
+          employee_id: plan.employee_id,
+          attendance_date: x.attendance_date,
+          // ATTENDANCE_OPEN / MISSING_IN_OR_OUT_PUNCH / INCOMPLETE_PUNCH_PAIR /
+          // REGULARIZATION_PENDING / CALCULATION_NOT_FINAL
+          incomplete_reason: x.incomplete_reason,
+          attendance_status: x.attendance_status || null,
+          punch_count: x.punch_count === undefined ? null : x.punch_count,
+          review_reasons: x.review_reasons || [],
+          blocking_request_id: x.blocking_request_id || null,
+          blocking_request_type: x.blocking_request_type || null,
+          blocking_request_kind: x.blocking_request_kind || null,
+          existing_pending_ot: existing
+            ? { attendance_approval_request_id: x.attendance_approval_request_id, ot_minutes: x.previous_ot_minutes !== undefined ? x.previous_ot_minutes : x.ot_minutes, action: existing }
+            : null,
+          ot_created: false,
+          [apply ? "remembered_for_reevaluation" : "would_be_remembered_for_reevaluation"]: remembers,
+        });
       });
 
       counts.new_pending += created.length;
@@ -368,6 +429,7 @@ async function run({
         blocked.filter((b) => pos(b.eligible_ot_minutes)).length;
 
       // Every new record must have somebody active to decide it.
+      if (created.length > 0) chainChecked.add(plan.employee_id);
       for (const c of created) {
         const problem = c.chain_error || (authority ? chainProblem(c.chain, authority) : null);
         if (problem) chainProblems.push({ employee_id: plan.employee_id, attendance_date: c.attendance_date, problem });
@@ -399,6 +461,8 @@ async function run({
         }
       });
       if (locked.length > 0) row.payroll_locked = locked;
+      const incompleteHere = incompleteAttendance.filter((i) => i.employee_id === plan.employee_id);
+      if (incompleteHere.length > 0) row.incomplete_attendance = incompleteHere.map(({ employee_id, ...rest }) => rest); // eslint-disable-line no-unused-vars
       detail.push(row);
       if (created.length > 0) {
         log(`${apply ? "created" : "would create"} ${created.length} pending OT for employee ${plan.employee_id}`);
@@ -408,6 +472,37 @@ async function run({
       log(`FAILED employee ${plan.employee_id}: ${(err && err.message) || err}`);
     }
     /* eslint-enable no-await-in-loop */
+  }
+
+  // ---- 3a. every other employee's chain: an invalid one is named even when
+  // no OT is raised for them in this run (their incomplete or remembered
+  // dates, and all future OT, would land on it) ----
+  if (typeof previewChain === "function" && authority) {
+    for (const plan of withAttendance) {
+      if (chainChecked.has(plan.employee_id)) continue;
+      /* eslint-disable no-await-in-loop */
+      let problem;
+      try {
+        const { chain } = await previewChain(plan.employee_id);
+        problem = chainProblem(chain, authority);
+      } catch (err) {
+        problem = String((err && err.message) || err);
+      }
+      /* eslint-enable no-await-in-loop */
+      if (problem) {
+        chainProblems.push({
+          employee_id: plan.employee_id,
+          attendance_date: null,
+          problem,
+          // No OT is raised for them in this run; these dates would reach the
+          // chain once their attendance is complete.
+          no_new_ot_in_this_run: true,
+          incomplete_or_remembered_dates: incompleteAttendance
+            .filter((i) => i.employee_id === plan.employee_id)
+            .map((i) => i.attendance_date),
+        });
+      }
+    }
   }
 
   // ---- 3b. remembered dates whose correction is already decided (apply only) ----
@@ -478,6 +573,8 @@ async function run({
       payroll_locked_eligible_minutes: counts.locked_month_eligible_minutes,
       blocked_by_open_request_days: counts.blocked_by_open_request_days,
       blocked_by_open_request_minutes: counts.blocked_by_open_request_minutes,
+      // Never eligible, never blocked minutes: listed under incomplete_attendance.
+      incomplete_attendance_days: counts.incomplete_attendance_days,
     },
     employees_without_valid_approval_chain: chainProblems,
     // A date an ATTENDANCE CORRECTION (regularization, HR correction, shift
@@ -485,10 +582,17 @@ async function run({
     // day. Each is REMEMBERED (--apply only) so the correction's final
     // decision re-runs OT for that exact date, before the cutover if need be.
     blocked_by_open_request: blockedByOpenRequest,
+    // A day with a missing in- or out-punch, an odd punch pair, a pending
+    // regularization or a calculation still open / not FINAL: NO OT AT ALL -
+    // none raised, a pending system OT withdrawn, no Telegram card, no
+    // approval row. Remembered (--apply) and re-evaluated once complete.
+    incomplete_attendance: incompleteAttendance,
     deferred_historical_ot: {
       [apply ? "dates_tracked" : "dates_would_be_tracked"]: counts.deferred_dates,
       newly_recorded: apply ? counts.deferred_newly_recorded : 0,
       eligible_minutes_on_uncorrected_days: counts.deferred_eligible_minutes,
+      // Of those, dates remembered because their attendance is incomplete.
+      incomplete_attendance_dates: counts.deferred_incomplete_dates,
       by_blocking_request_kind: deferredByKind,
       // A pending OT already raised on a date whose correction is now open:
       // kept, not approvable until the correction is decided.
@@ -531,6 +635,7 @@ async function main() {
       resolveDeferredOt: regularization.resolveDeferredOt,
       listEmployees: ({ from_date, to_date }) => calcRepo.listEmployeesForRecalculation({ from_date, to_date }),
       listApprovalAuthority: () => regRepo.listApprovalAuthority(),
+      previewChain: regularization.previewOtApprovalChain,
       listAttendedDates: (args) => regRepo.listAttendedDates(args),
       setting: await regRepo.getAutoOtSetting(),
       notifySummary: otTelegram ? otTelegram.notifyBacklogSummary : null,

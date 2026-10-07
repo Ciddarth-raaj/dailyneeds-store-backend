@@ -778,6 +778,34 @@ PENDING OT, when the engine still finds eligible OT; none when it is zero. The
 revoked record stays (CANCELLED, its steps and decision untouched) with its
 revocation row; the new record's creation is logged `REVOKE_OT`.
 
+## Incomplete attendance carries no OT
+
+A day with a **missing in- or out-punch**, an **odd punch pair**, a **pending
+regularization**, or a calculation that is **still open or not FINAL** has no
+OT at all - there is no Pending OT, no waiting OT, no Telegram OT card and no
+DnDS OT approval row for it. OT is calculated only once the attendance is
+complete:
+
+    incomplete attendance -> regularization -> correction approved
+      -> day recalculated (complete) -> eligible OT? -> Pending OT -> approver decides
+                                      -> zero OT?    -> nothing is created
+
+| Situation | Behaviour |
+|---|---|
+| sync finds the day incomplete, no OT record | nothing is raised; reported as `INCOMPLETE_DAY` / `DAY_OPEN` with `incomplete_reason` (`MISSING_IN_OR_OUT_PUNCH`, `INCOMPLETE_PUNCH_PAIR`, `REGULARIZATION_PENDING`, `CALCULATION_NOT_FINAL`, `ATTENDANCE_OPEN`) and 0 eligible minutes |
+| a pending **system** OT (no stage decided) on a day that became incomplete - a punch voided, a regularization raised | **withdrawn** at once (kept for audit, never deleted); the date is remembered (`attendance_ot_deferred_sync`, reason `INCOMPLETE_ATTENDANCE`, source `OT_WITHDRAWN_INCOMPLETE`) before the withdrawal |
+| raising a regularization | allowed; the OT sync runs right after it, so the stale OT is withdrawn |
+| deciding an OT whose live day is incomplete (DnDS, bulk, Telegram) | refused, `409 ATTENDANCE_INCOMPLETE`: *"Attendance is incomplete. OT will be calculated after attendance is complete."*; the system OT is withdrawn; Telegram retires the card's buttons. A final approval also clamps an incomplete day to 0 minutes |
+| an employee-raised or part-approved pending OT on an incomplete day | held for an approver (the clamp approves 0) - the system never withdraws a decided stage |
+| an OT in a payroll-locked month | unchanged: frozen with the month (the lock rule below) |
+| the attendance becomes complete (regularization approved, punch restored) | the ordinary sync runs for the date - from the remembered marker even before the cutover, outside the backdate window, or in a month locked meanwhile - and creates Pending OT only if the completed day has eligible OT |
+
+A remembered incomplete date is **never resolved from the broken day**: it
+stays `WAITING_FOR_CORRECTION` through every sync and sweep until the day is
+complete (its reason logged once as `STILL_BLOCKED`; each re-check moves it to
+the back of the sweep's queue, so a date nobody corrects cannot starve the
+others).
+
 ## Attendance correction comes before system OT (migration 20261126120000)
 
 The OT figure may itself be wrong until attendance is corrected, so a
@@ -792,8 +820,10 @@ whoever raised it. So a correction can always be raised beside a system OT,
 two manual corrections still exclude each other, and a date never holds two
 pending OTs.
 
-**While a correction (regularization, HR correction, shift change or
-permission) is pending on the date:**
+**While a correction is pending on the date** - in practice a shift change or
+permission on a COMPLETE day; a pending regularization makes the day
+incomplete, so the rule above applies to it instead and its OT is withdrawn,
+never kept waiting:
 
 | | Behaviour |
 |---|---|
@@ -820,8 +850,11 @@ had none. Approved and rejected OT are never overwritten.
 
 ### Deferred historical OT (`attendance_ot_deferred_sync`)
 
-A backfill date held by an open correction is not evaluated from the
-uncorrected day. On `--apply` only (a preview writes nothing) it is
+A backfill date held by an open correction, or whose attendance is
+incomplete, is not evaluated. Incomplete dates are reported separately
+(`incomplete_attendance`: employee, date, reason, any blocking request, the
+withdrawn pending OT if one existed) and never counted as eligible or blocked
+minutes. On `--apply` only (a preview writes nothing) the date is
 REMEMBERED: one row per employee and date (`uq_aods_employee_date`), status
 `WAITING_FOR_CORRECTION`, with the blocking request and the minutes the
 uncorrected day computes. It is a trigger, not an OT record.
@@ -851,7 +884,10 @@ pending OT approval request is created anyway. The exception holds only when
 all of these are true, re-proved inside the insert's transaction under row
 locks (`repository/attendance_regularization.js#deferredLockedExceptionHolds`):
 a marker for this exact employee and date, still `WAITING_FOR_CORRECTION`,
-created by the backfill (`source = 'BACKFILL'`); no attendance correction
+created by the backfill (`source = 'BACKFILL'`) or written when a pending
+system OT was withdrawn because the attendance became incomplete
+(`OT_WITHDRAWN_INCOMPLETE` - that OT would otherwise have waited into the
+lock); no attendance correction
 pending on the date; and no APPROVED/REJECTED OT on it (the sync preserves
 those first). Nothing is written to the locked month - no day row, no payroll
 figure, no settlement - and nothing is priced: approving it later is the

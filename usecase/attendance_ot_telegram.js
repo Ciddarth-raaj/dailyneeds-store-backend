@@ -219,7 +219,7 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
       : result && result.status === "REJECTED"
       ? "Already processed: this OT was rejected."
       : result && result.status === "CANCELLED"
-      ? "Already processed: this OT was withdrawn - the date no longer has eligible overtime."
+      ? "Already processed: this OT was withdrawn - the date's attendance changed (incomplete, or no eligible overtime). OT is calculated again once attendance is complete."
       : "Already processed: this OT has already been actioned.";
 
   /** The one decision path for both buttons and the reject reply. */
@@ -248,6 +248,14 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
       if (result && result.code === 409 && result.waiting_for_correction) {
         await answer(result.msg || "Attendance is being corrected. OT will be recalculated before approval.");
         return { handled: true, outcome: "WAITING_FOR_CORRECTION", waiting_for_correction: true };
+      }
+
+      // INCOMPLETE ATTENDANCE: no OT exists for the day - the system's record
+      // was withdrawn - so the card's buttons are retired.
+      if (result && result.code === 409 && result.attendance_incomplete) {
+        await answer(result.msg || "Attendance is incomplete. OT will be calculated after attendance is complete.");
+        await retireButtons(chatId, messageId);
+        return { handled: true, outcome: "ATTENDANCE_INCOMPLETE", attendance_incomplete: true };
       }
 
       if (result && result.code === 409 && result.ot_minutes_changed) {

@@ -349,8 +349,8 @@ module.exports = (
 
     // ATTENDANCE CORRECTION COMES FIRST: a pending SYSTEM OT on the date does
     // not block this (`findOpenRequest` leaves it out; it has its own open
-    // group). The OT waits - not approvable while this is pending - and is
-    // re-synced from the corrected day when this is decided.
+    // group). Once raised, the day is incomplete, so that OT is withdrawn
+    // (below) and re-synced from the corrected day when this is decided.
     const open = await attendanceRegularizationRepo.findOpenRequest(forEmployeeId, date);
     if (open) {
       throw validationError(
@@ -536,9 +536,28 @@ module.exports = (
           })
         : null;
 
+    /*
+     * INCOMPLETE ATTENDANCE CARRIES NO OT. A pending regularization makes the
+     * day not FINAL, so a pending system OT already on it is withdrawn now
+     * (no waiting OT, no live Telegram card, no approval row) and the date is
+     * remembered; the regularization's final decision re-runs the sync from
+     * the completed day. An auto-approved one is complete already: its OT is
+     * raised from the corrected day here.
+     */
+    const otAutoPending =
+      created && (!created.code || created.code === 200)
+        ? await syncAutoOtSafely({
+            employee_id: forEmployeeId,
+            dates: [date],
+            now,
+            source: auto_approve ? "REGULARIZATION_AUTO_APPROVED" : "REGULARIZATION_RAISED",
+          })
+        : null;
+
     return {
       ...created,
       month_refresh: monthRefresh,
+      ot_auto_pending: otAutoPending,
       status: created.status || REQUEST_STATUS.PENDING,
       auto_approved: Boolean(auto_approve),
       request_type: REQUEST_TYPE.REGULARIZATION,
@@ -1790,6 +1809,42 @@ module.exports = (
       if (blocker) return { ...correctionPendingRefusal(blocker), status: request.status, attendance_approval_request_id: Number(request_id), attendance_date: request.attendance_date };
     }
 
+    /*
+     * INCOMPLETE ATTENDANCE CARRIES NO OT. An OT on a day whose attendance is
+     * now incomplete (a punch excluded, a regularization raised, a day not
+     * FINAL) is never decided: the sync withdraws the system's own record at
+     * once, and the approver is told why. The final approval below clamps
+     * such a day to 0 as well, should it become incomplete in between.
+     */
+    if (request.request_type === REQUEST_TYPE.OT) {
+      const date = toDateOnly(request.attendance_date);
+      const [liveDay] = await attendanceCalculationUsecase.calculateRange({
+        employee_id: Number(request.requested_for_employee_id),
+        from_date: date,
+        to_date: date,
+      });
+      const incomplete = incompleteAttendanceOf(liveDay, autoOtVerdict(liveDay, { now, today: null }));
+      if (incomplete) {
+        const synced = await syncAutoOtSafely({
+          employee_id: Number(request.requested_for_employee_id),
+          days: liveDay ? [liveDay] : [],
+          now,
+          source: "DECISION_ON_INCOMPLETE_DAY",
+        });
+        return {
+          code: 409,
+          attendance_incomplete: true,
+          reason_code: "ATTENDANCE_INCOMPLETE",
+          ...incomplete,
+          status: request.status,
+          attendance_approval_request_id: Number(request_id),
+          attendance_date: request.attendance_date,
+          withdrawn: Boolean(synced && (synced.withdrawn || []).some((w) => Number(w.attendance_approval_request_id) === Number(request_id))),
+          msg: ATTENDANCE_INCOMPLETE_MESSAGE,
+        };
+      }
+    }
+
     const step = (request.steps || []).find(
       (s) => Number(s.stage_no) === Number(request.current_stage_no)
     );
@@ -1905,7 +1960,7 @@ module.exports = (
          * itself, so an OT approval that could reach it would pay those
          * minutes twice.
          */
-        const eligible = currentDay
+        const eligible = currentDay && !incompleteAttendanceOf(currentDay, autoOtVerdict(currentDay, { now, today: null }))
           ? Math.max(
               0,
               Math.trunc(
@@ -2410,10 +2465,42 @@ module.exports = (
   /** Skips that leave a remembered date WAITING, to be tried again. */
   const RETRYABLE_DEFERRED_SKIPS = Object.freeze([
     "DAY_OPEN",
+    "INCOMPLETE_DAY",
     "PAYROLL_LOCKED",
     "BEFORE_CUTOVER",
     "OUTSIDE_WINDOW",
   ]);
+
+  /*
+   * INCOMPLETE ATTENDANCE NEVER CARRIES OT. A day with a missing in- or
+   * out-punch, an odd punch pair, a pending regularization, or a calculation
+   * that is still open or not FINAL has no OT at all: none is raised, a
+   * pending system OT already on it is WITHDRAWN (it does not wait), and no
+   * Telegram card or approval row exists for it. Its date is remembered
+   * (`attendance_ot_deferred_sync`, reason INCOMPLETE_ATTENDANCE) when the
+   * deploy backfill finds it in an employee's window, or when a system OT is
+   * withdrawn from it, and is re-evaluated once the attendance is complete.
+   */
+  const INCOMPLETE_ATTENDANCE = Object.freeze({
+    OPEN: "ATTENDANCE_OPEN",
+    MISSING_PUNCH: "MISSING_IN_OR_OUT_PUNCH",
+    INCOMPLETE_PUNCH_PAIR: "INCOMPLETE_PUNCH_PAIR",
+    REGULARIZATION_PENDING: "REGULARIZATION_PENDING",
+    NOT_FINAL: "CALCULATION_NOT_FINAL",
+  });
+  const DEFERRED_REASON = Object.freeze({
+    CORRECTION: "BLOCKED_BY_OPEN_REQUEST",
+    INCOMPLETE: "INCOMPLETE_ATTENDANCE",
+  });
+  /** Marker sources whose date may still raise OT in a locked month (see `createRequest`). */
+  const DEFERRED_SOURCE = Object.freeze({
+    BACKFILL: "BACKFILL",
+    OT_WITHDRAWN_INCOMPLETE: "OT_WITHDRAWN_INCOMPLETE",
+  });
+  const LOCKED_EXCEPTION_SOURCES = Object.freeze([DEFERRED_SOURCE.BACKFILL, DEFERRED_SOURCE.OT_WITHDRAWN_INCOMPLETE]);
+
+  /** What an approver is told when an OT's day has incomplete attendance. */
+  const ATTENDANCE_INCOMPLETE_MESSAGE = "Attendance is incomplete. OT will be calculated after attendance is complete.";
 
   /** What an approver is told about a pending OT whose source payroll is locked. */
   const LOCKED_SOURCE_NOTE = "Source payroll locked — if approved, this OT will be settled in the next eligible payroll.";
@@ -2468,6 +2555,38 @@ module.exports = (
     const minutes = claimableOtOf(day);
     if (minutes <= 0) return { eligible: false, minutes: 0, reason: AUTO_OT_SKIP.NO_OT };
     return { eligible: true, minutes, reason: null };
+  };
+
+  /**
+   * Why a day's attendance is incomplete - null when it is complete. Asked
+   * only of a day `autoOtVerdict` found DAY_OPEN or INCOMPLETE_DAY.
+   */
+  const incompleteAttendanceOf = (day, verdict) => {
+    if (!day || !verdict) return null;
+    if (verdict.reason !== AUTO_OT_SKIP.DAY_OPEN && verdict.reason !== AUTO_OT_SKIP.INCOMPLETE_DAY) return null;
+    // `punch_count` is the engine's count of EFFECTIVE punches - what the verdict reads too.
+    const punches =
+      day.punch_count !== undefined && day.punch_count !== null
+        ? Number(day.punch_count) || 0
+        : Array.isArray(day.effective_punches)
+        ? day.effective_punches.length
+        : 0;
+    const reason =
+      verdict.reason === AUTO_OT_SKIP.DAY_OPEN
+        ? INCOMPLETE_ATTENDANCE.OPEN
+        : punches % 2 === 1
+        ? punches === 1
+          ? INCOMPLETE_ATTENDANCE.MISSING_PUNCH
+          : INCOMPLETE_ATTENDANCE.INCOMPLETE_PUNCH_PAIR
+        : day.status === CALC_STATUS.REGULARIZATION_PENDING
+        ? INCOMPLETE_ATTENDANCE.REGULARIZATION_PENDING
+        : INCOMPLETE_ATTENDANCE.NOT_FINAL;
+    return {
+      incomplete_reason: reason,
+      attendance_status: day.status || null,
+      punch_count: punches,
+      review_reasons: Array.isArray(day.review_reasons) ? day.review_reasons : [],
+    };
   };
 
   /** "09:00" from "09:00:00"; "11:42" from "2026-10-06 11:42:10". */
@@ -2693,6 +2812,33 @@ module.exports = (
     });
 
     let identity = null;
+    // Dates whose attendance is incomplete: their markers wait, whatever happened.
+    const incompleteDates = new Map();
+    // A remembered date this run could not evaluate: it stays WAITING, with
+    // what holds it now (a correction, or the incomplete attendance itself).
+    const noteMarkerWaiting = async (marker, correction, incomplete) => {
+      if (correction) {
+        if (typeof attendanceRegularizationRepo.markDeferredOtStillBlocked !== "function") return;
+        await attendanceRegularizationRepo.markDeferredOtStillBlocked({
+          deferred_sync_id: marker.deferred_sync_id,
+          employee_id: employeeId,
+          attendance_date: marker.attendance_date,
+          blocking_request_id: Number(correction.attendance_approval_request_id),
+          blocking_request_type: correction.request_type,
+          trigger_source: source,
+        });
+        return;
+      }
+      if (typeof attendanceRegularizationRepo.noteDeferredOtWaiting !== "function") return;
+      await attendanceRegularizationRepo.noteDeferredOtWaiting({
+        deferred_sync_id: marker.deferred_sync_id,
+        employee_id: employeeId,
+        attendance_date: toDateOnly(marker.attendance_date),
+        reason: incomplete ? DEFERRED_REASON.INCOMPLETE : null,
+        detail: incomplete ? incomplete.incomplete_reason : null,
+        trigger_source: source,
+      });
+    };
 
     for (const day of inScope) {
       const date = day.attendance_date;
@@ -2705,15 +2851,62 @@ module.exports = (
         const request = byDate.get(date) || null;
         const requestId = request ? Number(request.attendance_approval_request_id) : null;
         const correction = correctionOn.get(date) || null;
+        const incomplete = incompleteAttendanceOf(day, verdict);
+        if (incomplete) incompleteDates.set(date, incomplete);
 
         /*
-         * A DATE AN ATTENDANCE CORRECTION HOLDS OPEN. No new OT from the
-         * uncorrected day; a pending system OT waits as it is (never re-figured
-         * or withdrawn from a day about to change). The backfill remembers a
-         * date it could not evaluate - on --apply only - and the correction's
-         * final decision re-runs this sync for it.
+         * INCOMPLETE ATTENDANCE, NO OT RECORD: nothing is raised, nothing
+         * waits. Reported on its own (never as eligible or blocked minutes);
+         * the backfill remembers its window date so it is re-evaluated once
+         * the attendance is complete. (A pending OT on such a day is handled
+         * below: withdrawn, never kept waiting.)
          */
-        if (correction && (!request || request.status === REQUEST_STATUS.PENDING)) {
+        if (incomplete && !request) {
+          result.skipped.push({
+            attendance_date: date,
+            reason: verdict.reason,
+            eligible_ot_minutes: 0,
+            attendance_incomplete: true,
+            ...incomplete,
+            ...(correction ? blockerOf(correction) : {}),
+          });
+          if (track_deferred && !locked) {
+            const entry = {
+              attendance_date: date,
+              eligible_ot_minutes: 0,
+              deferred_reason: DEFERRED_REASON.INCOMPLETE,
+              incomplete_reason: incomplete.incomplete_reason,
+              ...(correction ? blockerOf(correction) : {}),
+              recorded: false,
+            };
+            if (!dry_run && typeof attendanceRegularizationRepo.upsertDeferredOt === "function") {
+              const saved = await attendanceRegularizationRepo.upsertDeferredOt({
+                employee_id: employeeId,
+                attendance_date: date,
+                blocking_request_id: correction ? Number(correction.attendance_approval_request_id) : null,
+                blocking_request_type: correction ? correction.request_type : null,
+                eligible_ot_minutes: 0,
+                reason: DEFERRED_REASON.INCOMPLETE,
+                detail: incomplete.incomplete_reason,
+                source,
+              });
+              entry.deferred_sync_id = saved.deferred_sync_id;
+              entry.recorded = saved.recorded;
+            }
+            result.deferred.push(entry);
+          }
+          continue;
+        }
+
+        /*
+         * A DATE AN ATTENDANCE CORRECTION HOLDS OPEN, ON A COMPLETE DAY (a
+         * pending shift change or permission). No new OT from the uncorrected
+         * day; a pending system OT waits as it is (its approval is refused
+         * meanwhile). The backfill remembers a date it could not evaluate - on
+         * --apply only - and the correction's final decision re-runs this sync
+         * for it. An INCOMPLETE day never reaches here: its OT does not wait.
+         */
+        if (correction && !incomplete && (!request || request.status === REQUEST_STATUS.PENDING)) {
           if (request) {
             result.unchanged.push({
               attendance_date: date,
@@ -2725,10 +2918,9 @@ module.exports = (
           }
           const deferrable =
             !locked && verdict.reason !== AUTO_OT_SKIP.NOT_EMPLOYED && verdict.reason !== AUTO_OT_SKIP.PRESENT_ABSENT_ONLY;
-          // The OT the UNCORRECTED day computes - reported, never raised. (A
-          // day with a pending regularization is not FINAL, so the verdict's
-          // own figure is 0; the day still says what it would claim.)
-          const uncorrectedMinutes = verdict.eligible ? verdict.minutes : Math.max(0, claimableOtOf(day) || 0);
+          // The OT the UNCORRECTED (but complete) day computes - reported,
+          // never raised.
+          const uncorrectedMinutes = verdict.eligible ? verdict.minutes : 0;
           result.skipped.push({
             attendance_date: date,
             reason: AUTO_OT_SKIP.BLOCKED_BY_OPEN_REQUEST,
@@ -2744,22 +2936,15 @@ module.exports = (
                 blocking_request_id: entry.blocking_request_id,
                 blocking_request_type: entry.blocking_request_type,
                 eligible_ot_minutes: uncorrectedMinutes,
+                reason: DEFERRED_REASON.CORRECTION,
                 source,
               });
               entry.deferred_sync_id = saved.deferred_sync_id;
               entry.recorded = saved.recorded;
             }
             result.deferred.push(entry);
-          } else if (!dry_run && markerOn.has(date) && typeof attendanceRegularizationRepo.markDeferredOtStillBlocked === "function") {
-            const m = markerOn.get(date);
-            await attendanceRegularizationRepo.markDeferredOtStillBlocked({
-              deferred_sync_id: m.deferred_sync_id,
-              employee_id: employeeId,
-              attendance_date: date,
-              blocking_request_id: Number(correction.attendance_approval_request_id),
-              blocking_request_type: correction.request_type,
-              trigger_source: source,
-            });
+          } else if (!dry_run && markerOn.has(date)) {
+            await noteMarkerWaiting(markerOn.get(date), correction, null);
           }
           continue;
         }
@@ -2807,10 +2992,31 @@ module.exports = (
           }
           if (!verdict.eligible) {
             if (tinyBool(request.auto_created) && decidedSteps === 0) {
+              /*
+               * INCOMPLETE ATTENDANCE: the OT does not wait on the broken day.
+               * The date is remembered FIRST (so a withdrawal is never lost),
+               * and re-evaluated - past the cutover, the window and a later
+               * payroll lock, for this date only - once attendance is complete.
+               */
+              let remembered = null;
+              if (incomplete && !dry_run && typeof attendanceRegularizationRepo.upsertDeferredOt === "function") {
+                remembered = await attendanceRegularizationRepo.upsertDeferredOt({
+                  employee_id: employeeId,
+                  attendance_date: date,
+                  blocking_request_id: correction ? Number(correction.attendance_approval_request_id) : null,
+                  blocking_request_type: correction ? correction.request_type : null,
+                  eligible_ot_minutes: 0,
+                  reason: DEFERRED_REASON.INCOMPLETE,
+                  detail: `${incomplete.incomplete_reason}; pending OT #${requestId} (${current} min) withdrawn`,
+                  source: track_deferred ? DEFERRED_SOURCE.BACKFILL : DEFERRED_SOURCE.OT_WITHDRAWN_INCOMPLETE,
+                });
+              }
               if (!dry_run) {
                 const done = await attendanceRegularizationRepo.withdrawAutoOtRequest({
                   requestId,
-                  reason: `Withdrawn by the system: ${date} no longer has eligible overtime (${verdict.reason})`,
+                  reason: incomplete
+                    ? `Withdrawn by the system: attendance for ${date} is incomplete (${incomplete.incomplete_reason}); OT is recalculated once attendance is complete`
+                    : `Withdrawn by the system: ${date} no longer has eligible overtime (${verdict.reason})`,
                   triggerSource: source,
                 });
                 if (!done || !done.withdrawn) {
@@ -2823,6 +3029,14 @@ module.exports = (
                 attendance_approval_request_id: requestId,
                 previous_ot_minutes: current,
                 reason: verdict.reason,
+                ...(incomplete
+                  ? {
+                      attendance_incomplete: true,
+                      ...incomplete,
+                      remembered: Boolean(remembered),
+                      deferred_sync_id: remembered ? remembered.deferred_sync_id : null,
+                    }
+                  : {}),
               });
             } else {
               // Raised by an employee, or already part-approved: an approver
@@ -2833,6 +3047,7 @@ module.exports = (
                 ot_minutes: current,
                 eligible_ot_minutes: 0,
                 reason: verdict.reason,
+                ...(incomplete ? { attendance_incomplete: true, ...incomplete } : {}),
               });
             }
             continue;
@@ -2895,8 +3110,11 @@ module.exports = (
          * THE ONE EXCEPTION - a DEFERRED HISTORICAL DATE. The deploy backfill
          * remembered this employee's date (`attendance_ot_deferred_sync`,
          * source BACKFILL, still WAITING) because an attendance correction
-         * held it; that correction has now finished (no correction is pending
-         * - checked above) and the engine finds eligible OT. Its ordinary
+         * held it or its attendance was incomplete - or a pending system OT
+         * was withdrawn from it because its attendance became incomplete
+         * (source OT_WITHDRAWN_INCOMPLETE: that OT would otherwise have waited
+         * into the lock). The attendance is now complete, no correction is
+         * pending (checked above) and the engine finds eligible OT. Its ordinary
          * PENDING OT approval request is created even though the month is now
          * locked: nothing locked is written (no day row, no payroll figure),
          * and approving it later goes through the existing Prior-Month OT
@@ -2904,7 +3122,7 @@ module.exports = (
          * under its row locks before it inserts.
          */
         const lockedException = locked ? markerOn.get(date) || null : null;
-        if (locked && !(lockedException && lockedException.source === "BACKFILL")) {
+        if (locked && !(lockedException && LOCKED_EXCEPTION_SOURCES.includes(lockedException.source))) {
           result.skipped.push({ attendance_date: date, reason: AUTO_OT_SKIP.PAYROLL_LOCKED, eligible_ot_minutes: verdict.minutes });
           continue;
         }
@@ -3026,6 +3244,13 @@ module.exports = (
      */
     if (!dry_run && markerOn.size > 0 && typeof attendanceRegularizationRepo.resolveDeferredOt === "function") {
       for (const [date, marker] of markerOn) {
+        // INCOMPLETE ATTENDANCE: re-evaluated only once it is complete - never
+        // resolved from the broken day (whatever was withdrawn from it).
+        if (incompleteDates.has(date)) {
+          /* eslint-disable-next-line no-await-in-loop */
+          await noteMarkerWaiting(marker, correctionOn.get(date) || null, incompleteDates.get(date));
+          continue;
+        }
         if (correctionOn.has(date)) continue;
         const hit = (list) => (list || []).find((x) => x.attendance_date === date);
         // RETRYABLE - the marker stays WAITING: a failure, a day still open,
@@ -3069,6 +3294,17 @@ module.exports = (
       }
     }
     return result;
+  };
+
+  /**
+   * The approval chain an OT for this employee WOULD follow - read-only, for
+   * the backfill preview, so an employee whose chain nobody (valid) can
+   * decide is named even when no OT is raised for them right now.
+   */
+  const previewOtApprovalChain = async (employeeId) => {
+    const who = await resolveIdentity(Number(employeeId));
+    const { chain, source } = await resolveChain(who);
+    return { chain, chain_source: source };
   };
 
   /**
@@ -4062,6 +4298,7 @@ module.exports = (
     syncAutoOt,
     syncAutoOtSafely,
     resolveDeferredOt,
+    previewOtApprovalChain,
     otApprovalContext,
     AUTO_OT_SKIP,
     MAX_FORWARD_DAYS,

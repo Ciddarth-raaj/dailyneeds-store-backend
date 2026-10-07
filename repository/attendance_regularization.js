@@ -49,8 +49,15 @@ const REVOKE_STEPS_SQL = `SELECT attendance_approval_step_id, stage_no, approver
 const { CORRECTION_REQUEST_TYPES, correctionPendingRefusal } = require("../utils/ot_correction_priority");
 
 /**
+ * Marker sources whose date may still raise a pending OT in a locked month:
+ * the deploy backfill's own, and a date whose pending system OT was withdrawn
+ * because its attendance became incomplete.
+ */
+const LOCKED_EXCEPTION_SOURCES = ["BACKFILL", "OT_WITHDRAWN_INCOMPLETE"];
+
+/**
  * THE DEFERRED HISTORICAL EXCEPTION, proved on the connection that is about
- * to insert: the backfill's marker for exactly this employee and date, still
+ * to insert: the remembered marker for exactly this employee and date, still
  * WAITING (locked FOR UPDATE, so a concurrent resolution cannot pass it by),
  * and no attendance correction pending on the date (a locking read).
  */
@@ -60,9 +67,9 @@ async function deferredLockedExceptionHolds(connection, request) {
       connection,
       `SELECT deferred_sync_id FROM attendance_ot_deferred_sync
         WHERE deferred_sync_id = ? AND employee_id = ? AND attendance_date = ?
-          AND status = 'WAITING_FOR_CORRECTION' AND source = 'BACKFILL'
+          AND status = 'WAITING_FOR_CORRECTION' AND source IN (?)
         FOR UPDATE`,
-      [request.deferred_sync_id, request.requested_for_employee_id, request.attendance_date]
+      [request.deferred_sync_id, request.requested_for_employee_id, request.attendance_date, LOCKED_EXCEPTION_SOURCES]
     );
     if (!marker) return false;
     const [blocker] = await queryAsync(
@@ -157,6 +164,25 @@ class AttendanceRegularizationRepository {
       description: err.toString(),
       category: "",
       ref,
+    });
+  }
+
+  /*
+   * A read of a table a not-yet-migrated database may not have (the deferred
+   * OT markers): its absence is an expected state, rejected with
+   * ER_NO_SUCH_TABLE for the caller to treat as "none" - never logged as an
+   * error. Any other failure is logged as `_read` does.
+   */
+  _readOptional(code, sql, params) {
+    return new Promise((resolve, reject) => {
+      this.db.query(sql, params, (err, rows) => {
+        if (err) {
+          if (err.code !== "ER_NO_SUCH_TABLE") this._log(code, err);
+          reject(err);
+          return;
+        }
+        resolve(rows || []);
+      });
     });
   }
 
@@ -341,7 +367,16 @@ class AttendanceRegularizationRepository {
    * correction is re-opened. Returns `{ deferred_sync_id, recorded }`, where
    * `recorded` is false when it was already waiting.
    */
-  async upsertDeferredOt({ employee_id, attendance_date, blocking_request_id, blocking_request_type, eligible_ot_minutes, source = "BACKFILL" }) {
+  async upsertDeferredOt({
+    employee_id,
+    attendance_date,
+    blocking_request_id = null,
+    blocking_request_type = null,
+    eligible_ot_minutes,
+    reason = "BLOCKED_BY_OPEN_REQUEST",
+    detail = null,
+    source = "BACKFILL",
+  }) {
     const connection = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(connection);
@@ -357,9 +392,9 @@ class AttendanceRegularizationRepository {
         const inserted = await queryAsync(
           connection,
           `INSERT INTO attendance_ot_deferred_sync
-             (employee_id, attendance_date, blocking_request_id, blocking_request_type, eligible_ot_minutes, source)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-          [employee_id, attendance_date, blocking_request_id, blocking_request_type, eligible_ot_minutes, source]
+             (employee_id, attendance_date, reason, blocking_request_id, blocking_request_type, eligible_ot_minutes, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [employee_id, attendance_date, reason, blocking_request_id, blocking_request_type, eligible_ot_minutes, source]
         );
         id = Number(inserted.insertId);
         recorded = true;
@@ -370,9 +405,9 @@ class AttendanceRegularizationRepository {
             connection,
             `UPDATE attendance_ot_deferred_sync
                 SET status = 'WAITING_FOR_CORRECTION', resolution = NULL, resolved_request_id = NULL, resolved_at = NULL,
-                    blocking_request_id = ?, blocking_request_type = ?, eligible_ot_minutes = ?
+                    reason = ?, blocking_request_id = ?, blocking_request_type = ?, eligible_ot_minutes = ?
               WHERE deferred_sync_id = ?`,
-            [blocking_request_id, blocking_request_type, eligible_ot_minutes, id]
+            [reason, blocking_request_id, blocking_request_type, eligible_ot_minutes, id]
           );
           recorded = true;
         }
@@ -380,7 +415,11 @@ class AttendanceRegularizationRepository {
       if (recorded) {
         await this._deferredLog(connection, {
           deferred_sync_id: id, employee_id, attendance_date, action: "DEFERRED",
-          blocking_request_id, detail: `${blocking_request_type} #${blocking_request_id} open; ${eligible_ot_minutes || 0} min eligible on the uncorrected day`,
+          blocking_request_id,
+          detail: (reason === "INCOMPLETE_ATTENDANCE"
+            ? `attendance incomplete${detail ? ` (${detail})` : ""}${blocking_request_id ? `; ${blocking_request_type} #${blocking_request_id} open` : ""}; no OT until complete`
+            : `${blocking_request_type} #${blocking_request_id} open; ${eligible_ot_minutes || 0} min eligible on the uncorrected day`
+          ).slice(0, 255),
           trigger_source: source,
         });
       }
@@ -398,7 +437,7 @@ class AttendanceRegularizationRepository {
   async listWaitingDeferredOt(employeeId, dates) {
     if (!Array.isArray(dates) || dates.length === 0) return [];
     try {
-      return await this._read(
+      return await this._readOptional(
         "LIST-WAITING-DEFERRED-OT",
         `SELECT deferred_sync_id, employee_id, DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
                 blocking_request_id, blocking_request_type, source
@@ -426,6 +465,35 @@ class AttendanceRegularizationRepository {
         detail: `${blocking_request_type} #${blocking_request_id} still open`, trigger_source,
       });
     }
+  }
+
+  /**
+   * Re-checked and still not evaluable (its attendance is incomplete): the
+   * marker waits on. Its reason follows what holds it, and it is moved to the
+   * back of the sweep's queue (`updated_at`), so a date nobody ever corrects
+   * cannot starve the others. Logged only when the reason changed.
+   */
+  async noteDeferredOtWaiting({ deferred_sync_id, employee_id, attendance_date, reason = null, detail = null, trigger_source = null }) {
+    if (reason) {
+      const changed = await queryAsync(
+        this.db,
+        `UPDATE attendance_ot_deferred_sync SET reason = ?
+          WHERE deferred_sync_id = ? AND status = 'WAITING_FOR_CORRECTION' AND NOT (reason <=> ?)`,
+        [reason, deferred_sync_id, reason]
+      );
+      if (changed && Number(changed.affectedRows) === 1) {
+        await this._deferredLog(this.db, {
+          deferred_sync_id, employee_id, attendance_date, action: "STILL_BLOCKED",
+          detail: `attendance incomplete${detail ? ` (${detail})` : ""}; no OT until complete`.slice(0, 255), trigger_source,
+        });
+      }
+    }
+    await queryAsync(
+      this.db,
+      `UPDATE attendance_ot_deferred_sync SET updated_at = CURRENT_TIMESTAMP(3)
+        WHERE deferred_sync_id = ? AND status = 'WAITING_FOR_CORRECTION'`,
+      [deferred_sync_id]
+    );
   }
 
   /**
@@ -466,7 +534,7 @@ class AttendanceRegularizationRepository {
   /** WAITING markers whose date has no pending correction any more - the sweep's work. */
   async listResolvableDeferredOt(limit = 500) {
     try {
-      return await this._read(
+      return await this._readOptional(
         "LIST-RESOLVABLE-DEFERRED-OT",
         `SELECT d.deferred_sync_id, d.employee_id, DATE_FORMAT(d.attendance_date, '%Y-%m-%d') AS attendance_date
            FROM attendance_ot_deferred_sync d
@@ -477,7 +545,7 @@ class AttendanceRegularizationRepository {
                      AND r.attendance_date = d.attendance_date
                      AND r.status = 'PENDING'
                      AND r.request_type IN (?))
-          ORDER BY d.employee_id, d.attendance_date
+          ORDER BY d.updated_at, d.deferred_sync_id
           LIMIT ?`,
         [CORRECTION_REQUEST_TYPES, Number(limit)]
       );
