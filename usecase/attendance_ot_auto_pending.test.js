@@ -48,6 +48,11 @@ const config = (id, code, name) => ({
 });
 const SHIFTS = {
   7: { config: config(7, "LATE", "Late Shift"), schedule: weekly(7, "10:00:00", "22:00:00") },
+  // The same hours with SUNDAY as a weekly off.
+  9: {
+    config: config(9, "LATE-SUNOFF", "Late Shift, Sunday off"),
+    schedule: weekly(9, "10:00:00", "22:00:00").map((row) => (row.day_of_week === 0 ? { ...row, is_working_day: 0 } : row)),
+  },
 };
 let punchSeq = 1;
 const punch = (employee_id, ioTime) => ({
@@ -116,7 +121,7 @@ function build(state = {}) {
   const calcRepo = {
     saved,
     getShiftAssignmentHistory: async (employeeId) => [
-      { employee_work_shift_assignment_id: 1, employee_id: employeeId, work_shift_id: 7, effective_from: "2026-09-01", source: "MIGRATION_BACKFILL" },
+      { employee_work_shift_assignment_id: 1, employee_id: employeeId, work_shift_id: (state.shiftOf || {})[employeeId] || 7, effective_from: "2026-08-01", source: "MIGRATION_BACKFILL" },
     ],
     getDateShiftOverrides: async () => [],
     getWorkShiftWithSchedule: async (id) => SHIFTS[id] || null,
@@ -217,6 +222,30 @@ function build(state = {}) {
     },
     // ---- automatic pending OT ----
     getAutoOtSetting: async () => setting,
+    lowerAutoOtCutover: async (date) => {
+      if (setting && date < setting.auto_pending_from_date) setting.auto_pending_from_date = date;
+      return setting;
+    },
+    // Active employees and their roles: the approvers above plus staff.
+    listApprovalAuthority: async () => [
+      ...Object.values(IDENTITIES).map((i) => ({ employee_id: i.employee_id, outlet_id: i.outlet_id, approver_role: i.approver_role })),
+      ...EMPLOYEES.map((e) => ({ employee_id: e.employee_id, outlet_id: e.store_id, approver_role: null })),
+    ].filter((a) => !(state.inactive || []).includes(a.employee_id)),
+    // ADMIN REVOKE, as the transaction applies it: the request CANCELLED, its
+    // decision kept on its steps, the revocation recorded beside it.
+    getRevocationSnapshot: async (id) => {
+      const r = store.requests.find((x) => x.attendance_approval_request_id === Number(id));
+      return r ? { request: { ...r }, steps: stepsOf(r.attendance_approval_request_id).map((st) => ({ ...st })), fingerprint: `fp-${id}` } : null;
+    },
+    getLatestRevocation: async () => null,
+    revokeRequest: async (args) => {
+      const r = store.requests.find((x) => x.attendance_approval_request_id === args.requestId);
+      store.revocations = store.revocations || [];
+      store.revocations.push({ attendance_approval_request_id: args.requestId, original_decision: args.originalDecision, reason: args.reason, revoked_stage_no: args.stageNo });
+      r.status = "CANCELLED";
+      if ((args.calculations || []).length > 0) saved.calculations.push(args.calculations);
+      return { code: 200, status: "CANCELLED", calculations_written: (args.calculations || []).length };
+    },
     findOtRequestsForSync: async (employeeId, dates) =>
       store.requests
         .filter((r) => r.requested_for_employee_id === employeeId && dates.includes(r.attendance_date) && ["OT", "REGULARIZATION_WITH_OT"].includes(r.request_type) && r.status !== "CANCELLED")
@@ -661,94 +690,190 @@ describe("12. pending and rejected OT do not reach payroll", () => {
   });
 });
 
-describe("13-15. the last-5-days deploy backfill", () => {
-  const TODAY = "2026-09-20";
-  const seed = () =>
+describe("13-15. the deploy backfill: each employee's previous 5 ATTENDANCE days", () => {
+  const TODAY = "2026-09-20"; // a Sunday
+  /*
+   * 42 (every day a working day) attended 10, 11, 12, 15 and 18 Sep - leave on
+   * 16-17, absent on 13, 14 and 19. Five CALENDAR days (15-19) would miss the
+   * 90 min OT on the 10th; five ATTENDANCE days reach back to it.
+   * 44 (Sunday weekly off) attended 14-19 Sep, plus 60 min OT on the 19th;
+   * its 17th OT was rejected and its 18th approved before the deploy.
+   * 43 has no punches at all.
+   */
+  const seed = (extra = {}) =>
     build({
       wireAuto: false, // the deploy state: days stored before the feature
       setting: { enabled: 1, auto_pending_from_date: "2026-09-15" },
+      shiftOf: { 44: 9 },
       rawPunches: [
-        ...day(42, "2026-09-12"), // older than 5 days: out of the window
-        ...day(42, "2026-09-15"), // eligible, open -> created
-        ...day(42, "2026-09-16", "22:00:00"), // no OT
-        ...day(42, "2026-09-17"), // approved already -> preserved
-        ...day(44, "2026-09-18"), // rejected already -> preserved
-        ...day(44, "2026-09-19", "23:00:00"), // eligible -> created
-        ...day(43, "2026-09-20"), // today: not in the window
+        ...day(42, "2026-09-05"), // older than its 5 attendance days
+        ...day(42, "2026-09-10"), // 90 min, reached only by attendance days
+        ...day(42, "2026-09-11", "22:00:00"),
+        ...day(42, "2026-09-12", "22:00:00"),
+        ...day(42, "2026-09-15", "22:00:00"),
+        ...day(42, "2026-09-18", "22:00:00"),
+        ...day(44, "2026-09-14", "22:00:00"),
+        ...day(44, "2026-09-15", "22:00:00"),
+        ...day(44, "2026-09-16", "22:00:00"),
+        ...day(44, "2026-09-17"), // rejected before deploy
+        ...day(44, "2026-09-18"), // approved before deploy
+        ...day(44, "2026-09-19", "23:00:00"), // 60 min, new
+        ...day(43, "2026-09-20"), // today: never evaluated
       ],
+      ...extra,
     });
-  const runBackfill = (w, apply) =>
-    backfill.run({
-      syncAutoOt: w.regularization.syncAutoOt,
-      listEmployees: async () => EMPLOYEES,
-      setting: { enabled: 1, auto_pending_from_date: "2026-09-15" },
-      today: TODAY, days: 5, apply, telegram: false,
-    });
+  const deps = (w, extra = {}) => ({
+    calculateRange: w.calculation.calculateRange,
+    syncAutoOt: w.regularization.syncAutoOt,
+    listEmployees: async () => EMPLOYEES,
+    listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+    setting: { enabled: 1, auto_pending_from_date: "2026-09-15" },
+    lowerCutover: (d) => w.regRepo.lowerAutoOtCutover(d),
+    notifySummary: w.otTelegram.notifyBacklogSummary,
+    today: TODAY,
+    days: 5,
+    lookback: 31,
+    ...extra,
+  });
   const decideExisting = async (w) => {
-    // History made before the deploy, by employees and approvers.
-    await w.regularization.raiseOtRequest({ actor: actor(42), attendance_date: "2026-09-17", reason: "Stock count ran late", today: TODAY, now: NOW });
-    await approveRoleChain(w, otOf(w, 42, "2026-09-17")[0].attendance_approval_request_id);
     await w.regularization.raiseOtRequest({ actor: actor(44), attendance_date: "2026-09-18", reason: "Stock count ran late", today: TODAY, now: NOW });
-    await w.regularization.decide({ actor: SM5, request_id: otOf(w, 44, "2026-09-18")[0].attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "Not authorised", now: NOW });
+    await approveRoleChain(w, otOf(w, 44, "2026-09-18")[0].attendance_approval_request_id, SM5);
+    await w.regularization.raiseOtRequest({ actor: actor(44), attendance_date: "2026-09-17", reason: "Stock count ran late", today: TODAY, now: NOW });
+    await w.regularization.decide({ actor: SM5, request_id: otOf(w, 44, "2026-09-17")[0].attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "Not authorised", now: NOW });
   };
+  const detailOf = (report, id) => report.detail.find((d) => d.employee_id === id);
 
-  it("13. the window is yesterday back five days", () => {
-    assert.deepEqual(backfill.windowFor(TODAY, 5), ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"]);
+  it("13. the window is per employee: their last 5 dates with punches, and every date in between", () => {
+    const calculated = ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"]
+      .map((d) => ({ attendance_date: d, punch_count: ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"].includes(d) ? 2 : 0 }));
+    const w = backfill.windowFor({ calculated, today: TODAY, days: 5, lookback: 31 });
+    assert.deepEqual(w.attendance_dates_counted, ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"]);
+    assert.equal(w.from_date, "2026-09-10");
+    assert.equal(w.to_date, "2026-09-19");
+    assert.equal(w.dates_evaluated.length, 10, "weekly offs, leave and absences in between are evaluated too");
+    // Fewer than 5 attended dates: the whole lookback is evaluated.
+    const short = backfill.windowFor({ calculated: calculated.slice(-2).map((d) => ({ ...d, punch_count: 2 })), today: TODAY, days: 5, lookback: 31 });
+    assert.equal(short.from_date, "2026-08-20");
+    assert.equal(short.complete, false);
   });
 
-  it("13. PREVIEW finds exactly the open eligible OT and writes nothing", async () => {
+  it("13. PREVIEW: the exact dates per employee, the counts, and nothing written", async () => {
     const w = seed();
     await decideExisting(w);
-    const before = w.store.requests.length;
-    const report = await runBackfill(w, false);
-    assert.equal(w.store.requests.length, before, "preview writes nothing");
-    assert.equal(report.totals.pending_ot_would_be_created, 2);
-    assert.equal(report.totals.pending_ot_minutes_created, 90 + 60);
-    assert.equal(report.totals.approved_preserved, 1);
-    assert.equal(report.totals.rejected_preserved, 1);
+    const before = JSON.stringify(w.store.requests);
+    const report = await backfill.run(deps(w, { apply: false }));
+    assert.equal(JSON.stringify(w.store.requests), before, "preview writes nothing");
+    assert.equal(w.telegramLog.sent.length, 0, "and messages nobody");
+    const d42 = detailOf(report, 42);
+    assert.deepEqual(d42.attendance_dates_counted, ["2026-09-10", "2026-09-11", "2026-09-12", "2026-09-15", "2026-09-18"]);
+    assert.equal(d42.from_date, "2026-09-10", "not 2026-09-15: five ATTENDANCE days, not five calendar days");
+    assert.equal(d42.dates_evaluated[0], "2026-09-10");
+    assert.equal(d42.dates_evaluated[d42.dates_evaluated.length - 1], "2026-09-19");
+    const d44 = detailOf(report, 44);
+    assert.equal(d44.from_date, "2026-09-15");
+    assert.ok(!report.detail.some((d) => d.employee_id === 43), "no punches, nothing to evaluate");
+    assert.equal(report.dates_covered.from_date, "2026-09-10");
+    assert.equal(report.dates_covered.to_date, "2026-09-19");
+    assert.equal(report.employees_checked, EMPLOYEES.length);
+    assert.equal(report.totals.new_pending_would_be_created, 2);
+    assert.equal(report.totals.new_pending_ot_minutes, 150);
+    assert.equal(report.totals.total_ot_minutes_added_to_queue, 150);
+    assert.equal(report.totals.already_approved, 1);
+    assert.equal(report.totals.already_rejected, 1);
+    assert.equal(report.totals.eligible_ot_days_found, 4);
+    assert.deepEqual(report.employees_without_valid_approval_chain, []);
     assert.deepEqual(report.failures, []);
   });
 
-  it("13/14. APPLY creates them pending and leaves the approved and rejected decisions exactly as they were", async () => {
+  it("13/14. APPLY: creates them pending, approved and rejected untouched, the cutover reaches back", async () => {
     const w = seed();
     await decideExisting(w);
-    const approved = { ...otOf(w, 42, "2026-09-17")[0] };
-    const rejected = { ...otOf(w, 44, "2026-09-18")[0] };
-    const report = await runBackfill(w, true);
-    assert.equal(report.totals.pending_ot_created, 2);
-    assert.deepEqual(otOf(w, 42, "2026-09-15").map((r) => [r.status, r.auto_created, r.candidate_ot_minutes]), [["PENDING", 1, 90]]);
+    const approved = { ...otOf(w, 44, "2026-09-18")[0] };
+    const rejected = { ...otOf(w, 44, "2026-09-17")[0] };
+    const report = await backfill.run(deps(w, { apply: true }));
+    assert.equal(report.totals.new_pending_created, 2);
+    assert.deepEqual(otOf(w, 42, "2026-09-10").map((r) => [r.status, r.auto_created, r.candidate_ot_minutes]), [["PENDING", 1, 90]]);
     assert.deepEqual(otOf(w, 44, "2026-09-19").map((r) => [r.status, r.auto_created, r.candidate_ot_minutes]), [["PENDING", 1, 60]]);
-    assert.deepEqual(otOf(w, 42, "2026-09-17"), [approved], "approved: untouched");
-    assert.deepEqual(otOf(w, 44, "2026-09-18"), [rejected], "rejected: untouched");
-    assert.equal(otOf(w, 42, "2026-09-12").length, 0, "older than the window");
-    assert.equal(otOf(w, 43, "2026-09-20").length, 0, "today is not in the window");
+    assert.deepEqual(otOf(w, 44, "2026-09-18"), [approved], "approved: untouched");
+    assert.deepEqual(otOf(w, 44, "2026-09-17"), [rejected], "rejected: untouched");
+    assert.equal(otOf(w, 42, "2026-09-05").length, 0, "older than the 5 attendance days");
+    assert.equal(otOf(w, 43, "2026-09-20").length, 0, "today is never in the window");
+    assert.equal(report.cutover, "2026-09-10", "lowered to the earliest window, never raised");
     assert.ok(w.store.log.filter((l) => l.action === "CREATED").every((l) => l.trigger_source === "BACKFILL"));
   });
 
   it("15. running the backfill twice produces no duplicates", async () => {
     const w = seed();
     await decideExisting(w);
-    await runBackfill(w, true);
+    await backfill.run(deps(w, { apply: true }));
     const count = w.store.requests.length;
-    const second = await runBackfill(w, true);
+    const second = await backfill.run(deps(w, { apply: true }));
     assert.equal(w.store.requests.length, count);
-    assert.equal(second.totals.pending_ot_created, 0);
+    assert.equal(second.totals.new_pending_created, 0);
     assert.equal(second.totals.already_pending_unchanged, 2);
+  });
+
+  it("an employee with nobody active to decide their chain is named in the preview", async () => {
+    const w = seed({ inactive: [7] }); // the only Store Manager of outlet 3 has left
+    const report = await backfill.run(deps(w, { apply: false }));
+    const problems = report.employees_without_valid_approval_chain;
+    assert.ok(problems.some((p) => p.employee_id === 42 && /no active Store Manager mapped for outlet 3/.test(p.problem)), JSON.stringify(problems));
+  });
+
+  it("payroll-locked months: OT is NOT raised there, but reported with its minutes", async () => {
+    const w = seed({ lockedMonths: ["42:2026-9"] });
+    const report = await backfill.run(deps(w, { apply: true }));
+    assert.equal(otOf(w, 42, "2026-09-10").length, 0);
+    assert.equal(report.totals.payroll_locked_eligible_days_not_raised, 1);
+    assert.equal(report.totals.payroll_locked_eligible_minutes, 90);
   });
 
   it("apply refuses to run before the migration has seeded its setting", async () => {
     const w = seed();
-    await assert.rejects(
-      backfill.run({ syncAutoOt: w.regularization.syncAutoOt, listEmployees: async () => EMPLOYEES, setting: null, today: TODAY, days: 5, apply: true }),
-      /not enabled/
-    );
+    await assert.rejects(backfill.run(deps(w, { apply: true, setting: null })), /not enabled/);
   });
 
   it("parses its arguments strictly", () => {
-    assert.deepEqual(backfill.parseArgs([]), { apply: false, days: 5, employee_ids: [], today: null, telegram: true });
+    assert.deepEqual(backfill.parseArgs([]), { apply: false, days: 5, lookback: 31, employee_ids: [], today: null, telegram: true, summary_only: false });
     assert.equal(backfill.parseArgs(["--apply", "--no-telegram"]).telegram, false);
     assert.throws(() => backfill.parseArgs(["--days", "90"]), /1 to 31/);
+    assert.throws(() => backfill.parseArgs(["--lookback", "60"]), /5 to 45/);
     assert.throws(() => backfill.parseArgs(["--force"]), /unknown argument/);
+  });
+});
+
+describe("Telegram volume: the backfill sends ONE summary per approver, never a card per date", () => {
+  it("12 backlog OT for one approver -> one message pointing at /ot; the records stay individual", async () => {
+    const dates = ["2026-09-08", "2026-09-09", "2026-09-10", "2026-09-11", "2026-09-12", "2026-09-13", "2026-09-14", "2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
+    // 43's chain names its first approver: 7.
+    const w = build({ wireAuto: false, rawPunches: dates.flatMap((d) => day(43, d)) });
+    const report = await backfill.run({
+      calculateRange: w.calculation.calculateRange,
+      syncAutoOt: w.regularization.syncAutoOt,
+      listEmployees: async () => [{ employee_id: 43 }],
+      listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-01" },
+      lowerCutover: (d) => w.regRepo.lowerAutoOtCutover(d),
+      notifySummary: w.otTelegram.notifyBacklogSummary,
+      today: "2026-09-20",
+      days: 12,
+      lookback: 31,
+      apply: true,
+    });
+    assert.equal(report.totals.new_pending_created, 12);
+    assert.equal(w.store.requests.filter((r) => r.requested_for_employee_id === 43 && r.status === "PENDING").length, 12, "twelve individual records");
+    assert.equal(w.telegramLog.sent.length, 1, "one message, not twelve");
+    const [msg] = w.telegramLog.sent;
+    assert.equal(msg.chatId, 1007);
+    assert.match(msg.text, /^12 OT approvals pending from previous days \(08 Sep 2026 - 19 Sep 2026\)\./);
+    assert.match(msg.text, /Send \/ot to review them/);
+    assert.equal(report.telegram.summaries[0].count, 12);
+  });
+
+  it("normal daily recalculation still sends an individual card per new OT", async () => {
+    const w = build({ rawPunches: [...day(43, DATE), ...day(43, DATE2)] });
+    await recalc(w, 43, DATE, DATE2);
+    assert.equal(w.telegramLog.sent.filter((m) => /OT Approval Pending/.test(m.text)).length, 2);
   });
 });
 
@@ -924,5 +1049,59 @@ describe("production wiring", () => {
     assert.match(server, /attendanceCalculationUsecase\.setOtAutoSync\(this\.attendanceRegularizationUsecase\)/);
     assert.match(server, /attendanceRegularizationUsecase\.setOtNotifier\(this\.attendanceOtTelegramUsecase\)/);
     assert.match(server, /name: "attendance_ot_approval"/);
+  });
+});
+
+describe("revoke: an OT decision goes back to Pending Approval - only while OT is still eligible", () => {
+  const ADMIN = { employee_id: 8, user_type: 2, branch_scope: ALL_BRANCHES };
+  const revoke = (w, id) =>
+    w.regularization.revokeDecision({ actor: ADMIN, request_id: id, reason: "decided by mistake", now: NOW });
+
+  it("Approved -> Revoke -> Pending Approval (a new pending record; the old one kept, cancelled, with its decision)", async () => {
+    const w = build({ rawPunches: day(42, DATE) });
+    await recalc(w, 42);
+    const [ot] = otOf(w, 42);
+    await approveRoleChain(w, ot.attendance_approval_request_id);
+    const out = await revoke(w, ot.attendance_approval_request_id);
+    assert.equal(out.code, 200);
+    const rows = otOf(w, 42);
+    assert.deepEqual(rows.map((r) => [r.attendance_approval_request_id, r.status]), [
+      [ot.attendance_approval_request_id, "CANCELLED"],
+      [rows[1].attendance_approval_request_id, "PENDING"],
+    ]);
+    assert.equal(rows[1].candidate_ot_minutes, 90);
+    assert.equal(rows[1].approved_ot_minutes, null, "nothing payable until approved again");
+    // FULL HISTORY: the revoked approval's own steps are untouched, the
+    // revocation is recorded, and the new record's creation is logged.
+    const oldSteps = w.store.steps.filter((s) => s.attendance_approval_request_id === ot.attendance_approval_request_id);
+    assert.deepEqual(oldSteps.map((s) => s.decision), ["APPROVED", "APPROVED", "APPROVED"]);
+    assert.deepEqual(w.store.revocations.map((r) => [r.attendance_approval_request_id, r.original_decision]), [[ot.attendance_approval_request_id, "APPROVED"]]);
+    assert.equal(w.store.log.filter((l) => l.action === "CREATED").pop().trigger_source, "REVOKE_OT");
+    assert.equal(out.ot_auto_pending.created.length, 1);
+    assert.equal(lastStored(w, 42).approved_ot_minutes, 0, "the revoked OT stops reaching payroll");
+  });
+
+  it("Rejected -> Revoke -> Pending Approval", async () => {
+    const w = build({ rawPunches: day(42, DATE) });
+    await recalc(w, 42);
+    const [ot] = otOf(w, 42);
+    await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "Not authorised", now: NOW });
+    await revoke(w, ot.attendance_approval_request_id);
+    assert.deepEqual(otOf(w, 42).map((r) => r.status), ["CANCELLED", "PENDING"]);
+    assert.equal(w.store.steps.find((s) => s.attendance_approval_request_id === ot.attendance_approval_request_id).decision, "REJECTED", "the rejection stays on record");
+    assert.equal(w.store.revocations[0].original_decision, "REJECTED");
+  });
+
+  it("revoked when the eligible OT has become zero -> no new pending OT", async () => {
+    const w = build({ rawPunches: day(42, DATE) });
+    await recalc(w, 42);
+    const [ot] = otOf(w, 42);
+    await approveRoleChain(w, ot.attendance_approval_request_id);
+    // A later correction: the out punch was really at the shift end.
+    w.rawPunches.find((p) => p.employee_id === 42 && p.io_time.endsWith("23:30:00")).io_time = `${DATE} 22:00:00`;
+    const out = await revoke(w, ot.attendance_approval_request_id);
+    assert.equal(out.code, 200);
+    assert.deepEqual(otOf(w, 42).map((r) => r.status), ["CANCELLED"], "nothing recreated");
+    assert.equal(out.ot_auto_pending.created.length, 0);
   });
 });

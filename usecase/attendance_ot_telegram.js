@@ -144,6 +144,41 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
     }
   };
 
+  /**
+   * THE BACKLOG SUMMARY - one message per approver for the deploy backfill,
+   * instead of one card per employee and date. The OT records stay
+   * individual; this only tells the approver they exist and how to reach
+   * them (`/ot` here, or DnDS). Never throws.
+   */
+  const notifyBacklogSummary = async ({ approver_employee_id, count, from_date = null, to_date = null }) => {
+    if (!configured()) return { sent: false, reason: "TELEGRAM_NOT_CONFIGURED" };
+    const approverId = Number(approver_employee_id);
+    const n = Math.max(0, Math.trunc(Number(count) || 0));
+    if (!approverId || n === 0) return { sent: false, reason: "NOTHING_TO_SAY" };
+    try {
+      const identity = await employeeTelegramRepo.getActiveIdentityByEmployee(approverId);
+      const chatId = identity && identity.private_chat_id ? identity.private_chat_id : null;
+      if (!chatId) return { sent: false, reason: "APPROVER_HAS_NO_TELEGRAM", approver_employee_id: approverId };
+      const span = from_date && to_date ? ` (${displayDate(from_date)} - ${displayDate(to_date)})` : "";
+      const text = [
+        `${n} OT approval${n === 1 ? "" : "s"} pending from previous days${span}.`,
+        "",
+        "Send /ot to review them here, or open the OT approvals in DnDS.",
+      ].join("\n");
+      const options = { parseMode: null };
+      if (webBaseUrl) {
+        options.replyMarkup = {
+          inline_keyboard: [[{ text: "Open in DnDS", url: `${String(webBaseUrl).replace(/\/$/, "")}/attendance/approval?type=OT` }]],
+        };
+      }
+      const sent = await telegram.sendMessage(chatId, text, options);
+      return { sent: true, approver_employee_id: approverId, chat_id: chatId, count: n, message_id: sent && sent.message_id ? sent.message_id : null };
+    } catch (err) {
+      log("NOTIFY-BACKLOG-SUMMARY", err, { approver_employee_id: approverId });
+      return { sent: false, reason: "SEND_FAILED" };
+    }
+  };
+
   /** The Telegram user behind a tap, as an employee - the existing link, nothing new. */
   const actorFor = async (telegramUserId) => {
     if (!telegramUserId) return null;
@@ -351,7 +386,9 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
       }
       await say(
         chatId,
-        `${total > mine.length ? `${total} OT approvals are pending; showing ${mine.length}.` : `${mine.length} OT approval(s) pending.`}`
+        total > mine.length
+          ? `${total} OT approvals are pending; here are ${mine.length}. Decide these, then send /ot again for the next.`
+          : `${mine.length} OT approval(s) pending.`
       );
       for (const row of mine) {
         /* eslint-disable no-await-in-loop */
@@ -401,6 +438,7 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
       return { handled: false };
     },
     notifyFirstApprover,
+    notifyBacklogSummary,
     composeMessage,
     keyboardFor,
     displayDate,

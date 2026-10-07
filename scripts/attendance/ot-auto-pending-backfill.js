@@ -1,53 +1,86 @@
 #!/usr/bin/env node
 /**
- * DEPLOY BACKFILL: the previous N (default 5) attendance days' eligible OT,
+ * DEPLOY BACKFILL: each employee's PREVIOUS 5 ATTENDANCE DAYS of eligible OT,
  * into approval - through the SAME `syncAutoOt` the attendance engine calls
- * after every stored day. This script writes no SQL of its own.
+ * after every stored day. This script writes no SQL of its own except the
+ * cutover row, which it only ever LOWERS (and only with --apply).
  *
- * WHAT IT DOES PER EMPLOYEE AND DATE (yesterday back N days):
+ * ================================== WHAT "5 ATTENDANCE DAYS" MEANS HERE ====
+ *
+ * Not five calendar days. This schema has no holiday calendar and no leave
+ * module: the only non-working days are a shift's weekly offs
+ * (`work_shift_weekly_schedule.is_working_day`). So, per employee, the SAFEST
+ * reading - the one that cannot miss OT because of a weekly off, a holiday,
+ * leave or an absence - is:
+ *
+ *   the employee's 5 most recent dates WITH PUNCHES (OT can only exist on a
+ *   day somebody worked), up to yesterday, looking back at most `--lookback`
+ *   days (default 31) - and EVERY date from the oldest of those five to
+ *   yesterday is evaluated, so a worked weekly off in between is checked too.
+ *
+ * An employee with fewer than 5 punched dates in the lookback has the whole
+ * lookback evaluated. Today is never evaluated (its day is still open).
+ *
+ * ========================================================== PER DATE =====
  *
  *   eligible OT, no OT record                 -> created PENDING (auto)
  *   PENDING OT, minutes changed                -> follows the engine
  *   PENDING auto OT, no eligible OT any more   -> withdrawn
  *   APPROVED or REJECTED (incl. payroll-lock
  *   closures)                                  -> PRESERVED, never touched
- *   payroll-locked month, open day, before
- *   the cutover, outside employment           -> skipped, with the reason
+ *   payroll-locked month                       -> NOT raised; reported with
+ *                                                its minutes (and an existing
+ *                                                pending one is preserved)
  *
- * IDEMPOTENT. A date that already carries an OT record is matched to it, and
- * the database refuses a second PENDING one - so a second run creates
- * nothing. Nobody has to request any of these days retrospectively.
+ * IDEMPOTENT: a second run creates nothing. TELEGRAM: no per-date cards - each
+ * named first approver gets ONE summary ("12 OT approvals pending from
+ * previous days ... send /ot"); the records stay individual.
  *
  * Usage, on the server, from the repository root:
  *
- *   # 1. PREVIEW (default) - counts and per-date detail, nothing written
+ *   # 1. PREVIEW (default) - read-only: the exact dates per employee, counts
  *   NODE_ENV=production node scripts/attendance/ot-auto-pending-backfill.js
  *
  *   # 2. apply (after migration 20261124120000 has run)
  *   NODE_ENV=production node scripts/attendance/ot-auto-pending-backfill.js --apply
  *
- * Options: --days <n> (1..31, default 5), --employee <id> (repeatable),
- * --today YYYY-MM-DD (the business date to count back from; default IST
- * today), --no-telegram (apply without messaging first approvers).
- * Exit code 1 if any employee or date failed.
+ * Options: --days <n> attendance days (1..31, default 5), --lookback <n>
+ * calendar days (5..45, default 31), --employee <id> (repeatable), --today
+ * YYYY-MM-DD (default IST today), --no-telegram, --summary-only (omit the
+ * per-employee detail from the JSON). Exit code 1 if anything failed.
  */
 
 const { istToday } = require("../../utils/istDate");
 const { addDays } = require("../../utils/attendance_engine");
 
 const DEFAULT_DAYS = 5;
+const DEFAULT_LOOKBACK = 31;
 
 function parseArgs(argv) {
-  const out = { apply: false, days: DEFAULT_DAYS, employee_ids: [], today: null, telegram: true };
+  const out = {
+    apply: false,
+    days: DEFAULT_DAYS,
+    lookback: DEFAULT_LOOKBACK,
+    employee_ids: [],
+    today: null,
+    telegram: true,
+    summary_only: false,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "--apply") out.apply = true;
     else if (arg === "--preview") out.apply = false;
     else if (arg === "--no-telegram") out.telegram = false;
+    else if (arg === "--summary-only") out.summary_only = true;
     else if (arg === "--days") {
       const n = Number(argv[i + 1]);
       if (!Number.isInteger(n) || n < 1 || n > 31) throw new Error("--days takes a whole number from 1 to 31");
       out.days = n;
+      i += 1;
+    } else if (arg === "--lookback") {
+      const n = Number(argv[i + 1]);
+      if (!Number.isInteger(n) || n < 5 || n > 45) throw new Error("--lookback takes a whole number from 5 to 45");
+      out.lookback = n;
       i += 1;
     } else if (arg === "--employee") {
       const id = Number(argv[i + 1]);
@@ -60,124 +93,297 @@ function parseArgs(argv) {
       i += 1;
     } else throw new Error(`unknown argument ${arg}`);
   }
+  if (out.days > out.lookback) throw new Error("--days cannot exceed --lookback");
   return out;
 }
 
-/** yesterday back `days` days, oldest first: the attendance days the deploy covers. */
-function windowFor(today, days) {
-  const dates = [];
-  for (let n = days; n >= 1; n -= 1) dates.push(addDays(today, -n));
-  return dates;
-}
-
-const CATEGORIES = [
-  "created",
-  "updated",
-  "withdrawn",
-  "unchanged",
-  "preserved_approved",
-  "preserved_rejected",
-  "held",
-  "skipped",
-  "errors",
-];
+/** Did the employee attend this date? Any punch at all - raw or effective. */
+const attended = (day) =>
+  !!day &&
+  (Number(day.punch_count) > 0 ||
+    (Array.isArray(day.raw_punches) && day.raw_punches.length > 0) ||
+    (Array.isArray(day.effective_punches) && day.effective_punches.length > 0));
 
 /**
- * Sync every employee over the window. One failure never stops the rest.
+ * One employee's window: the oldest of their last `days` attended dates (or
+ * the whole lookback when they attended fewer), to yesterday.
  *
- * @param {object}   deps
- * @param {Function} deps.syncAutoOt      the regularization usecase's sync
- * @param {Function} deps.listEmployees   ({ from_date, to_date }) -> [{ employee_id }]
- * @param {object}   [deps.setting]       the cutover row as stored (null = migration not run)
+ * @param {object[]} calculated  the engine's days for [today-lookback, yesterday]
  */
-async function run({ syncAutoOt, listEmployees, setting = null, today, days, employee_ids = [], apply = false, telegram = true, log = () => {} }) {
-  const dates = windowFor(today, days);
-  const from = dates[0];
-  const to = dates[dates.length - 1];
+function windowFor({ calculated, today, days, lookback }) {
+  const yesterday = addDays(today, -1);
+  const lookbackStart = addDays(today, -lookback);
+  const inRange = (calculated || [])
+    .filter((d) => d && d.attendance_date >= lookbackStart && d.attendance_date <= yesterday)
+    .sort((a, b) => (a.attendance_date < b.attendance_date ? -1 : 1));
+  const attendedDates = inRange.filter(attended).map((d) => d.attendance_date);
+  const counted = attendedDates.slice(-days);
+  const from = counted.length >= days ? counted[0] : lookbackStart;
+  const evaluated = inRange.filter((d) => d.attendance_date >= from);
+  return {
+    from_date: from,
+    to_date: yesterday,
+    complete: counted.length >= days,
+    attendance_dates_counted: counted,
+    dates_evaluated: evaluated.map((d) => d.attendance_date),
+    days: evaluated,
+  };
+}
 
-  if (apply && (!setting || !(setting.enabled === true || Number(setting.enabled) === 1))) {
+/**
+ * Can somebody ACTIVE decide every stage? A named approver must be active; a
+ * role stage needs an active holder of the role (Store Manager: at that
+ * outlet). Returns the problem as a sentence, or null.
+ */
+function chainProblem(chain, authority) {
+  if (!Array.isArray(chain) || chain.length === 0) return "no approval chain";
+  const active = new Set(authority.map((a) => Number(a.employee_id)));
+  for (const st of chain) {
+    if (st.approver_employee_id) {
+      if (!active.has(Number(st.approver_employee_id))) {
+        return `stage ${st.stage_no}: named approver ${st.approver_employee_id} is not an active employee`;
+      }
+      continue;
+    }
+    const holders = authority.filter(
+      (a) =>
+        a.approver_role === st.approver_role &&
+        (st.approver_role !== "STORE_MANAGER" || Number(a.outlet_id) === Number(st.outlet_id))
+    );
+    if (holders.length === 0) {
+      return st.approver_role === "STORE_MANAGER"
+        ? `stage ${st.stage_no}: no active Store Manager mapped for outlet ${st.outlet_id} (only an administrator can decide it)`
+        : `stage ${st.stage_no}: nobody active holds the ${st.approver_role} approval role (only an administrator can decide it)`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Plan every employee's window, then sync it (dry run unless `apply`). One
+ * failure never stops the rest.
+ */
+async function run({
+  calculateRange,
+  syncAutoOt,
+  listEmployees,
+  listApprovalAuthority = async () => null,
+  setting = null,
+  lowerCutover = null,
+  notifySummary = null,
+  today,
+  days = DEFAULT_DAYS,
+  lookback = DEFAULT_LOOKBACK,
+  employee_ids = [],
+  apply = false,
+  telegram = true,
+  summary_only = false,
+  log = () => {},
+}) {
+  const enabled = !!setting && (setting.enabled === true || Number(setting.enabled) === 1);
+  if (apply && !enabled) {
     throw new Error(
       "Automatic pending OT is not enabled (migration 20261124120000 not run, or its setting row is disabled) - run the migration first, or preview without --apply"
     );
   }
-  // A preview may be taken before the migration: it assumes the cutover the
-  // migration will seed (the first date of this window).
-  const assumed = setting || { enabled: 1, auto_pending_from_date: from };
+  const yesterday = addDays(today, -1);
+  const lookbackStart = addDays(today, -lookback);
 
   const population =
     employee_ids.length > 0
       ? employee_ids.map((employee_id) => ({ employee_id }))
-      : await listEmployees({ from_date: from, to_date: to });
+      : await listEmployees({ from_date: lookbackStart, to_date: yesterday });
 
-  const totals = Object.fromEntries(CATEGORIES.map((c) => [c, 0]));
-  const skippedByReason = {};
-  const detail = [];
+  // ---- 1. the windows, from the engine's own days ----
+  const plans = [];
   const failures = [];
-  let createdMinutes = 0;
-
   for (const { employee_id } of population) {
     /* eslint-disable no-await-in-loop */
     try {
+      const calculated = await calculateRange({ employee_id, from_date: lookbackStart, to_date: yesterday });
+      const w = windowFor({ calculated, today, days, lookback });
+      plans.push({ employee_id: Number(employee_id), ...w });
+    } catch (err) {
+      failures.push({ employee_id, stage: "WINDOW", message: String((err && err.message) || err) });
+    }
+    /* eslint-enable no-await-in-loop */
+  }
+  const withAttendance = plans.filter((p) => p.attendance_dates_counted.length > 0);
+  const earliest = withAttendance.reduce((m, p) => (m === null || p.from_date < m ? p.from_date : m), null);
+
+  // ---- 2. the cutover reaches back to the earliest window (apply only) ----
+  let cutover = setting ? setting.auto_pending_from_date : null;
+  if (apply && earliest && lowerCutover) {
+    const after = await lowerCutover(earliest);
+    cutover = after ? after.auto_pending_from_date : cutover;
+  }
+
+  const authority = await listApprovalAuthority();
+
+  // ---- 3. the sync, per employee, over exactly the planned dates ----
+  const counts = {
+    eligible_ot_days: 0,
+    already_approved: 0,
+    already_rejected: 0,
+    already_pending_unchanged: 0,
+    pending_minutes_would_change: 0,
+    pending_held_for_approver: 0,
+    new_pending: 0,
+    new_pending_minutes: 0,
+    changed_pending_minutes_delta: 0,
+    auto_pending_withdrawn: 0,
+    locked_month_eligible_days: 0,
+    locked_month_eligible_minutes: 0,
+    locked_month_pending_preserved: 0,
+  };
+  const chainProblems = [];
+  const detail = [];
+  const summaryByApprover = new Map();
+  let roleChainNotMessaged = 0;
+
+  for (const plan of withAttendance) {
+    /* eslint-disable no-await-in-loop */
+    try {
       const result = await syncAutoOt({
-        employee_id,
-        dates,
+        employee_id: plan.employee_id,
+        days: plan.days,
         today,
         source: "BACKFILL",
         dry_run: !apply,
-        notify: apply && telegram,
-        assume_setting: apply ? null : assumed,
+        // NO PER-DATE CARDS: one summary per approver is sent below.
+        notify: false,
+        assume_setting: apply ? null : { enabled: 1, auto_pending_from_date: plan.from_date },
       });
       if (!result.enabled) {
-        failures.push({ employee_id, message: "automatic pending OT is disabled" });
+        failures.push({ employee_id: plan.employee_id, stage: "SYNC", message: "automatic pending OT is disabled" });
         continue;
       }
-      CATEGORIES.forEach((c) => {
-        totals[c] += (result[c] || []).length;
-      });
-      (result.skipped || []).forEach((s) => {
-        skippedByReason[s.reason] = (skippedByReason[s.reason] || 0) + 1;
-      });
-      createdMinutes += (result.created || []).reduce((n, c) => n + (Number(c.ot_minutes) || 0), 0);
-      const interesting = ["created", "updated", "withdrawn", "preserved_approved", "preserved_rejected", "held", "errors"];
-      if (interesting.some((c) => (result[c] || []).length > 0)) {
-        const row = { employee_id };
-        interesting.forEach((c) => {
-          if ((result[c] || []).length > 0) row[c] = result[c];
-        });
-        detail.push(row);
+      const pos = (n) => Number(n) > 0;
+      const created = result.created || [];
+      const updated = result.updated || [];
+      const unchanged = (result.unchanged || []).filter((u) => !u.legacy && !u.duplicate_prevented);
+      const approved = result.preserved_approved || [];
+      const rejected = result.preserved_rejected || [];
+      const held = result.held || [];
+      const locked = (result.skipped || []).filter((s) => s.reason === "PAYROLL_LOCKED");
+
+      counts.new_pending += created.length;
+      counts.new_pending_minutes += created.reduce((n, c) => n + (Number(c.ot_minutes) || 0), 0);
+      counts.pending_minutes_would_change += updated.length;
+      counts.changed_pending_minutes_delta += updated.reduce((n, u) => n + (u.ot_minutes - u.previous_ot_minutes), 0);
+      counts.already_pending_unchanged += unchanged.length;
+      counts.pending_held_for_approver += held.length;
+      counts.already_approved += approved.length;
+      counts.already_rejected += rejected.length;
+      counts.auto_pending_withdrawn += (result.withdrawn || []).length;
+      counts.locked_month_eligible_days += locked.filter((l) => pos(l.eligible_ot_minutes)).length;
+      counts.locked_month_eligible_minutes += locked.reduce((n, l) => n + (Number(l.eligible_ot_minutes) || 0), 0);
+      counts.locked_month_pending_preserved += locked.filter((l) => l.existing_status === "PENDING").length;
+      counts.eligible_ot_days +=
+        created.length +
+        updated.length +
+        unchanged.length +
+        approved.filter((a) => pos(a.eligible_ot_minutes)).length +
+        rejected.filter((r) => pos(r.eligible_ot_minutes)).length +
+        held.filter((h) => pos(h.eligible_ot_minutes)).length +
+        locked.filter((l) => pos(l.eligible_ot_minutes)).length;
+
+      // Every new record must have somebody active to decide it.
+      for (const c of created) {
+        const problem = c.chain_error || (authority ? chainProblem(c.chain, authority) : null);
+        if (problem) chainProblems.push({ employee_id: plan.employee_id, attendance_date: c.attendance_date, problem });
+        if (c.first_approver_employee_id) {
+          const key = Number(c.first_approver_employee_id);
+          const entry = summaryByApprover.get(key) || { count: 0, from: null, to: null };
+          entry.count += 1;
+          entry.from = entry.from === null || c.attendance_date < entry.from ? c.attendance_date : entry.from;
+          entry.to = entry.to === null || c.attendance_date > entry.to ? c.attendance_date : entry.to;
+          summaryByApprover.set(key, entry);
+        } else {
+          roleChainNotMessaged += 1;
+        }
       }
-      (result.errors || []).forEach((e) => failures.push({ employee_id, ...e }));
-      if ((result.created || []).length > 0) {
-        log(`${apply ? "created" : "would create"} ${(result.created || []).length} pending OT for employee ${employee_id}`);
+      (result.errors || []).forEach((e) => failures.push({ employee_id: plan.employee_id, stage: "SYNC", ...e }));
+
+      const row = {
+        employee_id: plan.employee_id,
+        from_date: plan.from_date,
+        to_date: plan.to_date,
+        attendance_dates_counted: plan.attendance_dates_counted,
+        dates_evaluated: plan.dates_evaluated,
+      };
+      ["created", "updated", "withdrawn", "preserved_approved", "preserved_rejected", "held"].forEach((c) => {
+        if ((result[c] || []).length > 0) {
+          row[c] = result[c].map(({ chain, ...rest }) => rest); // eslint-disable-line no-unused-vars
+        }
+      });
+      if (locked.length > 0) row.payroll_locked = locked;
+      detail.push(row);
+      if (created.length > 0) {
+        log(`${apply ? "created" : "would create"} ${created.length} pending OT for employee ${plan.employee_id}`);
       }
     } catch (err) {
-      failures.push({ employee_id, message: String((err && err.message) || err) });
-      log(`FAILED employee ${employee_id}: ${(err && err.message) || err}`);
+      failures.push({ employee_id: plan.employee_id, stage: "SYNC", message: String((err && err.message) || err) });
+      log(`FAILED employee ${plan.employee_id}: ${(err && err.message) || err}`);
     }
     /* eslint-enable no-await-in-loop */
   }
 
+  // ---- 4. Telegram: ONE summary per named first approver (apply only) ----
+  const telegramPlan = [...summaryByApprover.entries()].map(([approver_employee_id, e]) => ({
+    approver_employee_id,
+    count: e.count,
+    from_date: e.from,
+    to_date: e.to,
+  }));
+  const telegramSent = [];
+  if (apply && telegram && notifySummary) {
+    for (const t of telegramPlan) {
+      /* eslint-disable no-await-in-loop */
+      telegramSent.push({ ...t, outcome: await notifySummary(t) });
+      /* eslint-enable no-await-in-loop */
+    }
+  }
+
+  const allDates = new Set(withAttendance.flatMap((p) => p.dates_evaluated));
   return {
     applied: apply,
     today,
-    from_date: from,
-    to_date: to,
-    cutover: assumed.auto_pending_from_date,
-    employees_checked: population.length,
-    totals: {
-      [apply ? "pending_ot_created" : "pending_ot_would_be_created"]: totals.created,
-      pending_ot_minutes_created: createdMinutes,
-      [apply ? "pending_ot_minutes_changed" : "pending_ot_minutes_would_change"]: totals.updated,
-      [apply ? "auto_pending_withdrawn" : "auto_pending_would_be_withdrawn"]: totals.withdrawn,
-      already_pending_unchanged: totals.unchanged,
-      approved_preserved: totals.preserved_approved,
-      rejected_preserved: totals.preserved_rejected,
-      pending_held_for_approver: totals.held,
-      skipped: totals.skipped,
-      errors: totals.errors,
+    attendance_days: days,
+    lookback_days: lookback,
+    dates_covered: {
+      from_date: earliest,
+      to_date: yesterday,
+      distinct_dates: [...allDates].sort(),
+      rule: `per employee: from the oldest of their last ${days} dates with punches (max ${lookback} days back) to yesterday; every date in between is evaluated`,
     },
-    skipped_by_reason: skippedByReason,
-    detail,
+    cutover: apply ? cutover : earliest,
+    employees_checked: population.length,
+    employees_with_attendance: withAttendance.length,
+    employees_with_short_history: withAttendance.filter((p) => !p.complete).map((p) => p.employee_id),
+    totals: {
+      eligible_ot_days_found: counts.eligible_ot_days,
+      already_approved: counts.already_approved,
+      already_rejected: counts.already_rejected,
+      already_pending_unchanged: counts.already_pending_unchanged,
+      already_pending_held_for_approver: counts.pending_held_for_approver,
+      [apply ? "new_pending_created" : "new_pending_would_be_created"]: counts.new_pending,
+      [apply ? "pending_minutes_changed" : "pending_minutes_would_change"]: counts.pending_minutes_would_change,
+      new_pending_ot_minutes: counts.new_pending_minutes,
+      changed_pending_minutes_net: counts.changed_pending_minutes_delta,
+      total_ot_minutes_added_to_queue: counts.new_pending_minutes + counts.changed_pending_minutes_delta,
+      [apply ? "auto_pending_withdrawn" : "auto_pending_would_be_withdrawn"]: counts.auto_pending_withdrawn,
+      payroll_locked_eligible_days_not_raised: counts.locked_month_eligible_days - counts.locked_month_pending_preserved,
+      payroll_locked_pending_preserved: counts.locked_month_pending_preserved,
+      payroll_locked_eligible_minutes: counts.locked_month_eligible_minutes,
+    },
+    employees_without_valid_approval_chain: chainProblems,
+    telegram: {
+      mode: "ONE_SUMMARY_PER_APPROVER",
+      summaries: apply ? telegramSent : telegramPlan,
+      new_pending_on_role_chains_not_messaged: roleChainNotMessaged,
+    },
+    detail: summary_only ? undefined : detail,
     failures,
   };
 }
@@ -193,25 +399,30 @@ async function main() {
     const approverSetupRepo = require("../../repository/attendance_approver_setup")(pool);
     const calculation = require("../../usecase/attendance_calculation")(calcRepo);
     const regularization = require("../../usecase/attendance_regularization")(regRepo, calculation, approverSetupRepo);
-    if (args.apply && args.telegram) {
-      regularization.setOtNotifier(
-        require("../../usecase/attendance_ot_telegram")({
-          regularizationUsecase: regularization,
-          employeeTelegramRepo: require("../../repository/employee_telegram")(pool),
-          telegram: require("../../services/telegram")(),
-          webBaseUrl: process.env.WEB_APP_BASE_URL || null,
-        })
-      );
-    }
+    const otTelegram =
+      args.apply && args.telegram
+        ? require("../../usecase/attendance_ot_telegram")({
+            regularizationUsecase: regularization,
+            employeeTelegramRepo: require("../../repository/employee_telegram")(pool),
+            telegram: require("../../services/telegram")(),
+            webBaseUrl: process.env.WEB_APP_BASE_URL || null,
+          })
+        : null;
     const report = await run({
+      calculateRange: calculation.calculateRange,
       syncAutoOt: regularization.syncAutoOt,
       listEmployees: ({ from_date, to_date }) => calcRepo.listEmployeesForRecalculation({ from_date, to_date }),
+      listApprovalAuthority: () => regRepo.listApprovalAuthority(),
       setting: await regRepo.getAutoOtSetting(),
+      lowerCutover: (date) => regRepo.lowerAutoOtCutover(date),
+      notifySummary: otTelegram ? otTelegram.notifyBacklogSummary : null,
       today: istToday(args.today),
       days: args.days,
+      lookback: args.lookback,
       employee_ids: args.employee_ids,
       apply: args.apply,
       telegram: args.telegram,
+      summary_only: args.summary_only,
       log: (line) => console.error(line),
     });
     console.log(JSON.stringify(report, null, 2));
@@ -231,4 +442,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { parseArgs, windowFor, run, DEFAULT_DAYS };
+module.exports = { parseArgs, windowFor, chainProblem, attended, run, DEFAULT_DAYS, DEFAULT_LOOKBACK };

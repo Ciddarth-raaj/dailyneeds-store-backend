@@ -2489,9 +2489,17 @@ module.exports = (
         }
 
         if (request) {
-          // PENDING. A locked month's pending OT is frozen with the month.
+          // PENDING. A locked month's pending OT is frozen with the month -
+          // PRESERVED as it is (never withdrawn, never re-figured, never
+          // closed), for the late-approval settlement to pick up.
           if (locked) {
-            skip(date, AUTO_OT_SKIP.PAYROLL_LOCKED);
+            result.skipped.push({
+              attendance_date: date,
+              reason: AUTO_OT_SKIP.PAYROLL_LOCKED,
+              attendance_approval_request_id: requestId,
+              existing_status: REQUEST_STATUS.PENDING,
+              eligible_ot_minutes: verdict.minutes,
+            });
             continue;
           }
           const current = Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0));
@@ -2579,16 +2587,45 @@ module.exports = (
           continue;
         }
         if (locked) {
-          skip(date, AUTO_OT_SKIP.PAYROLL_LOCKED);
-          continue;
-        }
-        if (dry_run) {
-          result.created.push({ attendance_date: date, attendance_approval_request_id: null, ot_minutes: verdict.minutes });
+          // Eligible OT in a payroll-locked month is NOT raised (no new
+          // question about settled pay), but it is REPORTED with its minutes
+          // so nothing is silently lost.
+          result.skipped.push({ attendance_date: date, reason: AUTO_OT_SKIP.PAYROLL_LOCKED, eligible_ot_minutes: verdict.minutes });
           continue;
         }
         if (!identity) identity = await resolveIdentity(employeeId);
         const who = identity;
-        const { chain, source: chain_source } = await resolveChain(who);
+        // THE CHAIN, resolved in a dry run too, so a preview can name every
+        // employee whose OT would have nobody (valid) to decide it.
+        let resolved;
+        try {
+          resolved = await resolveChain(who);
+        } catch (err) {
+          if (!dry_run) throw err;
+          result.created.push({
+            attendance_date: date,
+            attendance_approval_request_id: null,
+            ot_minutes: verdict.minutes,
+            chain: [],
+            chain_error: err && err.message ? err.message : String(err),
+          });
+          continue;
+        }
+        const { chain, source: chain_source } = resolved;
+        const firstStage = chain.find((st) => Number(st.stage_no) === 1) || null;
+        const firstApproverId =
+          firstStage && firstStage.approver_employee_id ? Number(firstStage.approver_employee_id) : null;
+        if (dry_run) {
+          result.created.push({
+            attendance_date: date,
+            attendance_approval_request_id: null,
+            ot_minutes: verdict.minutes,
+            chain,
+            chain_source,
+            first_approver_employee_id: firstApproverId,
+          });
+          continue;
+        }
         let created;
         try {
           created = await attendanceRegularizationRepo.createRequest({
@@ -2638,6 +2675,9 @@ module.exports = (
           attendance_date: date,
           attendance_approval_request_id: newId,
           ot_minutes: verdict.minutes,
+          chain,
+          chain_source,
+          first_approver_employee_id: firstApproverId,
         };
         if (notify) {
           entry.telegram = await notifyOtApprover(

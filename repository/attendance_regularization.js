@@ -1914,6 +1914,41 @@ class AttendanceRegularizationRepository {
     }
   }
 
+  /**
+   * WHO CAN DECIDE ANYTHING, read-only, for the backfill preview's chain
+   * check: every ACTIVE employee (status 1, not past a resignation date)
+   * with their outlet and their mapped approver role (null when none). A
+   * named approver must appear here; a role stage needs someone holding the
+   * role (for Store Manager, at that outlet).
+   */
+  async listApprovalAuthority() {
+    return this._read(
+      "LIST-APPROVAL-AUTHORITY",
+      `SELECT ne.employee_id, ne.store_id AS outlet_id, r.approver_role
+         FROM new_employee ne
+         LEFT JOIN attendance_approval_role r ON r.designation_id = ne.designation_id
+        WHERE ne.status = 1
+          AND (ne.resignation_date IS NULL OR ne.resignation_date >= CURDATE())`,
+      []
+    );
+  }
+
+  /**
+   * Lower (never raise) the automatic-OT cutover, so the deploy backfill can
+   * reach back over weekly offs and absences to each employee's previous
+   * attendance days. Returns the cutover now in force.
+   */
+  async lowerAutoOtCutover(date) {
+    await queryAsync(
+      this.db,
+      `UPDATE attendance_ot_auto_pending_setting
+          SET auto_pending_from_date = LEAST(auto_pending_from_date, ?)
+        WHERE setting_id = 1`,
+      [date]
+    );
+    return this.getAutoOtSetting();
+  }
+
   /** The automation's audit rows for some requests, oldest first. */
   async listAutoOtLog(requestIds) {
     if (!Array.isArray(requestIds) || requestIds.length === 0) return [];

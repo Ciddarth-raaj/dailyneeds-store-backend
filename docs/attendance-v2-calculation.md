@@ -727,8 +727,42 @@ Pending OT is counted by `listPendingApprovals` and blocks Approve & Lock as
 approval in a locked month is refused.
 
 **Deploy backfill.** `scripts/attendance/ot-auto-pending-backfill.js` — preview
-by default, `--apply` to write; the previous five attendance days through the
-same sync; approved/rejected preserved; idempotent.
+by default (read-only), `--apply` to write, through the same sync; approved and
+rejected preserved; idempotent.
+
+*"Previous 5 attendance days"*, not 5 calendar days. There is no holiday
+calendar or leave module in this schema (the only non-working days are a
+shift's weekly offs), so per employee the window is: their **5 most recent
+dates with punches** up to yesterday (at most 31 days back, `--lookback`), and
+**every date** from the oldest of those to yesterday is evaluated — a weekly
+off, holiday, leave or absence in between can never hide OT. Fewer than 5
+punched dates: the whole lookback is evaluated. The preview prints each
+employee's `attendance_dates_counted` and `dates_evaluated`. `--apply` lowers
+the cutover to the earliest window (never raises it).
+
+The preview reports: dates covered, employees checked, eligible OT days, already
+approved / rejected / pending, new pending, pending whose minutes would change,
+minutes added to the queue, eligible OT in payroll-locked months (not raised,
+with minutes), and every employee whose new OT would have **no active approver**
+(a named approver who has left, or a role stage nobody active holds).
+
+**Telegram volume.** The backfill sends **no per-date cards**: each named first
+approver gets one summary (*"12 OT approvals pending from previous days … send
+/ot"*). Day-to-day OT raised by recalculation still sends one card per OT to
+the first approver. `/ot` lists 10 at a time.
+
+**Revoke.** Approved → Revoke → a new PENDING OT, and Rejected → Revoke → a new
+PENDING OT, when the engine still finds eligible OT; none when it is zero. The
+revoked record stays (CANCELLED, its steps and decision untouched) with its
+revocation row; the new record's creation is logged `REVOKE_OT`.
+
+**Payroll lock / late approval (not yet built — awaiting decision).** OT still
+PENDING when its month is locked is preserved as PENDING (nothing closes it;
+`closeOtForPayrollLock` is not called by any lock action). Approving it is
+refused while the month is locked. The only existing adjustment mechanism is
+the manual `ARREARS` payrun adjustment (one money amount per employee per
+month, no PF/ESI, no link to the OT); it is not a clean fit, so late-approval
+settlement into a later payroll needs a design decision first.
 
 ---
 

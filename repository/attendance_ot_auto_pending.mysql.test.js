@@ -40,7 +40,7 @@ const D1 = addDays(TODAY, -3);
 const D2 = addDays(TODAY, -2);
 
 const SCHEMA = [
-  `CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), store_id INT NULL, designation_id INT NULL)`,
+  `CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), store_id INT NULL, designation_id INT NULL, status TINYINT NOT NULL DEFAULT 1, resignation_date DATE NULL)`,
   `CREATE TABLE designation (designation_id INT PRIMARY KEY, designation_name VARCHAR(80))`,
   `CREATE TABLE attendance_approval_role (designation_id INT PRIMARY KEY, approver_role VARCHAR(32) NULL, requester_class VARCHAR(20) NULL)`,
   `CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80))`,
@@ -107,8 +107,11 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
   let repo;
   let calcRepo;
   let usecase;
+  let engineCalc;
   /** The engine's eligible OT per `${employee}:${date}`; absent = no OT. */
   const eligible = new Map();
+  /** `${employee}:${date}` with no punches at all (leave, absence, weekly off). */
+  const absent = new Set();
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}${URL.includes("?") ? "&" : "?"}connectionLimit=8&multipleStatements=true`);
@@ -125,10 +128,11 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
         const out = [];
         for (let d = from_date; d <= to_date; d = addDays(d, 1)) {
           const ot = eligible.get(`${employee_id}:${d}`) || 0;
+          const off = absent.has(`${employee_id}:${d}`);
           out.push({
-            employee_id, attendance_date: d, status: "FINAL", is_final: true, punch_count: 2,
+            employee_id, attendance_date: d, status: off ? "ABSENT" : "FINAL", is_final: true, punch_count: off ? 0 : 2,
             shift_snapshot: { work_shift_id: 7, shift_code: "GEN", in_time: "09:00:00", out_time: "18:00:00" },
-            effective_punches: [{ io_time: `${d} 08:58:00` }, { io_time: `${d} 19:05:00` }],
+            effective_punches: off ? [] : [{ io_time: `${d} 08:58:00` }, { io_time: `${d} 19:05:00` }],
             worked_minutes: 600, candidate_ot_minutes: ot, excess_ot_minutes: ot, attendance_calculation_mode: "STANDARD",
           });
         }
@@ -137,6 +141,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
       toStorageRow: (d) => d,
     };
     usecase = buildRegularization(repo, engine);
+    engineCalc = engine.calculateRange;
   });
 
   after(async () => {
@@ -147,12 +152,13 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
 
   beforeEach(async () => {
     eligible.clear();
+    absent.clear();
     for (const t of TABLES.filter((x) => x !== "attendance_ot_auto_pending_setting")) await q(pool, `DELETE FROM ${t}`);
     await q(pool, "UPDATE attendance_ot_auto_pending_setting SET enabled = 1, auto_pending_from_date = ? WHERE setting_id = 1", [addDays(TODAY, -5)]);
     await q(pool, "INSERT INTO designation VALUES (1, 'Staff'), (2, 'Store Manager')");
     await q(pool, "INSERT INTO attendance_approval_role VALUES (2, 'STORE_MANAGER', 'MANAGER')");
     await q(pool, "INSERT INTO outlets VALUES (3, 'DN3')");
-    await q(pool, "INSERT INTO new_employee VALUES ?", [[[EMP, "Staff A", 3, 1], [EMP2, "Staff B", 3, 1], [SM3, "Manager DN3", 3, 2]]]);
+    await q(pool, "INSERT INTO new_employee (employee_id, employee_name, store_id, designation_id) VALUES ?", [[[EMP, "Staff A", 3, 1], [EMP2, "Staff B", 3, 1], [SM3, "Manager DN3", 3, 2]]]);
   });
 
   const otRows = (emp = EMP) =>
@@ -301,25 +307,50 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.equal(Number(counts.pending_ot), 1);
   });
 
-  it("the backfill: preview writes nothing; apply creates; a second apply creates nothing", async () => {
+  it("the backfill: 5 ATTENDANCE days per employee; preview writes nothing; apply creates once; the cutover is lowered", async () => {
+    // EMP did not punch on -1, -4, -5, -6: its last 5 attendance days are
+    // -2, -3, -7, -8, -9, so -9 (120 min) is in its window and -10 is not.
+    [1, 4, 5, 6].forEach((n) => absent.add(`${EMP}:${addDays(TODAY, -n)}`));
     eligible.set(`${EMP}:${D1}`, 60);
+    eligible.set(`${EMP}:${addDays(TODAY, -9)}`, 120);
+    eligible.set(`${EMP}:${addDays(TODAY, -10)}`, 200);
     eligible.set(`${EMP2}:${D2}`, 45);
-    eligible.set(`${EMP}:${addDays(TODAY, -9)}`, 120); // older than the window
     const args = {
+      calculateRange: engineCalc,
       syncAutoOt: usecase.syncAutoOt,
       listEmployees: async () => [{ employee_id: EMP }, { employee_id: EMP2 }],
+      listApprovalAuthority: () => repo.listApprovalAuthority(),
+      lowerCutover: (d) => repo.lowerAutoOtCutover(d),
       setting: await repo.getAutoOtSetting(),
-      today: TODAY, days: 5, telegram: false,
+      today: TODAY, days: 5, lookback: 31, telegram: false,
     };
     const preview = await backfill.run({ ...args, apply: false });
-    assert.equal(preview.totals.pending_ot_would_be_created, 2);
-    assert.equal(preview.totals.pending_ot_minutes_created, 105);
+    const mine = preview.detail.find((d) => d.employee_id === EMP);
+    assert.equal(mine.from_date, addDays(TODAY, -9));
+    assert.deepEqual(mine.attendance_dates_counted, [-9, -8, -7, -3, -2].map((n) => addDays(TODAY, n)));
+    assert.equal(preview.detail.find((d) => d.employee_id === EMP2).from_date, addDays(TODAY, -5));
+    assert.equal(preview.totals.new_pending_would_be_created, 3);
+    assert.equal(preview.totals.new_pending_ot_minutes, 225);
     assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_request"))[0].n, 0);
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -5), "preview leaves the cutover alone");
+
     const applied = await backfill.run({ ...args, apply: true });
-    assert.equal(applied.totals.pending_ot_created, 2);
-    const again = await backfill.run({ ...args, apply: true });
-    assert.equal(again.totals.pending_ot_created, 0);
-    assert.equal(again.totals.already_pending_unchanged, 2);
-    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_request"))[0].n, 2);
+    assert.equal(applied.totals.new_pending_created, 3);
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -9), "lowered to the earliest window");
+    const again = await backfill.run({ ...args, setting: await repo.getAutoOtSetting(), apply: true });
+    assert.equal(again.totals.new_pending_created, 0);
+    assert.equal(again.totals.already_pending_unchanged, 3);
+    assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_approval_request"))[0].n, 3);
+    // The cutover is only ever lowered.
+    await repo.lowerAutoOtCutover(TODAY);
+    assert.equal((await repo.getAutoOtSetting()).auto_pending_from_date, addDays(TODAY, -9));
+  });
+
+  it("the chain check reads active employees and their mapped roles", async () => {
+    const rows = await repo.listApprovalAuthority();
+    const sm = rows.find((r) => Number(r.employee_id) === SM3);
+    assert.equal(sm.approver_role, "STORE_MANAGER");
+    assert.equal(Number(sm.outlet_id), 3);
+    assert.equal(rows.find((r) => Number(r.employee_id) === EMP).approver_role, null);
   });
 });
