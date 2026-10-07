@@ -434,3 +434,81 @@ describe("the rules v2 does NOT revive", () => {
     assert.equal(configured.candidate_ot_minutes, plain.candidate_ot_minutes, "OT is untouched");
   });
 });
+
+/*
+ * THE UNUSED-BREAK RULE, case by case. Formula before the fix, on a day with
+ * 4+ punches: raw OT = worked - NRM = (span - actual break) - (shift span -
+ * allowed break), so every unused break minute became OT. After: raw OT =
+ * MIN(surplus, span - MAX(actual break, allowed break) - NRM) - the unused
+ * allowance is reserved, exactly as the two-punch day already was. Worked
+ * minutes and the shortage still use the break actually taken.
+ */
+describe("an unused break allowance never adds OT - the agreed cases", () => {
+  // 09:00-18:00 with a 60-minute break: 8 hours plus the allowance, NRM 480.
+  const nineToSix = { in_time: "09:00", out_time: "18:00" };
+  const preShift = (min = 0) => ({ pre_shift_overtime_allowed: 1, pre_shift_overtime_minimum_minutes: min });
+
+  it("1. 60 allowed, 60 taken: unchanged - no OT, nothing short", () => {
+    const r = day({}, ["09:00", "13:00", "14:00", "18:00"], nineToSix);
+    assert.deepEqual([r.nrm_minutes, r.worked_minutes, r.shortage_minutes, r.candidate_ot_minutes], [480, 480, 0, 0]);
+  });
+
+  it("2 / Case A. 60 allowed, 47 taken: the unused 13 do NOT become OT (worked still shows 493)", () => {
+    const r = day({}, ["09:00", "13:00", "13:47", "18:00"], nineToSix);
+    assert.deepEqual([r.actual_gap_minutes, r.worked_minutes, r.shortage_minutes], [47, 493, 0]);
+    assert.deepEqual([r.raw_ot_minutes, r.candidate_ot_minutes], [0, 0]);
+  });
+
+  it("3. 60 allowed, 0 taken (lunch punched straight back, or no lunch punch at all): no 60 minutes of OT", () => {
+    assert.equal(day({}, ["09:00", "13:00", "13:00", "18:00"], nineToSix).candidate_ot_minutes, 0);
+    assert.equal(day({}, ["09:00", "18:00"], nineToSix).candidate_ot_minutes, 0);
+  });
+
+  it("4 / Case B. 30 minutes after the shift with a 47-minute lunch: exactly the genuine 30, nothing on top", () => {
+    const r = day({}, ["09:00", "13:00", "13:47", "18:30"], nineToSix);
+    assert.deepEqual([r.pre_shift_ot_minutes, r.post_shift_ot_minutes, r.candidate_ot_minutes], [0, 30, 30]);
+  });
+
+  it("5 / Case C. 30 minutes early: genuine pre-shift OT under the existing threshold rule", () => {
+    const times = ["08:30", "13:00", "14:00", "18:00"];
+    assert.equal(day(preShift(30), times, nineToSix).pre_shift_ot_minutes, 30, "minimum 30 is met");
+    assert.equal(day(preShift(45), times, nineToSix).candidate_ot_minutes, 0, "minimum 45 is not: the threshold still applies");
+  });
+
+  it("6 / Case C. 30 minutes early AND a 47-minute lunch: still 30, the short break does not inflate it", () => {
+    const r = day(preShift(30), ["08:30", "13:00", "13:47", "18:00"], nineToSix);
+    assert.deepEqual([r.pre_shift_ot_minutes, r.post_shift_ot_minutes, r.candidate_ot_minutes], [30, 0, 30]);
+  });
+
+  it("7 / Case D. an early regular shift with large genuine pre-shift OT (the ES2 pattern) is unchanged", () => {
+    // Three hours before the shift, full lunch taken: all 180 pre-shift minutes stay.
+    const full = day(preShift(30), ["06:00", "13:00", "14:00", "18:00"], nineToSix);
+    assert.deepEqual([full.pre_shift_ot_minutes, full.candidate_ot_minutes], [180, 180]);
+    // The two-punch day, untouched by this change, gives the same 180.
+    assert.equal(day(preShift(30), ["06:00", "18:00"], nineToSix).candidate_ot_minutes, 180);
+    // A short lunch on the same day takes nothing away from the genuine 180 either.
+    assert.equal(day(preShift(30), ["06:00", "13:00", "13:20", "18:00"], nineToSix).candidate_ot_minutes, 180);
+  });
+
+  it("8 / Case E. ES1 14:00-22:00 with a ZERO break allowance (the 2260 / 12 Sep pattern): the fix changes nothing", () => {
+    const es1 = { in_time: "14:00", out_time: "22:00", break_minutes: 0 };
+    // A regularized lunch punch pair: the gap is real time away and is charged as before.
+    const withLunch = day({}, ["14:00", "18:00", "18:30", "22:45"], es1);
+    assert.deepEqual([withLunch.nrm_minutes, withLunch.worked_minutes, withLunch.candidate_ot_minutes], [480, 495, 15]);
+    assert.equal(withLunch.candidate_ot_minutes, withLunch.worked_minutes - withLunch.nrm_minutes, "the old formula's answer");
+    // Without the lunch pair, the whole 45 minutes after 22:00 is genuine OT.
+    assert.equal(day({}, ["14:00", "22:45"], es1).candidate_ot_minutes, 45);
+  });
+
+  it("9. Present/Absent Only mode is unaffected: no OT, whatever the punches", () => {
+    const r = calculateAttendanceDay({
+      employee_id: 42,
+      attendance_date: DATE,
+      shift: shift({}, nineToSix),
+      punches: punches("09:00", "13:00", "13:10", "19:00"),
+      attendance_calculation_mode: "PRESENT_ABSENT_ONLY",
+    });
+    assert.equal(r.candidate_ot_minutes, 0);
+    assert.equal(r.attendance_calculation_mode, "PRESENT_ABSENT_ONLY");
+  });
+});

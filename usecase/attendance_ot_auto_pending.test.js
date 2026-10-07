@@ -2269,3 +2269,65 @@ describe("lunch OT correction: days stored under the old rule, brought in line",
     assert.equal(d1.candidate_ot_minutes, 60);
   });
 });
+
+describe("UNUSED BREAK ALLOWANCE: pending, decided and priced OT, through ordinary recalculation", () => {
+  const payrunCalc = require("../utils/payrun_calculation");
+  // 10:00-22:00, 60 min allowance (NRM 660). A 30-minute lunch, out at 22:30:
+  // the old rule found 60 (30 genuine + 30 unused lunch); the rule finds 30.
+  const shortLunchDay = (employee_id, date) => [
+    punch(employee_id, `${date} 10:00:00`), punch(employee_id, `${date} 14:00:00`),
+    punch(employee_id, `${date} 14:30:00`), punch(employee_id, `${date} 22:30:00`),
+  ];
+  const oldRuleOt = (w, employee_id, date, status, minutes) => {
+    w.store.requests.push({
+      attendance_approval_request_id: 7000 + w.store.requests.length, request_type: "OT", requested_for_employee_id: employee_id,
+      requested_by_employee_id: employee_id, attendance_date: date, status, current_stage_no: 1, total_stages: 1,
+      auto_created: 1, candidate_ot_minutes: minutes, approved_ot_minutes: status === "APPROVED" ? minutes : status === "REJECTED" ? 0 : null,
+      finalization_state: status === "PENDING" ? "NOT_REQUIRED" : "SETTLED",
+    });
+    return w.store.requests[w.store.requests.length - 1];
+  };
+
+  it("11. a pending system OT raised under the old rule follows the recalculated day DOWN to the genuine 30, audited", async () => {
+    const w = build({ rawPunches: shortLunchDay(42, DATE) });
+    const stale = oldRuleOt(w, 42, DATE, "PENDING", 60);
+    const out = await recalc(w, 42);
+    assert.deepEqual(out.ot_auto_pending.updated.map((u) => [u.previous_ot_minutes, u.ot_minutes]), [[60, 30]]);
+    assert.deepEqual([stale.status, stale.candidate_ot_minutes], ["PENDING", 30]);
+    assert.ok(w.store.log.some((l) => l.action === "MINUTES_CHANGED" && l.previous_ot_minutes === 60 && l.new_ot_minutes === 30));
+  });
+
+  it("12. decided OT keeps its decision: APPROVED is never rewritten (the day pays at most the genuine 30); REJECTED stays rejected", async () => {
+    const w = build({ rawPunches: [...shortLunchDay(42, DATE), ...shortLunchDay(42, DATE2)] });
+    const approved = oldRuleOt(w, 42, DATE, "APPROVED", 60);
+    const rejected = oldRuleOt(w, 42, DATE2, "REJECTED", 60);
+    const out = await recalc(w, 42, DATE, DATE2);
+    assert.deepEqual([approved.status, approved.approved_ot_minutes, approved.candidate_ot_minutes], ["APPROVED", 60, 60], "the request record is untouched");
+    assert.deepEqual([rejected.status, rejected.approved_ot_minutes], ["REJECTED", 0]);
+    assert.equal(out.ot_auto_pending.preserved_approved.length + out.ot_auto_pending.preserved_rejected.length, 2);
+    assert.equal(liveOt(w, 42, DATE2).filter((r) => r.status === "PENDING").length, 0, "no new pending OT beside a rejection");
+    assert.equal(lastStored(w, 42).approved_ot_minutes, 30, "the existing clamp: never paid beyond the day's eligible OT");
+  });
+
+  it("13. payroll pricing is the same formula on the corrected minutes", () => {
+    const priced = payrunCalc.priceLateOt({ approved_ot_minutes: 30, daily_rate: 800, nrm_minutes: 660 });
+    // Rs 800 / 11 h = 72.73 an hour; half an hour = 36.36.
+    assert.deepEqual([priced.ot_hourly_rate, priced.amount], [72.73, 36.36]);
+  });
+
+  it("14. the backfill preview reconciles on the corrected figures, with no break flag", async () => {
+    const dates = ["2026-09-15", "2026-09-16", "2026-09-17", "2026-09-18", "2026-09-19"];
+    const w = build({ wireAuto: false, setting: { enabled: 1, auto_pending_from_date: "2026-09-20" }, rawPunches: dates.flatMap((d) => shortLunchDay(42, d)) });
+    await persistAll(w, [42]);
+    const report = await backfill.run({
+      calculateRange: w.calculation.calculateRange, syncAutoOt: w.regularization.syncAutoOt,
+      listEmployees: async () => [{ employee_id: 42 }], listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+      listAttendedDates: attendedFromSaved(w), setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+      today: "2026-09-20", apply: false, telegram: false, summary_only: true,
+    });
+    const s = report.new_pending_candidates.summary;
+    assert.deepEqual([s.candidate_count, s.candidate_minutes, s.reconciliation.ok], [5, 150, true]);
+    assert.equal(s.flagged.break_shorter_than_allowed_adds_to_surplus, 0);
+    assert.ok(report.new_pending_candidates.candidates.every((c) => c.final_eligible_ot_minutes === 30 && c.unused_break_minutes_in_surplus === 0));
+  });
+});
