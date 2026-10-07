@@ -818,33 +818,14 @@ Priced once at approval (`utils/payrun_calculation#priceLateOt`, the same
 `otAmountPaise` the monthly OT groups use) and stored; an unpriceable item
 refuses the approval with a sentence rather than paying 0.
 
-**Statutory treatment — the same as normal OT** (calculation version 5).
-
-| | Normal OT | Prior-Month OT |
-|---|---|---|
-| Gross / total earnings, net pay | included | included |
-| PF / EPS / EDLI wage | excluded (EPF Act s.2(b)(ii); Code s.2(88)(h)) | excluded |
-| ESI **coverage** (21,000 ceiling, low-wage exemption) | not counted | not counted |
-| ESI **contribution** wage (covered employee) | added | added, **in the month it is paid** |
-
-ESIC: overtime "will be considered as wage for the purpose of charging the
-contribution only and will not be considered for the purpose of the coverage"
-(memo 3-1(2)/3(1)/68 of 31.05.1968; *Indian Drugs & Pharmaceuticals Ltd v
-ESIC*, SC, 06.11.1996). So for a covered employee:
-
-```
-ESI coverage wage      = eligible normal salary earnings (Code s.2(88) definition)   -> ceiling test
-ESI contribution wage  = coverage wage + this month's OT + Prior-Month OT paid now   -> 0.75% / 3.25%
-```
-
-Prior-Month OT is charged in the payroll that pays it, on that month's
-coverage: it was not payable in its source month (unapproved when that
-payroll was locked and its ESI return filed), it became payable on approval,
-and the source month is never reopened. `ESI_OVERTIME_IN_CONTRIBUTION_WAGE=false`
-restores the previous treatment (overtime outside the ESI wage) without a code
-change. An open calculation made before version 5 that charged ESI and carried
-OT is RECALCULATION_REQUIRED (`ESI_OT_RULE_CHANGED`); locked months keep their
-figures. There is no TDS or professional-tax module.
+**Statutory treatment — the same as normal OT (DnDS payroll rule).**
+Current-month OT and Prior-Month OT are earnings: both are added to total
+earnings (gross) and net pay. Neither enters the ESI wage (the existing
+ESI-applicable wage: eligible normal salary earnings) nor the PF, EPS or EDLI
+wage, so neither changes any employee or employer ESI or PF contribution.
+Example: ESI wage 18,500, current OT 1,250, Prior-Month OT 1,000 → earnings
+include all 2,250; ESI is still charged on 18,500. There is no TDS or
+professional-tax module.
 
 **Payslip.** One line per source month, e.g.
 `Prior-Month OT — Sep 2026: 180 min   ₹xxx.xx`, with the per-request detail

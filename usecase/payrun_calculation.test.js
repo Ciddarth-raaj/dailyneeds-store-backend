@@ -2795,7 +2795,7 @@ describe("Unlock, Publish and Unpublish", () => {
     await calculation.calculate({ ...MONTH, employee_ids: [1], actor: ACTOR });
     const stored = world.calculations.get(1);
     assert.equal(Number(stored.net_pay) % 1, 0);
-    assert.equal(stored.calculation_version, 5);
+    assert.equal(stored.calculation_version, 4);
     assert.equal((await rowOf(1)).net_pay, stored.net_pay);
     assert.equal(
       Math.round(stored.net_pay * 100),
@@ -4322,7 +4322,7 @@ describe("salary resolution - Recalculate takes the approved salary applicable t
     assert.equal(appr.approved_count, 0);
     // And a Recalculate clears it on the right figures.
     await calculation.calculate({ ...SEP, employee_ids: [1355], mode: "RECALCULATE", actor: ACTOR });
-    assert.deepEqual([Number(stored().monthly_gross), stored().calculation_version], [11500, 5]);
+    assert.deepEqual([Number(stored().monthly_gross), stored().calculation_version], [11500, 4]);
     assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
   });
 
@@ -4331,28 +4331,6 @@ describe("salary resolution - Recalculate takes the approved salary applicable t
     await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
     stored().calculation_version = 3;
     assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
-  });
-
-  it("ESI ON OVERTIME: an open version-4 row that charged ESI and carried OT reads RECALCULATION REQUIRED; nothing else is flagged", async () => {
-    initializeSeptember(1355, [OPENING]);
-    await calculation.calculate({ ...SEP, employee_ids: [1355], actor: ACTOR });
-    assert.equal(stored().esi_status, "APPLIED");
-    // A version-4 row without OT: its ESI is the same either way - not flagged.
-    stored().calculation_version = 4;
-    assert.equal((await rowOfMonth(SEP)).status, CALC_STATUS.READY_FOR_APPROVAL);
-    // The same row WITH OT: its ESI left the OT out.
-    stored().ot_amount = "250.00";
-    let row = await rowOfMonth(SEP);
-    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
-    assert.deepEqual(row.recalculation_reasons.map((r) => r.code), ["ESI_OT_RULE_CHANGED"]);
-    // Prior-Month OT alone triggers it too.
-    stored().ot_amount = "0.00";
-    stored().prior_month_ot_amount = "300.00";
-    row = await rowOfMonth(SEP);
-    assert.equal(row.status, CALC_STATUS.RECALCULATION_REQUIRED);
-    // A version-5 row is never flagged.
-    stored().calculation_version = 5;
-    assert.notEqual((await rowOfMonth(SEP)).status, CALC_STATUS.RECALCULATION_REQUIRED);
   });
 
   it("LOCK: an APPROVED_LOCKED month is immutable - no figure, no salary, no snapshot changes, and it is not re-judged", async () => {

@@ -837,25 +837,14 @@ function calculateEsi(context = {}, config = CONFIG) {
    * arithmetic on a different number, and one implementation is what keeps
    * them from drifting apart.
    */
-  const contributionsFor = (wage, basis, coverageWage = wage) => {
-    /*
-     * COVERAGE AND CONTRIBUTION ARE TWO DIFFERENT WAGES. ESIC charges the
-     * contribution on overtime but does not count overtime when deciding
-     * whether an employee is within the coverage ceiling (ESIC memo
-     * 3-1(2)/3(1)/68 of 31.05.1968; Indian Drugs & Pharmaceuticals Ltd v ESIC,
-     * SC, 06.11.1996). So the ceiling test and the low-wage exemption read
-     * `coverageWage` (the wage WITHOUT overtime), and the contribution is
-     * charged on `wage` (the wage WITH it). A caller with no overtime passes
-     * one wage, and both are the same number.
-     */
-    const covered = context.contribution_period_continues === true || coverageWage <= ceiling;
+  const contributionsFor = (wage, basis) => {
+    const covered = context.contribution_period_continues === true || wage <= ceiling;
     if (!covered) {
       return {
         status: STATUS.NOT_APPLICABLE,
         unresolved: [],
         esi_wage: toRupees(wage),
         esi_wage_basis: basis,
-        esi_coverage_wage: toRupees(coverageWage),
         employee_esi: 0,
         employer_esi: 0,
         reason: "Wage is above the ESI coverage ceiling",
@@ -872,15 +861,7 @@ function calculateEsi(context = {}, config = CONFIG) {
      * threshold and the EMPLOYER still pays in full. An exemption that zeroed
      * both would understate the employer cost, so the two are decided apart.
      */
-    /*
-     * The exemption is decided on the ordinary wage (without overtime), which
-     * is what it was decided on before overtime entered the contribution
-     * wage. Whether ESIC reads the average daily wage with or without
-     * overtime is NOT verified here; at 176/day (4,576 a month) it touches
-     * almost nobody, and it is one line to move if HR/compliance says
-     * otherwise.
-     */
-    const daily = Number(toRupees(coverageWage)) / config.salary.salaryDaysPerMonth;
+    const daily = Number(toRupees(wage)) / config.salary.salaryDaysPerMonth;
     const exempt =
       context.employee_contribution_exempt === true || daily <= cfg.employeeExemptionDailyWage;
 
@@ -893,7 +874,6 @@ function calculateEsi(context = {}, config = CONFIG) {
       unresolved: [],
       esi_wage: toRupees(wage),
       esi_wage_basis: basis,
-      esi_coverage_wage: toRupees(coverageWage),
       employee_esi: toRupees(employeeEsi),
       employer_esi: toRupees(employerEsi),
       employee_contribution_exempt: exempt,
@@ -919,12 +899,7 @@ function calculateEsi(context = {}, config = CONFIG) {
       return pending(UNRESOLVED.ESI_APPLICABILITY_NOT_RECORDED);
     }
 
-    /*
-     * `esi_coverage_wage`, when given, is the supplied wage WITHOUT overtime:
-     * the figure coverage is decided on. Absent, the one wage decides both.
-     */
-    const coverageSupplied = toPaise(context.esi_coverage_wage);
-    return contributionsFor(supplied, ESI_WAGE_BASIS.PAYROLL, coverageSupplied === null ? supplied : coverageSupplied);
+    return contributionsFor(supplied, ESI_WAGE_BASIS.PAYROLL);
   }
 
   /*

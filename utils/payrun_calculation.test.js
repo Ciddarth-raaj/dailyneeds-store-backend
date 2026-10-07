@@ -196,13 +196,13 @@ describe("overtime", () => {
     assert.equal(withCandidates.ot_amount, 125);
   });
 
-  it("excludes OT from PF, and charges ESI on it (see 'ESI on overtime' below)", () => {
+  it("excludes OT from PF and from ESI", () => {
     const plain = run();
     const withOt = run({ attendance: { approved_ot_minutes: 600 } });
     assert.ok(withOt.ot_amount > 0);
     assert.equal(withOt.pf_wage, plain.pf_wage);
     assert.equal(withOt.employee_pf, plain.employee_pf);
-    assert.equal(withOt.esi_wage, plain.esi_wage + withOt.ot_amount);
+    assert.equal(withOt.esi_wage, plain.esi_wage);
   });
 
   /**
@@ -512,19 +512,6 @@ describe("the status rules", () => {
       ...over,
     });
 
-  it("is RECALCULATION_REQUIRED, with its own reason, for an open row whose ESI predates ESI on overtime", () => {
-    const v = ready({ esi_ot_rule_outdated: true });
-    assert.equal(v.status, CALC_STATUS.RECALCULATION_REQUIRED);
-    assert.deepEqual(v.recalculation_reasons.map((r) => r.code), [RECALC_REASON.ESI_OT_RULE_CHANGED]);
-    assert.match(v.recalculation_reasons[0].message, /overtime/);
-    assert.ok(v.blockers.some((b) => b.code === READY_BLOCKER.RECALCULATION_REQUIRED));
-    // A locked month is never re-judged: its figures stand.
-    const locked = calc.deriveStatus({ calculation: { status: CALC_STATUS.APPROVED_LOCKED }, esi_ot_rule_outdated: true });
-    assert.equal(locked.status, CALC_STATUS.APPROVED_LOCKED);
-    // And nothing changes for a row that does not carry the flag.
-    assert.equal(ready().status, ready({ esi_ot_rule_outdated: false }).status);
-  });
-
   it("is NOT_CALCULATED before anything has been computed", () => {
     const v = calc.deriveStatus({ calculation: null });
     assert.equal(v.status, CALC_STATUS.NOT_CALCULATED);
@@ -821,10 +808,10 @@ describe("the ESI contribution period", () => {
 
   /**
    * THE PAYRUN'S OWN EXCLUSIONS ARE UNTOUCHED BY ANY OF THIS. Coverage decides
-   * WHETHER a contribution is charged; the wage it is charged on is eligible
-   * normal salary earnings plus overtime (and nothing else).
+   * WHETHER a contribution is charged; the wage it is charged on is still
+   * eligible normal salary earnings only.
    */
-  it("still excludes Extra Days and the three additions from the ESI wage; OT is the only addition", () => {
+  it("still excludes Extra Days, OT and the three additions from the ESI wage", () => {
     const plain = run({ coverage_entry_salary: COVERED_AT_ENTRY });
     const loaded = run({
       coverage_entry_salary: COVERED_AT_ENTRY,
@@ -841,8 +828,8 @@ describe("the ESI contribution period", () => {
     });
 
     assert.ok(Number(loaded.ot_amount) > 0 && Number(loaded.extra_day_amount) > 0);
-    assert.equal(loaded.esi_wage, plain.esi_wage + loaded.ot_amount, "OT only - not Extra Days, Incentive, Bonus or Arrears");
-    assert.equal(loaded.esi_coverage_wage, plain.esi_coverage_wage);
+    assert.equal(loaded.esi_wage, plain.esi_wage);
+    assert.equal(loaded.employee_esi, plain.employee_esi);
     assert.equal(loaded.pf_wage, plain.pf_wage);
     assert.equal(loaded.employee_pf, plain.employee_pf);
   });
@@ -1054,8 +1041,8 @@ describe("Net Pay is rounded to the whole rupee in the engine", () => {
     assert.equal(base.net_pay_rounding, 0);
   });
 
-  it("is engine version 5, which is not a source marker - approved months do not go stale", () => {
-    assert.equal(run().calculation_version, 5);
+  it("is engine version 4, which is not a source marker - approved months do not go stale", () => {
+    assert.equal(run().calculation_version, 4);
     assert.ok(!calc.SOURCE_KEYS.includes("calculation_version"));
   });
 });
@@ -1088,167 +1075,27 @@ describe("the month read's card filter", () => {
   });
 });
 
-/* ===================================================== ESI ON OVERTIME */
+/* ================================ OT AND PRIOR-MONTH OT: OUTSIDE ESI AND PF */
 
 /**
- * ESI: OVERTIME IS WAGE FOR THE CONTRIBUTION, NOT FOR COVERAGE.
+ * THE DnDS PAYROLL RULE: OVERTIME IS PAID, NOT CONTRIBUTED ON.
  *
- * ESIC: "Overtime allowances will be considered as wage for the purpose of
- * charging the contribution only and will not be considered for the purpose
- * of the coverage of the employee under the Scheme" (memo 3-1(2)/3(1)/68,
- * 31.05.1968; Indian Drugs & Pharmaceuticals Ltd v ESIC, SC, 06.11.1996).
+ * Current-month OT and Prior-Month (late-approved) OT are earnings - they are
+ * in Total Earnings and Net Pay - but neither enters the ESI wage nor the
+ * PF / EPS / EDLI wages, so neither changes any employee or employer
+ * contribution. The ESI wage is the existing ESI-applicable wage calculation
+ * (eligible normal salary earnings) and nothing else.
  *
- * So there are two wages and they must never be the same variable:
- *   coverage wage      = eligible normal salary earnings (the Code's wage
- *                        definition), WITHOUT overtime - tested against the
- *                        21,000 ceiling;
- *   contribution wage  = coverage wage + this month's OT + Prior-Month OT paid
- *                        in this payroll - charged at 0.75% / 3.25%.
- *
- * PRIOR-MONTH OT IS CHARGED IN THE MONTH IT IS PAID, on that month's
- * coverage: it was not payable in its source month (unapproved when that
- * payroll locked and its return was filed), and the source month is never
- * reopened.
- *
- * The fixture: gross 26,000 -> coverage wage 18,500 (less HRA 5,000 and
- * Conveyance 2,500); ESI 0.75% = 138.75 -> 139, 3.25% = 601.25 -> 601.
+ * The fixture: gross 26,000 -> ESI wage 18,500 (less HRA 5,000 and Conveyance
+ * 2,500); 600 min of OT at 125/h = 1,250; a 1,000 Prior-Month OT item.
  */
-describe("ESI on overtime: contribution wage, never coverage", () => {
+describe("OT and Prior-Month OT are earnings, never ESI or PF wages", () => {
   const lateItem = (amount) => ({
     late_settlement_id: 7, attendance_approval_request_id: 701, attendance_date: "2026-07-10",
     source_year: 2026, source_month: 7, approved_ot_minutes: 480, nrm_minutes: 480, daily_rate: 1000,
     ot_hourly_rate: 125, amount,
   });
-
-  it("the no-OT month is unchanged: one wage, 18,500, 139 / 601", () => {
-    const r = run();
-    assert.equal(r.esi_wage, 18500);
-    assert.equal(r.esi_coverage_wage, 18500);
-    assert.equal(r.esi_ot_wage, 0);
-    assert.equal(r.employee_esi, 139);
-    assert.equal(r.employer_esi, 601);
-  });
-
-  it("1. ESI-covered employee + normal OT: the OT is in the ESI contribution wage", () => {
-    // 600 min at 125/h = 1,250. 19,750 x 0.75% = 148.125 -> 148; x 3.25% = 641.875 -> 642.
-    const r = run({ attendance: { approved_ot_minutes: 600 } });
-    assert.equal(r.ot_amount, 1250);
-    assert.equal(r.esi_status, "APPLIED");
-    assert.equal(r.esi_wage, 19750);
-    assert.equal(r.esi_coverage_wage, 18500, "coverage is still tested without the OT");
-    assert.equal(r.esi_ot_wage, 1250);
-    assert.equal(r.employee_esi, 148);
-    assert.equal(r.employer_esi, 642);
-  });
-
-  it("2. ESI-covered employee + Prior-Month OT: charged in the month it is paid, at the same rates", () => {
-    // 1,000 paid now for July. 19,500 x 0.75% = 146.25 -> 146; x 3.25% = 633.75 -> 634.
-    const r = calc.computeCalculation({ ...input(), prior_month_ot: [lateItem(1000)] });
-    assert.equal(r.prior_month_ot_amount, 1000);
-    assert.equal(r.ot_amount, 0);
-    assert.equal(r.esi_wage, 19500);
-    assert.equal(r.esi_coverage_wage, 18500);
-    assert.equal(r.esi_ot_wage, 1000);
-    assert.equal(r.employee_esi, 146);
-    assert.equal(r.employer_esi, 634);
-
-    // Both kinds together: 18,500 + 1,250 + 1,000 = 20,750.
-    const both = calc.computeCalculation({
-      ...input({ approved_ot_minutes: 600 }),
-      prior_month_ot: [lateItem(1000)],
-    });
-    assert.equal(both.esi_wage, 20750);
-    assert.equal(both.esi_ot_wage, 2250);
-  });
-
-  it("3. outside coverage: OT alone never pulls an employee into ESI", () => {
-    // Above the ceiling at entry and above it this month (coverage wage 27,500).
-    const above = {
-      snapshot: { monthly_gross: 40000, basic: 20000, conveyance: 2500, hra: 10000, special_allowance: 7500 },
-      attendance: { salary_day_earnings: 40000, approved_ot_minutes: 600 },
-      coverage_entry_salary: { salary_id: 12, monthly_gross: 40000, basic: 20000, conveyance: 2500, hra: 10000, special_allowance: 7500 },
-    };
-    const r = run(above);
-    assert.ok(r.ot_amount > 0);
-    assert.equal(r.esi_coverage_basis, "ABOVE_CEILING_AT_ENTRY");
-    assert.equal(r.employee_esi, 0);
-    assert.equal(r.employer_esi, 0);
-
-    // ESI not applicable at all: OT changes nothing either.
-    const na = run({ snapshot: { esi_applicable: 0 }, attendance: { approved_ot_minutes: 600 } });
-    assert.equal(na.esi_wage, 0);
-    assert.equal(na.employee_esi, 0);
-    assert.equal(na.employer_esi, 0);
-  });
-
-  it("3. ...and OT never pushes a covered month OUT: coverage is tested on the wage without it", () => {
-    // Above the ceiling at entry, but this month's ordinary wage is under it
-    // (13 salary days -> coverage wage 13,750), so the month is covered.
-    // 3,000 min of OT (~9,615) takes the CONTRIBUTION wage above 21,000 -
-    // that must not be read as leaving the scheme.
-    const r = run({
-      snapshot: { monthly_gross: 40000, basic: 20000, conveyance: 2500, hra: 10000, special_allowance: 7500 },
-      attendance: { salary_days: 13, salary_day_earnings: 20000, approved_ot_minutes: 3000 },
-      coverage_entry_salary: { salary_id: 12, monthly_gross: 40000, basic: 20000, conveyance: 2500, hra: 10000, special_allowance: 7500 },
-    });
-    assert.equal(r.esi_coverage_wage, 13750);
-    assert.ok(Number(r.esi_wage) > 21000, `contribution wage ${r.esi_wage}`);
-    assert.equal(r.esi_status, "APPLIED");
-    assert.equal(r.employee_esi, Math.round(Number(r.esi_wage) * 0.0075));
-    assert.equal(r.employer_esi, Math.round(Number(r.esi_wage) * 0.0325));
-  });
-
-  it("3. an unprovable entry position is not raised just because OT crossed the ceiling", () => {
-    // No salary at entry; the ordinary wage (18,500) is under the ceiling, so
-    // the open question changes nothing - even with 20,000 of OT on top.
-    const r = run({ coverage_entry_salary: null, attendance: { approved_ot_minutes: 9600 } });
-    assert.ok(Number(r.esi_wage) > 21000);
-    assert.equal(r.esi_status, "APPLIED");
-    assert.equal(r.is_complete, true);
-  });
-
-  it("4. covered for the contribution period above the ceiling: OT is charged with the rest", () => {
-    // Covered at entry (20,000 then); this month's ordinary wage 27,500.
-    const r = run({
-      snapshot: { monthly_gross: 40000, basic: 20000, conveyance: 2500, hra: 10000, special_allowance: 7500 },
-      attendance: { salary_day_earnings: 40000, approved_ot_minutes: 480 },
-      coverage_entry_salary: { salary_id: 11, monthly_gross: 20000, basic: 10000, conveyance: 2500, hra: 4000, special_allowance: 3500 },
-    });
-    assert.equal(r.esi_contribution_period_continues, true);
-    assert.equal(r.esi_coverage_wage, 27500);
-    assert.equal(r.esi_wage, 27500 + r.ot_amount);
-    assert.equal(r.employee_esi, Math.round((27500 + r.ot_amount) * 0.0075));
-    assert.equal(r.employer_esi, Math.round((27500 + r.ot_amount) * 0.0325));
-  });
-
-  it("5. PF is unchanged: OT and Prior-Month OT stay out of the PF / EPS / EDLI wages", () => {
-    const plain = run();
-    const withOt = calc.computeCalculation({ ...input({ approved_ot_minutes: 600 }), prior_month_ot: [lateItem(1000)] });
-    for (const k of ["pf_wage", "eps_wage", "edli_wage", "employee_pf", "employer_epf", "employer_eps", "employer_pf_total", "edli"]) {
-      assert.equal(withOt[k], plain[k], k);
-    }
-  });
-
-  it("6. gross and net pay still contain both kinds of OT; net falls only by the extra employee ESI", () => {
-    const plain = run();
-    const withOt = calc.computeCalculation({ ...input({ approved_ot_minutes: 600 }), prior_month_ot: [lateItem(1000)] });
-    assert.equal(withOt.total_earnings, plain.total_earnings + 1250 + 1000);
-    const extraEsi = withOt.employee_esi - plain.employee_esi;
-    assert.equal(extraEsi, 156 - 139, "20,750 x 0.75% = 155.625 -> 156");
-    assert.equal(withOt.total_employee_deductions, plain.total_employee_deductions + extraEsi);
-  });
-
-  it("the switch: ESI_OVERTIME_IN_CONTRIBUTION_WAGE=false restores the previous treatment", () => {
-    const config = require("../config/statutory");
-    const off = { ...config, esi: { ...config.esi, overtimeInContributionWage: false } };
-    const plain = calc.computeCalculation(input(), off);
-    const withOt = calc.computeCalculation({ ...input({ approved_ot_minutes: 600 }), prior_month_ot: [lateItem(1000)] }, off);
-    assert.equal(withOt.esi_wage, plain.esi_wage);
-    assert.equal(withOt.employee_esi, plain.employee_esi);
-    assert.equal(withOt.esi_ot_wage, 0);
-  });
-
-  function input(attendanceOverrides = {}) {
+  const input = (attendanceOverrides = {}) => {
     const attendance = { ...ATTENDANCE, ...attendanceOverrides };
     return {
       snapshot: SNAPSHOT,
@@ -1259,7 +1106,71 @@ describe("ESI on overtime: contribution wage, never coverage", () => {
       as_of: "2026-08-31",
       coverage_entry_salary: ENTRY_SALARY,
     };
-  }
+  };
+  const plain = () => calc.computeCalculation(input());
+  const withOt = () => calc.computeCalculation(input({ approved_ot_minutes: 600 }));
+  const withLate = () => calc.computeCalculation({ ...input(), prior_month_ot: [lateItem(1000)] });
+  const withBoth = () => calc.computeCalculation({ ...input({ approved_ot_minutes: 600 }), prior_month_ot: [lateItem(1000)] });
+  const PF_KEYS = ["pf_wage", "eps_wage", "edli_wage", "employee_pf", "employer_epf", "employer_eps", "employer_pf_total", "edli"];
+
+  it("the baseline: ESI wage 18,500, employee ESI 139, employer ESI 601", () => {
+    const r = plain();
+    assert.equal(r.esi_status, "APPLIED");
+    assert.equal(r.esi_wage, 18500);
+    assert.equal(r.employee_esi, 139); // 18,500 x 0.75% = 138.75
+    assert.equal(r.employer_esi, 601); // 18,500 x 3.25% = 601.25
+  });
+
+  it("1. normal OT increases earnings (and net pay)", () => {
+    assert.equal(withOt().ot_amount, 1250);
+    assert.equal(withOt().total_earnings, plain().total_earnings + 1250);
+    assert.equal(withOt().net_pay, plain().net_pay + 1250);
+  });
+
+  it("2-4. normal OT does NOT change the ESI wage, employee ESI or employer ESI", () => {
+    assert.equal(withOt().esi_wage, 18500);
+    assert.equal(withOt().employee_esi, plain().employee_esi);
+    assert.equal(withOt().employer_esi, plain().employer_esi);
+  });
+
+  it("5. Prior-Month OT increases earnings (and net pay), as its own amount", () => {
+    assert.equal(withLate().prior_month_ot_amount, 1000);
+    assert.equal(withLate().ot_amount, 0, "never merged into this month's OT");
+    assert.equal(withLate().total_earnings, plain().total_earnings + 1000);
+    assert.equal(withLate().net_pay, plain().net_pay + 1000);
+  });
+
+  it("6-8. Prior-Month OT does NOT change the ESI wage, employee ESI or employer ESI", () => {
+    assert.equal(withLate().esi_wage, 18500);
+    assert.equal(withLate().employee_esi, plain().employee_esi);
+    assert.equal(withLate().employer_esi, plain().employer_esi);
+  });
+
+  it("both together: earnings 26,000 + 1,250 + 1,000, ESI still on 18,500 - not 20,750", () => {
+    const r = withBoth();
+    assert.equal(r.total_earnings, plain().total_earnings + 2250);
+    assert.equal(r.esi_wage, 18500);
+    assert.equal(r.employee_esi, 139);
+    assert.equal(r.employer_esi, 601);
+    assert.equal(r.total_employee_deductions, plain().total_employee_deductions, "no extra deduction of any kind");
+  });
+
+  it("9. normal OT does not change the PF / EPS / EDLI wages or contributions", () => {
+    for (const k of PF_KEYS) assert.equal(withOt()[k], plain()[k], k);
+  });
+
+  it("10. Prior-Month OT does not change the PF / EPS / EDLI wages or contributions", () => {
+    for (const k of PF_KEYS) assert.equal(withLate()[k], plain()[k], k);
+    for (const k of PF_KEYS) assert.equal(withBoth()[k], plain()[k], `${k} (both)`);
+  });
+
+  it("an employee near the ESI ceiling: OT cannot push the ESI wage over 21,000 either", () => {
+    // 9,600 min of OT = 20,000 on top of an 18,500 ESI wage.
+    const big = calc.computeCalculation({ ...input({ approved_ot_minutes: 9600 }), prior_month_ot: [lateItem(5000)] });
+    assert.equal(big.esi_wage, 18500);
+    assert.equal(big.esi_status, "APPLIED");
+    assert.equal(big.employee_esi, 139);
+  });
 });
 
 /* ===================================================== PRIOR-MONTH OT */
@@ -1289,18 +1200,14 @@ describe("Prior-Month OT: priced and treated exactly like OT", () => {
     assert.equal(Number(withLate.total_earnings) - Number(settled.total_earnings), 225);
   });
 
-  it("10. in Total Earnings and Net Pay; NOT in the PF wage; IN the ESI contribution wage - exactly as OT", () => {
+  it("10. in Total Earnings and Net Pay; NOT in the PF wage, the ESI wage or any contribution - exactly as OT", () => {
     const base = run();
     const withOt = run({ attendance: { approved_ot_minutes: 120 } });
     const withLate = calc.computeCalculation({ ...settledInput(26000), prior_month_ot: [item(250)] });
-    for (const k of ["pf_wage", "employee_pf", "employer_pf_total", "employer_epf", "employer_eps"]) {
+    for (const k of ["pf_wage", "employee_pf", "employer_pf_total", "employer_epf", "employer_eps", "esi_wage", "employee_esi", "employer_esi"]) {
       assert.equal(withLate[k], base[k], `${k} unchanged by prior-month OT`);
       assert.equal(withOt[k], base[k], `${k} unchanged by this month's OT either`);
     }
-    for (const k of ["esi_wage", "employee_esi", "employer_esi", "esi_coverage_wage"]) {
-      assert.equal(withLate[k], withOt[k], `${k}: prior-month OT is charged exactly as this month's OT`);
-    }
-    assert.equal(withLate.esi_wage, base.esi_wage + 250);
     assert.equal(Number(withLate.total_earnings) - Number(base.total_earnings), 250);
     assert.equal(withLate.total_earnings, withOt.total_earnings, "the same 250 either way");
     assert.equal(withLate.net_pay, withOt.net_pay);

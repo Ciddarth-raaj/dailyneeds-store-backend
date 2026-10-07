@@ -250,26 +250,6 @@ const esi = {
   employeeExemptionDailyWage: num("ESI_EMPLOYEE_EXEMPTION_DAILY_WAGE", 176),
 
   /**
-   * OVERTIME IS ESI WAGE FOR THE CONTRIBUTION, NOT FOR COVERAGE.
-   *
-   * ESIC: "Overtime allowances will be considered as wage for the purpose of
-   * charging the contribution only and will not be considered for the
-   * purpose of the coverage of the employee under the Scheme" (memo
-   * 3-1(2)/3(1)/68 of 31.05.1968; Indian Drugs & Pharmaceuticals Ltd v ESIC,
-   * SC, Civil Appeal 2777/1980, 06.11.1996). So for a covered employee the
-   * month's OT and any Prior-Month OT paid in the month are added to the
-   * contribution wage, and the coverage ceiling is still tested on the wage
-   * without them (`utils/salary_engine.js#calculateEsi`).
-   *
-   * A SWITCH, because the Code on Social Security 2020 s.2(88)(h) lists
-   * "overtime allowance" among the heads excluded from wages (subject to the
-   * 50% proviso) and ESIC's post-21.11.2025 advisories are read both ways.
-   * `false` restores the previous behaviour (overtime outside the ESI wage)
-   * without a code change, should compliance settle it the other way.
-   */
-  overtimeInContributionWage: bool("ESI_OVERTIME_IN_CONTRIBUTION_WAGE", true),
-
-  /**
    * THE CONTRIBUTION PERIODS, as the months they begin in: 1 April and
    * 1 October, each running to the day before the next one starts.
    *
@@ -355,6 +335,6 @@ const rounding = {
  * findable when a rate change turns out to have been wrong. Bump it whenever
  * a committed default above changes.
  */
-const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-10-07-ESI-OT-IN-CONTRIBUTION-WAGE";
+const configVersion = process.env.STATUTORY_CONFIG_VERSION || "M2-2026-09-17-PF-CEILING-25000-EPS-PF-APPLICABLE-AGE";
 
 module.exports = { salary, pf, esi, wages, rounding, configVersion };

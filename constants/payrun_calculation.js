@@ -48,20 +48,9 @@
  * its snapshot's salary - which is how such rows are recognised and sent back
  * to RECALCULATION_REQUIRED (see `usecase/payrun_calculation.js#_present`).
  */
-/*
- * 5: ESI IS CHARGED ON OVERTIME. The ESI contribution wage is the coverage
- * wage plus this month's OT and any Prior-Month OT paid in the month; the
- * coverage ceiling is still tested without them (`config/statutory.js#esi.
- * overtimeInContributionWage`). An OPEN row calculated before version 5 that
- * charged ESI and carried OT is understated, and is sent back to
- * RECALCULATION_REQUIRED with its own reason (ESI_OT_RULE_CHANGED). Locked
- * rows keep their figures.
- */
-const CALCULATION_VERSION = 5;
+const CALCULATION_VERSION = 4;
 /** The first version that prices from the resolved approved salary. */
 const PRICED_FROM_RESOLVED_SALARY_VERSION = 4;
-/** The first version whose ESI contribution wage includes overtime. */
-const ESI_ON_OVERTIME_VERSION = 5;
 
 /**
  * THE STATE OF ONE EMPLOYEE'S CALCULATION, and the five values are exclusive
@@ -251,8 +240,6 @@ const RECALC_REASON = {
   ADJUSTMENTS_CHANGED: "ADJUSTMENTS_CHANGED",
   PAY_TYPE_CHANGED: "PAY_TYPE_CHANGED",
   CALCULATION_FAILED: "CALCULATION_FAILED",
-  /** A formula correction, not a source change: see CALCULATION_VERSION 5. */
-  ESI_OT_RULE_CHANGED: "ESI_OT_RULE_CHANGED",
 };
 
 const RECALC_REASON_LABEL = {
@@ -265,7 +252,6 @@ const RECALC_REASON_LABEL = {
   [RECALC_REASON.ADJUSTMENTS_CHANGED]: "Adjustments changed",
   [RECALC_REASON.PAY_TYPE_CHANGED]: "Pay type changed",
   [RECALC_REASON.CALCULATION_FAILED]: "Calculation did not complete",
-  [RECALC_REASON.ESI_OT_RULE_CHANGED]: "ESI on overtime corrected",
 };
 
 const RECALC_REASON_MESSAGE = {
@@ -287,8 +273,6 @@ const RECALC_REASON_MESSAGE = {
     "This month's pay type has been changed since this calculation. Recalculate to record it on the calculation.",
   [RECALC_REASON.CALCULATION_FAILED]:
     "The last calculation could not complete. Its reasons are on the employee's detail.",
-  [RECALC_REASON.ESI_OT_RULE_CHANGED]:
-    "This calculation left overtime out of the ESI contribution wage. ESI is now charged on overtime (coverage is still decided without it). Recalculate to apply it.",
 };
 
 /**
@@ -458,7 +442,6 @@ const MAX_BULK_EMPLOYEES = 1000;
 
 module.exports = {
   CALCULATION_VERSION,
-  ESI_ON_OVERTIME_VERSION,
   PRICED_FROM_RESOLVED_SALARY_VERSION,
   CALC_STATUS,
   STORED_STATUS,
