@@ -4360,6 +4360,8 @@ module.exports = (
     setOtNotifier,
     syncAutoOt,
     syncAutoOtSafely,
+    // Read-only: the OT a calculated day carries into approval (the rebuild preview).
+    autoOtVerdict,
     resolveDeferredOt,
     previewOtApprovalChain,
     previewApprovalIdentity,
