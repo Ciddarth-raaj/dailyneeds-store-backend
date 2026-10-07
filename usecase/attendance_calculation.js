@@ -1622,7 +1622,9 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
    * Every path through here obeys it - the single endpoint, each employee of
    * a bulk run, Work Shift propagation, an assignment change, a punch void.
    */
-  const recalculateRange = async ({ employee_id, from_date, to_date, now = null }) => {
+  // `ot_sync_source` only names the trigger on the automatic-OT audit rows
+  // (a one-off correction script); every ordinary caller is a RECALCULATION.
+  const recalculateRange = async ({ employee_id, from_date, to_date, now = null, ot_sync_source = "RECALCULATION" }) => {
     const employeeId = Number(employee_id);
     const from = toDateOnly(from_date);
     const to = toDateOnly(to_date);
@@ -1712,7 +1714,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
       employee_id: employeeId,
       days,
       now,
-      source: "RECALCULATION",
+      source: ot_sync_source,
     });
 
     return {

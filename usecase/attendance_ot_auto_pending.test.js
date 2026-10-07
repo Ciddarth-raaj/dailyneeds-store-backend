@@ -1895,3 +1895,100 @@ describe("BACKFILL PREVIEW: approval-chain problems and source mismatches stay v
     assert.notDeepEqual(row.raw_punch_dates, row.persisted_attendance_dates);
   });
 });
+
+/* ================================= the one-off lunch-OT correction ==== */
+
+describe("lunch OT correction: days stored under the old rule, brought in line", () => {
+  const lunchCorrection = require("../scripts/attendance/lunch-ot-correction");
+  // 10:00-22:00, 60 minute allowance, a 30 minute lunch. The old rule paid the
+  // 30 unused minutes as OT; the new one pays only time after 22:00.
+  const shortLunch = (employee_id, date, out) => [
+    punch(employee_id, `${date} 10:00:00`),
+    punch(employee_id, `${date} 13:00:00`),
+    punch(employee_id, `${date} 13:30:00`),
+    punch(employee_id, `${date} ${out}`),
+  ];
+  const oldOt = (w, employee_id, date, minutes, status = "PENDING") => {
+    const stores = { 42: 3, 43: 3, 44: 5 };
+    return w.regRepo
+      .createRequest({
+        request: { requested_for_employee_id: employee_id, requested_by_employee_id: employee_id, attendance_date: date, request_type: "OT", auto_created: true, candidate_ot_minutes: minutes, outlet_id: stores[employee_id] },
+        chain: [{ stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: stores[employee_id] }],
+      })
+      .then(({ attendance_approval_request_id: id }) => {
+        const r = w.store.requests.find((x) => x.attendance_approval_request_id === id);
+        if (status === "APPROVED") Object.assign(r, { status: "APPROVED", approved_ot_minutes: minutes });
+        return r;
+      });
+  };
+  const oldRow = (employee_id, attendance_date, raw, approved = 0) => ({
+    employee_id, attendance_date, raw_ot_minutes: raw, candidate_ot_minutes: raw, pre_shift_ot_minutes: 0, post_shift_ot_minutes: raw, approved_ot_minutes: approved,
+  });
+
+  const scenario = async () => {
+    const w = build({
+      rawPunches: [
+        ...shortLunch(42, DATE, "22:00:00"), // old 30 -> new 0
+        ...shortLunch(42, DATE2, "23:00:00"), // old 90 -> new 60
+        ...shortLunch(44, DATE, "23:00:00"), // approved 90 -> day clamps to 60, request untouched
+        ...shortLunch(43, "2026-08-20", "22:00:00"), // locked month: untouched
+      ],
+      lockedMonths: ["43:2026-8"],
+    });
+    const pending0 = await oldOt(w, 42, DATE, 30);
+    const pending60 = await oldOt(w, 42, DATE2, 90);
+    const approved = await oldOt(w, 44, DATE, 90, "APPROVED");
+    const lockedPending = await oldOt(w, 43, "2026-08-20", 30);
+    const rows = [oldRow(42, DATE, 30), oldRow(42, DATE2, 90), oldRow(44, DATE, 90, 90), oldRow(43, "2026-08-20", 30)];
+    const deps = {
+      listAffected: async () => rows,
+      findLocked: (r) => w.calcRepo.findPayrollLockedPeriods(r),
+      calculateRange: w.calculation.calculateRange,
+      syncAutoOt: w.regularization.syncAutoOt,
+      recalculateRange: w.calculation.recalculateRange,
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-01" },
+      today: "2026-09-20",
+      now: NOW,
+    };
+    return { w, deps, pending0, pending60, approved, lockedPending };
+  };
+
+  it("preview writes nothing and names what would change", async () => {
+    const { w, deps, pending60 } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, apply: false });
+    assert.equal(w.saved.calculations.length, 0);
+    assert.equal(pending60.candidate_ot_minutes, 90);
+    assert.equal(report.summary.attendance_days_corrected, 3);
+    assert.equal(report.summary.pending_ot_requests_reduced, 1);
+    assert.equal(report.summary.pending_ot_requests_withdrawn, 1);
+    assert.equal(report.summary.days_skipped_payroll_locked, 1);
+  });
+
+  it("apply recalculates, reduces or withdraws pending OT, never raises an approval, never touches a locked month", async () => {
+    const { w, deps, pending0, pending60, approved, lockedPending } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, apply: true });
+
+    assert.equal(report.failures.length, 0, JSON.stringify(report.failures));
+    assert.equal(report.summary.attendance_days_corrected, 3);
+    assert.equal(report.summary.pending_ot_requests_corrected, 2);
+    assert.equal(report.summary.ot_requests_created, 0);
+
+    assert.equal(pending0.status, "CANCELLED", "only unused lunch: the pending OT is withdrawn");
+    assert.equal(pending60.status, "PENDING");
+    assert.equal(pending60.candidate_ot_minutes, 60, "reduced to the post-shift hour");
+    assert.ok(w.store.log.every((l) => l.trigger_source === "LUNCH_OT_CORRECTION"));
+
+    assert.equal(approved.status, "APPROVED");
+    assert.equal(approved.approved_ot_minutes, 90, "the approved request itself is never rewritten");
+    assert.ok(lastStored(w, 44).approved_ot_minutes <= 60, "the day's approved figure only ever comes down");
+
+    assert.equal(lockedPending.candidate_ot_minutes, 30);
+    assert.equal(lastStored(w, 43, "2026-08-20"), undefined, "no row written in a locked month");
+    assert.equal(report.skipped_payroll_locked.length, 1);
+
+    const d1 = lastStored(w, 42, DATE2);
+    assert.equal(d1.pre_shift_ot_minutes, 0);
+    assert.equal(d1.post_shift_ot_minutes, 60);
+    assert.equal(d1.candidate_ot_minutes, 60);
+  });
+});
