@@ -236,9 +236,15 @@ function dailySalary(grossRupees, config = CONFIG) {
  * THE GROSS IS FIXED. A manual override redistributes a gross; it cannot
  * change it. Changing pay is a new salary revision, which is a different
  * action with a different approval.
+ *
+ * NO COMPONENT CAPS. The Conveyance and HRA caps belong to the AUTOMATIC
+ * breakup (`calculateBreakup`); a manual breakup is HR overriding that policy,
+ * so it may put any non-negative amount in any component as long as the four
+ * add up to the gross. Statutory wages stay protected regardless: the Code's
+ * 50% proviso in `statutoryWages` adds back any excess of HRA + Conveyance
+ * over half the pay.
  */
 function validateManualBreakup(grossRupees, components = {}, options = {}, config = CONFIG) {
-  const cfg = config.salary;
   const errors = [];
 
   const gross = toPaise(grossRupees);
@@ -264,16 +270,6 @@ function validateManualBreakup(grossRupees, components = {}, options = {}, confi
     errors.push(
       `Components must add up to the monthly gross: ${toRupees(sum)} entered against a gross of ${toRupees(gross)}`
     );
-  }
-
-  const conveyanceCap = toPaise(cfg.conveyanceCap);
-  if (parts.conveyance > conveyanceCap) {
-    errors.push(`Conveyance cannot exceed ${cfg.conveyanceCap}`);
-  }
-
-  const hraCap = toPaise(cfg.hraCap);
-  if (parts.hra > hraCap) {
-    errors.push(`HRA cannot exceed ${cfg.hraCap}`);
   }
 
   /*
