@@ -11,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 
 const dir = path.join(__dirname, "mysql/migrations");
-const NAME = "20261124120000-attendance-ot-auto-pending";
+const NAME = "20261125120000-attendance-ot-auto-pending";
 const read = (f) => fs.readFileSync(path.join(dir, "sqls", f), "utf8");
 const statements = (sql) =>
   sql.replace(/--[^\n]*/g, "").split(";").map((s) => s.trim().replace(/\s+/g, " ")).filter(Boolean);

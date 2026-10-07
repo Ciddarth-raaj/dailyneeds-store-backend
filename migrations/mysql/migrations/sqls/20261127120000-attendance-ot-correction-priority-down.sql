@@ -1,4 +1,4 @@
--- Reverses 20261126120000.
+-- Reverses 20261127120000.
 --
 -- WARNING: the old groups admit ONE pending 'ATT' request a date. If a date
 -- has BOTH a pending system OT and a pending regularization (which this

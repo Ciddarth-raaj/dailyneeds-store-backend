@@ -35,7 +35,7 @@ const CONTROL = 2; // identical in every way, without it
 const REQUEST = 501;
 const REQUEST_LATER = 503; // late-approved while October is locked but not yet published
 const EPFO = "20261120120000-epfo-wage-ceiling-2026-up.sql";
-const CARRY = "20261125120000-attendance-ot-late-settlement-up.sql";
+const CARRY = "20261126120000-attendance-ot-late-settlement-up.sql";
 
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));

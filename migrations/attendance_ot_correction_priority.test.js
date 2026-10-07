@@ -1,5 +1,5 @@
 /**
- * Migration 20261126120000 - attendance correction before system OT.
+ * Migration 20261127120000 - attendance correction before system OT.
  *
  *   node --test migrations/attendance_ot_correction_priority.test.js
  *
@@ -11,7 +11,7 @@ const assert = require("node:assert/strict");
 const fs = require("fs");
 const path = require("path");
 
-const NAME = "20261126120000-attendance-ot-correction-priority";
+const NAME = "20261127120000-attendance-ot-correction-priority";
 const dir = path.join(__dirname, "mysql/migrations");
 const up = fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8").replace(/^\s*--.*$/gm, "");
 const down = fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8").replace(/^\s*--.*$/gm, "");

@@ -29,12 +29,12 @@ const { istToday } = require("../utils/istDate");
 const { addDays } = require("../utils/attendance_engine");
 
 const SQL_DIR = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
-const UP = fs.readFileSync(path.join(SQL_DIR, "20261124120000-attendance-ot-auto-pending-up.sql"), "utf8");
-const DOWN = fs.readFileSync(path.join(SQL_DIR, "20261124120000-attendance-ot-auto-pending-down.sql"), "utf8");
+const UP = fs.readFileSync(path.join(SQL_DIR, "20261125120000-attendance-ot-auto-pending-up.sql"), "utf8");
+const DOWN = fs.readFileSync(path.join(SQL_DIR, "20261125120000-attendance-ot-auto-pending-down.sql"), "utf8");
 // Attendance correction before system OT: the AUTO_OT group, the one-pending-OT
 // key and the deferred-sync tables.
-const PRIORITY_UP = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-up.sql"), "utf8");
-const PRIORITY_DOWN = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-correction-priority-down.sql"), "utf8");
+const PRIORITY_UP = fs.readFileSync(path.join(SQL_DIR, "20261127120000-attendance-ot-correction-priority-up.sql"), "utf8");
+const PRIORITY_DOWN = fs.readFileSync(path.join(SQL_DIR, "20261127120000-attendance-ot-correction-priority-down.sql"), "utf8");
 // A PERMISSION raise reads the employee's attendance-mode history: the real
 // table, taken from its own migration (as the permission suite does), so this
 // suite never depends on a table another suite left behind.
@@ -358,7 +358,7 @@ describe("automatic pending OT, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
   });
 
 
-  /* ============ ATTENDANCE CORRECTION BEFORE SYSTEM OT, as SQL (migration 20261126120000) ==== */
+  /* ============ ATTENDANCE CORRECTION BEFORE SYSTEM OT, as SQL (migration 20261127120000) ==== */
 
   const CHAIN = [{ stage_no: 1, approver_role: "STORE_MANAGER", outlet_id: 3, approver_employee_id: null, approval_level: null }];
   const raise = (type, { emp = EMP, date = D1, auto = false, minutes = 0, by = emp } = {}) =>

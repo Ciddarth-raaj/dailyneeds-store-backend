@@ -971,7 +971,7 @@ class Server {
     // AUTOMATIC PENDING OT. Every stored day hands itself to the
     // regularization usecase's sync after the write commits, so eligible OT
     // enters approval with no employee request. Gated by the cutover row of
-    // migration 20261124120000 (absent = disabled).
+    // migration 20261125120000 (absent = disabled).
     this.attendanceCalculationUsecase.setOtAutoSync(this.attendanceRegularizationUsecase);
     // EDIT SHIFT ASSIGNMENT needs the calculation usecase for two things: to
     // ask, before it writes, whether the effective date reaches into a

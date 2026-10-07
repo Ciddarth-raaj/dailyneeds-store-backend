@@ -60,7 +60,7 @@ const { istToday } = require("../utils/istDate");
 /**
  * Move one employee-month's prior-month OT from one settlement status to the
  * next, on the caller's connection and transaction, with a log row per item.
- * A database without the table (before migration 20261125120000) has nothing
+ * A database without the table (before migration 20261126120000) has nothing
  * to move. Returns how many moved.
  */
 async function moveLateOt(conn, repo, { employee_id, year, month, from, to, actor = null, note = null }) {
@@ -486,7 +486,7 @@ class PayrunCalculationRepository {
    * so a recalculation keeps exactly what it had, never picks one up twice,
    * and a locked month's inputs still read as what it consumed (publish
    * compares them). One read for the population.
-   * A database without the table (before migration 20261125120000) has none.
+   * A database without the table (before migration 20261126120000) has none.
    */
   async listLateOtForSettlement(employeeIds, year, month) {
     if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];

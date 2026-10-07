@@ -70,7 +70,7 @@
  *   # 1. PREVIEW (default) - read-only: the exact dates per employee, counts
  *   NODE_ENV=production node scripts/attendance/ot-auto-pending-backfill.js
  *
- *   # 2. apply (after migration 20261124120000 has run)
+ *   # 2. apply (after migration 20261125120000 has run)
  *   NODE_ENV=production node scripts/attendance/ot-auto-pending-backfill.js --apply
  *
  * Options: --days <n> attendance days (1..31, default 5), --lookback <n>
@@ -231,7 +231,7 @@ async function run({
   const enabled = !!setting && (setting.enabled === true || Number(setting.enabled) === 1);
   if (apply && !enabled) {
     throw new Error(
-      "Automatic pending OT is not enabled (migration 20261124120000 not run, or its setting row is disabled) - run the migration first, or preview without --apply"
+      "Automatic pending OT is not enabled (migration 20261125120000 not run, or its setting row is disabled) - run the migration first, or preview without --apply"
     );
   }
   const yesterday = addDays(today, -1);

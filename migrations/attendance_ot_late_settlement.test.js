@@ -12,7 +12,7 @@ const fs = require("fs");
 const path = require("path");
 
 const dir = path.join(__dirname, "mysql/migrations");
-const NAME = "20261125120000-attendance-ot-late-settlement";
+const NAME = "20261126120000-attendance-ot-late-settlement";
 const strip = (sql) => sql.replace(/^\s*--.*$/gm, "");
 const up = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8"));
 const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8"));

@@ -698,7 +698,7 @@ approved shift); not Present/Absent Only; inside employment.
 
 **Gates.** Nothing is *created* before the cutover date
 (`attendance_ot_auto_pending_setting.auto_pending_from_date`, seeded by
-migration 20261124120000 to the deploy date), older than the 45-day request
+migration 20261125120000 to the deploy date), older than the 45-day request
 window, on an open day, or in a payroll-locked month (checked before, and again
 under `FOR UPDATE` inside the insert). `enabled = 0` on that row is the kill
 switch. The cutover and the window gate **creation only**: a record that
@@ -806,7 +806,7 @@ complete (its reason logged once as `STILL_BLOCKED`; each re-check moves it to
 the back of the sweep's queue, so a date nobody corrects cannot starve the
 others).
 
-## Attendance correction comes before system OT (migration 20261126120000)
+## Attendance correction comes before system OT (migration 20261127120000)
 
 The OT figure may itself be wrong until attendance is corrected, so a
 correction always wins over a **system-raised** OT on the same date.

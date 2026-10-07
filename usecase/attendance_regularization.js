@@ -2425,7 +2425,7 @@ module.exports = (
    * retried or concurrent run creates nothing twice.
    *
    * GATED. Nothing is raised before the cutover date (migration
-   * 20261124120000, the deploy date), older than the request
+   * 20261125120000, the deploy date), older than the request
    * backdate window, on a date whose day is still open, or in a payroll-locked
    * month - and a locked month's pending OT is not changed either.
    */

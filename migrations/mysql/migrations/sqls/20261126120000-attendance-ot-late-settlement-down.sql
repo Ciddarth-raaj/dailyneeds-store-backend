@@ -1,4 +1,4 @@
--- Reverses 20261125120000. WARNING: once any prior-month OT has been settled
+-- Reverses 20261126120000. WARNING: once any prior-month OT has been settled
 -- into a payroll, running this drops that money's breakdown (the payslip
 -- snapshots keep their own copy). The column DROPs are guarded the same way
 -- they were added.

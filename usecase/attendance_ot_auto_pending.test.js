@@ -163,7 +163,7 @@ function build(state = {}) {
 
   const stepsOf = (id) => store.steps.filter((s) => s.attendance_approval_request_id === id);
   const decidedSteps = (id) => stepsOf(id).filter((s) => s.decision === "APPROVED" || s.decision === "REJECTED").length;
-  // The open-request groups, as migration 20261126120000 generates them: a
+  // The open-request groups, as migration 20261127120000 generates them: a
   // SYSTEM OT has its own, so it never holds the slot a correction needs.
   const group = (type, auto) =>
     type === "SHIFT_CHANGE" ? "SHIFT" : type === "PERMISSION" ? "PERM" : type === "OT" && auto ? "AUTO_OT" : "ATT";

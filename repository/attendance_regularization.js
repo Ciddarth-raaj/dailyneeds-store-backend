@@ -2207,7 +2207,7 @@ class AttendanceRegularizationRepository {
 
   /* ============================================ AUTOMATIC PENDING OT ====
    *
-   * Eligible OT enters approval on its own (migration 20261124120000). The
+   * Eligible OT enters approval on its own (migration 20261125120000). The
    * OT record is the ordinary `attendance_approval_request` row - these
    * methods only read what the sync needs and make the two guarded writes it
    * may make to a request NOBODY HAS FINALLY DECIDED: follow the engine's

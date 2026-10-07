@@ -25,12 +25,12 @@ const buildRegularization = require("../usecase/attendance_regularization");
 const SQL_DIR = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const read = (f) => fs.readFileSync(path.join(SQL_DIR, f), "utf8");
 const MIGRATIONS = [
-  "20261124120000-attendance-ot-auto-pending-up.sql",
-  "20261125120000-attendance-ot-late-settlement-up.sql",
+  "20261125120000-attendance-ot-auto-pending-up.sql",
+  "20261126120000-attendance-ot-late-settlement-up.sql",
   "20261103120000-attendance-approval-revocation-up.sql",
   "20261106120000-attendance-approval-revocation-outcome-up.sql",
   // Attendance correction before system OT: groups, the OT key, the deferred markers.
-  "20261126120000-attendance-ot-correction-priority-up.sql",
+  "20261127120000-attendance-ot-correction-priority-up.sql",
 ];
 
 const EMP = 601;

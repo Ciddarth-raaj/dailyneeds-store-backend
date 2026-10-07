@@ -19,7 +19,7 @@ const MIGRATIONS = [
   "20261112120000-payrun-payslip-up.sql",
   // Prior-Month OT carry-forward: the settlement tables and the two
   // calculation columns the repository now reads and writes.
-  "20261125120000-attendance-ot-late-settlement-up.sql",
+  "20261126120000-attendance-ot-late-settlement-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 

@@ -893,7 +893,7 @@ class AttendanceCalculationRepository {
           )
         );
       } catch (err) {
-        // A database without migration 20261125120000 has no late
+        // A database without migration 20261126120000 has no late
         // settlements: read exactly as before.
         if (!err || err.code !== "ER_NO_SUCH_TABLE") {
           this._log("GET-APPROVAL-STATE", err);

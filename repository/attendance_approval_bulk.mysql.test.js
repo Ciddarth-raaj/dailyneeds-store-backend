@@ -43,7 +43,7 @@ const DATE = "2026-09-10";
 const SQL_DIR = path.join(__dirname, "..", "migrations/mysql/migrations/sqls");
 const REVOCATION_MIGRATION = path.join(SQL_DIR, "20261103120000-attendance-approval-revocation-up.sql");
 const BULK_MIGRATION = path.join(SQL_DIR, "20261105120000-attendance-approval-bulk-action-up.sql");
-const LATE_OT_MIGRATION = path.join(SQL_DIR, "20261125120000-attendance-ot-late-settlement-up.sql");
+const LATE_OT_MIGRATION = path.join(SQL_DIR, "20261126120000-attendance-ot-late-settlement-up.sql");
 
 const SCHEMA = [
   `CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), store_id INT NULL, designation_id INT NULL)`,
