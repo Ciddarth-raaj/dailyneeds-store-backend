@@ -92,7 +92,7 @@ test("daily salary is the gross over 26 salary days", () => {
 
 /* ------------------------------------------------------- manual override */
 
-test("a manual breakup that adds up, within the caps, with Basic unchanged, needs no reason", () => {
+test("a manual breakup that adds up, with Basic unchanged, needs no reason", () => {
   const r = E.validateManualBreakup(50000, {
     basic: 25000,
     conveyance: 2000,
@@ -114,26 +114,33 @@ test("components that do not add up to the gross are refused", () => {
   assert.match(r.errors.join(" "), /add up to the monthly gross/);
 });
 
-test("Conveyance above 2500 is refused", () => {
+test("a manual breakup is not held to the automatic caps: Conveyance above 2500 is accepted", () => {
   const r = E.validateManualBreakup(50000, {
     basic: 25000,
     conveyance: 3000,
     hra: 10000,
     special_allowance: 12000,
   });
-  assert.equal(r.valid, false);
-  assert.match(r.errors.join(" "), /Conveyance cannot exceed 2500/);
+  assert.equal(r.valid, true, r.errors.join(" "));
 });
 
-test("HRA above 10000 is refused", () => {
+test("a manual breakup is not held to the automatic caps: HRA above 10000 is accepted", () => {
   const r = E.validateManualBreakup(50000, {
     basic: 25000,
     conveyance: 2500,
     hra: 12000,
     special_allowance: 10500,
   });
-  assert.equal(r.valid, false);
-  assert.match(r.errors.join(" "), /HRA cannot exceed 10000/);
+  assert.equal(r.valid, true, r.errors.join(" "));
+});
+
+test("the screenshot case: 17000 / 4000 / 10000 / 3000 on a 34000 gross, with a reason, is accepted", () => {
+  const r = E.validateManualBreakup(
+    34000,
+    { basic: 17000, conveyance: 4000, hra: 10000, special_allowance: 3000 },
+    { manual_override: true, override_reason: "Agreed structure" }
+  );
+  assert.equal(r.valid, true, r.errors.join(" "));
 });
 
 test("a negative component is refused", () => {
