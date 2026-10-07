@@ -5,6 +5,7 @@ const {
   CALC_CARD,
   CALCULATION_VERSION,
   PRICED_FROM_RESOLVED_SALARY_VERSION,
+  ESI_ON_OVERTIME_VERSION,
   ROW_RESULT,
   STORED_STATUS,
   RESET_REASON,
@@ -19,6 +20,7 @@ const { monthWindow, statutorySetupComplete, statutorySetupGaps } = require("../
 const { deriveState } = require("../utils/payrun_adjustments");
 const calc = require("../utils/payrun_calculation");
 const engine = require("../utils/salary_engine");
+const statutoryConfig = require("../config/statutory");
 const { evaluatePayrollReadiness, statutoryHoldReason } = require("../utils/payroll_readiness");
 const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
@@ -326,6 +328,25 @@ function fixedSalaryFigures(record) {
   const esi = contribution(presented && presented.esi_status, presented && presented.employee_esi);
   const takeHome = gross === null || pf === null || esi === null ? null : ((gross - pf - esi) / 100).toFixed(2);
   return { monthly_ctc: monthlyCtc, take_home: takeHome };
+}
+
+/**
+ * AN OPEN ROW WHOSE ESI LEFT OUT OVERTIME. Calculated before version 5, ESI
+ * actually charged, and overtime (this month's or Prior-Month) on the row -
+ * the only rows whose ESI the correction changes. Nothing else is re-judged.
+ */
+function esiOtRuleOutdated(stored) {
+  if (!stored || Number(stored.calculation_version || 0) >= ESI_ON_OVERTIME_VERSION) return false;
+  if (statutoryConfig.esi.overtimeInContributionWage === false) return false;
+  if (stored.esi_status !== "APPLIED") return false;
+  return (paiseOf(stored.ot_amount) || 0) > 0 || (paiseOf(stored.prior_month_ot_amount) || 0) > 0;
+}
+
+/** The overtime a stored row's ESI wage includes: 0 before version 5 or when ESI was not charged. */
+function esiOtWageOf(stored) {
+  if (!stored || Number(stored.calculation_version || 0) < ESI_ON_OVERTIME_VERSION) return 0;
+  if (stored.esi_status !== "APPLIED" || statutoryConfig.esi.overtimeInContributionWage === false) return 0;
+  return ((paiseOf(stored.ot_amount) || 0) + (paiseOf(stored.prior_month_ot_amount) || 0)) / 100;
 }
 
 /** The salary_id a stored calculation was priced on: its own from version 4, its snapshot's before. */
@@ -716,6 +737,7 @@ class PayrunCalculationUsecase {
       current_source_hash: currentSourceHash,
       current_inputs_hash: currentInputsHash,
       priced_salary_mismatch: pricedSalaryMismatch,
+      esi_ot_rule_outdated: esiOtRuleOutdated(stored),
       /*
        * THE STORED ROW IS TRANSLATED BACK INTO MARKERS BEFORE IT IS COMPARED -
        * see `storedMarkers`. The OT split is stored as the priced breakdown
@@ -1203,6 +1225,12 @@ class PayrunCalculationUsecase {
               esi_status: stored.esi_status,
               esi_wage: provisional(stored.esi_wage),
               esi_wage_basis: stored.esi_wage_basis,
+              /**
+               * THE OVERTIME INSIDE THE ESI WAGE (version 5 on): this month's
+               * OT plus Prior-Month OT, when ESI was charged. The rest of the
+               * ESI wage is the coverage wage the ceiling was tested on.
+               */
+              esi_ot_wage: provisional(esiOtWageOf(stored)),
               employee_esi: provisional(stored.employee_esi),
               employer_esi: provisional(stored.employer_esi),
               /**

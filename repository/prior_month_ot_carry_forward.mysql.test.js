@@ -180,7 +180,7 @@ describe("Prior-Month OT carry-forward over real SQL", { skip: !URL && "ATTENDAN
     assert.equal(price.amount, 200);
   });
 
-  it("4/10. October picks it up: Prior-Month OT in earnings and net pay, NOT in the PF or ESI wage - exactly like OT", async () => {
+  it("4/10. October picks it up: Prior-Month OT in earnings and net pay and the ESI contribution wage, NOT the PF wage - exactly like OT", async () => {
     at("2026-11-03");
     const before = JSON.stringify(await row(LATE, 9));
     const oct = await usecase.calculate({ year: 2026, month: 10, all_eligible: true, actor: ACTOR });
@@ -192,9 +192,16 @@ describe("Prior-Month OT carry-forward over real SQL", { skip: !URL && "ATTENDAN
     assert.equal(Number(late.ot_amount), Number(control.ot_amount), "this month's own OT is untouched");
     assert.equal(Number(late.arrears), 0, "never Arrears");
     assert.equal(Number(late.total_earnings) - Number(control.total_earnings), 200);
-    for (const k of ["pf_wage", "employee_pf", "employer_epf", "employer_eps", "esi_wage", "employee_esi", "employer_esi"]) {
-      assert.equal(String(late[k]), String(control[k]), `${k}: OT reaches no statutory wage`);
+    for (const k of ["pf_wage", "employee_pf", "employer_epf", "employer_eps"]) {
+      assert.equal(String(late[k]), String(control[k]), `${k}: OT never reaches the PF wage`);
     }
+    // ESI: charged in the month it is PAID (October), on October's coverage.
+    // The 200 is added to the contribution wage; contributions follow it.
+    assert.equal(late.esi_status, "APPLIED");
+    assert.equal(Number(late.esi_wage), Number(control.esi_wage) + 200);
+    const wage = Number(late.esi_wage);
+    assert.equal(Number(late.employee_esi), Math.round((wage * 75) / 10000), "0.75%");
+    assert.equal(Number(late.employer_esi), Math.round((wage * 325) / 10000), "3.25%");
     assert.equal(control.prior_month_ot_amount, null, "an ordinary month is stored exactly as before");
     const s = await settlement();
     assert.deepEqual([s.settlement_status, s.settlement_year, s.settlement_month], ["INCLUDED", 2026, 10]);
@@ -254,6 +261,9 @@ describe("Prior-Month OT carry-forward over real SQL", { skip: !URL && "ATTENDAN
     assert.equal(nov.calculated_count, 2, JSON.stringify(nov.results));
     assert.equal((await row(LATE, 11)).prior_month_ot_amount, null);
     assert.equal(Number((await row(LATE, 11)).total_earnings), Number((await row(CONTROL, 11)).total_earnings));
+    for (const k of ["esi_wage", "employee_esi", "employer_esi"]) {
+      assert.equal(String((await row(LATE, 11))[k]), String((await row(CONTROL, 11))[k]), `${k}: no ESI charged on it twice either`);
+    }
   });
 
   it("8. the whole journey is on record: request, original date/month/minutes, price, settlement month", async () => {

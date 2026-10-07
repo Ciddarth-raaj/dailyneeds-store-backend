@@ -963,12 +963,26 @@ function computeCalculation(input = {}, config = CONFIG) {
   /* ------------------------------------------------------------ THE ESI */
 
   /*
-   * THE ESI WAGE IS ELIGIBLE NORMAL SALARY EARNINGS ONLY.
+   * TWO ESI WAGES: ONE FOR COVERAGE, ONE FOR THE CONTRIBUTION.
    *
+   * THE COVERAGE WAGE is eligible normal salary earnings only:
    * NORMAL SALARY EARNINGS = SALARY DAY EARNINGS - MISSING HOURS DEDUCTION.
-   * Extra Days, OT, Incentive, Bonus and Arrears are excluded, and again by
+   * Extra Days, OT, Incentive, Bonus and Arrears are excluded by
    * construction: none of them appears in the remuneration handed to the wage
-   * definition below.
+   * definition below. It is what the coverage ceiling (and the low-wage
+   * exemption) is tested on.
+   *
+   * THE CONTRIBUTION WAGE is the coverage wage PLUS OVERTIME - this month's
+   * OT and any Prior-Month OT paid in this payroll - for an employee who is
+   * covered. ESIC charges the contribution on overtime and does not count it
+   * for coverage (see `config/statutory.js#esi.overtimeInContributionWage`).
+   * Overtime never enters the coverage question, so it can neither pull
+   * somebody into the scheme nor push them out of it.
+   *
+   * PRIOR-MONTH OT IS CHARGED IN THE MONTH IT IS PAID, on this month's
+   * coverage. It was not payable in its source month - it was unapproved when
+   * that payroll was locked and its ESI return filed - and became payable on
+   * approval; the source month's payroll and filing are never reopened.
    *
    * THE DEDUCTION COMES OFF THE WAGE because it is not a deduction from pay in
    * the recovery sense - it is minutes the employee did not work, so it is
@@ -1034,8 +1048,10 @@ function computeCalculation(input = {}, config = CONFIG) {
     config
   );
 
-  const esiWageRupees = wageDefinition === null ? null : wageDefinition.statutory_wages;
-  const esiWagePaise = toPaise(esiWageRupees);
+  const esiCoverageWageRupees = wageDefinition === null ? null : wageDefinition.statutory_wages;
+  const esiCoverageWagePaise = toPaise(esiCoverageWageRupees);
+  const esiOtPaise = config.esi.overtimeInContributionWage === false ? 0 : monthOtPaise + priorMonthOtPaise;
+  const esiWageRupees = esiCoverageWagePaise === null ? null : toRupees(esiCoverageWagePaise + esiOtPaise);
   const coverageCeilingPaise = toPaise(config.esi.coverageCeiling);
 
   /*
@@ -1059,9 +1075,9 @@ function computeCalculation(input = {}, config = CONFIG) {
    */
   const coverageUnresolvedAboveCeiling =
     coverage.continues === null &&
-    esiWagePaise !== null &&
+    esiCoverageWagePaise !== null &&
     coverageCeilingPaise !== null &&
-    esiWagePaise > coverageCeilingPaise;
+    esiCoverageWagePaise > coverageCeilingPaise;
 
   let esi;
   if (coverageUnresolvedAboveCeiling) {
@@ -1085,6 +1101,7 @@ function computeCalculation(input = {}, config = CONFIG) {
       {
         esi_applicable: snapshot.esi_applicable,
         esi_wage: esiWageRupees,
+        esi_coverage_wage: esiCoverageWageRupees,
         /*
          * `true` OR `undefined`, NEVER `false`, which is the shape the engine
          * documents: a proven continuation keeps somebody covered above the
@@ -1258,6 +1275,15 @@ function computeCalculation(input = {}, config = CONFIG) {
     employee_esi: esi.employee_esi,
     employer_esi: esi.employer_esi,
     esi_wage_definition: wageDefinition,
+    /**
+     * THE TWO ESI WAGES, apart (not stored columns; the stored `esi_wage` is
+     * the contribution wage). `esi_coverage_wage` is the wage the ceiling was
+     * tested on, without overtime; `esi_ot_wage` is the overtime (this
+     * month's and Prior-Month) inside `esi_wage` - zero when ESI was not
+     * charged.
+     */
+    esi_coverage_wage: esiCoverageWageRupees,
+    esi_ot_wage: esi.status === engine.STATUS.APPLIED ? toRupees(esiOtPaise) : 0,
     /**
      * HOW THE COVERAGE QUESTION WAS ANSWERED, beside the contribution it
      * decided - the same pair `calculateSalary` returns for the Salary Master.
@@ -1466,12 +1492,19 @@ function deriveStatus(input = {}) {
    * catch, the markers already agree with the world and the hash says nothing.
    */
   const pricedSalaryMoved = input.priced_salary_mismatch === true;
+  /*
+   * A FORMULA CORRECTION THE STORED FIGURES PREDATE: ESI was charged without
+   * the overtime it is now charged on (calculation version 5). Decided by the
+   * caller from the stored row; never true for a locked row (returned above).
+   */
+  const esiOtRuleOutdated = input.esi_ot_rule_outdated === true;
 
-  if (sourceMoved || inputsMoved || pricedSalaryMoved) {
+  if (sourceMoved || inputsMoved || pricedSalaryMoved || esiOtRuleOutdated) {
     (input.change_reasons || []).forEach((code) => recalcReasons.push(recalcReasonOf(code)));
     if (pricedSalaryMoved && !recalcReasons.some((r) => r.code === RECALC_REASON.SALARY_CHANGED)) {
       recalcReasons.unshift(recalcReasonOf(RECALC_REASON.SALARY_CHANGED));
     }
+    if (esiOtRuleOutdated) recalcReasons.push(recalcReasonOf(RECALC_REASON.ESI_OT_RULE_CHANGED));
     if (recalcReasons.length === 0) {
       /*
        * THE HASH SAYS SOMETHING MOVED AND THE MARKER COMPARISON NAMED NOTHING.
