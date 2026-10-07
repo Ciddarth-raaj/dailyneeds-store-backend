@@ -59,6 +59,30 @@ const { addDays } = require("../../utils/attendance_engine");
 
 const SOURCE = "LUNCH_OT_CORRECTION";
 
+/**
+ * One line per affected day, for a person to check: old and new OT, and what
+ * happens to the date's OT request.
+ */
+function table(report) {
+  const key = (x) => `${Number(x.employee_id)}|${String(x.attendance_date).slice(0, 10)}`;
+  const action = new Map();
+  const note = (list, label, fmt) => (list || []).forEach((x) => action.set(key(x), `${label} #${x.attendance_approval_request_id}${fmt ? ` ${fmt(x)}` : ""}`));
+  note(report.pending_ot_reduced, "PENDING_REDUCED", (x) => `${x.previous_ot_minutes}->${x.ot_minutes}`);
+  note(report.pending_ot_withdrawn, "PENDING_WITHDRAWN", (x) => `${x.previous_ot_minutes}->0`);
+  note(report.pending_ot_held, "PART_APPROVED_HELD", (x) => `${x.ot_minutes} (eligible ${x.eligible_ot_minutes})`);
+  note(report.approved_ot_preserved, "APPROVED_UNCHANGED", (x) => `${x.approved_ot_minutes}`);
+  const ot = (f) => (f ? `${f.pre_shift_ot_minutes}+${f.post_shift_ot_minutes}=${f.candidate_ot_minutes}` : "-");
+  const lines = [["employee", "date", "result", "old pre+post=OT", "new pre+post=OT", "approved old->new", "ot_request"].join("\t")];
+  const push = (result, x) =>
+    lines.push([x.employee_id, x.attendance_date, result, ot(x.before || x), ot(x.after), x.before ? `${x.before.approved_ot_minutes}->${x.after ? x.after.approved_ot_minutes : "-"}` : `${x.approved_ot_minutes}->-`, action.get(key(x)) || "-"].join("\t"));
+  report.days_corrected.forEach((x) => push("CORRECTED", x));
+  report.days_unchanged.forEach((x) => push("UNCHANGED", x));
+  report.ot_would_increase.forEach((x) => push("WOULD_INCREASE_NOT_WRITTEN", x));
+  report.skipped_payroll_locked.forEach((x) => push("SKIPPED_PAYROLL_LOCKED", x));
+  report.failures.forEach((x) => lines.push([x.employee_id, x.attendance_date, `FAILED ${x.reason}${x.message ? `: ${x.message}` : ""}`].join("\t")));
+  return lines.join("\n");
+}
+
 function parseArgs(argv) {
   const out = { apply: false };
   for (const arg of argv) {
@@ -136,6 +160,9 @@ async function run({ listAffected, findLocked, calculateRange, syncAutoOt, recal
     pending_ot_held: [],
     approved_ot_preserved: [],
     ot_created: [],
+    // Never written: the rule only removes minutes, so any of these is a
+    // question for a person, not for this script.
+    ot_would_increase: [],
     failures: [],
   };
 
@@ -152,6 +179,14 @@ async function run({ listAffected, findLocked, calculateRange, syncAutoOt, recal
       let day;
       let sync;
       if (apply) {
+        // Proven before anything is stored: a day whose OT would go UP is
+        // never written by this correction.
+        const [probe] = await calculateRange({ employee_id: employeeId, from_date: date, to_date: date });
+        const probed = figures(probe);
+        if (probed.approved_ot_minutes > before.approved_ot_minutes || probed.candidate_ot_minutes > before.candidate_ot_minutes) {
+          report.ot_would_increase.push({ employee_id: employeeId, attendance_date: date, before, after: probed });
+          continue;
+        }
         const out = await recalculateRange({ employee_id: employeeId, from_date: date, to_date: date, now, ot_sync_source: SOURCE });
         day = (out.days || []).find((d) => d.attendance_date === date) || null;
         sync = out.ot_auto_pending;
@@ -167,7 +202,7 @@ async function run({ listAffected, findLocked, calculateRange, syncAutoOt, recal
       const after = figures(day);
       const entry = { employee_id: employeeId, attendance_date: date, before, after };
       if (after.approved_ot_minutes > before.approved_ot_minutes || after.candidate_ot_minutes > before.candidate_ot_minutes) {
-        report.failures.push({ ...entry, reason: "OT_WOULD_INCREASE" });
+        report.ot_would_increase.push(entry);
         continue;
       }
       (sameFigures(before, after) ? report.days_unchanged : report.days_corrected).push(entry);
@@ -201,6 +236,7 @@ async function run({ listAffected, findLocked, calculateRange, syncAutoOt, recal
     approved_ot_requests_preserved: report.approved_ot_preserved.length,
     approved_ot_day_figures_reduced: report.days_corrected.filter((e) => e.after.approved_ot_minutes < e.before.approved_ot_minutes).length,
     ot_requests_created: report.ot_created.length,
+    ot_would_increase: report.ot_would_increase.length,
     failures: report.failures.length,
   };
   return report;
@@ -235,6 +271,7 @@ async function main() {
     });
     console.log(JSON.stringify(report, null, 2));
     console.error(`SUMMARY ${JSON.stringify(report.summary)}`);
+    console.error(table(report));
     return report.failures.length === 0 ? 0 : 1;
   } finally {
     mysql.close();
@@ -251,4 +288,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { parseArgs, run, AFFECTED_SQL, SOURCE };
+module.exports = { parseArgs, run, table, AFFECTED_SQL, SOURCE };

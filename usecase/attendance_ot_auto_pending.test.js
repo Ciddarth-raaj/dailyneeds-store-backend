@@ -1962,6 +1962,21 @@ describe("lunch OT correction: days stored under the old rule, brought in line",
     assert.equal(report.summary.pending_ot_requests_reduced, 1);
     assert.equal(report.summary.pending_ot_requests_withdrawn, 1);
     assert.equal(report.summary.days_skipped_payroll_locked, 1);
+    assert.equal(report.summary.ot_would_increase, 0);
+    const lines = lunchCorrection.table(report).split("\n");
+    assert.equal(lines.length, 5, "a header and one line per affected day");
+    assert.ok(lines.some((l) => l.startsWith(`42\t${DATE2}\tCORRECTED\t0+90=90\t0+60=60`) && l.includes("PENDING_REDUCED")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("PENDING_WITHDRAWN")));
+    assert.ok(lines.some((l) => l.includes("APPROVED_UNCHANGED")));
+    assert.ok(lines.some((l) => l.includes("SKIPPED_PAYROLL_LOCKED")));
+  });
+
+  it("a day whose OT would go UP is reported and never written", async () => {
+    const { w, deps } = await scenario();
+    const report = await lunchCorrection.run({ ...deps, listAffected: async () => [oldRow(42, DATE2, 10)], apply: true });
+    assert.equal(report.summary.ot_would_increase, 1);
+    assert.equal(report.summary.attendance_days_corrected, 0);
+    assert.equal(w.saved.calculations.length, 0);
   });
 
   it("apply recalculates, reduces or withdraws pending OT, never raises an approval, never touches a locked month", async () => {
