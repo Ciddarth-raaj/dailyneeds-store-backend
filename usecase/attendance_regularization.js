@@ -3204,6 +3204,8 @@ module.exports = (
             chain,
             chain_source,
             first_approver_employee_id: firstApproverId,
+            // Reported only: raised under the deferred locked-month exception.
+            source_payroll_locked: Boolean(lockedException),
           });
           continue;
         }
@@ -3353,6 +3355,19 @@ module.exports = (
     const who = await resolveIdentity(Number(employeeId));
     const { chain, source } = await resolveChain(who);
     return { chain, chain_source: source };
+  };
+
+  /**
+   * Who someone is, for the backfill preview's candidate list (name and
+   * outlet). Read-only; null for an unknown id.
+   */
+  const previewApprovalIdentity = async (employeeId) => {
+    try {
+      const who = await resolveIdentity(Number(employeeId));
+      return { employee_id: who.employee_id, employee_name: who.employee_name || null, outlet_id: who.outlet_id, outlet_name: who.outlet_name || null };
+    } catch (err) {
+      return null;
+    }
   };
 
   /**
@@ -4347,6 +4362,7 @@ module.exports = (
     syncAutoOtSafely,
     resolveDeferredOt,
     previewOtApprovalChain,
+    previewApprovalIdentity,
     otApprovalContext,
     AUTO_OT_SKIP,
     MAX_FORWARD_DAYS,

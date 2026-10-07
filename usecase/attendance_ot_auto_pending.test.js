@@ -2018,3 +2018,138 @@ describe("DEFERRED OT IS REMEMBERED ONLY WHERE A CORRECTION COULD PRODUCE OT", (
     assert.deepEqual(liveOt(w, 42, "2026-09-18").map((r) => [r.status, r.candidate_ot_minutes]), [["PENDING", 90]]);
   });
 });
+
+describe("BACKFILL PREVIEW: the NEW Pending OT candidates, read-only and reconciled", () => {
+  // The late shift with PRE-SHIFT OT allowed, for the early-arrival cases.
+  SHIFTS[11] = { config: { ...config(11, "LATE-PRE", "Late Shift, pre-shift OT"), pre_shift_overtime_allowed: 1 }, schedule: weekly(11, "10:00:00", "22:00:00") };
+  /*
+   * 42 (shift 11, role chain SM of outlet 3):
+   *   15 Sep  10:00-23:30, two punches          -> 90 min post-shift
+   *   16 Sep  10:00, 14:00 / 14:20, 23:00       -> 100 min: a 20-min break of 60 allowed adds 40
+   *   17 Sep  08:30-22:00                       -> 90 min pre-shift (came early)
+   *   18 Sep  07:00-23:30                       -> 270 min: 180 pre + 90 post, over 120
+   *   19 Sep  10:00-22:00                       -> no OT, no candidate
+   */
+  const seed = (extra = {}) =>
+    build({
+      wireAuto: false,
+      setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+      shiftOf: { 42: 11 },
+      rawPunches: [
+        ...day(42, "2026-09-15"),
+        punch(42, "2026-09-16 10:00:00"), punch(42, "2026-09-16 14:00:00"), punch(42, "2026-09-16 14:20:00"), punch(42, "2026-09-16 23:00:00"),
+        punch(42, "2026-09-17 08:30:00"), punch(42, "2026-09-17 22:00:00"),
+        punch(42, "2026-09-18 07:00:00"), punch(42, "2026-09-18 23:30:00"),
+        ...day(42, "2026-09-19", "22:00:00"),
+      ],
+      ...extra,
+    });
+  const args = (w, extra = {}) => ({
+    calculateRange: w.calculation.calculateRange,
+    syncAutoOt: w.regularization.syncAutoOt,
+    resolveDeferredOt: w.regularization.resolveDeferredOt,
+    listEmployees: async () => [{ employee_id: 42 }],
+    listApprovalAuthority: () => w.regRepo.listApprovalAuthority(),
+    previewChain: w.regularization.previewOtApprovalChain,
+    describeEmployee: w.regularization.previewApprovalIdentity,
+    describeShift: async (id) => {
+      const shift = await w.calcRepo.getWorkShiftWithSchedule(id);
+      return shift && shift.config ? shift.config.shift_name : null;
+    },
+    listAttendedDates: attendedFromSaved(w),
+    setting: { enabled: 1, auto_pending_from_date: "2026-09-20" },
+    today: "2026-09-20",
+    apply: false,
+    telegram: false,
+    summary_only: true,
+    ...extra,
+  });
+  const byDate = (report) => new Map(report.new_pending_candidates.candidates.map((c) => [c.attendance_date, c]));
+
+  it("lists every record --apply would create - in --summary-only too - and reconciles exactly with the totals", async () => {
+    const w = seed();
+    await persistAll(w, [42]);
+    const report = await backfill.run(args(w));
+    const { summary, candidates } = report.new_pending_candidates;
+    assert.equal(report.detail, undefined, "summary-only");
+    assert.equal(summary.candidate_count, report.totals.new_pending_would_be_created);
+    assert.equal(summary.candidate_minutes, report.totals.new_pending_ot_minutes);
+    assert.deepEqual(candidates.map((c) => [c.attendance_date, c.final_eligible_ot_minutes]), [
+      ["2026-09-15", 90], ["2026-09-16", 100], ["2026-09-17", 90], ["2026-09-18", 270],
+    ]);
+    assert.deepEqual([summary.candidate_count, summary.candidate_minutes, summary.min_ot_minutes, summary.max_ot_minutes, summary.avg_ot_minutes], [4, 550, 90, 270, 137.5]);
+    assert.deepEqual([summary.count_ge_60, summary.count_ge_120, summary.count_ge_180], [4, 1, 1]);
+    assert.equal(summary.reconciliation.ok, true);
+    assert.deepEqual(report.failures, []);
+    assert.equal(w.store.requests.length, 0, "read-only");
+  });
+
+  it("each candidate carries the day's own figures: shift, punches, worked, NRM, break, pre/post-shift OT, approver", async () => {
+    const w = seed();
+    await persistAll(w, [42]);
+    const c = byDate(await backfill.run(args(w))).get("2026-09-15");
+    assert.deepEqual(
+      [c.employee_id, c.employee_name, c.outlet_name, c.shift_code, c.shift_name, c.shift_start, c.shift_end, c.first_punch, c.last_punch, c.punch_count],
+      [42, "Asha", "Outlet 3", "LATE-PRE", "Late Shift, pre-shift OT", "10:00", "22:00", "10:00", "23:30", 2]
+    );
+    assert.deepEqual([c.worked_minutes, c.nrm_minutes, c.break_deducted_minutes, c.pre_shift_ot_minutes, c.post_shift_ot_minutes, c.final_eligible_ot_minutes], [750, 660, 60, 0, 90, 90]);
+    assert.deepEqual([c.payroll_month_locked, c.eligibility_category, c.flags], [false, "POST_SHIFT_OT", []]);
+    assert.deepEqual(c.approver, { role: "STORE_MANAGER", outlet_id: 3, holders: [{ employee_id: 7, employee_name: "Mgr3" }] });
+  });
+
+  it("flags pre-shift OT, an early arrival, a short break that adds to the surplus, and OT over 120 min", async () => {
+    const w = seed();
+    await persistAll(w, [42]);
+    const report = await backfill.run(args(w));
+    const c = byDate(report);
+    assert.deepEqual([c.get("2026-09-16").break_allowed_minutes, c.get("2026-09-16").break_deducted_minutes, c.get("2026-09-16").unused_break_minutes_in_surplus], [60, 20, 40]);
+    assert.deepEqual(c.get("2026-09-16").flags, ["BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS"]);
+    assert.deepEqual([c.get("2026-09-17").pre_shift_ot_minutes, c.get("2026-09-17").eligibility_category], [90, "PRE_SHIFT_OT"]);
+    assert.deepEqual(c.get("2026-09-17").flags, ["PRE_SHIFT_OT", "EARLY_ARRIVAL_BEFORE_SHIFT"]);
+    assert.deepEqual(c.get("2026-09-18").flags, ["PRE_SHIFT_OT", "EARLY_ARRIVAL_BEFORE_SHIFT", "OT_OVER_120_MIN"]);
+    assert.equal(c.get("2026-09-18").eligibility_category, "PRE_AND_POST_SHIFT_OT");
+    const s = report.new_pending_candidates.summary;
+    assert.deepEqual(s.flagged, {
+      pre_shift_ot: 2, early_arrival_before_shift: 2, break_shorter_than_allowed_adds_to_surplus: 1,
+      early_arrival_with_break_contribution: 0, ot_over_120_min: 1, invalid_approval_chain: 0,
+    });
+    assert.deepEqual(s.top_20_by_ot_minutes.map((t) => [t.attendance_date, t.final_eligible_ot_minutes]), [
+      ["2026-09-18", 270], ["2026-09-16", 100], ["2026-09-15", 90], ["2026-09-17", 90],
+    ]);
+  });
+
+  it("an invalid approval chain is flagged on the candidate itself (the 2296 pattern)", async () => {
+    const w = seed({ inactive: [7] });
+    await persistAll(w, [42]);
+    const report = await backfill.run(args(w));
+    const c = byDate(report).get("2026-09-15");
+    assert.ok(c.flags.includes("INVALID_APPROVAL_CHAIN"));
+    assert.match(c.approval_chain_problem, /no active Store Manager mapped for outlet 3/);
+    assert.deepEqual(c.approver.holders, []);
+    assert.equal(report.new_pending_candidates.summary.flagged.invalid_approval_chain, 4);
+  });
+
+  it("a candidate list that does not reconcile is a reported failure", () => {
+    const one = { employee_id: 42, attendance_date: "2026-09-15", final_eligible_ot_minutes: 90, flags: [] };
+    const short = backfill.summarizeCandidates([one], { count: 2, minutes: 180 });
+    assert.equal(short.reconciliation.ok, false);
+    assert.deepEqual(short.reconciliation.problems, ["candidate_count 1 != new_pending 2", "candidate_minutes 90 != new_pending_ot_minutes 180"]);
+    const dup = backfill.summarizeCandidates([one, one], { count: 2, minutes: 180 });
+    assert.deepEqual(dup.reconciliation.problems, ["1 duplicate employee/date candidate(s)"]);
+  });
+
+  it("--apply runs the preview first and writes NOTHING unless it matches the approved count and minutes", async () => {
+    const w = seed();
+    await persistAll(w, [42]);
+    await assert.rejects(
+      backfill.run(args(w, { apply: true, expect_candidates: 124, expect_minutes: 11735 })),
+      /Refusing --apply: the candidate preview does not reconcile - preview now finds 4 candidates, 124 were approved; preview now finds 550 minutes, 11735 were approved/
+    );
+    assert.equal(w.store.requests.length, 0, "nothing written");
+    assert.equal(w.store.deferred.length, 0);
+    const applied = await backfill.run(args(w, { apply: true, expect_candidates: 4, expect_minutes: 550 }));
+    assert.equal(applied.totals.new_pending_created, 4);
+    assert.equal(w.store.requests.filter((r) => r.request_type === "OT" && r.status === "PENDING").length, 4);
+    assert.deepEqual(backfill.parseArgs(["--apply", "--expect-candidates", "124", "--expect-minutes", "11735"]).expect_minutes, 11735);
+  });
+});

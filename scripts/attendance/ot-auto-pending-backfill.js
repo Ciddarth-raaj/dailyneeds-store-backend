@@ -61,6 +61,18 @@
  * Every employee's approval chain is checked (read-only), so an invalid one
  * is named even when no OT is raised for them in this run.
  *
+ * NEW PENDING OT CANDIDATES (read-only, always printed, --summary-only too):
+ * every record the run would create, with the day's own figures (shift,
+ * punches, worked, NRM, break deducted, pre/post-shift OT), the approver and
+ * flags - PRE_SHIFT_OT, EARLY_ARRIVAL_BEFORE_SHIFT,
+ * BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS, OT_OVER_120_MIN,
+ * INVALID_APPROVAL_CHAIN - plus a summary (count, minutes, min/max/avg,
+ * >=60/120/180, top 20). The count and minutes must reconcile exactly with
+ * totals.new_pending_*; if not, the preview reports a failure, and --apply
+ * runs this preview first and refuses to write anything. --apply also takes
+ * --expect-candidates N --expect-minutes M (the figures the reviewer
+ * approved) and refuses unless the fresh preview matches them.
+ *
  * IDEMPOTENT: a second run creates nothing. TELEGRAM: no per-date cards - each
  * named first approver gets ONE summary ("12 OT approvals pending from
  * previous days ... send /ot"); the records stay individual.
@@ -116,6 +128,11 @@ function parseArgs(argv) {
       const id = Number(argv[i + 1]);
       if (!Number.isInteger(id) || id <= 0) throw new Error("--employee takes a positive employee id");
       out.employee_ids.push(id);
+      i += 1;
+    } else if (arg === "--expect-candidates" || arg === "--expect-minutes") {
+      const n = Number(argv[i + 1]);
+      if (!Number.isInteger(n) || n < 0) throw new Error(`${arg} takes a whole number`);
+      out[arg === "--expect-candidates" ? "expect_candidates" : "expect_minutes"] = n;
       i += 1;
     } else if (arg === "--today") {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(argv[i + 1] || "")) throw new Error("--today takes YYYY-MM-DD");
@@ -202,6 +219,133 @@ function chainProblem(chain, authority) {
   return null;
 }
 
+/* ------------------------------------------------ NEW PENDING OT CANDIDATES */
+
+/** "10:00" from "2026-09-14 10:00:00" / "10:00:00". */
+const hhmm = (v) => {
+  if (!v) return null;
+  const m = /(\d{2}:\d{2})(:\d{2})?$/.exec(String(v));
+  return m ? m[1] : String(v);
+};
+const num = (v) => (v === null || v === undefined || v === "" ? null : Number(v));
+
+/** Candidates over this many minutes are flagged for a closer look. */
+const HIGH_OT_MINUTES = 120;
+
+/**
+ * One NEW system Pending OT the run would create, described from the very day
+ * the engine calculated for it - READ-ONLY: every figure is the engine's own
+ * stored field, nothing is recalculated here.
+ */
+function describeCandidate({ employee_id, created, day, identity, chainProblemText, approver, shiftName = null }) {
+  const d = day || {};
+  const snap = d.shift_snapshot || {};
+  const punches = Array.isArray(d.effective_punches) ? d.effective_punches : [];
+  const punchCount = num(d.punch_count) === null ? punches.length : num(d.punch_count);
+  const breakAllowed = num(d.break_allowance_minutes);
+  const breakCharged = num(d.break_charged_minutes);
+  const preShiftOt = num(d.pre_shift_ot_minutes) || 0;
+  const postShiftOt = num(d.post_shift_ot_minutes) || 0;
+  const preShiftTime = num(d.pre_shift_minutes) || 0;
+  const minutes = Number(created.ot_minutes) || 0;
+  // A break taken SHORTER than allowed adds its unused minutes to the surplus
+  // - only on a 4+ punch day: a two-punch day's OT basis takes the uncharged
+  // break back out (no OUT/IN evidence that it was skipped).
+  const unusedBreak =
+    punchCount >= 4 && breakAllowed !== null && breakCharged !== null ? Math.max(0, breakAllowed - breakCharged) : 0;
+  const breakContribution = Math.min(unusedBreak, num(d.raw_ot_minutes) || minutes);
+  const flags = [];
+  if (preShiftOt > 0) flags.push("PRE_SHIFT_OT");
+  if (preShiftTime > 0) flags.push("EARLY_ARRIVAL_BEFORE_SHIFT");
+  if (breakContribution > 0) flags.push("BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS");
+  if (preShiftTime > 0 && breakContribution > 0) flags.push("EARLY_ARRIVAL_WITH_BREAK_CONTRIBUTION");
+  if (minutes > HIGH_OT_MINUTES) flags.push("OT_OVER_120_MIN");
+  if (chainProblemText) flags.push("INVALID_APPROVAL_CHAIN");
+  const category =
+    preShiftOt > 0 && postShiftOt > 0
+      ? "PRE_AND_POST_SHIFT_OT"
+      : preShiftOt > 0
+      ? "PRE_SHIFT_OT"
+      : "POST_SHIFT_OT";
+  return {
+    employee_id,
+    employee_name: identity ? identity.employee_name : null,
+    attendance_date: created.attendance_date,
+    outlet_id: identity ? identity.outlet_id : null,
+    outlet_name: identity ? identity.outlet_name : null,
+    shift_code: snap.shift_code || null,
+    shift_name: shiftName || snap.shift_name || null,
+    shift_start: hhmm(snap.in_time),
+    shift_end: hhmm(snap.out_time),
+    first_punch: punches.length > 0 ? hhmm(punches[0].io_time) : null,
+    last_punch: punches.length > 1 ? hhmm(punches[punches.length - 1].io_time) : null,
+    punch_count: punchCount,
+    span_minutes: num(d.span_minutes),
+    worked_minutes: num(d.worked_minutes),
+    nrm_minutes: num(d.nrm_minutes),
+    payroll_nrm_minutes: num(d.base_nrm_minutes),
+    break_allowed_minutes: breakAllowed,
+    break_deducted_minutes: breakCharged,
+    actual_break_gap_minutes: num(d.actual_gap_minutes),
+    pre_shift_time_minutes: preShiftTime,
+    pre_shift_ot_minutes: preShiftOt,
+    post_shift_ot_minutes: postShiftOt,
+    ot_offset_minutes: num(d.ot_offset_minutes) || 0,
+    raw_ot_minutes: num(d.raw_ot_minutes),
+    shift_authorised_ot_minutes: num(d.shift_authorised_ot_minutes) || 0,
+    unused_break_minutes_in_surplus: breakContribution,
+    final_eligible_ot_minutes: minutes,
+    payroll_month_locked: Boolean(created.source_payroll_locked),
+    approver: approver || null,
+    approval_chain_problem: chainProblemText || null,
+    eligibility_category: category,
+    flags,
+  };
+}
+
+/**
+ * The candidate summary, and the reconciliation that must hold before any
+ * --apply: the candidate list IS the records the run would create.
+ */
+function summarizeCandidates(candidates, expected) {
+  const minutes = candidates.map((c) => c.final_eligible_ot_minutes);
+  const total = minutes.reduce((a, b) => a + b, 0);
+  const keys = new Set(candidates.map((c) => `${c.employee_id}|${c.attendance_date}`));
+  const problems = [];
+  if (candidates.length !== expected.count) problems.push(`candidate_count ${candidates.length} != new_pending ${expected.count}`);
+  if (total !== expected.minutes) problems.push(`candidate_minutes ${total} != new_pending_ot_minutes ${expected.minutes}`);
+  if (keys.size !== candidates.length) problems.push(`${candidates.length - keys.size} duplicate employee/date candidate(s)`);
+  const flagCount = (f) => candidates.filter((c) => c.flags.includes(f)).length;
+  return {
+    candidate_count: candidates.length,
+    candidate_minutes: total,
+    min_ot_minutes: minutes.length ? Math.min(...minutes) : null,
+    max_ot_minutes: minutes.length ? Math.max(...minutes) : null,
+    avg_ot_minutes: minutes.length ? Math.round((total / minutes.length) * 10) / 10 : null,
+    count_ge_60: minutes.filter((m) => m >= 60).length,
+    count_ge_120: minutes.filter((m) => m >= 120).length,
+    count_ge_180: minutes.filter((m) => m >= 180).length,
+    flagged: {
+      pre_shift_ot: flagCount("PRE_SHIFT_OT"),
+      early_arrival_before_shift: flagCount("EARLY_ARRIVAL_BEFORE_SHIFT"),
+      break_shorter_than_allowed_adds_to_surplus: flagCount("BREAK_SHORTER_THAN_ALLOWED_ADDS_TO_SURPLUS"),
+      early_arrival_with_break_contribution: flagCount("EARLY_ARRIVAL_WITH_BREAK_CONTRIBUTION"),
+      ot_over_120_min: flagCount("OT_OVER_120_MIN"),
+      invalid_approval_chain: flagCount("INVALID_APPROVAL_CHAIN"),
+    },
+    top_20_by_ot_minutes: [...candidates]
+      .sort((a, b) => b.final_eligible_ot_minutes - a.final_eligible_ot_minutes || a.employee_id - b.employee_id || (a.attendance_date < b.attendance_date ? -1 : 1))
+      .slice(0, 20)
+      .map((c) => ({ employee_id: c.employee_id, employee_name: c.employee_name, attendance_date: c.attendance_date, final_eligible_ot_minutes: c.final_eligible_ot_minutes, flags: c.flags })),
+    reconciliation: {
+      ok: problems.length === 0,
+      expected_new_pending: expected.count,
+      expected_new_pending_minutes: expected.minutes,
+      problems,
+    },
+  };
+}
+
 /**
  * Plan every employee's window, then sync it (dry run unless `apply`). One
  * failure never stops the rest.
@@ -216,6 +360,14 @@ async function run({
   // Read-only: the chain an employee's OT would follow, so an invalid chain
   // is named even for an employee with no OT raised in this run.
   previewChain = null,
+  // Read-only: an employee's name and outlet, for the candidate list.
+  describeEmployee = async () => null,
+  // Read-only: a Work Shift's name (the day's snapshot carries only its code).
+  describeShift = async () => null,
+  // --apply only: the candidate count and minutes the reviewer approved from
+  // the preview. --apply refuses to write anything unless they match.
+  expect_candidates = null,
+  expect_minutes = null,
   listAttendedDates,
   setting = null,
   notifySummary = null,
@@ -233,6 +385,29 @@ async function run({
     throw new Error(
       "Automatic pending OT is not enabled (migration 20261125120000 not run, or its setting row is disabled) - run the migration first, or preview without --apply"
     );
+  }
+  /*
+   * --apply IS PRECEDED BY ITS OWN PREVIEW. The same run, read-only, first:
+   * the candidate list must reconcile exactly with the records it would
+   * create, and - when given - with the count and minutes the reviewer
+   * approved. Anything else and nothing is written.
+   */
+  if (apply) {
+    const dry = await run({
+      calculateRange, syncAutoOt, listEmployees, listApprovalAuthority, previewChain, describeEmployee, describeShift, listAttendedDates,
+      setting, today, days, lookback, employee_ids, apply: false, telegram: false, summary_only: true, log,
+    });
+    const rec = dry.new_pending_candidates.summary;
+    const mismatch = [...rec.reconciliation.problems];
+    if (expect_candidates !== null && rec.candidate_count !== Number(expect_candidates)) {
+      mismatch.push(`preview now finds ${rec.candidate_count} candidates, ${expect_candidates} were approved`);
+    }
+    if (expect_minutes !== null && rec.candidate_minutes !== Number(expect_minutes)) {
+      mismatch.push(`preview now finds ${rec.candidate_minutes} minutes, ${expect_minutes} were approved`);
+    }
+    if (mismatch.length > 0) {
+      throw new Error(`Refusing --apply: the candidate preview does not reconcile - ${mismatch.join("; ")}`);
+    }
   }
   const yesterday = addDays(today, -1);
   const lookbackStart = addDays(today, -lookback);
@@ -308,6 +483,25 @@ async function run({
   const deferredByCategory = {};
   const incompleteAttendance = [];
   const chainChecked = new Set();
+  // Every NEW Pending OT the run would create, described for review.
+  const candidates = [];
+  const nameOf = new Map();
+  const identityOf = async (id) => {
+    if (!nameOf.has(id)) nameOf.set(id, await describeEmployee(id));
+    return nameOf.get(id);
+  };
+  const shiftNames = new Map();
+  const shiftNameOf = async (id) => {
+    if (!id) return null;
+    if (!shiftNames.has(id)) {
+      try {
+        shiftNames.set(id, await describeShift(id));
+      } catch (err) {
+        shiftNames.set(id, null);
+      }
+    }
+    return shiftNames.get(id);
+  };
   const deferredByKind = {};
   const chainProblems = [];
   const blockedByOpenRequest = [];
@@ -457,6 +651,37 @@ async function run({
       for (const c of created) {
         const problem = c.chain_error || (authority ? chainProblem(c.chain, authority) : null);
         if (problem) chainProblems.push({ employee_id: plan.employee_id, attendance_date: c.attendance_date, problem });
+        // THE CANDIDATE, from the very day the engine calculated for it.
+        const stage1 = (c.chain || []).find((st) => Number(st.stage_no) === 1) || null;
+        let approver = null;
+        if (stage1 && stage1.approver_employee_id) {
+          const who = await identityOf(Number(stage1.approver_employee_id));
+          approver = { employee_id: Number(stage1.approver_employee_id), employee_name: who ? who.employee_name : null };
+        } else if (stage1) {
+          const holders = (authority || []).filter(
+            (a) => a.approver_role === stage1.approver_role && (stage1.approver_role !== "STORE_MANAGER" || Number(a.outlet_id) === Number(stage1.outlet_id))
+          );
+          approver = {
+            role: stage1.approver_role,
+            outlet_id: stage1.outlet_id === undefined ? null : stage1.outlet_id,
+            holders: await Promise.all(holders.map(async (h) => {
+              const who = await identityOf(Number(h.employee_id));
+              return { employee_id: Number(h.employee_id), employee_name: who ? who.employee_name : null };
+            })),
+          };
+        }
+        const candidateDay = (plan.days || []).find((dd) => dd && dd.attendance_date === c.attendance_date);
+        candidates.push(
+          describeCandidate({
+            employee_id: plan.employee_id,
+            created: c,
+            day: candidateDay,
+            shiftName: await shiftNameOf(candidateDay && candidateDay.shift_snapshot ? Number(candidateDay.shift_snapshot.work_shift_id) : null),
+            identity: await identityOf(plan.employee_id),
+            chainProblemText: problem,
+            approver,
+          })
+        );
         if (c.first_approver_employee_id) {
           const key = Number(c.first_approver_employee_id);
           const entry = summaryByApprover.get(key) || { count: 0, from: null, to: null };
@@ -556,6 +781,10 @@ async function run({
   }
 
   const allDates = new Set(withAttendance.flatMap((p) => p.dates_evaluated));
+  const candidateSummary = summarizeCandidates(candidates, { count: counts.new_pending, minutes: counts.new_pending_minutes });
+  if (!candidateSummary.reconciliation.ok) {
+    failures.push({ employee_id: null, stage: "CANDIDATE_RECONCILIATION", message: candidateSummary.reconciliation.problems.join("; ") });
+  }
   return {
     applied: apply,
     today,
@@ -603,6 +832,14 @@ async function run({
       ordinary_absent_excluded_from_reevaluation: incompleteByCategory.ORDINARY_ABSENT_NO_OT_REEVALUATION || 0,
     },
     employees_without_valid_approval_chain: chainProblems,
+    // READ-ONLY: every NEW system Pending OT this run would create (always
+    // listed, --summary-only included), with the day's own figures and the
+    // flags a reviewer must look at. Reconciles exactly with
+    // totals.new_pending_* - else a failure, and --apply refuses.
+    new_pending_candidates: {
+      summary: candidateSummary,
+      candidates: candidates.sort((a, b) => a.employee_id - b.employee_id || (a.attendance_date < b.attendance_date ? -1 : 1)),
+    },
     // A date an ATTENDANCE CORRECTION (regularization, HR correction, shift
     // change, permission) holds open: no OT is raised from the uncorrected
     // day. Each is REMEMBERED (--apply only) so the correction's final
@@ -665,6 +902,13 @@ async function main() {
       listEmployees: ({ from_date, to_date }) => calcRepo.listEmployeesForRecalculation({ from_date, to_date }),
       listApprovalAuthority: () => regRepo.listApprovalAuthority(),
       previewChain: regularization.previewOtApprovalChain,
+      describeEmployee: regularization.previewApprovalIdentity,
+      describeShift: async (id) => {
+        const shift = await calcRepo.getWorkShiftWithSchedule(id);
+        return shift && shift.config ? shift.config.shift_name || null : null;
+      },
+      expect_candidates: args.expect_candidates,
+      expect_minutes: args.expect_minutes,
       listAttendedDates: (args) => regRepo.listAttendedDates(args),
       setting: await regRepo.getAutoOtSetting(),
       notifySummary: otTelegram ? otTelegram.notifyBacklogSummary : null,
@@ -694,4 +938,4 @@ if (require.main === module) {
   );
 }
 
-module.exports = { parseArgs, windowFor, chainProblem, punched, run, DEFAULT_DAYS, DEFAULT_LOOKBACK };
+module.exports = { parseArgs, windowFor, chainProblem, punched, run, describeCandidate, summarizeCandidates, DEFAULT_DAYS, DEFAULT_LOOKBACK };
