@@ -395,6 +395,57 @@ class EmployeeMasterRoutes {
       }
     );
 
+    /* ----------------------------------- payroll eligible (salary N/A) */
+    /**
+     * Read is an ordinary employee-master read. WRITE IS ADMINISTRATORS ONLY,
+     * enforced here with `requireAdmin` (user_type = 2), the same door as
+     * Attendance Required: no grantable permission key can open it, and the
+     * column is absent from `EDITABLE_FIELDS` and from the legacy update
+     * schema, so there is no other way in.
+     */
+    router.get(
+      "/employee/:employee_id/payroll-eligible",
+      this.permissions.require(P.VIEW_EMPLOYEES),
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          res.json(await this.usecase.getPayrollEligible(req.params.employee_id));
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    router.post(
+      "/employee/:employee_id/payroll-eligible",
+      requireAdmin,
+      this.branchScope.requireEmployeeInScope(),
+      async (req, res) => {
+        try {
+          const isValid = Joi.validate(
+            req.body,
+            Joi.object().keys({ payroll_eligible: Joi.boolean().required() }).unknown(false)
+          );
+          if (isValid.error !== null) throw isValid.error;
+
+          res.json(
+            await this.usecase.setPayrollEligible(
+              req.params.employee_id,
+              req.body.payroll_eligible === true || req.body.payroll_eligible === "true",
+              {
+                actorEmployeeId: this._actor(req),
+                actorUserId: req.auth && Number.isInteger(Number(req.auth.userId)) && Number(req.auth.userId) > 0 ? Number(req.auth.userId) : null,
+              }
+            )
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
     /* ------------------------------------------------- location scope */
     /**
      * ALL LOCATIONS / ROAMING. Read is an ordinary employee-master read:

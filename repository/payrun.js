@@ -134,6 +134,19 @@ class PayrunRepository {
    * bank pair is read only to report the payment-readiness WARNING, and the
    * account number never leaves this layer - the usecase turns it into a
    * boolean (see `usecase/payrun.js`).
+   *
+   * PAYROLL ELIGIBLE IS THE ONE ELIGIBILITY FACT DECIDED HERE, because it
+   * decides MEMBERSHIP rather than readiness. An employee whose
+   * `new_employee.payroll_eligible` is 0 (Salary Not Applicable) is not in
+   * the payroll population at all: not listed, not counted Ready, Blocked or
+   * Attendance Needs Action, not selectable and not initializable. Every
+   * payroll stage downstream reads `payrun_employee` rows that only
+   * initialization writes, so excluding them here excludes them everywhere.
+   *
+   * A MONTH ALREADY INITIALIZED STAYS. The flag is not effective-dated, so an
+   * employee who already has a `payrun_employee` row for THIS month is kept:
+   * marking somebody Salary Not Applicable today must not make an existing
+   * payrun - started, approved or published - vanish from its own month.
    */
   async listPopulation({ year, month, store_ids = null, designation_id = null }) {
     const pad = (n) => String(n).padStart(2, "0");
@@ -143,8 +156,12 @@ class PayrunRepository {
     const where = [
       "(ne.resignation_date IS NULL OR ne.resignation_date >= ?)",
       `((${JOINED_ON("ne")}) IS NULL OR (${JOINED_ON("ne")}) <= ?)`,
+      `(ne.payroll_eligible = 1
+        OR EXISTS (SELECT 1 FROM payrun_employee pe_existing
+                    WHERE pe_existing.employee_id = ne.employee_id
+                      AND pe_existing.period_year = ? AND pe_existing.period_month = ?))`,
     ];
-    const params = [from, to];
+    const params = [from, to, Number(year), Number(month)];
 
     const location = locationPredicate("ne.store_id", store_ids);
     if (location.clause) {
@@ -173,6 +190,7 @@ class PayrunRepository {
               ne.esi_number,
               ne.account_no,
               ne.ifsc,
+              ne.payroll_eligible,
               DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
               DATE_FORMAT((${JOINED_ON("ne")}), '%Y-%m-%d') AS date_of_joining
          FROM new_employee ne
@@ -456,6 +474,33 @@ class PayrunRepository {
         "pay_type", "pay_type_source", "status", "initialized_by",
       ];
       const values = rows.map((row) => columns.map((c) => (row[c] === undefined ? null : row[c])));
+
+      /*
+       * DEFENCE IN DEPTH: NOBODY SALARY-NOT-APPLICABLE IS SNAPSHOTTED. The
+       * population already leaves them out, so this should never fire; it is
+       * here so that no future caller, and no flag flipped between the read
+       * and this write, can start a payroll month for an employee who is not
+       * payroll eligible. Read under lock in the same transaction as the
+       * insert, and the whole batch is refused rather than half-written.
+       */
+      const ineligible = await this._read(
+        "CHECK-PAYROLL-ELIGIBLE",
+        `SELECT employee_id FROM new_employee
+          WHERE employee_id IN (?) AND payroll_eligible = 0
+          FOR UPDATE`,
+        [rows.map((r) => r.employee_id)],
+        conn
+      );
+      if (Array.isArray(ineligible) && ineligible.length > 0) {
+        const err = new Error(
+          `Not payroll eligible (Salary Not Applicable): employee ${ineligible
+            .map((r) => r.employee_id)
+            .join(", ")}. Nothing was initialized.`
+        );
+        err.name = "ValidationError";
+        err.httpCode = 422;
+        throw err;
+      }
 
       await this._read(
         "INSERT-SNAPSHOTS",

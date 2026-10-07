@@ -43,6 +43,7 @@ describe(NAME, () => {
       "20261121120000-company-details-permission.js",
       "20261122120000-payroll-export-payslips-permission.js",
       "20261123120000-payroll-reports.js",
+      "20261124120000-employee-payroll-eligible.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });
