@@ -319,3 +319,43 @@ describe("8-9. nothing downstream of initialization can include them", () => {
     assert.match(population, /pe_existing\.period_year = \? AND pe_existing\.period_month = \?/);
   });
 });
+
+describe("verification gates", () => {
+  it("A. the same employee with Yes behaves exactly like today - BLOCKED with no approved salary, and initializes once one is approved", async () => {
+    const yes = (salaries) =>
+      scenario({ population: [employee(), employee({ employee_id: NOT_PAID, employee_name: "Vinodh Kumar", payroll_eligible: 1 })], salaries });
+    const blocked = await buildUsecase(yes([salary(PAID)])).getMonth({ year: YEAR, month: MONTH });
+    assert.equal(blocked.rows.find((r) => r.employee_id === NOT_PAID).status, STATUS_GROUP.BLOCKED);
+    const ready = await buildUsecase(yes([salary(PAID), salary(NOT_PAID)])).getMonth({ year: YEAR, month: MONTH });
+    assert.ok(ready.rows.some((r) => r.employee_id === NOT_PAID), "listed once salary is approved");
+  });
+
+  it("C. a normal Yes employee's row is identical whether a colleague is Yes or No", async () => {
+    const withNo = await buildUsecase(scenario()).getMonth({ year: YEAR, month: MONTH });
+    const withYes = await buildUsecase(
+      scenario({ population: [employee(), employee({ employee_id: NOT_PAID, payroll_eligible: 1, account_no: null, ifsc: null })] })
+    ).getMonth({ year: YEAR, month: MONTH });
+    assert.deepEqual(
+      withNo.rows.find((r) => r.employee_id === PAID),
+      withYes.rows.find((r) => r.employee_id === PAID)
+    );
+  });
+
+  it("D. nobody becomes No automatically: the migration updates no row and no code names an employee id", () => {
+    const root = path.join(__dirname, "..");
+    const up = fs.readFileSync(path.join(root, "migrations/mysql/migrations/sqls/20261124120000-employee-payroll-eligible-up.sql"), "utf8");
+    assert.ok(!/^\s*UPDATE\b/im.test(up) && !/'UPDATE /i.test(up), "the migration sets no value - every row takes DEFAULT 1");
+    assert.ok(!/employee_id\s*(=|IN)\s*\(?\s*\d/i.test(up), "the migration names no employee");
+    for (const rel of ["repository/payrun.js", "usecase/payrun.js", "utils/payrun_eligibility.js", "usecase/employee_master.js", "repository/employee_master.js"]) {
+      const src = fs.readFileSync(path.join(root, rel), "utf8");
+      assert.ok(!/employee_?[iI]d\s*={2,3}\s*\d/.test(src), `${rel} has no employee-id special case`);
+    }
+    const utils = fs.readFileSync(path.join(root, "utils/payrun_eligibility.js"), "utf8");
+    const start = utils.indexOf("function isPayrollEligible(");
+    const rule = utils.slice(start, utils.indexOf("\n}\n", start));
+    assert.match(rule, /payroll_eligible/);
+    for (const inferred of ["designation", "payment_type", "pf_applicable", "esi_applicable", "attendance_required", "salary"]) {
+      assert.ok(!new RegExp(`employee\\.${inferred}`).test(rule), `the rule does not infer from ${inferred}`);
+    }
+  });
+});

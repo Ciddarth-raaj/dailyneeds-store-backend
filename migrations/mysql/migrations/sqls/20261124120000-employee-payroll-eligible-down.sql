@@ -1,5 +1,8 @@
--- Drops exactly the column the up-migration added. Every employee marked
--- "not payroll eligible" returns to the payroll population.
+-- Drops exactly what the up-migration added: the audit table (and its
+-- history) and the column. Every employee marked "not payroll eligible"
+-- returns to the payroll population.
+
+DROP TABLE IF EXISTS `employee_payroll_eligible_audit`;
 
 SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
                 WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'new_employee'

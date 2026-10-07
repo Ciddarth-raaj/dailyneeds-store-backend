@@ -504,10 +504,21 @@ class EmployeeMasterUsecase {
     if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
     const row = await this.repo.getPayrollEligible(id);
     if (!row) throw new NotFoundError(`employee ${id} does not exist`);
-    return { code: 200, ...row };
+    const [history, initializedMonths] = await Promise.all([
+      this.repo.listPayrollEligibleAudit(id),
+      this.repo.listInitializedPayrollMonths(id),
+    ]);
+    return { code: 200, ...row, history, initialized_months: initializedMonths };
   }
 
-  async setPayrollEligible(employeeId, eligible, { actorEmployeeId = null } = {}) {
+  /**
+   * THE AUDIT. Every real change writes one append-only
+   * `employee_payroll_eligible_audit` row - employee, old value, new value,
+   * acting employee and user, time - in the SAME transaction as the update,
+   * so a change cannot exist without its record. Setting it to the value it
+   * already holds is a no-op and writes nothing.
+   */
+  async setPayrollEligible(employeeId, eligible, { actorEmployeeId = null, actorUserId = null } = {}) {
     const id = Number(employeeId);
     if (!Number.isInteger(id) || id <= 0) throw new ValidationError("employee_id must be a positive integer");
     if (typeof eligible !== "boolean") {
@@ -518,19 +529,30 @@ class EmployeeMasterUsecase {
       const before = await this.repo.lockEmployee(tx, id);
       if (!before) throw new NotFoundError(`employee ${id} does not exist`);
 
+      const previous = await this.repo.readPayrollEligibleForUpdate(tx, id);
       const result = await this.repo.setPayrollEligible(tx, id, eligible);
+      if (previous !== null && previous !== eligible) {
+        await this.repo.insertPayrollEligibleAudit(tx, {
+          employeeId: id,
+          oldValue: previous,
+          newValue: eligible,
+          changedBy: actorEmployeeId,
+          changedByUserId: actorUserId,
+        });
+      }
 
       this._log(
         logger.LEVEL.INFO,
         "PAYROLL-ELIGIBLE",
-        `employee ${id}: payroll_eligible set to ${eligible ? 1 : 0}`,
-        { employeeId: id, actorEmployeeId, payroll_eligible: eligible }
+        `employee ${id}: payroll_eligible ${previous === null ? "?" : previous ? 1 : 0} -> ${eligible ? 1 : 0}`,
+        { employeeId: id, actorEmployeeId, actorUserId, payroll_eligible: eligible }
       );
 
       return {
         code: 200,
         employee_id: id,
         payroll_eligible: eligible,
+        previous_value: previous,
         changed: result.changed > 0,
       };
     });

@@ -433,7 +433,10 @@ class EmployeeMasterRoutes {
             await this.usecase.setPayrollEligible(
               req.params.employee_id,
               req.body.payroll_eligible === true || req.body.payroll_eligible === "true",
-              { actorEmployeeId: this._actor(req) }
+              {
+                actorEmployeeId: this._actor(req),
+                actorUserId: req.auth && Number.isInteger(Number(req.auth.userId)) && Number(req.auth.userId) > 0 ? Number(req.auth.userId) : null,
+              }
             )
           );
         } catch (err) {

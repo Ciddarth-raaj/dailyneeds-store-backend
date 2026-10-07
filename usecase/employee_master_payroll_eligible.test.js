@@ -24,6 +24,16 @@ function fakeRepo(store = {}) {
         ? { employee_id: id, employee_name: "X", payroll_eligible: Number(e.payroll_eligible) === 1 }
         : null;
     },
+    readPayrollEligibleForUpdate: async (tx, id) => {
+      const e = store.employees.get(id);
+      return e ? Number(e.payroll_eligible) === 1 : null;
+    },
+    insertPayrollEligibleAudit: async (tx, row) => {
+      store.audit = store.audit || [];
+      store.audit.push(row);
+    },
+    listPayrollEligibleAudit: async () => (store.audit || []).slice().reverse(),
+    listInitializedPayrollMonths: async () => store.initializedMonths || [],
     setPayrollEligible: async (tx, id, required) => {
       const e = store.employees.get(id);
       const before = Number(e.payroll_eligible);
@@ -118,5 +128,43 @@ describe("the write is administrators only, on its own route", () => {
   it("the read is an ordinary view_employees read", () => {
     const get = routes.slice(routes.indexOf('router.get(\n      "/employee/:employee_id/payroll-eligible"'));
     assert.match(get.slice(0, 300), /this\.permissions\.require\(P\.VIEW_EMPLOYEES\)/);
+  });
+});
+
+describe("the audit trail", () => {
+  it("each real change writes ONE audit row: employee, old value, new value, acting employee and user", async () => {
+    const store = {};
+    const uc = usecase(store);
+    await uc.setPayrollEligible(901, false, { actorEmployeeId: 7, actorUserId: 70 });
+    assert.deepEqual(store.audit, [
+      { employeeId: 901, oldValue: true, newValue: false, changedBy: 7, changedByUserId: 70 },
+    ]);
+    await uc.setPayrollEligible(901, true, { actorEmployeeId: 7, actorUserId: 70 });
+    assert.equal(store.audit.length, 2);
+    assert.deepEqual(store.audit[1], { employeeId: 901, oldValue: false, newValue: true, changedBy: 7, changedByUserId: 70 });
+  });
+
+  it("setting the value it already holds writes NO audit row", async () => {
+    const store = {};
+    await usecase(store).setPayrollEligible(901, true, { actorEmployeeId: 7 });
+    assert.equal((store.audit || []).length, 0);
+  });
+
+  it("the read returns the history and the months already initialized (for the Yes -> No warning)", async () => {
+    const store = { initializedMonths: [{ year: 2026, month: 9 }] };
+    const uc = usecase(store);
+    await uc.setPayrollEligible(901, false, { actorEmployeeId: 7 });
+    const read = await uc.getPayrollEligible(901);
+    assert.equal(read.payroll_eligible, false);
+    assert.equal(read.history.length, 1);
+    assert.deepEqual(read.initialized_months, [{ year: 2026, month: 9 }]);
+  });
+
+  it("the change and its audit row are written in the same transaction", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const src = fs.readFileSync(path.join(__dirname, "employee_master.js"), "utf8");
+    const body = src.slice(src.indexOf("async setPayrollEligible"), src.indexOf("/* ---------------------------------------------------- location scope -- */"));
+    assert.match(body, /withTransaction\(async \(tx\) =>[\s\S]*readPayrollEligibleForUpdate\(tx[\s\S]*setPayrollEligible\(tx[\s\S]*insertPayrollEligibleAudit\(tx/);
   });
 });
