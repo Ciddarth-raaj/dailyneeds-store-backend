@@ -347,7 +347,7 @@ class LrFollowupRepository {
       `SELECT
          SUM(f.status IN (${open}))                                         AS total_open,
          SUM(f.status IN (${open}) AND f.source_type = 'ADVANCE_REQUEST')  AS advance_open,
-         SUM(f.status IN (${open}) AND f.source_type = 'CREDIT_PURCHASE')  AS credit_open,
+         SUM(f.status IN (${open}) AND f.source_type = 'CREDIT_PURCHASE')  AS manual_open,
          SUM(f.status = 'DISPATCH_PENDING')                                 AS dispatch_pending,
          SUM(f.status = 'IN_TRANSIT')                                       AS in_transit,
          SUM(f.status IN (${open}) AND ${OVERDUE_SQL})                      AS overdue,
@@ -378,7 +378,7 @@ class LrFollowupRepository {
       return {
         total_open: n(r.total_open),
         advance_open: n(r.advance_open),
-        credit_open: n(r.credit_open),
+        manual_open: n(r.manual_open),
         dispatch_pending: n(r.dispatch_pending),
         in_transit: n(r.in_transit),
         overdue: n(r.overdue),
@@ -415,9 +415,10 @@ class LrFollowupRepository {
     ).then((rows) => rows[0] || null);
   }
 
-  getCreditPurchase(id, conn = null, { forUpdate = false } = {}) {
+  /** A manual LR Follow-up entry (stored in `credit_purchases`). */
+  getManualEntry(id, conn = null, { forUpdate = false } = {}) {
     return this.run(
-      "SOURCE.CREDIT",
+      "SOURCE.MANUAL",
       `SELECT cp.*, creator.employee_name AS created_by_name,
               t.transporter_name, t.contact_no AS transporter_contact_no
          FROM credit_purchases cp
@@ -444,10 +445,10 @@ class LrFollowupRepository {
     ).then((rows) => rows.map((r) => Number(r.advance_request_id)));
   }
 
-  creditPurchasesWithoutFollowup(storeIds = null, conn = null) {
+  manualEntriesWithoutFollowup(storeIds = null, conn = null) {
     const scope = this.scopeClause(storeIds, "cp.outlet_id");
     return this.run(
-      "SOURCE.CREDIT.MISSING",
+      "SOURCE.MANUAL.MISSING",
       `SELECT cp.credit_purchase_id
          FROM credit_purchases cp
          LEFT JOIN lr_followup f ON f.credit_purchase_id = cp.credit_purchase_id

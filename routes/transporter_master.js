@@ -13,8 +13,7 @@ const { PERMISSION: LRF } = require("../utils/lr_followup");
  * is made inactive, which keeps it on every old record.
  *
  * The dropdown list (`/options`, active only) is also open to the people who
- * pick a transporter - whoever raises a credit purchase or updates a
- * follow-up - so they do not need the whole master to fill in a form.
+ * pick a transporter - whoever creates an LR Follow-up or updates one - so they do not need the whole master to fill in a form.
  */
 
 // Shape only; the field rules (contact number, name length) are in
@@ -48,7 +47,7 @@ class TransporterMasterRoutes {
 
     router.get(
       "/options",
-      needs(PERMISSION.VIEW, LRF.CREATE_CREDIT_PURCHASE, LRF.UPDATE),
+      needs(PERMISSION.VIEW, LRF.CREATE_MANUAL, LRF.UPDATE),
       async (req, res) => {
         try {
           res.json({ code: 200, data: await this.usecase.options() });

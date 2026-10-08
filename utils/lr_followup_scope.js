@@ -1,6 +1,6 @@
 /**
- * LR FOLLOW-UP ACCESS SCOPE - which branches' follow-ups and credit
- * purchases a caller may see and act on.
+ * LR FOLLOW-UP ACCESS SCOPE - which branches' follow-ups
+ * (including manual ones) a caller may see and act on.
  *
  * WHY NOT THE GLOBAL DASHBOARD SCOPE. LR follow-up is a company-wide desk:
  * one person chases every pending purchase for every branch. The generic

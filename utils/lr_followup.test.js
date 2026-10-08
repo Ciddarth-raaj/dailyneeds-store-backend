@@ -57,7 +57,12 @@ describe("references", () => {
   it("names the follow-up and its source the way the screens show them", () => {
     assert.equal(R.followupRef(12), "LRF-12");
     assert.equal(R.sourceRef({ source_type: "ADVANCE_REQUEST", advance_request_id: 1025 }), "AR-1025");
-    assert.equal(R.sourceRef({ source_type: "CREDIT_PURCHASE", credit_purchase_id: 4587 }), "CP-4587");
+    // A manual follow-up has no source document; its LRF number is its reference.
+    assert.equal(R.sourceRef({ source_type: "CREDIT_PURCHASE", credit_purchase_id: 4587 }), null);
+    assert.equal(R.toApiSourceType("CREDIT_PURCHASE"), "MANUAL");
+    assert.equal(R.toApiSourceType("ADVANCE_REQUEST"), "ADVANCE_REQUEST");
+    assert.equal(R.fromApiSourceType("MANUAL"), "CREDIT_PURCHASE");
+    assert.equal(R.fromApiSourceType("CREDIT_PURCHASE"), undefined);
   });
 });
 

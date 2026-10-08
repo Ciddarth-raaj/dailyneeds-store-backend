@@ -2,9 +2,9 @@
  * Transporter Master - the name and contact rules, free of SQL so they can
  * be tested on their own.
  *
- * One list of transporters serves both the Advance and the Credit Purchase
- * follow-ups; a follow-up and a credit purchase point at a transporter by
- * its primary key and never carry its name as text.
+ * One list of transporters serves every LR Follow-up, from an Advance
+ * Request or created by hand; a follow-up points at a transporter by its
+ * primary key and never carries its name as text.
  */
 const { normalizeIndianMobile } = require("./mobile_number");
 

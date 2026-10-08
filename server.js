@@ -439,12 +439,13 @@ class Server {
     this.advanceRequestRepo = require("./repository/advance_request")(
       this.mysql.connection
     );
-    // LR Follow-up: the follow-ups and their history, the minimal Credit
-    // Purchase entry, and the one Transporter Master both sources share.
+    // LR Follow-up: the follow-ups and their history, the manual
+    // "Create LR Follow-up" entry, and the one Transporter Master both
+    // sources share.
     this.lrFollowupRepo = require("./repository/lr_followup")(
       this.mysql.connection
     );
-    this.creditPurchaseRepo = require("./repository/credit_purchase")(
+    this.lrFollowupManualRepo = require("./repository/lr_followup_manual")(
       this.mysql.connection
     );
     this.transporterMasterRepo = require("./repository/transporter_master")(
@@ -1373,8 +1374,8 @@ class Server {
       this.lrFollowupRepo,
       this.transporterMasterUsecase
     );
-    this.creditPurchaseUsecase = require("./usecase/credit_purchase")(
-      this.creditPurchaseRepo,
+    this.lrFollowupManualUsecase = require("./usecase/lr_followup_manual")(
+      this.lrFollowupManualRepo,
       this.lrFollowupUsecase,
       this.transporterMasterUsecase
     );
@@ -1935,8 +1936,8 @@ class Server {
       this.permissions,
       lrScope
     );
-    const creditPurchaseRouter = require("./routes/credit_purchase")(
-      this.creditPurchaseUsecase,
+    const lrFollowupManualRouter = require("./routes/lr_followup_manual")(
+      this.lrFollowupManualUsecase,
       this.permissions,
       lrScope
     );
@@ -2165,8 +2166,8 @@ class Server {
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
     app.use("/advance-request", advanceRequestRouter.getRouter());
+    app.use("/lr-followup/manual", lrFollowupManualRouter.getRouter());
     app.use("/lr-followup", lrFollowupRouter.getRouter());
-    app.use("/credit-purchase", creditPurchaseRouter.getRouter());
     app.use("/transporter-master", transporterMasterRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
     app.use("/job-worksheet", jobWorksheetRouter.getRouter());
