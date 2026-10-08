@@ -1245,3 +1245,54 @@ describe("Prior-Month OT: priced and treated exactly like OT", () => {
     };
   }
 });
+
+describe("approved OT of a month reopened after it was locked", () => {
+  const item = (over = {}) => ({
+    late_settlement_id: 9,
+    attendance_approval_request_id: 601,
+    attendance_date: "2026-09-30",
+    source_year: 2026,
+    source_month: 9,
+    approved_ot_minutes: 28,
+    nrm_minutes: 570,
+    daily_rate: 1153.85,
+    ot_hourly_rate: 121.46,
+    amount: 56.68,
+    ...over,
+  });
+
+  it("is priced by the one OT formula: 28 min at NRM 570 on 1,153.85 = 121.46/h, 56.68", () => {
+    const p = calc.priceLateOt({ approved_ot_minutes: 28, daily_rate: 1153.85, nrm_minutes: 570 });
+    assert.equal(p.ot_hourly_rate, 121.46);
+    assert.equal(p.amount, 56.68);
+  });
+
+  it("splits this month's own late-approved OT from genuine prior-month OT", () => {
+    const split = calc.splitLateOt([item(), item({ attendance_approval_request_id: 700, source_month: 8, amount: 10 })], 2026, 9);
+    assert.deepEqual(split.own_month.map((i) => i.attendance_approval_request_id), [601]);
+    assert.equal(split.own_month_minutes, 28);
+    assert.equal(split.own_month_amount, 56.68);
+    assert.deepEqual(split.earlier.map((i) => i.attendance_approval_request_id), [700]);
+    assert.equal(split.earlier_amount, 10);
+  });
+
+  it("zero OT: nothing to split", () => {
+    const split = calc.splitLateOt([], 2026, 9);
+    assert.equal(split.own_month_minutes, 0);
+    assert.equal(split.own_month_amount, 0);
+  });
+
+  it("a calculation that did not pay it is stale for APPROVED OT, and one that did is not", () => {
+    assert.equal(calc.lateOtChanged({ prior_month_ot: null }, [item()]), true);
+    assert.equal(calc.lateOtChanged({ prior_month_ot: JSON.stringify([item()]) }, [item()]), false);
+    // withdrawn after the calculation paid it
+    assert.equal(calc.lateOtChanged({ prior_month_ot: JSON.stringify([item()]) }, []), true);
+    assert.equal(calc.lateOtChanged({ prior_month_ot: null }, []), false);
+  });
+
+  it("the inputs hash still hashes the set exactly as before", () => {
+    const base = { amounts: {}, pay_type: "BANK" };
+    assert.notEqual(calc.inputsHash({ ...base, prior_month_ot: [item()] }), calc.inputsHash(base));
+    assert.equal(calc.inputsHash({ ...base, prior_month_ot: [] }), calc.inputsHash(base));
+  });
+});

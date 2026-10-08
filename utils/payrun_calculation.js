@@ -474,6 +474,66 @@ function attendanceSourceChanges(storedRow = {}, currentMarkers = {}) {
  * after calculation would otherwise be a locked record that disagrees with the
  * month beside it.
  */
+/**
+ * THE IDENTITY OF A SET OF PRIOR-MONTH OT ITEMS - request, minutes, price -
+ * in a fixed order. The one spelling `inputsHash` hashes and
+ * `lateOtChanged` compares, so the two can never disagree about whether the
+ * set moved.
+ */
+function lateOtMarker(items = []) {
+  return (Array.isArray(items) ? items : [])
+    .map((i) => `${i.attendance_approval_request_id}:${i.approved_ot_minutes}:${i.amount}`)
+    .sort()
+    .join(",");
+}
+
+/**
+ * HAS THE APPROVED OT SETTLED IN THIS MONTH MOVED UNDER ITS CALCULATION?
+ *
+ * An OT approved while its month was locked - and the same OT coming back to
+ * that month when it is unlocked - changes the money through the payrun's
+ * INPUTS hash, not through any attendance marker. Without this the screen
+ * named that change "Adjustments changed", which sends somebody to look at
+ * the wrong thing. Compared with the stored row's own items; the same
+ * spelling `inputsHash` uses (see `lateOtMarker`).
+ */
+function lateOtChanged(storedRow = {}, currentItems = []) {
+  let paid = storedRow ? storedRow.prior_month_ot : null;
+  if (typeof paid === "string") {
+    try {
+      paid = JSON.parse(paid);
+    } catch (err) {
+      paid = [];
+    }
+  }
+  return lateOtMarker(paid) !== lateOtMarker(currentItems);
+}
+
+/**
+ * SPLIT THE SETTLED OT ITEMS BY WHERE THEY BELONG: approved after THIS
+ * month was locked and paid in it once it was unlocked again (`own_month`),
+ * and genuinely PRIOR-month OT (`earlier`). Both are already priced; this
+ * only says which is which, so a screen or a payslip does not call
+ * September's own overtime "Prior-Month OT" in September's payroll.
+ */
+function splitLateOt(items = [], year, month) {
+  const own = [];
+  const earlier = [];
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    if (Number(item.source_year) === Number(year) && Number(item.source_month) === Number(month)) own.push(item);
+    else earlier.push(item);
+  });
+  const total = (list) => list.reduce((n, i) => n + (toPaise(i.amount) || 0), 0);
+  const minutes = (list) => list.reduce((n, i) => n + intOr0(i.approved_ot_minutes), 0);
+  return {
+    own_month: own,
+    own_month_minutes: minutes(own),
+    own_month_amount: toRupees(total(own)),
+    earlier,
+    earlier_amount: toRupees(total(earlier)),
+  };
+}
+
 function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [] } = {}) {
   const contract = computeContract(amounts);
   return hashOf([
@@ -488,14 +548,7 @@ function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [] } = {})
     // the next open month's stored calculation stale until it is
     // recalculated. Appended only when there is some, so every existing
     // calculation keeps the hash it was stored with.
-    ...(Array.isArray(prior_month_ot) && prior_month_ot.length > 0
-      ? [
-          prior_month_ot
-            .map((i) => `${i.attendance_approval_request_id}:${i.approved_ot_minutes}:${i.amount}`)
-            .sort()
-            .join(","),
-        ]
-      : []),
+    ...(Array.isArray(prior_month_ot) && prior_month_ot.length > 0 ? [lateOtMarker(prior_month_ot)] : []),
   ]);
 }
 
@@ -1742,6 +1795,9 @@ module.exports = {
   storedMarkers,
   sourceHash,
   inputsHash,
+  lateOtMarker,
+  lateOtChanged,
+  splitLateOt,
   detectChanges,
   computeCalculation,
   roundToRupeePaise,
