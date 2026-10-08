@@ -116,6 +116,24 @@ const MAX_POPULATION = 2000;
 /** Drilldown page size ceiling. Lists are paginated, never unbounded. */
 const MAX_DRILLDOWN_LIMIT = 200;
 
+/**
+ * How far back the drilldown looks for an unbroken run of absences. A run
+ * that reaches the edge is reported as this number with `absent_streak_capped`
+ * set, rather than read further back for every row on the page.
+ */
+const ABSENT_STREAK_LOOKBACK_DAYS = 14;
+
+/**
+ * Days that are not working days for the employee: they neither count toward
+ * an absence run nor break it, so a week off in the middle of a run of
+ * absences does not hide it.
+ */
+const STREAK_NEUTRAL_STATUSES = new Set([
+  CALC_STATUS.NO_SHIFT_FOR_DATE,
+  CALC_STATUS.NO_SCHEDULE_ROW,
+  CALC_STATUS.ATTENDANCE_NOT_REQUIRED,
+]);
+
 function validationError(message) {
   const err = new Error(message);
   err.name = "ValidationError";
@@ -1341,7 +1359,7 @@ module.exports = (attendanceDashboardRepo) => {
       }
     })();
 
-    const { date, rows } = await buildPopulation({
+    const { date, rows, employees } = await buildPopulation({
       attendance_date,
       store_ids,
       designation_id,
@@ -1362,6 +1380,12 @@ module.exports = (attendanceDashboardRepo) => {
 
     const size = Math.max(1, Math.min(MAX_DRILLDOWN_LIMIT, Math.trunc(Number(limit) || 50)));
     const start = Math.max(0, Math.trunc(Number(offset) || 0));
+    const page = await withAbsentStreaks({
+      rows: matched.slice(start, start + size),
+      employees,
+      date,
+      now,
+    });
 
     return {
       attendance_date: date,
@@ -1379,8 +1403,55 @@ module.exports = (attendanceDashboardRepo) => {
         search: search || null,
         attendance_mode,
       },
-      employees: matched.slice(start, start + size),
+      employees: page,
     };
+  };
+
+  /**
+   * THE ABSENCE RUN BEFORE THE DATE, for the rows on one drilldown page.
+   *
+   * `absent_streak` is the number of consecutive working days immediately
+   * before `date` on which the employee was ABSENT (no punches), read by the
+   * same engine path as every other day here. Non-working days are skipped
+   * without breaking the run; any other day ends it. Only rows with no punch
+   * on the date are read - a row that checked in has no run to report - and
+   * only the page, so it is one batch of at most MAX_DRILLDOWN_LIMIT people.
+   */
+  const withAbsentStreaks = async ({ rows, employees, date, now }) => {
+    const wanted = new Set(rows.filter((r) => r.punch_count === 0).map((r) => r.employee_id));
+    if (wanted.size === 0) return rows;
+    const people = (employees || []).filter((e) => wanted.has(Number(e.employee_id)));
+    if (people.length === 0) return rows;
+
+    const from = addDays(date, -ABSENT_STREAK_LOOKBACK_DAYS);
+    const to = addDays(date, -1);
+    const dates = dateRange(from, to);
+    const batch = await loadBatch({ employees: people, from, to });
+
+    const streaks = new Map();
+    people.forEach((employee) => {
+      const days = computeDaysForEmployee({ employee, dates, batch, now });
+      let streak = 0;
+      let broken = false;
+      for (let i = days.length - 1; i >= 0; i -= 1) {
+        const day = days[i];
+        if (STREAK_NEUTRAL_STATUSES.has(day.status)) continue;
+        if (day.status === CALC_STATUS.ABSENT && (Number(day.punch_count) || 0) === 0) {
+          streak += 1;
+          continue;
+        }
+        broken = true;
+        break;
+      }
+      streaks.set(Number(employee.employee_id), { streak, capped: !broken && streak > 0 });
+    });
+
+    return rows.map((r) => {
+      const found = streaks.get(r.employee_id);
+      return found
+        ? { ...r, absent_streak: found.streak, absent_streak_capped: found.capped }
+        : r;
+    });
   };
 
   /**

@@ -1285,3 +1285,40 @@ describe("an empty authorized scope reads nothing", () => {
     assert.deepEqual(filters.outlets.map((o) => o.store_id), [2]);
   });
 });
+
+describe("drilldown - the run of absences before the date", () => {
+  const punch = (id, employeeId, date, hh) => ({
+    punch_id: id,
+    employee_id: employeeId,
+    io_time: `${date} ${hh}:00:00`,
+    punch_date: date,
+    dev_id: 1,
+    ingest_source: "FIXTURE",
+    attendance_punch_void_id: null,
+  });
+  const state = {
+    employees: [employee(1), employee(2), employee(3)],
+    rawPunches: [
+      // 1 last worked two days before: one absent day since.
+      punch(101, 1, "2026-09-10", 10),
+      punch(102, 1, "2026-09-10", 21),
+      // 3 is in today, so has no run to report.
+      punch(301, 3, DATE, 10),
+    ],
+  };
+
+  it("counts consecutive absent working days before the date for those not checked in", async () => {
+    const uc = buildUsecase(fakeRepo(state));
+    const drill = await uc.getDrilldown({
+      attendance_date: DATE,
+      bucket: "TOTAL",
+      now: ist(DATE, 11, 0),
+    });
+    const by = new Map(drill.employees.map((e) => [e.employee_id, e]));
+    assert.equal(by.get(1).absent_streak, 1);
+    assert.equal(by.get(1).absent_streak_capped, false);
+    // 2 has never punched since the roster began on the 1st.
+    assert.equal(by.get(2).absent_streak, 11);
+    assert.equal(by.get(3).absent_streak, undefined);
+  });
+});
