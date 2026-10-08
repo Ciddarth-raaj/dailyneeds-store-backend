@@ -84,7 +84,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     await q(sqlFile("20260903020000-lr-workflow-stage-4-up.sql"));
     await q(sqlFile("20261109110000-transporter-master-up.sql"));
     await q(sqlFile("20261109120000-lr-followup-up.sql"));
-    await q(sqlFile("20261128120000-lr-followup-manual-up.sql"));
+    await q(sqlFile("20261129120000-lr-followup-manual-up.sql"));
 
     clock = makeClock();
     advanceRepo = require("./advance_request")(pool);

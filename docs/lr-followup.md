@@ -11,7 +11,7 @@ Create LR Follow-up (manual) ┘
 ```
 
 There is no separate "Credit Purchase" module any more. The manual entry
-replaced it (migration `20261128120000-lr-followup-manual`): it asks only for
+replaced it (migration `20261129120000-lr-followup-manual`): it asks only for
 the **Supplier** and the **Transporter** (from the Transporter Master), with
 optional **LR No.**, **Dispatch Date**, **Expected Delivery Date** and
 **Remarks**. No bill / invoice reference, amount, bill date or receiving
@@ -69,7 +69,7 @@ Two migrations, both additive (no existing table altered, no existing row writte
   is the reference upper-cased with spaces and `- / . _ \ #` removed
   (formerly `utils/credit_purchase.js`) - "KF/2026/101", "kf-2026-101" and
   "KF 2026 101" are one bill. Plus unique `request_key` for double clicks.
-  **Since `20261128120000-lr-followup-manual`** the bill reference, its key,
+  **Since `20261129120000-lr-followup-manual`** the bill reference, its key,
   amount and bill date are NULL-able and a manual entry leaves them empty
   (outlet = Warehouse); `lr_followup.amount` is NULL-able too. Rows entered
   before keep their bill, and NULL keys never collide, so the old duplicate

@@ -114,7 +114,7 @@ describe("down", () => {
 });
 
 describe("manual LR Follow-up (replaces the Credit Purchase entry)", () => {
-  const MANUAL = "20261128120000-lr-followup-manual";
+  const MANUAL = "20261129120000-lr-followup-manual";
   const up = body(read(`${MANUAL}-up.sql`));
   const down = body(read(`${MANUAL}-down.sql`));
 
