@@ -323,7 +323,17 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
   const priorLines = [...priorByMonth.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([key, e]) => ({
-      ...line(`prior_month_ot_${key}`, `Prior-Month OT — ${MONTH_SHORT[e.month - 1]} ${e.year}: ${e.minutes} min`, e.paise),
+      ...line(
+        `prior_month_ot_${key}`,
+        // THIS month's own OT, approved while it was locked and paid here
+        // after it was unlocked, is not "Prior-Month" OT on this payslip.
+        `${
+          e.year === Number(period.year) && e.month === Number(period.month)
+            ? "OT Approved After Lock"
+            : "Prior-Month OT"
+        } — ${MONTH_SHORT[e.month - 1]} ${e.year}: ${e.minutes} min`,
+        e.paise
+      ),
       prior_month_ot: { source_year: e.year, source_month: e.month, approved_ot_minutes: e.minutes },
     }));
   const priorSum = [...priorByMonth.values()].reduce((n, e) => n + e.paise, 0);

@@ -13,6 +13,7 @@ const {
   RESET_REMARK_MAX,
   isLockedStatus,
   LIFECYCLE_ACTION,
+  RECALC_REASON,
 } = require("../constants/payrun_calculation");
 const { monthWindow, statutorySetupComplete, statutorySetupGaps } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
@@ -724,7 +725,17 @@ class PayrunCalculationUsecase {
        * and marked as the bare split, and comparing one against the other
        * would report every calculated employee as stale on every read.
        */
-      change_reasons: stored ? calc.detectChanges(calc.storedMarkers(stored), currentMarkers) : [],
+      change_reasons: stored
+        ? [
+            ...calc.detectChanges(calc.storedMarkers(stored), currentMarkers),
+            /*
+             * OT APPROVED WHILE A MONTH WAS LOCKED - and coming back to that
+             * month once it is unlocked - moves the money through the inputs
+             * hash. It is approved OT that changed, and the screen says so.
+             */
+            ...(calc.lateOtChanged(stored, priorMonthOt) ? [RECALC_REASON.APPROVED_OT_CHANGED] : []),
+          ].filter((code, i, all) => all.indexOf(code) === i)
+        : [],
       attendance,
       pending_regularizations: Number(counts.pending_regularizations || 0),
       pending_ot: Number(counts.pending_ot || 0),
@@ -866,8 +877,22 @@ class PayrunCalculationUsecase {
          */
         salary_days: attendanceDependent(stored ? stored.salary_days : null),
         extra_days: attendanceDependent(stored ? stored.extra_days : null),
+        /*
+         * THE MONTH'S APPROVED OT, INCLUDING its own OT approved while it was
+         * locked and paid here once it was unlocked (carried with the
+         * Prior-Month OT items - see `getEmployee`). Without it the column
+         * read 0 for an employee whose attendance says "OT Approved".
+         */
         approved_ot_hours: attendanceDependent(
-          stored ? Number(stored.approved_ot_hours) : null
+          stored
+            ? Math.round(
+                ((Number(stored.approved_ot_minutes) || 0) +
+                  calc.splitLateOt(this._json(stored.prior_month_ot), context.period.year, context.period.month)
+                    .own_month_minutes) /
+                  60 *
+                  10000
+              ) / 10000
+            : null
         ),
         /*
          * ADDITIONS AND DEDUCTIONS ARE NOT SUPPRESSED, and that is the point
@@ -1170,6 +1195,32 @@ class PayrunCalculationUsecase {
                */
               prior_month_ot_amount: provisional(stored.prior_month_ot_amount),
               prior_month_ot: pending ? [] : this._json(stored.prior_month_ot),
+              /**
+               * THIS MONTH'S OWN OT, APPROVED WHILE THE MONTH WAS LOCKED and
+               * paid here after it was unlocked. It travels with the
+               * Prior-Month OT items above (one claim, one settlement, never
+               * paid twice) but it is not prior-month OT, so the screen shows
+               * it as this month's approved OT. The two `prior_month_*`
+               * fields above are unchanged and still include it.
+               */
+              ...(() => {
+                const split = calc.splitLateOt(
+                  pending ? [] : this._json(stored.prior_month_ot) || [],
+                  period.year,
+                  period.month
+                );
+                const attendanceMinutes = Number(stored.approved_ot_minutes) || 0;
+                const total = attendanceMinutes + split.own_month_minutes;
+                return {
+                  late_approved_ot: split.own_month,
+                  late_approved_ot_minutes: provisional(split.own_month_minutes),
+                  late_approved_ot_amount: provisional(split.own_month.length > 0 ? split.own_month_amount : null),
+                  earlier_month_ot: split.earlier,
+                  earlier_month_ot_amount: provisional(split.earlier.length > 0 ? split.earlier_amount : null),
+                  total_approved_ot_minutes: provisional(total),
+                  total_approved_ot_hours: provisional(Math.round((total / 60) * 10000) / 10000),
+                };
+              })(),
             },
             adjustments: {
               incentive: stored.incentive,

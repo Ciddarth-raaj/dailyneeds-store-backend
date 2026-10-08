@@ -481,7 +481,8 @@ class PayrunCalculationRepository {
 
   /**
    * PRIOR-MONTH OT THIS PAYROLL MONTH SETTLES, per employee: every
-   * late-approved OT still PENDING_SETTLEMENT from an EARLIER month, and
+   * late-approved OT still PENDING_SETTLEMENT from an EARLIER month - or from
+   * THIS month itself, once it has been unlocked again - and
    * every one this month already INCLUDED - or, once it is locked, SETTLED -
    * so a recalculation keeps exactly what it had, never picks one up twice,
    * and a locked month's inputs still read as what it consumed (publish
@@ -502,7 +503,15 @@ class PayrunCalculationRepository {
             WHERE s.employee_id IN (?)
               AND (
                     (s.settlement_status = 'PENDING_SETTLEMENT'
-                       AND (s.source_year * 12 + s.source_month) < (? * 12 + ?)
+                       /* ITS OWN MONTH TOO. An OT approved while its month
+                          was locked is parked here; if that month is then
+                          unlocked, it is open again and is where the OT
+                          belongs. Without the equality the minutes stayed
+                          parked until a LATER month was calculated, and the
+                          reopened month's payroll showed no approved OT at
+                          all although Attendance said "OT Approved". The
+                          claim below still lets only ONE month take it. */
+                       AND (s.source_year * 12 + s.source_month) <= (? * 12 + ?)
                        /* A LOCKED month takes nothing new: an item approved
                           after it locked waits for the next open month, and
                           the locked month's inputs stay what it was locked
