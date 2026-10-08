@@ -40,11 +40,13 @@ const {
 } = require("../utils/attendance_stored_read");
 const { isDayClosed } = require("../utils/attendance_dashboard");
 const { propagationScope } = require("../utils/shift_propagation");
-const { istToday } = require("../utils/istDate");
+const { istToday, istDateOf } = require("../utils/istDate");
 const { partitionClosedDays, endOfIstDay } = require("../utils/attendance_persist_guard");
 const { payrollLockedError } = require("../utils/attendance_payroll_lock");
 const readTiming = require("../utils/attendance_read_timing");
 const { monthFreshness } = require("../utils/attendance_month_freshness");
+const { explainAutoOt } = require("../utils/attendance_ot_auto_gate");
+const { MAX_BACKDATE_DAYS } = require("../utils/shift_change_eligibility");
 
 /** Every [year, month] a date range covers, in order. */
 function monthsSpanned(from, to) {
@@ -1373,12 +1375,66 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
           : []
       );
 
-    return calculateRange({
+    const days = await calculateRange({
       employee_id,
       from_date: from,
       to_date: to,
       stored_days_loader: loadStored,
       now,
+    });
+    return explainAutoOtDays(employee_id, days, { now });
+  };
+
+  /**
+   * CALCULATED OT WITH NO REQUEST, EXPLAINED. Every day whose OT (or, on a
+   * shift-authorised date, whose excess) is AVAILABLE - calculated, settled,
+   * and with no OT request behind it - gets `ot_auto_status`: whether the
+   * automation will raise it, or the rule that keeps it from ever doing so
+   * (before the cutover, outside the window, payroll locked, automation off).
+   * The rule is `utils/attendance_ot_auto_gate.js`, the one the sync itself
+   * applies. It explains; it raises, backfills and writes nothing. The extra
+   * reads happen only when some day needs explaining.
+   */
+  const explainAutoOtDays = async (employee_id, days, { now = null } = {}) => {
+    const list = Array.isArray(days) ? days : [];
+    const needing = list.filter(
+      (d) => d && (d.ot_claim_state === OT_CLAIM_STATE.AVAILABLE || d.ot_excess_state === OT_CLAIM_STATE.AVAILABLE)
+    );
+    if (needing.length === 0 || typeof attendanceCalculationRepo.getAutoOtSetting !== "function") return list;
+    const employeeId = Number(employee_id);
+    const dates = needing.map((d) => d.attendance_date);
+    const [setting, markers, locked] = await Promise.all([
+      attendanceCalculationRepo.getAutoOtSetting(),
+      attendanceCalculationRepo.listWaitingDeferredOt
+        ? attendanceCalculationRepo.listWaitingDeferredOt(employeeId, dates)
+        : [],
+      attendanceCalculationRepo.findPayrollLockedPeriods
+        ? attendanceCalculationRepo.findPayrollLockedPeriods(
+            dates.map((attendance_date) => ({ employee_id: employeeId, attendance_date }))
+          )
+        : [],
+    ]);
+    const waiting = new Set((markers || []).map((m) => toDateOnly(m.attendance_date)));
+    const lockedMonths = new Set(
+      (locked || []).map((p) => `${Number(p.year !== undefined ? p.year : p.period_year)}-${Number(p.month !== undefined ? p.month : p.period_month)}`)
+    );
+    // The business date of the read's own instant, as the sync judges it.
+    const businessToday = typeof now === "number" ? istDateOf(now) : todayIs();
+    const oldest = addDays(businessToday, -MAX_BACKDATE_DAYS);
+    return list.map((day) => {
+      if (!needing.includes(day)) return day;
+      const date = day.attendance_date;
+      return {
+        ...day,
+        ot_auto_status: explainAutoOt({
+          date,
+          setting,
+          oldest,
+          max_backdate_days: MAX_BACKDATE_DAYS,
+          marker_waiting: waiting.has(date),
+          locked: lockedMonths.has(`${Number(date.slice(0, 4))}-${Number(date.slice(5, 7))}`),
+        }),
+      };
     });
   };
 
@@ -3016,6 +3072,7 @@ module.exports = (attendanceCalculationRepo, options = {}) => {
     setBreakOverride,
     calculateRange,
     readRange,
+    explainAutoOtDays,
     CALCULATION_SOURCE,
     calculateProposedDay,
     attendanceDateForPunchTime,

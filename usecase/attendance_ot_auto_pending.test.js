@@ -148,6 +148,10 @@ function build(state = {}) {
     getEmploymentWindow: async (id) => EMPLOYEES.find((e) => e.employee_id === Number(id)) || null,
     getMonthlyGrossAsOf: async () => null,
     findPayrollLockedPeriods: async (rows) => lockHits(rows),
+    // The attendance read's explanation of a not-raised OT reads the same cutover and markers.
+    getAutoOtSetting: async () => setting,
+    listWaitingDeferredOt: async (employeeId, dates) =>
+      (store.deferred || []).filter((d) => d.employee_id === employeeId && dates.includes(d.attendance_date) && d.status === "WAITING_FOR_CORRECTION"),
     saveCalculations: async (rows) => {
       if (lockHits(rows).length > 0) throw lockedError();
       saved.calculations.push(rows);
@@ -2267,5 +2271,105 @@ describe("lunch OT correction: days stored under the old rule, brought in line",
     assert.equal(d1.pre_shift_ot_minutes, 0);
     assert.equal(d1.post_shift_ot_minutes, 60);
     assert.equal(d1.candidate_ot_minutes, 60);
+  });
+});
+
+/* ================= HISTORICAL CUTOVER: the Employee 945 shape (4 Sep 2026) */
+
+describe("HISTORICAL CUTOVER: calculated OT dated before automatic OT started is explained, never raised (Employee 945, 4 Sep)", () => {
+  const SEP4 = "2026-09-04";
+  const OCT6 = "2026-10-06";
+  const OCT8_NOON = Date.parse("2026-10-08T12:00:00+05:30");
+  const CUTOVER = { enabled: 1, auto_pending_from_date: "2026-10-06" };
+  const recalcAt = (w, date, now = OCT8_NOON) =>
+    w.calculation.recalculateRange({ employee_id: 42, from_date: date, to_date: date, now });
+  const read = (w, date, now = OCT8_NOON) => w.calculation.readRange({ employee_id: 42, from_date: date, to_date: date, now });
+
+  it("OT CALCULATION: out at 22:22 on a 10:00-22:00 shift is 22 minutes of eligible OT", async () => {
+    const w = build({ rawPunches: day(42, SEP4, "22:22:00"), setting: CUTOVER });
+    await recalcAt(w, SEP4);
+    assert.equal(lastStored(w, 42, SEP4).candidate_ot_minutes, 22);
+  });
+
+  it("AUTOMATIC REQUEST GENERATION: none for 4 Sep (BEFORE_CUTOVER); one for 6 Oct", async () => {
+    const w = build({ rawPunches: [...day(42, SEP4, "22:22:00"), ...day(42, OCT6, "22:30:00")], setting: CUTOVER });
+    const sep = await recalcAt(w, SEP4);
+    assert.deepEqual(sep.ot_auto_pending.skipped.map((x) => x.reason), ["BEFORE_CUTOVER"]);
+    assert.equal(otOf(w, 42, SEP4).length, 0, "no request, no duplicate, nothing backfilled");
+    await recalcAt(w, OCT6);
+    const [oct] = otOf(w, 42, OCT6);
+    assert.equal(oct.status, "PENDING");
+    assert.equal(oct.auto_created, 1);
+    // Recalculating 4 Sep again still raises nothing.
+    await recalcAt(w, SEP4);
+    assert.equal(otOf(w, 42, SEP4).length, 0);
+  });
+
+  it("THE ATTENDANCE READ says why: Calculated, NOT_RAISED, BEFORE_CUTOVER - not 'sent for approval'", async () => {
+    const w = build({ rawPunches: [...day(42, SEP4, "22:22:00"), ...day(42, OCT6, "22:30:00")], setting: CUTOVER });
+    await recalcAt(w, SEP4);
+    await recalcAt(w, OCT6);
+    const [sep] = await read(w, SEP4);
+    assert.equal(sep.ot_claim_state, "AVAILABLE", "calculated OT stays distinguishable from approval status");
+    assert.equal(sep.candidate_ot_minutes, 22);
+    assert.deepEqual(
+      { state: sep.ot_auto_status.state, reason: sep.ot_auto_status.reason, cutover: sep.ot_auto_status.cutover_date },
+      { state: "NOT_RAISED", reason: "BEFORE_CUTOVER", cutover: "2026-10-06" }
+    );
+    assert.match(sep.ot_auto_status.detail, /before automatic OT approval started \(6 Oct 2026\)/);
+    const [oct] = await read(w, OCT6);
+    assert.equal(oct.ot_claim_state, "REQUEST_PENDING");
+    assert.equal(oct.ot_auto_status, undefined, "a day with a request needs no explanation");
+  });
+
+  it("APPROVAL-LIST VISIBILITY: the 6 Oct request is in Pending; 4 Sep is in no tab because none exists", async () => {
+    const w = build({ rawPunches: [...day(42, SEP4, "22:22:00"), ...day(42, OCT6, "22:30:00")], setting: CUTOVER });
+    await recalcAt(w, SEP4);
+    await recalcAt(w, OCT6);
+    for (const status of ["PENDING", "ALL"]) {
+      // eslint-disable-next-line no-await-in-loop
+      const list = await w.regularization.listApprovals({ actor: SM3, request_type: REQUEST_TYPE.OT, status, now: OCT8_NOON });
+      assert.deepEqual(list.rows.map((r) => r.attendance_date), [OCT6], status);
+    }
+  });
+
+  it("a date ON/after the cutover with no request yet reads as on its way (AWAITING_AUTOMATIC_REQUEST)", async () => {
+    const w = build({ rawPunches: day(42, OCT6, "22:30:00"), setting: CUTOVER });
+    // Stored without the sync (as a run that has not reached the date yet would leave it).
+    const days = await w.calculation.calculateRange({ employee_id: 42, from_date: OCT6, to_date: OCT6, now: OCT8_NOON });
+    const [explained] = await w.calculation.explainAutoOtDays(42, days, { now: OCT8_NOON });
+    assert.equal(explained.ot_auto_status.state, "AWAITING_AUTOMATIC_REQUEST");
+  });
+
+  it("LOCKED PAYROLL MONTH: explained as PAYROLL_LOCKED, and still nothing is raised", async () => {
+    const w = build({ rawPunches: day(42, SEP4, "22:22:00"), setting: { enabled: 1, auto_pending_from_date: "2026-09-01" } });
+    await recalcAt(w, SEP4);
+    // Withdraw what the (earlier) cutover raised, then lock the month: the read says why nothing is pending.
+    const [raised] = liveOt(w, 42, SEP4);
+    await w.regRepo.withdrawAutoOtRequest({ requestId: raised.attendance_approval_request_id, reason: "test", triggerSource: "TEST" });
+    w.lockedMonths.add("42:2026-9");
+    const [sep] = await read(w, SEP4);
+    assert.equal(sep.ot_auto_status.reason, "PAYROLL_LOCKED");
+    assert.equal(liveOt(w, 42, SEP4).length, 0);
+  });
+
+  it("WITHDRAWN: a withdrawn system OT is not counted as a request; the day explains itself again", async () => {
+    const w = build({ rawPunches: day(42, OCT6, "22:30:00"), setting: CUTOVER });
+    await recalcAt(w, OCT6);
+    const [raised] = liveOt(w, 42, OCT6);
+    await w.regRepo.withdrawAutoOtRequest({ requestId: raised.attendance_approval_request_id, reason: "test", triggerSource: "TEST" });
+    const list = await w.regularization.listApprovals({ actor: SM3, request_type: REQUEST_TYPE.OT, status: "ALL", now: OCT8_NOON });
+    assert.equal(list.rows.length, 0, "a withdrawn request is on no tab");
+    const [d] = await read(w, OCT6);
+    assert.equal(d.ot_claim_state, "AVAILABLE");
+    assert.equal(d.ot_auto_status.state, "AWAITING_AUTOMATIC_REQUEST");
+  });
+
+  it("AUTOMATION OFF: explained, nothing raised", async () => {
+    const w = build({ rawPunches: day(42, OCT6, "22:30:00"), setting: { enabled: 0, auto_pending_from_date: "2026-10-06" } });
+    await recalcAt(w, OCT6);
+    const [d] = await read(w, OCT6);
+    assert.equal(d.ot_auto_status.reason, "AUTOMATION_OFF");
+    assert.equal(otOf(w, 42, OCT6).length, 0);
   });
 });

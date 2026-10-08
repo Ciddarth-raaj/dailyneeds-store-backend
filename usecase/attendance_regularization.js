@@ -120,6 +120,7 @@ function validationError(message) {
  * somebody has to remember to change together.
  */
 const { MAX_BACKDATE_DAYS, MAX_FORWARD_DAYS } = shiftChangeEligibility;
+const { autoOtCreationGate } = require("../utils/attendance_ot_auto_gate");
 
 /**
  * `approverSetupRepo` is the EMPLOYEE-LEVEL approver store (Attendance
@@ -2796,7 +2797,6 @@ module.exports = (
      * withdrawn when its OT goes, wherever its date falls.
      */
     const creationFrom = toDateOnly(allow_creation_from);
-    const effectiveCutover = cutover && creationFrom && creationFrom < cutover ? creationFrom : cutover;
     const inScope = calculated.filter((day) => day.attendance_date <= businessToday);
     if (inScope.length === 0) return result;
     const scopeDates = inScope.map((d) => d.attendance_date);
@@ -2827,14 +2827,16 @@ module.exports = (
         markerOn.set(toDateOnly(m.attendance_date), m)
       );
     }
+    // The shared rule (`utils/attendance_ot_auto_gate.js`): the attendance
+    // read explains a not-raised OT with this very function.
     const creationGate = (date) =>
-      markerOn.has(date)
-        ? null
-        : effectiveCutover && date < effectiveCutover
-        ? AUTO_OT_SKIP.BEFORE_CUTOVER
-        : date < oldest && !(creationFrom && date >= creationFrom)
-        ? AUTO_OT_SKIP.OUTSIDE_WINDOW
-        : null;
+      autoOtCreationGate({
+        date,
+        cutover,
+        creation_from: creationFrom,
+        oldest,
+        marker_waiting: markerOn.has(date),
+      });
     const blockerOf = (c) => ({
       blocking_request_id: Number(c.attendance_approval_request_id),
       blocking_request_type: c.request_type,
