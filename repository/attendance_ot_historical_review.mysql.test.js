@@ -45,6 +45,8 @@ const MODE_HISTORY_TABLE = fs
 const REVIEW_UP = fs.readFileSync(path.join(SQL_DIR, "20261128120000-attendance-ot-historical-review-up.sql"), "utf8");
 const REVIEW_DOWN = fs.readFileSync(path.join(SQL_DIR, "20261128120000-attendance-ot-historical-review-down.sql"), "utf8");
 const LATE_UP = fs.readFileSync(path.join(SQL_DIR, "20261126120000-attendance-ot-late-settlement-up.sql"), "utf8");
+// The administrator's revocation audit - in production since 20261103120000.
+const REVOCATION_UP = fs.readFileSync(path.join(SQL_DIR, "20261103120000-attendance-approval-revocation-up.sql"), "utf8");
 
 const EMP = 945; // unlocked September
 const EMP2 = 946; // locked September
@@ -121,6 +123,7 @@ const TABLES = [
   "attendance_ot_historical_review_raised",
   "attendance_ot_historical_review_item",
   "attendance_ot_historical_review_batch",
+  "attendance_approval_revocation",
   "attendance_ot_late_settlement_log",
   "attendance_ot_late_settlement",
   "attendance_day_calculation",
@@ -164,6 +167,7 @@ describe("Historical OT Review, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     await q(pool, PRIORITY_UP);
     await q(pool, MODE_HISTORY_TABLE);
     await q(pool, LATE_UP);
+    await q(pool, REVOCATION_UP);
     await q(pool, REVIEW_UP);
     const repo = buildRepo(pool);
     const calcRepo = buildCalcRepo(pool);
@@ -251,7 +255,7 @@ describe("Historical OT Review, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
   it("AUTHORISE over real SQL: Pending OT in both months (the locked one through the marker re-proved FOR UPDATE), audited, never twice", async () => {
     const p = await review.preview({ now: NOW });
     const out = await review.authorise({ actor: { employee_id: 1, user_id: 1 }, preview_hash: p.preview_hash, now: NOW });
-    assert.deepEqual(out.summary, { authorised: 2, created: 2, skipped: 0, failed: 0, created_minutes: 44 });
+    assert.deepEqual(out.summary, { authorised: 2, created: 2, skipped: 0, failed: 0, created_minutes: 44, telegram: [] });
     for (const emp of [EMP, EMP2]) {
       // eslint-disable-next-line no-await-in-loop
       const [ot] = await otRows(emp);
@@ -386,7 +390,7 @@ describe("Historical OT Review, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
       assert.equal(p.review_installed, false);
       assert.equal(p.review_history, "NONE_FEATURE_NOT_INSTALLED");
       const by = Object.fromEntries(p.lines.map((l) => [l.employee_id, l]));
-      assert.deepEqual([by[EMP].proposed_action, by[EMP].withdrawn_request_id !== null], ["CREATE_PENDING_OT", true], "a withdrawn request is still seen");
+      assert.deepEqual([by[EMP].proposed_action, by[EMP].withdrawn_request_id !== null], ["SKIP_PREVIOUSLY_WITHDRAWN", true], "a withdrawn request is still seen, and never re-opened");
       assert.equal(by[EMP2].proposed_action, "CREATE_PENDING_OT_PRIOR_MONTH_SETTLEMENT", "the payroll lock is still seen");
       assert.equal(by[EMP2].payroll_status, "PUBLISHED");
       assert.equal(by[947].proposed_action, "SKIP_EXISTING_APPROVED", "an existing approval is still seen");
@@ -409,6 +413,27 @@ describe("Historical OT Review, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
       await ro.end();
       await q(pool, REVIEW_UP);
     }
+  });
+
+  it("WITHDRAWN vs REVOKED over real SQL: the automation's withdrawal and an administrator's revocation are named, and neither is creatable", async () => {
+    const ins = (emp) =>
+      q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, outlet_id, reason, candidate_ot_minutes, auto_created, status, total_stages)
+               VALUES ('OT', ?, ?, ?, 3, 'System', 22, 1, 'CANCELLED', 1)`, [emp, emp, SEP4]);
+    const a = await ins(EMP);
+    const b = await ins(EMP2);
+    await q(pool, `INSERT INTO attendance_ot_auto_pending_log (attendance_approval_request_id, employee_id, attendance_date, action, previous_ot_minutes, new_ot_minutes, trigger_source)
+                   VALUES (?, ?, ?, 'WITHDRAWN', 22, 0, 'RECALCULATION')`, [a.insertId, EMP, SEP4]);
+    const cols = (await q(pool, "SELECT COLUMN_NAME AS c FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'attendance_approval_revocation' AND IS_NULLABLE = 'NO' AND COLUMN_DEFAULT IS NULL AND EXTRA NOT LIKE '%auto_increment%'")).map((r) => r.c);
+    const vals = { attendance_approval_request_id: b.insertId, request_type: "OT", employee_id: EMP2, requested_for_employee_id: EMP2, attendance_date: SEP4,
+      original_decision: "APPROVED", original_status: "APPROVED", original_request_status: "APPROVED", original_current_stage_no: 1, reset_steps: "[]", revoked_stage_no: 1, reason: "entered in error", revoked_by_employee_id: 1, revoked_by: 1, request_fingerprint: "x", fingerprint: "x" };
+    const use = cols.filter((c) => c in vals);
+    assert.deepEqual(cols.filter((c) => !(c in vals)), [], `revocation columns this test fills: ${cols}`);
+    await q(pool, `INSERT INTO attendance_approval_revocation (${use.join(", ")}) VALUES (?)`, [use.map((c) => vals[c])]);
+    const p = await review.preview({ now: NOW });
+    const by = Object.fromEntries(p.lines.map((l) => [l.employee_id, l]));
+    assert.deepEqual([by[EMP].proposed_action, by[EMP].withdrawn_kind], ["SKIP_PREVIOUSLY_WITHDRAWN", "SYSTEM_WITHDRAWN"]);
+    assert.deepEqual([by[EMP2].proposed_action, by[EMP2].withdrawn_kind], ["SKIP_PREVIOUSLY_REVOKED", "REVOKED"]);
+    assert.deepEqual(p.summary.to_create, { entries: 0, minutes: 0, employees: 0 });
   });
 
   it("A FAILED SCHEMA LOOKUP IS AN ERROR, never 'not reviewed'", async () => {

@@ -2421,6 +2421,13 @@ function fakeReviewRepo(w, { published = [] } = {}) {
             ot_request_status: live ? live.status : null,
             ot_request_closure_reason: live ? live.closure_reason || null : null,
             withdrawn_request_id: withdrawn ? withdrawn.attendance_approval_request_id : null,
+            withdrawn_kind: !withdrawn
+              ? null
+              : (w.store.revocations || []).some((v) => v.attendance_approval_request_id === withdrawn.attendance_approval_request_id)
+              ? "REVOKED"
+              : w.store.log.some((l) => l.attendance_approval_request_id === withdrawn.attendance_approval_request_id && l.action === "WITHDRAWN")
+              ? "SYSTEM_WITHDRAWN"
+              : "CANCELLED",
             late_settlement_status: settled ? settled.settlement_status : null,
             correction_pending: reqs.some((r) => r.status === "PENDING" && r.request_type !== "OT") ? 1 : 0,
             marker_status: marker ? marker.status : null,
@@ -2484,7 +2491,7 @@ describe("HISTORICAL OT REVIEW: a controlled backfill of calculated OT dated bef
     await recalc(w, 42);
     await recalc(w, 43);
     const reviewRepo = fakeReviewRepo(w, opts);
-    const review = buildReview({ reviewRepo, regularization: w.regularization });
+    const review = buildReview({ reviewRepo, regularization: w.regularization, notifier: w.otTelegram });
     return { w, reviewRepo, review };
   };
   const preview = (review) => review.preview({ from_date: "2026-09-01", to_date: "2026-09-19", now: NOW });
@@ -2517,7 +2524,8 @@ describe("HISTORICAL OT REVIEW: a controlled backfill of calculated OT dated bef
     const { w, review, reviewRepo } = await world();
     const p = await preview(review);
     const out = await review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 42, attendance_date: DATE }], now: NOW });
-    assert.deepEqual(out.summary, { authorised: 1, created: 1, skipped: 0, failed: 0, created_minutes: 90 });
+    // 42's first stage is a ROLE (no named approver): no Telegram message - it is in the Pending queue.
+    assert.deepEqual(out.summary, { authorised: 1, created: 1, skipped: 0, failed: 0, created_minutes: 90, telegram: [] });
     const [ot] = otOf(w, 42);
     assert.deepEqual([ot.status, ot.candidate_ot_minutes, ot.auto_created, ot.attendance_date], ["PENDING", 90, 1, DATE], "original work date kept");
     assert.match(ot.reason, /Historical OT review #1 \(item 1\) for the 2026-09-14 work date/);
@@ -2615,6 +2623,58 @@ describe("HISTORICAL OT REVIEW: a controlled backfill of calculated OT dated bef
     const line = p.lines.find((l) => l.employee_id === 42);
     assert.equal(line.dry_run.outcome, "WOULD_NOT_CREATE", JSON.stringify(line));
     assert.ok(line.proposed_action.startsWith("SKIP_"));
+  });
+
+  it("WITHDRAWN (Employee 2260, 12 Sep shape): a date whose system OT was withdrawn is never re-opened by a review, even when OT is eligible again", async () => {
+    const { w, review } = await world({ setting: { enabled: 1, auto_pending_from_date: "2026-09-01" } });
+    // With an earlier cutover the automation raised 42's OT, then withdrew it (its OT went away)...
+    const [ot] = liveOt(w, 42);
+    await w.regRepo.withdrawAutoOtRequest({ requestId: ot.attendance_approval_request_id, reason: "no eligible OT", triggerSource: "RECALCULATION" });
+    w.regRepo.getAutoOtSetting = async () => CUT;
+    // ...and today the engine finds the OT again.
+    const p = await preview(review);
+    const line = p.lines.find((l) => l.employee_id === 42);
+    assert.deepEqual([line.proposed_action, line.withdrawn_request_id, line.withdrawn_kind], ["SKIP_PREVIOUSLY_WITHDRAWN", ot.attendance_approval_request_id, "SYSTEM_WITHDRAWN"]);
+    assert.equal(line.dry_run, undefined, "not even dry-run as a creation");
+    await assert.rejects(
+      review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 42, attendance_date: DATE }], now: NOW }),
+      /not creatable/
+    );
+    assert.equal(liveOt(w, 42).length, 0);
+  });
+
+  it("REVOKED: an administrator's revocation is not duplicated - its own replacement Pending OT is what the review sees", async () => {
+    const { w, review } = await world({ setting: { enabled: 1, auto_pending_from_date: "2026-09-01" } });
+    const [ot] = liveOt(w, 42);
+    await approveRoleChain(w, ot.attendance_approval_request_id);
+    const out = await w.regularization.revokeDecision({ actor: { employee_id: 1, user_type: 2, branch_scope: ALL_BRANCHES }, request_id: ot.attendance_approval_request_id, reason: "entered in error", now: NOW });
+    assert.equal(out.code, 200, JSON.stringify(out));
+    w.regRepo.getAutoOtSetting = async () => CUT;
+    const p = await preview(review);
+    // Revoking an approval while OT is still eligible puts it back to Pending
+    // (the existing revoke flow); the review creates nothing beside it.
+    const line = p.lines.find((l) => l.employee_id === 42);
+    assert.equal(line.proposed_action, "SKIP_EXISTING_PENDING");
+    assert.equal(line.withdrawn_request_id, ot.attendance_approval_request_id);
+  });
+
+  it("TELEGRAM: one summary to each named first approver per batch - no card per date, nothing on a repeat", async () => {
+    const { w, review } = await world();
+    const sentBefore = w.telegramLog.sent.length;
+    const p = await preview(review);
+    const out = await review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, now: NOW });
+    assert.equal(out.summary.created, 2);
+    // 43's chain names 7 as its first approver; 42's first stage is a role.
+    assert.deepEqual(out.summary.telegram, [{ approver_employee_id: 7, count: 1, sent: true, reason: null }]);
+    const sent = w.telegramLog.sent.slice(sentBefore);
+    assert.equal(sent.length, 1, "exactly one message");
+    assert.equal(sent[0].chatId, 1007);
+    assert.match(sent[0].text, /^1 OT approval pending from previous days \(14 Sep 2026 - 14 Sep 2026\)\./);
+    assert.ok(!sent.some((m) => /OT Approval Pending/.test(m.text)), "no per-request card");
+    // A repeat finds nothing to create and sends nothing.
+    const again = await preview(review);
+    await assert.rejects(review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: again.preview_hash, now: NOW }), /Nothing to create/);
+    assert.equal(w.telegramLog.sent.length, sentBefore + 1);
   });
 
   it("the window ends before the cutover: later dates stay with normal processing, and the cutover never moves", async () => {

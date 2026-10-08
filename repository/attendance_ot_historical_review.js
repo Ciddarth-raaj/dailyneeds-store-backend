@@ -132,6 +132,19 @@ class AttendanceOtHistoricalReviewRepository {
                 WHERE r.requested_for_employee_id = c.employee_id AND r.attendance_date = c.attendance_date
                   AND r.request_type = 'OT' AND r.status = 'CANCELLED'
                 ORDER BY r.attendance_approval_request_id DESC LIMIT 1) AS withdrawn_request_id,
+              -- HOW it was cancelled: an administrator's revocation of a
+              -- decision, the automation's withdrawal, or another cancellation.
+              (SELECT CASE
+                        WHEN EXISTS (SELECT 1 FROM attendance_approval_revocation rv
+                                      WHERE rv.attendance_approval_request_id = r.attendance_approval_request_id) THEN 'REVOKED'
+                        WHEN EXISTS (SELECT 1 FROM attendance_ot_auto_pending_log lg
+                                      WHERE lg.attendance_approval_request_id = r.attendance_approval_request_id
+                                        AND lg.action = 'WITHDRAWN') THEN 'SYSTEM_WITHDRAWN'
+                        ELSE 'CANCELLED' END
+                 FROM attendance_approval_request r
+                WHERE r.requested_for_employee_id = c.employee_id AND r.attendance_date = c.attendance_date
+                  AND r.request_type = 'OT' AND r.status = 'CANCELLED'
+                ORDER BY r.attendance_approval_request_id DESC LIMIT 1) AS withdrawn_kind,
               (SELECT ls.settlement_status FROM attendance_ot_late_settlement ls
                 WHERE ls.employee_id = c.employee_id AND ls.attendance_date = c.attendance_date
                   AND ls.settlement_status <> 'CANCELLED'

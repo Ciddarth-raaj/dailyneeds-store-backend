@@ -36,9 +36,14 @@ describe("classify: the proposed action per date", () => {
     assert.equal(action({ late_settlement_status: "SETTLED" }), r.ACTION.SKIP_ALREADY_PAID);
     assert.equal(action({ approved_ot_minutes: 22 }), r.ACTION.SKIP_ALREADY_PAID);
   });
-  it("a WITHDRAWN request does not block a review, and is reported", () => {
-    const l = r.classify(row({ withdrawn_request_id: 77 }), { cutover: CUT });
-    assert.deepEqual([l.proposed_action, l.withdrawn_request_id], [r.ACTION.CREATE_PENDING_OT, 77]);
+  it("a WITHDRAWN or REVOKED request is never re-opened by a review (Employee 2260, 12 Sep shape)", () => {
+    const sys = r.classify(row({ withdrawn_request_id: 77, withdrawn_kind: "SYSTEM_WITHDRAWN" }), { cutover: CUT });
+    assert.deepEqual([sys.proposed_action, sys.withdrawn_request_id, sys.withdrawn_kind], [r.ACTION.SKIP_PREVIOUSLY_WITHDRAWN, 77, "SYSTEM_WITHDRAWN"]);
+    assert.equal(action({ withdrawn_request_id: 78, withdrawn_kind: "REVOKED" }), r.ACTION.SKIP_PREVIOUSLY_REVOKED);
+    assert.equal(action({ withdrawn_request_id: 79 }), r.ACTION.SKIP_PREVIOUSLY_WITHDRAWN, "any other cancellation too");
+    // ...and in a locked month as well.
+    assert.equal(action({ withdrawn_request_id: 77, payroll_status: "APPROVED_LOCKED" }), r.ACTION.SKIP_PREVIOUSLY_WITHDRAWN);
+    assert.equal(r.CREATE_ACTIONS.includes(r.ACTION.SKIP_PREVIOUSLY_WITHDRAWN), false);
   });
   it("a date a review already raised is never raised again", () => {
     assert.equal(action({ already_reviewed: 1, withdrawn_request_id: 77 }), r.ACTION.SKIP_ALREADY_REVIEWED);

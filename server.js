@@ -1760,6 +1760,9 @@ class Server {
       require("./usecase/attendance_ot_historical_review")({
         reviewRepo: require("./repository/attendance_ot_historical_review")(this.mysql.connection),
         regularization: this.attendanceRegularizationUsecase,
+        // One Telegram summary per first approver per batch - the deploy
+        // backfill's message - never a card per date.
+        notifier: this.attendanceOtTelegramUsecase,
       }),
       this.permissions
     );

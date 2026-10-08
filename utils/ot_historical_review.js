@@ -39,6 +39,16 @@ const ACTION = Object.freeze({
   SKIP_CLOSED_AT_PAYROLL_LOCK: "SKIP_CLOSED_AT_PAYROLL_LOCK",
   SKIP_ALREADY_PAID: "SKIP_ALREADY_PAID",
   SKIP_ALREADY_REVIEWED: "SKIP_ALREADY_REVIEWED",
+  /*
+   * A CANCELLED OT request on the date is never re-opened by a review. The
+   * system withdrew it (the eligible OT went away, or the attendance became
+   * incomplete - that case has its own deferred re-evaluation), or an
+   * administrator revoked a decision. Either way somebody or something
+   * decided against it; a bulk review is not the place to undo that. Listed,
+   * with how it was cancelled, for a person to look at.
+   */
+  SKIP_PREVIOUSLY_WITHDRAWN: "SKIP_PREVIOUSLY_WITHDRAWN",
+  SKIP_PREVIOUSLY_REVOKED: "SKIP_PREVIOUSLY_REVOKED",
   SKIP_ATTENDANCE_INCOMPLETE: "SKIP_ATTENDANCE_INCOMPLETE",
   SKIP_CORRECTION_PENDING: "SKIP_CORRECTION_PENDING",
   SKIP_OUTSIDE_EMPLOYMENT: "SKIP_OUTSIDE_EMPLOYMENT",
@@ -79,6 +89,7 @@ function classify(row, { cutover }) {
     existing_status: row.ot_request_status || null,
     withdrawn_request_id:
       row.withdrawn_request_id === null || row.withdrawn_request_id === undefined ? null : Number(row.withdrawn_request_id),
+    withdrawn_kind: row.withdrawn_request_id === null || row.withdrawn_request_id === undefined ? null : row.withdrawn_kind || "CANCELLED",
     late_settlement_status: row.late_settlement_status || null,
     deferred_marker: row.marker_status ? `${row.marker_status}:${row.marker_source}` : null,
     payroll_status: payroll,
@@ -99,6 +110,10 @@ function classify(row, { cutover }) {
   if (line.late_settlement_status || int0(row.approved_ot_minutes) > 0) return act(ACTION.SKIP_ALREADY_PAID);
   // Never twice: a date a review already raised OT on, whatever became of it.
   if (Number(row.already_reviewed) === 1) return act(ACTION.SKIP_ALREADY_REVIEWED);
+  // Never re-open a cancelled request (see SKIP_PREVIOUSLY_WITHDRAWN).
+  if (line.withdrawn_request_id !== null) {
+    return act(line.withdrawn_kind === "REVOKED" ? ACTION.SKIP_PREVIOUSLY_REVOKED : ACTION.SKIP_PREVIOUSLY_WITHDRAWN);
+  }
   if (Number(row.outside_employment) === 1) return act(ACTION.SKIP_OUTSIDE_EMPLOYMENT);
   // Attendance comes first: no OT from an unsettled or uncorrected day.
   if (Number(row.is_final) !== 1 || row.status !== "FINAL" || int0(row.punch_count) % 2 === 1) {

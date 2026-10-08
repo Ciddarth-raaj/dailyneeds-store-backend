@@ -50,7 +50,7 @@ const addDays = (date, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-module.exports = ({ reviewRepo, regularization }) => {
+module.exports = ({ reviewRepo, regularization, notifier = null }) => {
   /** The window: from 1 Sep 2026 to the day before the automatic-OT cutover. */
   const windowFor = async ({ from_date, to_date }) => {
     const setting = await reviewRepo.getAutoOtSetting();
@@ -222,7 +222,14 @@ module.exports = ({ reviewRepo, regularization }) => {
             ? `Pending OT #${requestId}, ${created.ot_minutes} min; payroll locked: an approval settles as Prior-Month OT`
             : `Pending OT #${requestId}, ${created.ot_minutes} min`;
           await reviewRepo.setItemOutcome({ review_item_id: item.review_item_id, outcome: "CREATED", created_request_id: requestId, detail });
-          results.push({ ...item, outcome: "CREATED", created_request_id: requestId, ot_minutes: created.ot_minutes, detail });
+          results.push({
+            ...item,
+            outcome: "CREATED",
+            created_request_id: requestId,
+            ot_minutes: created.ot_minutes,
+            first_approver_employee_id: created.first_approver_employee_id || null,
+            detail,
+          });
           continue;
         }
         const why =
@@ -248,6 +255,33 @@ module.exports = ({ reviewRepo, regularization }) => {
       failed: count("FAILED"),
       created_minutes: results.filter((r) => r.outcome === "CREATED").reduce((n, r) => n + (Number(r.ot_minutes) || 0), 0),
     };
+    /*
+     * TELEGRAM: ONE SUMMARY PER FIRST APPROVER, NOT A CARD PER DATE - the
+     * deploy backfill's rule, and its message (`notifyBacklogSummary`). The
+     * requests are individual and decided as usual (/ot, or DnDS). Only
+     * requests THIS batch created are counted, so a repeat batch (which
+     * creates nothing) sends nothing. A role-based first stage with no named
+     * approver gets no message; the request is in their Pending queue.
+     */
+    summary.telegram = [];
+    if (notifier && typeof notifier.notifyBacklogSummary === "function") {
+      const byApprover = new Map();
+      results
+        .filter((r) => r.outcome === "CREATED" && r.first_approver_employee_id)
+        .forEach((r) => {
+          const id = Number(r.first_approver_employee_id);
+          const e = byApprover.get(id) || { count: 0, from: r.attendance_date, to: r.attendance_date };
+          e.count += 1;
+          if (r.attendance_date < e.from) e.from = r.attendance_date;
+          if (r.attendance_date > e.to) e.to = r.attendance_date;
+          byApprover.set(id, e);
+        });
+      for (const [approverId, e] of byApprover) {
+        // eslint-disable-next-line no-await-in-loop
+        const sent = await notifier.notifyBacklogSummary({ approver_employee_id: approverId, count: e.count, from_date: e.from, to_date: e.to });
+        summary.telegram.push({ approver_employee_id: approverId, count: e.count, sent: Boolean(sent && sent.sent), reason: sent && !sent.sent ? sent.reason || null : null });
+      }
+    }
     await reviewRepo.finishBatch({ review_batch_id: batchId, status: summary.failed > 0 ? "FAILED" : "APPLIED", summary });
     return { review_batch_id: batchId, summary, results };
   };
