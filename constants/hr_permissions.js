@@ -774,4 +774,9 @@ module.exports = {
   // scope. Viewing or downloading one payslip does not need it. GRANTED TO
   // NOBODY: administrators hold it through the user_type 2 bypass.
   PAYROLL_EXPORT_PAYSLIPS: "payroll_export_payslips",
+  // Attendance -> Historical OT Review: preview calculated OT the automatic-OT
+  // cutover left without a request, and AUTHORISE raising Pending OT for it.
+  // Approving the OT is still the employee's ordinary chain. GRANTED TO
+  // NOBODY: administrators hold it through the user_type 2 bypass.
+  ATTENDANCE_OT_HISTORICAL_REVIEW: "attendance_ot_historical_review",
 };
