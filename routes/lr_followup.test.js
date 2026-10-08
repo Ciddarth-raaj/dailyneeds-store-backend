@@ -1,5 +1,5 @@
 /**
- * LR Follow-up, Credit Purchase and Transporter Master - the route surface,
+ * LR Follow-up, Create LR Follow-up and Transporter Master - the route surface,
  * what guards each endpoint, and that the branch scope is applied on the
  * server.
  *
@@ -15,7 +15,7 @@ const assert = require("node:assert/strict");
 const express = require("express");
 
 const buildLr = require("./lr_followup");
-const buildCredit = require("./credit_purchase");
+const buildManual = require("./lr_followup_manual");
 const buildTransporter = require("./transporter_master");
 
 const NONE = "NONE";
@@ -65,7 +65,7 @@ describe("every endpoint carries the right key", () => {
         "GET /": ["view_lr_followup"],
         "GET /legacy": ["manage_lr_legacy_verification"],
         "POST /legacy/backfill": ["manage_lr_legacy_verification"],
-        "GET /by-source/:type(ADVANCE_REQUEST|CREDIT_PURCHASE)/:sourceId(\\d+)": ["view_lr_followup"],
+        "GET /by-source/:type(ADVANCE_REQUEST|MANUAL)/:sourceId(\\d+)": ["view_lr_followup"],
         "GET /:id(\\d+)": ["view_lr_followup"],
         "PATCH /:id(\\d+)/lr": ["update_lr_followup"],
         "POST /:id(\\d+)/follow-ups": ["update_lr_followup"],
@@ -76,11 +76,9 @@ describe("every endpoint carries the right key", () => {
     );
   });
 
-  it("Credit Purchase - and there is no edit or delete", () => {
-    const table = guardTable(buildCredit({}, recordingPermissions, fakeScope(() => ({}))).getRouter());
+  it("Create LR Follow-up - create only, no list, edit or delete", () => {
+    const table = guardTable(buildManual({}, recordingPermissions, fakeScope(() => ({}))).getRouter());
     assert.deepEqual(Object.fromEntries(table.map((r) => [r.route, r.keys])), {
-      "GET /": ["view_credit_purchase"],
-      "GET /:id(\\d+)": ["view_credit_purchase"],
       "POST /": ["create_credit_purchase"],
     });
   });
@@ -133,8 +131,8 @@ describe("17 and 18. enforced on the server", () => {
       next();
     });
     const dashboardScope = fakeScope(() => scope);
+    app.use("/lr-followup/manual", buildManual(usecase, permissions, dashboardScope).getRouter());
     app.use("/lr-followup", buildLr(usecase, permissions, dashboardScope).getRouter());
-    app.use("/credit-purchase", buildCredit(usecase, permissions, dashboardScope).getRouter());
     await new Promise((resolve) => {
       server = app.listen(0, resolve);
     });
@@ -159,7 +157,7 @@ describe("17 and 18. enforced on the server", () => {
       (await call("POST", "/lr-followup/5/close-without-receipt", { closure_reason: "REFUNDED", remark: "x" })).status,
       403
     );
-    assert.equal((await call("POST", "/credit-purchase", {})).status, 403);
+    assert.equal((await call("POST", "/lr-followup/manual", {})).status, 403);
     assert.equal(calls.length, 0);
   });
 
@@ -219,17 +217,39 @@ describe("17 and 18. enforced on the server", () => {
   });
 
   it("validates bodies before anything runs", async () => {
-    held = new Set(["update_lr_followup", "create_credit_purchase"]);
+    held = new Set(["view_lr_followup", "update_lr_followup", "create_credit_purchase"]);
     scope = { kind: "ALL_STORES", store_ids: null };
     const before = calls.length;
     assert.equal((await call("POST", "/lr-followup/5/follow-ups", {})).status, 400); // remark required
-    assert.equal((await call("POST", "/credit-purchase", { distributor_code: 1 })).status, 400);
-    assert.equal(
-      (await call("POST", "/credit-purchase", {
-        distributor_code: 1, bill_reference: "B1", amount: 10, bill_date: "2026-09-30", outlet_id: 1,
-      })).status,
-      400 // transporter is required
-    );
+    assert.equal((await call("POST", "/lr-followup/manual", { distributor_code: 1 })).status, 400); // transporter required
+    assert.equal((await call("POST", "/lr-followup/manual", { transporter_id: 3 })).status, 400); // supplier required
+    // The fields the Credit Purchase entry had are not part of an LR Follow-up.
+    for (const extra of [{ bill_reference: "B1" }, { amount: 10 }, { bill_date: "2026-09-30" }, { outlet_id: 1 }]) {
+      assert.equal((await call("POST", "/lr-followup/manual", { distributor_code: 1, transporter_id: 3, ...extra })).status, 400);
+    }
+    assert.equal((await call("GET", "/lr-followup?source_type=CREDIT_PURCHASE")).status, 400);
     assert.equal(calls.length, before);
+  });
+
+  it("creates a manual LR Follow-up from supplier + transporter alone", async () => {
+    held = new Set(["create_credit_purchase"]);
+    scope = { kind: "ALL_STORES", store_ids: null };
+    const r = await call("POST", "/lr-followup/manual", { distributor_code: 1, transporter_id: 3 });
+    assert.equal(r.status, 201);
+    const last = calls[calls.length - 1];
+    assert.equal(last.name, "create");
+    assert.deepEqual(last.args[0], { distributor_code: 1, transporter_id: 3 });
+    assert.equal(last.args[1], 501);
+  });
+
+  it("maps the API's MANUAL source type to the stored one", async () => {
+    held = new Set(["view_lr_followup"]);
+    scope = { kind: "ALL_STORES", store_ids: null };
+    assert.equal((await call("GET", "/lr-followup?source_type=MANUAL")).status, 200);
+    assert.equal(calls[calls.length - 1].args[0].source_type, "CREDIT_PURCHASE");
+    assert.equal((await call("GET", "/lr-followup/by-source/MANUAL/4")).status, 200);
+    assert.equal(calls[calls.length - 1].args[0], "CREDIT_PURCHASE");
+    // The stored name is not an API name: no route matches it.
+    assert.equal((await fetch(`${base}/lr-followup/by-source/CREDIT_PURCHASE/4`)).status, 404);
   });
 });

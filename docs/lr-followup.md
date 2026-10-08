@@ -1,14 +1,32 @@
 # Purchase / LR Follow-up
 
 Tracks every purchase whose goods are still to arrive, from the moment it is
-paid for (Advance Request) or bought on credit (Credit Purchase) until the goods
-are **physically received**.
+paid for (Advance Request) or dispatched by a supplier on credit (**Create LR
+Follow-up**, the manual entry) until the goods are **physically received**.
 
 ```
-Advance Request ─ paid ─┐
-                        ├─► LR Follow-up: Dispatch / LR Pending ─► In Transit ─► Goods Received ─► Closed
-Credit Purchase created ┘
+Advance Request ─ paid ──────┐
+                             ├─► LR Follow-up: Dispatch / LR Pending ─► In Transit ─► Goods Received ─► Closed
+Create LR Follow-up (manual) ┘
 ```
+
+There is no separate "Credit Purchase" module any more. The manual entry
+replaced it (migration `20261129120000-lr-followup-manual`): it asks only for
+the **Supplier** and the **Transporter** (from the Transporter Master), with
+optional **LR No.**, **Dispatch Date**, **Expected Delivery Date** and
+**Remarks**. No bill / invoice reference, amount, bill date or receiving
+outlet: every such delivery goes to the **Warehouse** (outlet 2,
+`constants/outlets.js`), which the server records itself.
+
+**Internal names kept.** The Credit Purchase entry had already been deployed
+(`20261109120000-lr-followup` ran in production), so its database names stay:
+the entry is a row in `credit_purchases`, its follow-up has
+`source_type = 'CREDIT_PURCHASE'` and `credit_purchase_id`, and the create key
+is still `create_credit_purchase`. The API and screens never show them: the
+API source type is **`MANUAL`** (mapped in `utils/lr_followup.js`
+`toApiSourceType` / `fromApiSourceType`), `credit_purchase_id` is not returned,
+and a manual follow-up's reference is its own `LRF-n` (there is no `CP-n`).
+`view_credit_purchase` is no longer used by any route.
 
 Goods physically received is the only normal closing condition. An LR number,
 a dispatch date, a supplier's word, an expected date passing or a completed
@@ -49,8 +67,14 @@ Two migrations, both additive (no existing table altered, no existing row writte
   optional LR No. / dispatch / expected date, remarks, created by/at.
   Duplicates: unique `(distributor_code, bill_reference_key)`, where the key
   is the reference upper-cased with spaces and `- / . _ \ #` removed
-  (`utils/credit_purchase.js`) - "KF/2026/101", "kf-2026-101" and
+  (formerly `utils/credit_purchase.js`) - "KF/2026/101", "kf-2026-101" and
   "KF 2026 101" are one bill. Plus unique `request_key` for double clicks.
+  **Since `20261129120000-lr-followup-manual`** the bill reference, its key,
+  amount and bill date are NULL-able and a manual entry leaves them empty
+  (outlet = Warehouse); `lr_followup.amount` is NULL-able too. Rows entered
+  before keep their bill, and NULL keys never collide, so the old duplicate
+  protection still holds for them. The manual entry's duplicate protection
+  is its `request_key`.
 * `lr_followup` - one row per source. `source_type`, `advance_request_id`
   (**unique**, FK) or `credit_purchase_id` (**unique**, FK), a CHECK that
   exactly one is set, copied supplier/outlet/amount/`source_date`
@@ -94,7 +118,7 @@ into SQL.
 | Action | Endpoint | Key | Notes |
 |---|---|---|---|
 | Auto-create (advance) | inside `PATCH /advance-request/:id/payment` | `pay_advance_request` (unchanged) | Same transaction as `approved → paid`; a failure rolls the payment back. Locks the advance row, then a locking read for an existing follow-up - idempotent. |
-| Create credit purchase (+ follow-up) | `POST /credit-purchase` | `create_credit_purchase` | One transaction. Starts In Transit if an LR No. or dispatch date was entered; the transporter alone is not dispatch. |
+| Create LR Follow-up (manual) | `POST /lr-followup/manual` | `create_credit_purchase` (labelled "Create LR Follow-up") | Body: `distributor_code`, `transporter_id` (both required), `lr_no`, `dispatch_date`, `expected_delivery_date`, `remarks`, `request_key`. One transaction; outlet = Warehouse, so the caller's LR scope must include it. Starts In Transit if an LR No. or dispatch date was entered; the transporter alone is not dispatch. Answers with the follow-up detail. |
 | Dashboard / list / detail | `GET /lr-followup/summary`, `/`, `/:id`, `/by-source/:type/:id` | `view_lr_followup` | Default order: overdue first, most days overdue, oldest. |
 | LR / dispatch update | `PATCH /lr-followup/:id/lr` | `update_lr_followup` | All fields optional; LR No. or dispatch date → In Transit; clearing them → back to pending. Transporter must be active unless unchanged. |
 | Add follow-up | `POST /lr-followup/:id/follow-ups` | `update_lr_followup` | Remark required; always a new history row. |
@@ -102,7 +126,7 @@ into SQL.
 | Legacy decision | `POST /lr-followup/:id/legacy-decision` | `manage_lr_legacy_verification` | Verification Required rows only. Received / still pending / refunded / adjusted / cancelled; remark required. |
 | Close without receipt | `POST /lr-followup/:id/close-without-receipt` | `close_lr_followup_without_receipt` | Live rows only. Refunded / adjusted / cancelled; remark required; never readable as received. |
 | Backfill | `POST /lr-followup/legacy/backfill` | `manage_lr_legacy_verification` + LR all-stores scope | Idempotent. |
-| Transporter Master | `/transporter-master` (`GET`, `GET /:id`, `POST`, `PATCH /:id`, `GET /options`) | `view/create/edit_transporter_master` | `/options` (active only) is also open to `create_credit_purchase` and `update_lr_followup`. |
+| Transporter Master | `/transporter-master` (`GET`, `GET /:id`, `POST`, `PATCH /:id`, `GET /options`) | `view/create/edit_transporter_master` | `/options` (active only) is also open to `create_credit_purchase` (Create LR Follow-up) and `update_lr_followup`. |
 
 Every mutation accepts a client `request_key`: a retried submission returns
 the current state and writes nothing.
@@ -137,8 +161,8 @@ the session.
 4. Work the queue: each decision is recorded in the follow-up history;
    *Goods Still Pending* moves it to the live dashboard. The original advance
    request is never modified.
-5. Add transporters in **Master → Transporters** before raising credit
-   purchases.
+5. Add transporters in **Master → Transporters** before creating LR
+   Follow-ups by hand.
 
 ## 5. Tests
 

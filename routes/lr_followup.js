@@ -3,7 +3,14 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const { requireEmployee } = require("../utils/actor");
 const sendError = require("../utils/route_errors");
-const { PERMISSION, SOURCE_TYPE, STATUS, DECISION, AGEING_BUCKETS } = require("../utils/lr_followup");
+const {
+  PERMISSION,
+  API_SOURCE_TYPE,
+  fromApiSourceType,
+  STATUS,
+  DECISION,
+  AGEING_BUCKETS,
+} = require("../utils/lr_followup");
 
 /**
  * Purchase / LR Follow-up.
@@ -17,8 +24,13 @@ const { PERMISSION, SOURCE_TYPE, STATUS, DECISION, AGEING_BUCKETS } = require(".
  *      branch, everyone else their own store, read live. A follow-up of
  *      another branch reads as "not found" - knowing an id is not access.
  *
- * Follow-ups are created only by the two triggers (Advance paid, Credit
- * Purchase created) and the backfill. There is no "create follow-up" route.
+ * Follow-ups are created by an Advance Request reaching paid, by the manual
+ * "Create LR Follow-up" entry (routes/lr_followup_manual.js, mounted at
+ * /lr-followup/manual) and by the backfill.
+ *
+ * Source types on this API are ADVANCE_REQUEST and MANUAL. The database
+ * stores MANUAL as 'CREDIT_PURCHASE' (utils/lr_followup.js); the mapping
+ * happens here on the way in and in the usecase on the way out.
  */
 
 const MAX_LIMIT = 200;
@@ -78,7 +90,7 @@ const listSchema = {
   limit: Joi.number().integer().min(1).optional(),
   offset: Joi.number().integer().min(0).optional(),
   status: Joi.string().valid(["OPEN", "ALL", ...Object.keys(STATUS)]).optional(),
-  source_type: Joi.string().valid(Object.keys(SOURCE_TYPE)).optional(),
+  source_type: Joi.string().valid(Object.values(API_SOURCE_TYPE)).optional(),
   distributor_code: Joi.number().integer().optional(),
   transporter_id: Joi.number().integer().optional(),
   from_date: optionalDate,
@@ -162,7 +174,7 @@ class LrFollowupRoutes {
         const data = await this.usecase.list(
           {
             status: q.status,
-            source_type: q.source_type,
+            source_type: q.source_type ? fromApiSourceType(q.source_type) : undefined,
             distributor_code: q.distributor_code,
             transporter_id: q.transporter_id,
             from_date: q.from_date || undefined,
@@ -209,12 +221,12 @@ class LrFollowupRoutes {
     );
 
     router.get(
-      "/by-source/:type(ADVANCE_REQUEST|CREDIT_PURCHASE)/:sourceId(\\d+)",
+      "/by-source/:type(ADVANCE_REQUEST|MANUAL)/:sourceId(\\d+)",
       needs(PERMISSION.VIEW),
       this.handle(async (req, res) => {
         const storeIds = await this.storeIds(req);
         const data = await this.usecase.getBySource(
-          req.params.type,
+          fromApiSourceType(req.params.type),
           parseInt(req.params.sourceId, 10),
           storeIds
         );

@@ -3,8 +3,8 @@
  * tested on their own.
  *
  * A follow-up tracks goods that have been paid for (an Advance Request reached
- * `paid`) or bought on credit (a Credit Purchase was created) until they are
- * PHYSICALLY RECEIVED. Nothing else closes one: an LR number, a dispatch date,
+ * `paid`) or dispatched by a supplier on credit (a user created the LR
+ * Follow-up by hand) until they are PHYSICALLY RECEIVED. Nothing else closes one: an LR number, a dispatch date,
  * a supplier's word or an expected date passing are all tracking information,
  * not receipt.
  *
@@ -19,10 +19,39 @@
  * stored, so it can never disagree with the dates it comes from.
  */
 
+/**
+ * The source of a follow-up as the DATABASE names it. A manual LR Follow-up
+ * is stored as 'CREDIT_PURCHASE' (with its entry in `credit_purchases`):
+ * those names shipped before the manual entry replaced the Credit Purchase
+ * entry, and are kept rather than migrated. The API never shows them - see
+ * API_SOURCE_TYPE.
+ */
 const SOURCE_TYPE = Object.freeze({
   ADVANCE_REQUEST: "ADVANCE_REQUEST",
   CREDIT_PURCHASE: "CREDIT_PURCHASE",
 });
+
+/** The source of a follow-up as the API and the screens name it. */
+const API_SOURCE_TYPE = Object.freeze({
+  ADVANCE_REQUEST: "ADVANCE_REQUEST",
+  MANUAL: "MANUAL",
+});
+
+const TO_API_SOURCE = Object.freeze({
+  [SOURCE_TYPE.ADVANCE_REQUEST]: API_SOURCE_TYPE.ADVANCE_REQUEST,
+  [SOURCE_TYPE.CREDIT_PURCHASE]: API_SOURCE_TYPE.MANUAL,
+});
+
+const FROM_API_SOURCE = Object.freeze({
+  [API_SOURCE_TYPE.ADVANCE_REQUEST]: SOURCE_TYPE.ADVANCE_REQUEST,
+  [API_SOURCE_TYPE.MANUAL]: SOURCE_TYPE.CREDIT_PURCHASE,
+});
+
+/** Database source type -> API source type (unknown values pass through). */
+const toApiSourceType = (value) => TO_API_SOURCE[value] || value;
+
+/** API source type -> database source type; undefined for anything else. */
+const fromApiSourceType = (value) => FROM_API_SOURCE[value];
 
 const STATUS = Object.freeze({
   DISPATCH_PENDING: "DISPATCH_PENDING",
@@ -95,8 +124,9 @@ const PERMISSION = Object.freeze({
   MANAGE_LEGACY: "manage_lr_legacy_verification",
   CLOSE_WITHOUT_RECEIPT: "close_lr_followup_without_receipt",
   ALL_STORES: "lr_followup_all_stores",
-  VIEW_CREDIT_PURCHASE: "view_credit_purchase",
-  CREATE_CREDIT_PURCHASE: "create_credit_purchase",
+  // "Create LR Follow-up" (the manual entry). The key keeps the name it
+  // shipped with, so designations that were granted it keep it.
+  CREATE_MANUAL: "create_credit_purchase",
 });
 
 /** Display buckets only - nothing escalates on them. */
@@ -107,11 +137,13 @@ const AGEING_BUCKETS = Object.freeze([
   { key: "10+", label: "More than 10 days", min: 11, max: null },
 ]);
 
-/** Reference prefixes the screens show: LRF-12, AR-1025, CP-4587. */
+/**
+ * Reference prefixes the screens show: LRF-12, AR-1025. A manual follow-up
+ * has no source document of its own; its LRF number is its reference.
+ */
 const REF_PREFIX = Object.freeze({
   FOLLOWUP: "LRF",
   [SOURCE_TYPE.ADVANCE_REQUEST]: "AR",
-  [SOURCE_TYPE.CREDIT_PURCHASE]: "CP",
 });
 
 const conflict = (message) => {
@@ -142,7 +174,7 @@ const blank = (v) => v === undefined || v === null || String(v).trim() === "";
  * supplier? An LR number or a dispatch date is enough - neither is
  * mandatory, because some suppliers and transport methods never produce an
  * LR. The transporter alone is not dispatch: it says who will carry the
- * goods, and a credit purchase names one before anything has moved. An
+ * goods, and a manual follow-up names one before anything has moved. An
  * expected delivery date alone is a promise, not a dispatch.
  */
 function hasDispatchEvidence(row) {
@@ -185,7 +217,7 @@ function daysBetween(from, to) {
 }
 
 /**
- * Ageing in days from the source date (paid date / credit purchase date).
+ * Ageing in days from the source date (paid date / manual entry date).
  * An open follow-up ages to today; a closed one stops at the day it closed.
  */
 function ageingDays(row, today) {
@@ -230,9 +262,6 @@ function sourceRef(row) {
   if (row.source_type === SOURCE_TYPE.ADVANCE_REQUEST && row.advance_request_id) {
     return `${REF_PREFIX.ADVANCE_REQUEST}-${row.advance_request_id}`;
   }
-  if (row.source_type === SOURCE_TYPE.CREDIT_PURCHASE && row.credit_purchase_id) {
-    return `${REF_PREFIX.CREDIT_PURCHASE}-${row.credit_purchase_id}`;
-  }
   return null;
 }
 
@@ -273,6 +302,9 @@ function outcomeForDecision(decision, row) {
 
 module.exports = {
   SOURCE_TYPE,
+  API_SOURCE_TYPE,
+  toApiSourceType,
+  fromApiSourceType,
   STATUS,
   OPEN_STATUSES,
   TERMINAL_STATUSES,

@@ -6,7 +6,7 @@ const { withTransaction } = require("../utils/transaction");
  * The Transporter Master and its audit trail.
  *
  * There is no DELETE here, deliberately: a transporter that is no longer
- * used is made inactive. Credit purchases and LR follow-ups reference it by
+ * used is made inactive. LR follow-ups (and their manual entries) reference it by
  * key, and the foreign keys would refuse the delete anyway.
  */
 

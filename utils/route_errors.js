@@ -1,5 +1,5 @@
 /**
- * The response shape for the error names the LR Follow-up, Credit Purchase
+ * The response shape for the error names the LR Follow-up (including Create LR Follow-up)
  * and Transporter Master usecases throw. Same shape the Advance Request
  * routes use, plus two names those routes did not need:
  *

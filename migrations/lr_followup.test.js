@@ -112,3 +112,31 @@ describe("down", () => {
     assert.ok(td.indexOf("transporter_master_audit") < td.indexOf("DROP TABLE IF EXISTS transporter_master;"));
   });
 });
+
+describe("manual LR Follow-up (replaces the Credit Purchase entry)", () => {
+  const MANUAL = "20261129120000-lr-followup-manual";
+  const up = body(read(`${MANUAL}-up.sql`));
+  const down = body(read(`${MANUAL}-down.sql`));
+
+  it("runs after the LR Follow-up tables, from its own files", () => {
+    assert.ok(LRF < MANUAL);
+    const js = fs.readFileSync(path.join(dir, `${MANUAL}.js`), "utf8");
+    assert.match(js, new RegExp(`'${MANUAL}-up.sql'`));
+    assert.match(js, new RegExp(`'${MANUAL}-down.sql'`));
+  });
+
+  it("keeps the deployed names and only makes the bill fields optional", () => {
+    assert.doesNotMatch(up, /RENAME|DROP|CREATE TABLE|INSERT|UPDATE /i);
+    for (const col of ["bill_reference", "bill_reference_key", "amount", "bill_date"]) {
+      assert.match(up, new RegExp(`MODIFY ${col} [A-Z]+(\\(\\d+(,\\d+)?\\))? NULL`), col);
+    }
+    assert.doesNotMatch(up, /outlet_id/); // the Warehouse is always recorded
+    assert.match(up, /ALTER TABLE lr_followup MODIFY amount DECIMAL\(12,2\) NULL/);
+  });
+
+  it("down fills the gaps before making the columns mandatory again", () => {
+    assert.ok(down.indexOf("UPDATE credit_purchases") < down.indexOf("ALTER TABLE credit_purchases"));
+    assert.ok(down.indexOf("UPDATE lr_followup") < down.indexOf("ALTER TABLE lr_followup"));
+    assert.match(down, /MODIFY amount DECIMAL\(12,2\) NOT NULL/);
+  });
+});

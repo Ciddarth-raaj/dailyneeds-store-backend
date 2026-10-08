@@ -34,7 +34,8 @@ const BASE_SCHEMA = `
   CREATE TABLE all_permissions (id INT AUTO_INCREMENT PRIMARY KEY, permission_key VARCHAR(100));
   CREATE TABLE permissions (id INT AUTO_INCREMENT PRIMARY KEY, permission_key VARCHAR(100), designation_id INT, is_active TINYINT(1) DEFAULT 1);
   INSERT INTO product_distributor_master VALUES (10, 'Sri Balaji Traders', 'C10'), (11, 'Kaveri Foods', 'C11');
-  INSERT INTO outlets VALUES (1, 'Anna Nagar'), (2, 'Velachery');
+  -- 2 is the Warehouse, as in production (constants/outlets.js).
+  INSERT INTO outlets VALUES (1, 'Anna Nagar'), (2, 'Daily Needs-Warehouse');
   INSERT INTO new_employee VALUES (501, 'Purchase Lead', 1), (502, 'Accounts', 1), (503, 'Store Keeper', 2);
 `;
 
@@ -63,7 +64,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
   let lrRepo;
   let lr;
   let transporters;
-  let credit;
+  let manual;
   let transporterId;
 
   before(async () => {
@@ -83,6 +84,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     await q(sqlFile("20260903020000-lr-workflow-stage-4-up.sql"));
     await q(sqlFile("20261109110000-transporter-master-up.sql"));
     await q(sqlFile("20261109120000-lr-followup-up.sql"));
+    await q(sqlFile("20261129120000-lr-followup-manual-up.sql"));
 
     clock = makeClock();
     advanceRepo = require("./advance_request")(pool);
@@ -90,7 +92,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     transporters = require("../usecase/transporter_master")(require("./transporter_master")(pool));
     lr = require("../usecase/lr_followup")(lrRepo, transporters, { clock });
     advance = require("../usecase/advance_request")(advanceRepo, { lrFollowup: lr });
-    credit = require("../usecase/credit_purchase")(require("./credit_purchase")(pool), lr, transporters, { clock });
+    manual = require("../usecase/lr_followup_manual")(require("./lr_followup_manual")(pool), lr, transporters, { clock });
 
     const t = await transporters.create({ transporter_name: "VRL Logistics", contact_no: "98765 43210" }, EMP);
     transporterId = t.transporter_id;
@@ -121,13 +123,9 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
   const history = (id) =>
     q("SELECT * FROM lr_followup_activity WHERE lr_followup_id = ? ORDER BY lr_followup_activity_id", [id]);
 
-  function creditInput(extra = {}) {
+  function manualInput(extra = {}) {
     return {
       distributor_code: 11,
-      bill_reference: "KF/2026/101",
-      amount: 12500,
-      bill_date: "2026-09-29",
-      outlet_id: 1,
       transporter_id: transporterId,
       ...extra,
     };
@@ -208,58 +206,98 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     });
   });
 
-  // ------------------------------------------------------------ credit trigger
+  // ------------------------------------------------------------ manual trigger
 
-  describe("Credit Purchase -> created", () => {
-    it("3. creating a credit purchase creates exactly one follow-up, carrying the transporter", async () => {
-      const cp = await credit.create(creditInput(), EMP, null);
-      const rows = await q("SELECT * FROM lr_followup WHERE credit_purchase_id = ?", [cp.credit_purchase_id]);
+  describe("Create LR Follow-up (manual) -> created", () => {
+    it("3. creating one makes exactly one follow-up, for the Warehouse, carrying the transporter", async () => {
+      const f = await manual.create(manualInput({ remarks: "Two cartons" }), EMP, null);
+      const rows = await q("SELECT * FROM lr_followup WHERE lr_followup_id = ?", [f.lr_followup_id]);
       assert.equal(rows.length, 1);
-      assert.equal(rows[0].source_type, "CREDIT_PURCHASE");
+      assert.equal(rows[0].source_type, "CREDIT_PURCHASE"); // the stored name
+      assert.equal(f.source_type, "MANUAL"); // the API name
+      assert.equal(f.credit_purchase_id, undefined);
+      assert.equal(f.source_ref, null);
       assert.equal(Number(rows[0].transporter_id), transporterId);
-      assert.equal(rows[0].invoice_number, "KF/2026/101");
-      assert.equal(cp.lr_followup_id, rows[0].lr_followup_id);
-      assert.equal(cp.transporter_name, "VRL Logistics");
-    });
-
-    it("4. a repeated credit purchase event does not create another follow-up", async () => {
-      const key = "c0ffee00-0000-4000-8000-000000000001";
-      const results = await Promise.all([1, 2, 3].map(() => credit.create(creditInput({ request_key: key }), EMP, null)));
-      assert.equal(new Set(results.map((r) => r.credit_purchase_id)).size, 1);
-      assert.equal((await q("SELECT * FROM credit_purchases")).length, 1);
-      assert.equal((await q("SELECT * FROM lr_followup")).length, 1);
-
-      const again = await lr.createForCreditPurchase(results[0].credit_purchase_id, EMP);
-      assert.equal(again.created, false);
-
-      // The same supplier bill under a new key is a duplicate purchase.
-      await assert.rejects(
-        credit.create(creditInput({ request_key: "another" }), EMP, null),
-        (e) => e.name === "ConflictError" && /already entered/.test(e.message)
+      assert.equal(Number(rows[0].outlet_id), 2);
+      assert.equal(rows[0].amount, null);
+      assert.equal(rows[0].invoice_number, null);
+      assert.equal(f.transporter_name, "VRL Logistics");
+      assert.equal(f.supplier_name, "Kaveri Foods");
+      assert.equal(f.source.type, "MANUAL");
+      assert.equal(f.source.ref, `LRF-${f.lr_followup_id}`);
+      assert.match(f.activity[0].remark, /Two cartons/);
+      const [entry] = await q("SELECT * FROM credit_purchases");
+      assert.deepEqual(
+        [entry.bill_reference, entry.bill_reference_key, entry.amount, entry.bill_date, Number(entry.outlet_id)],
+        [null, null, null, null, 2]
       );
     });
 
+    it("4. a repeated submission does not create another follow-up", async () => {
+      const key = "c0ffee00-0000-4000-8000-000000000001";
+      const results = await Promise.all([1, 2, 3].map(() => manual.create(manualInput({ request_key: key }), EMP, null)));
+      assert.equal(new Set(results.map((r) => r.lr_followup_id)).size, 1);
+      assert.equal((await q("SELECT * FROM credit_purchases")).length, 1);
+      assert.equal((await q("SELECT * FROM lr_followup")).length, 1);
+
+      const [entry] = await q("SELECT credit_purchase_id FROM credit_purchases");
+      const again = await lr.createForManual(entry.credit_purchase_id, EMP);
+      assert.equal(again.created, false);
+
+      // No bill to collide on: a second dispatch from the same supplier is
+      // its own follow-up.
+      await manual.create(manualInput({ request_key: "another" }), EMP, null);
+      assert.equal((await q("SELECT * FROM lr_followup")).length, 2);
+    });
+
     it("5. a new follow-up begins in Dispatch / LR Pending - the transporter alone is not dispatch", async () => {
-      const cp = await credit.create(creditInput(), EMP, null);
-      const [f] = await q("SELECT status FROM lr_followup WHERE credit_purchase_id = ?", [cp.credit_purchase_id]);
+      const f = await manual.create(manualInput({ expected_delivery_date: "2026-10-05" }), EMP, null);
       assert.equal(f.status, "DISPATCH_PENDING");
     });
 
-    it("a credit purchase entered with an LR number starts In Transit", async () => {
-      const cp = await credit.create(creditInput({ lr_no: "LR-786542", dispatch_date: "2026-09-30" }), EMP, null);
-      const [f] = await q("SELECT status, lr_no FROM lr_followup WHERE credit_purchase_id = ?", [cp.credit_purchase_id]);
-      assert.equal(f.status, "IN_TRANSIT");
-      assert.equal(f.lr_no, "LR-786542");
+    it("an LR No. alone, or a dispatch date alone, starts it In Transit", async () => {
+      const a = await manual.create(manualInput({ lr_no: "LR-786542" }), EMP, null);
+      assert.equal(a.status, "IN_TRANSIT");
+      assert.equal(a.lr_no, "LR-786542");
+      const b = await manual.create(manualInput({ dispatch_date: "2026-09-30" }), EMP, null);
+      assert.equal(b.status, "IN_TRANSIT");
     });
 
-    it("an inactive transporter cannot be chosen for a new credit purchase", async () => {
+    it("an inactive transporter cannot be chosen for a new follow-up", async () => {
       await transporters.update(transporterId, { is_active: false }, EMP);
-      await assert.rejects(credit.create(creditInput(), EMP, null), (e) => /inactive/.test(e.message));
+      await assert.rejects(manual.create(manualInput(), EMP, null), (e) => /inactive/.test(e.message));
       assert.equal((await q("SELECT * FROM credit_purchases")).length, 0);
     });
 
-    it("an Own Store user cannot raise a purchase for another branch", async () => {
-      await assert.rejects(credit.create(creditInput({ outlet_id: 1 }), EMP, [2]), (e) => e.name === "ForbiddenError");
+    it("supplier and transporter are mandatory; dates are checked", async () => {
+      await assert.rejects(manual.create(manualInput({ transporter_id: null }), EMP, null), (e) => /Transporter is required/.test(e.message));
+      await assert.rejects(manual.create(manualInput({ distributor_code: null }), EMP, null), (e) => /Supplier is required/.test(e.message));
+      await assert.rejects(manual.create(manualInput({ dispatch_date: "2026-10-02" }), EMP, null), (e) => /future/.test(e.message));
+      await assert.rejects(
+        manual.create(manualInput({ dispatch_date: "2026-09-30", expected_delivery_date: "2026-09-29" }), EMP, null),
+        (e) => /before the Dispatch Date/.test(e.message)
+      );
+      assert.equal((await q("SELECT * FROM credit_purchases")).length, 0);
+    });
+
+    it("only someone whose scope includes the Warehouse can create one", async () => {
+      await assert.rejects(manual.create(manualInput(), EMP, [1]), (e) => e.name === "ForbiddenError");
+      const f = await manual.create(manualInput(), 503, [2]);
+      assert.equal(f.status, "DISPATCH_PENDING");
+    });
+
+    it("an entry made before the change, with its bill, still reads and backfills", async () => {
+      await q(
+        `INSERT INTO credit_purchases (distributor_code, bill_reference, bill_reference_key, amount, bill_date, outlet_id, transporter_id, created_by)
+         VALUES (11, 'KF/1', 'KF1', 400, '2026-09-20', 1, ?, 501)`,
+        [transporterId]
+      );
+      const run = await lr.backfill(EMP);
+      assert.equal(run.created, 1);
+      const [row] = await q("SELECT * FROM lr_followup");
+      assert.equal(row.invoice_number, "KF/1");
+      assert.equal(Number(row.amount), 400);
+      assert.equal(row.status, "VERIFICATION_REQUIRED");
     });
   });
 
@@ -507,17 +545,20 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
   describe("the dashboard", () => {
     it("filters by source, ageing bucket and supplier, oldest and most overdue first", async () => {
       const a = await paidAdvance(); // paid 1 Oct
-      await credit.create(creditInput({ bill_date: "2026-09-20" }), EMP, null); // 11 days
+      clock.set("2026-09-20T04:30:00Z");
+      await manual.create(manualInput(), EMP, null); // created 20 Sep: 11 days
+      clock.set("2026-10-01T04:30:00Z");
       const fa = (await followupsFor(a))[0].lr_followup_id;
       await lr.updateLr(fa, { expected_delivery_date: "2026-09-30" }, EMP, null); // overdue
 
       const all = await lr.list({}, null, 50, 0);
       assert.equal(all.count, 2);
       assert.equal(all.items[0].lr_followup_id, fa); // overdue first
-      const credits = await lr.list({ source_type: "CREDIT_PURCHASE" }, null, 50, 0);
-      assert.equal(credits.count, 1);
-      assert.equal(credits.items[0].ageing_days, 11);
-      assert.equal(credits.items[0].ageing_bucket, "10+");
+      const manuals = await lr.list({ source_type: "CREDIT_PURCHASE" }, null, 50, 0);
+      assert.equal(manuals.count, 1);
+      assert.equal(manuals.items[0].source_type, "MANUAL");
+      assert.equal(manuals.items[0].ageing_days, 11);
+      assert.equal(manuals.items[0].ageing_bucket, "10+");
       const old = await lr.list({ ageing_min: 11 }, null, 50, 0);
       assert.equal(old.count, 1);
       const bySupplier = await lr.list({ distributor_code: 10 }, null, 50, 0);
@@ -525,10 +566,10 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
 
       const s = await lr.summary(null);
       assert.deepEqual(
-        { open: s.total_open, adv: s.advance_open, cred: s.credit_open, pending: s.dispatch_pending, overdue: s.overdue },
-        { open: 2, adv: 1, cred: 1, pending: 2, overdue: 1 }
+        { open: s.total_open, adv: s.advance_open, man: s.manual_open, pending: s.dispatch_pending, overdue: s.overdue },
+        { open: 2, adv: 1, man: 1, pending: 2, overdue: 1 }
       );
-      assert.equal(s.outstanding_amount, 17500);
+      assert.equal(s.outstanding_amount, 5000); // a manual follow-up carries no amount
     });
   });
 
@@ -567,7 +608,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
     });
 
     it("a referenced transporter cannot be hard-deleted", async () => {
-      await credit.create(creditInput(), EMP, null);
+      await manual.create(manualInput(), EMP, null);
       await assert.rejects(q("DELETE FROM transporter_master WHERE transporter_id = ?", [transporterId]), /foreign key/i);
     });
   });
@@ -575,7 +616,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
   // ------------------------------------------------------------ over HTTP
 
   describe("end to end over HTTP, real routes and real SQL", () => {
-    it("transporter -> credit purchase -> LR update -> follow-up -> goods received", async () => {
+    it("transporter -> Create LR Follow-up -> LR update -> follow-up -> goods received", async () => {
       const express = require("express");
       const app = express();
       app.use(express.json());
@@ -586,13 +627,13 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
       });
       const permissions = { require: () => (req, res, next) => next() };
       // The REAL LR scope rule over the real employee table: EMP (store 1)
-      // holds lr_followup_all_stores, so the CP below for store 2 is visible.
+      // holds lr_followup_all_stores, so the Warehouse follow-ups are visible.
       const scope = require("../utils/lr_followup_scope").createLrScope(
         { ADMIN_USER_TYPE: 2, has: async (r, key) => key === "lr_followup_all_stores" },
         { getEmployeeStore: async (id) => ({ ...(await q("SELECT employee_id, store_id, 1 AS employee_status FROM new_employee WHERE employee_id = ?", [id]))[0] }) }
       );
       app.use("/transporter-master", require("../routes/transporter_master")(transporters, permissions).getRouter());
-      app.use("/credit-purchase", require("../routes/credit_purchase")(credit, permissions, scope).getRouter());
+      app.use("/lr-followup/manual", require("../routes/lr_followup_manual")(manual, permissions, scope).getRouter());
       app.use("/lr-followup", require("../routes/lr_followup")(lr, permissions, scope).getRouter());
       const server = await new Promise((resolve) => {
         const s = app.listen(0, () => resolve(s));
@@ -609,9 +650,7 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         const t = await call("POST", "/transporter-master", { transporter_name: "KPN Parcel", contact_no: "+91 91234 56789" });
         assert.equal(t.status, 201);
         assert.equal(t.body.data.contact_no, "9123456789");
-        const noTransporter = await call("POST", "/credit-purchase", {
-          distributor_code: 11, bill_reference: "KF/76", amount: 1, bill_date: "2026-09-30", outlet_id: 2,
-        });
+        const noTransporter = await call("POST", "/lr-followup/manual", { distributor_code: 11 });
         assert.equal(noTransporter.status, 400);
         const dup = await call("POST", "/transporter-master", { transporter_name: "kpn  parcel", contact_no: "9123456789" });
         assert.equal(dup.status, 409);
@@ -621,13 +660,13 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         const options = await call("GET", "/transporter-master/options");
         assert.equal(options.body.data.length, 2);
 
-        const cp = await call("POST", "/credit-purchase", {
-          distributor_code: 11, bill_reference: "KF/77", amount: 999.5, bill_date: "2026-09-30",
-          outlet_id: 2, transporter_id: t.body.data.transporter_id, request_key: "rk-http-1",
+        const cp = await call("POST", "/lr-followup/manual", {
+          distributor_code: 11, transporter_id: t.body.data.transporter_id, request_key: "rk-http-1",
         });
         assert.equal(cp.status, 201);
         const fid = cp.body.data.lr_followup_id;
         assert.ok(fid);
+        assert.equal(cp.body.data.status, "DISPATCH_PENDING"); // transporter alone is not dispatch
 
         const lrUpdate = await call("PATCH", `/lr-followup/${fid}/lr`, { lr_no: "LR-555", dispatch_date: "2026-10-01", request_key: "rk-http-2" });
         assert.equal(lrUpdate.status, 200);
@@ -637,9 +676,10 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         const fu = await call("POST", `/lr-followup/${fid}/follow-ups`, { remark: "Shipment in transit.", next_follow_up_date: "2026-10-02" });
         assert.equal(fu.status, 201);
 
-        const list = await call("GET", "/lr-followup?source_type=CREDIT_PURCHASE");
+        const list = await call("GET", "/lr-followup?source_type=MANUAL");
         assert.equal(list.body.data.count, 1);
-        assert.equal(list.body.data.items[0].source_ref, `CP-${cp.body.data.credit_purchase_id}`);
+        assert.equal(list.body.data.items[0].source_type, "MANUAL");
+        assert.equal(list.body.data.items[0].source_ref, null);
 
         const received = await call("POST", `/lr-followup/${fid}/goods-received`, { remark: "Received in full" });
         assert.equal(received.status, 200);
@@ -647,20 +687,17 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
         const again = await call("POST", `/lr-followup/${fid}/goods-received`, {});
         assert.equal(again.status, 409);
 
-        const card = await call("GET", `/lr-followup/by-source/CREDIT_PURCHASE/${cp.body.data.credit_purchase_id}`);
-        assert.equal(card.body.data.followup.status, "CLOSED");
-        assert.equal(card.body.data.exception, null);
 
         const detail = (await call("GET", `/lr-followup/${fid}`)).body.data;
         assert.deepEqual(detail.activity.map((a) => a.activity_type), ["CREATED", "LR_UPDATE", "FOLLOW_UP", "GOODS_RECEIVED", "CLOSED"]);
         assert.equal(detail.closure_outcome, "CLOSED - GOODS_RECEIVED");
         assert.equal(detail.stock_received, true);
 
-        // A second credit purchase, closed WITHOUT receipt over HTTP.
-        const cp2 = await call("POST", "/credit-purchase", {
-          distributor_code: 11, bill_reference: "KF/78", amount: 50, bill_date: "2026-09-30",
-          outlet_id: 1, transporter_id: t.body.data.transporter_id,
+        // A second manual follow-up, closed WITHOUT receipt over HTTP.
+        const cp2 = await call("POST", "/lr-followup/manual", {
+          distributor_code: 11, transporter_id: t.body.data.transporter_id, lr_no: "LR-9",
         });
+        assert.equal(cp2.body.data.status, "IN_TRANSIT");
         const f2 = cp2.body.data.lr_followup_id;
         const closed = await call("POST", `/lr-followup/${f2}/close-without-receipt`, { closure_reason: "CANCELLED", remark: "Supplier cancelled the order" });
         assert.equal(closed.status, 200);
@@ -677,37 +714,12 @@ describe("LR Follow-up, as SQL", { skip: !URL && "LR_TEST_MYSQL is not set" }, (
 
   // ------------------------------------------------------------ corrections
 
-  describe("Credit Purchase: transporter mandatory, duplicates normalised", () => {
-    it("refuses a credit purchase with no transporter", async () => {
-      await assert.rejects(credit.create(creditInput({ transporter_id: null }), EMP, null), (e) => /Transporter is required/.test(e.message));
+  describe("manual entry: transporter mandatory in the database too", () => {
+    it("refuses an entry with no transporter", async () => {
       await assert.rejects(q(
-        "INSERT INTO credit_purchases (distributor_code, bill_reference, bill_reference_key, amount, bill_date, outlet_id, transporter_id, created_by) VALUES (11, 'X', 'X', 1, '2026-09-30', 1, NULL, 501)"
+        "INSERT INTO credit_purchases (distributor_code, outlet_id, transporter_id, created_by) VALUES (11, 2, NULL, 501)"
       ), /cannot be null/i);
       assert.equal((await q("SELECT * FROM credit_purchases")).length, 0);
-    });
-
-    it("the same supplier bill typed differently is a duplicate; another supplier's is not", async () => {
-      await credit.create(creditInput({ bill_reference: "KF/2026/101" }), EMP, null);
-      for (const typed of ["kf-2026-101", " KF 2026 101 ", "Kf.2026.101"]) {
-        await assert.rejects(
-          credit.create(creditInput({ bill_reference: typed, request_key: `k-${typed}` }), EMP, null),
-          (e) => e.name === "ConflictError",
-          typed
-        );
-      }
-      await credit.create(creditInput({ distributor_code: 10, bill_reference: "kf-2026-101" }), EMP, null);
-      assert.equal((await q("SELECT * FROM credit_purchases")).length, 2);
-      assert.equal((await q("SELECT * FROM lr_followup")).length, 2);
-    });
-
-    it("two people entering the same bill at once: one purchase, one follow-up", async () => {
-      const outcomes = await Promise.allSettled([
-        credit.create(creditInput({ bill_reference: "KF/9", request_key: "a" }), EMP, null),
-        credit.create(creditInput({ bill_reference: "kf 9", request_key: "b" }), EMP, null),
-      ]);
-      assert.equal(outcomes.filter((o) => o.status === "fulfilled").length, 1);
-      assert.equal(outcomes.find((o) => o.status === "rejected").reason.name, "ConflictError");
-      assert.equal((await q("SELECT * FROM lr_followup")).length, 1);
     });
   });
 

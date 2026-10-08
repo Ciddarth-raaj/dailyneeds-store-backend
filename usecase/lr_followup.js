@@ -1,6 +1,7 @@
 const { istDateOf } = require("../utils/istDate");
 const {
   SOURCE_TYPE,
+  toApiSourceType,
   STATUS,
   CLOSURE_REASON,
   ACTIVITY,
@@ -20,12 +21,12 @@ const {
 } = require("../utils/lr_followup");
 
 /**
- * LR Follow-up: from "paid for / bought on credit" to "goods physically
+ * LR Follow-up: from "paid for / dispatched on credit" to "goods physically
  * received".
  *
  * TWO TRIGGERS, ONE SHAPE. `createForPaidAdvance` runs inside the Advance
- * Request payment's own transaction; `createForCreditPurchase` inside the
- * Credit Purchase insert's. Both lock the source row first and then look for
+ * Request payment's own transaction; `createForManual` inside the manual
+ * "Create LR Follow-up" entry's insert. Both lock the source row first and then look for
  * an existing follow-up with a locking read, so the same event processed
  * twice - a retry, a double click, two servers - finds the first follow-up
  * instead of making a second. The unique keys on the table are the backstop.
@@ -116,8 +117,13 @@ class LrFollowupUsecase {
     const ageing = row.ageing_days !== undefined && row.ageing_days !== null
       ? Number(row.ageing_days)
       : base.ageing_days;
+    // A manual follow-up is stored as 'CREDIT_PURCHASE' with an entry in
+    // `credit_purchases`; the API names it MANUAL and does not expose the
+    // internal entry id.
+    const { credit_purchase_id, ...presented } = base;
     return {
-      ...base,
+      ...presented,
+      source_type: toApiSourceType(row.source_type),
       ageing_days: ageing,
       ageing_bucket: ageingBucket(ageing),
       is_overdue: row.is_overdue !== undefined ? Boolean(Number(row.is_overdue)) : base.is_overdue,
@@ -190,40 +196,42 @@ class LrFollowupUsecase {
   }
 
   /**
-   * The Credit Purchase trigger, inside the purchase insert's transaction.
-   * The purchase's own dispatch details are copied in, so a purchase that
-   * already has an LR or dispatch date starts In Transit.
+   * The manual "Create LR Follow-up" trigger, inside the entry's insert
+   * transaction. The entry's own dispatch details are copied in, so one
+   * that already has an LR No. or dispatch date starts In Transit; the
+   * transporter alone does not. It ages from the day it was created.
    */
-  async createForCreditPurchase(creditPurchaseId, actorId = null, conn = null) {
+  async createForManual(entryId, actorId = null, conn = null) {
     if (!conn) {
-      return this.repo.transaction((c) => this.createForCreditPurchase(creditPurchaseId, actorId, c));
+      return this.repo.transaction((c) => this.createForManual(entryId, actorId, c));
     }
 
-    const purchase = await this.repo.getCreditPurchase(creditPurchaseId, conn, { forUpdate: true });
-    if (!purchase) throw notFound("Credit purchase not found");
+    const entry = await this.repo.getManualEntry(entryId, conn, { forUpdate: true });
+    if (!entry) throw notFound("LR Follow-up entry not found");
 
-    const existing = await this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, creditPurchaseId, null, conn, {
+    const existing = await this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, entryId, null, conn, {
       forUpdate: true,
     });
     if (existing) return { created: false, lr_followup_id: Number(existing.lr_followup_id) };
 
     const tracking = {
-      lr_no: purchase.lr_no ?? null,
-      transporter_id: purchase.transporter_id ?? null,
-      dispatch_date: purchase.dispatch_date ?? null,
-      expected_delivery_date: purchase.expected_delivery_date ?? null,
+      lr_no: entry.lr_no ?? null,
+      transporter_id: entry.transporter_id ?? null,
+      dispatch_date: entry.dispatch_date ?? null,
+      expected_delivery_date: entry.expected_delivery_date ?? null,
     };
     const status = statusForDispatch(STATUS.DISPATCH_PENDING, tracking);
 
     return this.insertWithHistory(
       {
         source_type: SOURCE_TYPE.CREDIT_PURCHASE,
-        credit_purchase_id: creditPurchaseId,
-        distributor_code: purchase.distributor_code,
-        outlet_id: purchase.outlet_id ?? null,
-        amount: purchase.amount,
-        source_date: toDateOnly(purchase.bill_date) || this.today(),
-        invoice_number: purchase.bill_reference ?? null,
+        credit_purchase_id: entryId,
+        distributor_code: entry.distributor_code,
+        outlet_id: entry.outlet_id ?? null,
+        amount: null,
+        source_date: this.now(),
+        invoice_number: null,
+        latest_remark: entry.remarks ?? null,
         ...tracking,
         status,
         created_by: actorId,
@@ -231,15 +239,16 @@ class LrFollowupUsecase {
       {
         activity_type: ACTIVITY.CREATED,
         remark:
-          status === STATUS.IN_TRANSIT
-            ? `Credit purchase CP-${creditPurchaseId} created with dispatch details. Follow-up opened: in transit.`
-            : `Credit purchase CP-${creditPurchaseId} created. Follow-up opened: waiting for dispatch / LR.`,
+          (status === STATUS.IN_TRANSIT
+            ? "LR Follow-up created with dispatch details: in transit."
+            : "LR Follow-up created: waiting for dispatch / LR.") +
+          (entry.remarks ? ` ${entry.remarks}` : ""),
         new_status: status,
         details: { tracking },
         created_by: actorId,
       },
       conn,
-      () => this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, creditPurchaseId, null, conn, { forUpdate: true })
+      () => this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, entryId, null, conn, { forUpdate: true })
     );
   }
 
@@ -303,14 +312,10 @@ class LrFollowupUsecase {
         created_at: a.created_at,
       };
     }
-    const p = await this.repo.getCreditPurchase(row.credit_purchase_id);
+    const p = await this.repo.getManualEntry(row.credit_purchase_id);
     return p && {
-      type: SOURCE_TYPE.CREDIT_PURCHASE,
-      id: Number(p.credit_purchase_id),
-      ref: `CP-${p.credit_purchase_id}`,
-      amount: p.amount,
-      bill_reference: p.bill_reference,
-      bill_date: p.bill_date,
+      type: toApiSourceType(SOURCE_TYPE.CREDIT_PURCHASE),
+      ref: followupRef(row.lr_followup_id),
       transporter_name: p.transporter_name,
       transporter_contact_no: p.transporter_contact_no,
       remarks: p.remarks,
@@ -321,7 +326,8 @@ class LrFollowupUsecase {
 
   /**
    * The follow-up for one source, for the read-only card on the Advance
-   * Request and Credit Purchase screens.
+   * Request screen. `sourceType` is the database name (the route maps the
+   * API's MANUAL to it).
    *
    * `expected` says whether one SHOULD exist, so a paid advance with no
    * follow-up is reported as an exception rather than shown as nothing.
@@ -333,8 +339,8 @@ class LrFollowupUsecase {
       if (!advance) throw notFound("Advance request not found");
       expected = advance.status === "paid";
     } else {
-      const purchase = await this.repo.getCreditPurchase(sourceId);
-      if (!purchase) throw notFound("Credit purchase not found");
+      const entry = await this.repo.getManualEntry(sourceId);
+      if (!entry) throw notFound("LR Follow-up entry not found");
       expected = true;
     }
 
@@ -746,8 +752,8 @@ class LrFollowupUsecase {
   // =================================================================
 
   /**
-   * Brings every paid Advance Request (and, defensively, every Credit
-   * Purchase) that has no follow-up into the module, as
+   * Brings every paid Advance Request (and, defensively, every manual
+   * entry) that has no follow-up into the module, as
    * VERIFICATION_REQUIRED.
    *
    * WHY NOT ASSUME. dnds has no internal goods-receipt record linked to an
@@ -760,9 +766,9 @@ class LrFollowupUsecase {
    * once, create nothing new.
    */
   async backfill(actorId) {
-    const [advanceIds, creditIds] = await Promise.all([
+    const [advanceIds, manualIds] = await Promise.all([
       this.repo.paidAdvancesWithoutFollowup(null),
-      this.repo.creditPurchasesWithoutFollowup(null),
+      this.repo.manualEntriesWithoutFollowup(null),
     ]);
     const runAt = this.now();
     const results = [];
@@ -771,9 +777,9 @@ class LrFollowupUsecase {
       // eslint-disable-next-line no-await-in-loop
       results.push(await this.repo.transaction((conn) => this.backfillAdvance(id, actorId, runAt, conn)));
     }
-    for (const id of creditIds) {
+    for (const id of manualIds) {
       // eslint-disable-next-line no-await-in-loop
-      results.push(await this.repo.transaction((conn) => this.backfillCredit(id, actorId, runAt, conn)));
+      results.push(await this.repo.transaction((conn) => this.backfillManual(id, actorId, runAt, conn)));
     }
 
     return {
@@ -838,30 +844,31 @@ class LrFollowupUsecase {
     return { source_ref: `AR-${id}`, finding, ...result };
   }
 
-  async backfillCredit(id, actorId, runAt, conn) {
-    const purchase = await this.repo.getCreditPurchase(id, conn, { forUpdate: true });
-    if (!purchase) return { source_ref: `CP-${id}`, created: false, finding: "Purchase not found; skipped." };
+  async backfillManual(id, actorId, runAt, conn) {
+    const ref = `Manual entry ${id}`;
+    const entry = await this.repo.getManualEntry(id, conn, { forUpdate: true });
+    if (!entry) return { source_ref: ref, created: false, finding: "Entry not found; skipped." };
     const existing = await this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, id, null, conn, { forUpdate: true });
     if (existing) {
-      return { source_ref: `CP-${id}`, created: false, lr_followup_id: Number(existing.lr_followup_id) };
+      return { source_ref: ref, created: false, lr_followup_id: Number(existing.lr_followup_id) };
     }
 
     const finding =
-      `Credit purchase dated ${fmtDate(purchase.bill_date)} had no follow-up. ` +
+      `Manual LR Follow-up entry of ${fmtDate(entry.bill_date || entry.created_at)} had no follow-up. ` +
       "Whether the goods arrived cannot be determined automatically. Verify and record the outcome.";
     const result = await this.insertWithHistory(
       {
         source_type: SOURCE_TYPE.CREDIT_PURCHASE,
         credit_purchase_id: id,
-        distributor_code: purchase.distributor_code,
-        outlet_id: purchase.outlet_id ?? null,
-        amount: purchase.amount,
-        source_date: toDateOnly(purchase.bill_date),
-        invoice_number: purchase.bill_reference ?? null,
-        lr_no: purchase.lr_no ?? null,
-        transporter_id: purchase.transporter_id ?? null,
-        dispatch_date: purchase.dispatch_date ?? null,
-        expected_delivery_date: purchase.expected_delivery_date ?? null,
+        distributor_code: entry.distributor_code,
+        outlet_id: entry.outlet_id ?? null,
+        amount: entry.amount ?? null,
+        source_date: toDateOnly(entry.bill_date) || entry.created_at,
+        invoice_number: entry.bill_reference ?? null,
+        lr_no: entry.lr_no ?? null,
+        transporter_id: entry.transporter_id ?? null,
+        dispatch_date: entry.dispatch_date ?? null,
+        expected_delivery_date: entry.expected_delivery_date ?? null,
         status: STATUS.VERIFICATION_REQUIRED,
         is_legacy: 1,
         latest_remark: finding,
@@ -871,13 +878,13 @@ class LrFollowupUsecase {
         activity_type: ACTIVITY.BACKFILL,
         remark: finding,
         new_status: STATUS.VERIFICATION_REQUIRED,
-        details: { backfill_run_at: runAt.toISOString(), source_ref: `CP-${id}`, receipt_evidence: null },
+        details: { backfill_run_at: runAt.toISOString(), source_ref: ref, receipt_evidence: null },
         created_by: actorId,
       },
       conn,
       () => this.repo.getBySource(SOURCE_TYPE.CREDIT_PURCHASE, id, null, conn, { forUpdate: true })
     );
-    return { source_ref: `CP-${id}`, finding, ...result };
+    return { source_ref: ref, finding, ...result };
   }
 
   /** The Legacy Follow-up Verification queue (and, optionally, its decided rows). */
