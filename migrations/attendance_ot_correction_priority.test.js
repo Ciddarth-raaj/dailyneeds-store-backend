@@ -22,11 +22,9 @@ describe(`migration ${NAME}`, () => {
     assert.ok(js.includes(`${NAME}-up.sql`));
     assert.ok(js.includes(`${NAME}-down.sql`));
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, "")).sort();
-    // The newest OT migration. Later migrations of other modules are named,
-    // so each is a deliberate addition.
-    const ot = all.filter((f) => /attendance-ot/.test(f));
-    assert.equal(ot[ot.length - 1], NAME, "the newest OT migration");
-    assert.deepEqual(all.filter((f) => f > NAME), ["20261129120000-lr-followup-manual"]);
+    // Sorts after every OT migration before it; only the Historical OT Review
+    // and the LR Follow-up manual migration follow.
+    assert.deepEqual(all.filter((f) => f > NAME), ["20261128120000-attendance-ot-historical-review", "20261129120000-lr-followup-manual"]);
   });
 
   it("a SYSTEM OT gets its own open-request group; manual requests keep theirs", () => {

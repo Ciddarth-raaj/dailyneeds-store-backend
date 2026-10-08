@@ -146,11 +146,15 @@ class AttendanceCalculationRoutes {
           const read = req.query.preview === "true"
             ? this.usecase.calculateRange
             : this.usecase.readRange;
-          const days = await read({
+          let days = await read({
             employee_id: Number(req.query.employee_id),
             from_date: req.query.from_date,
             to_date: req.query.to_date,
           });
+          // A preview explains a not-raised OT exactly as the stored read does.
+          if (read === this.usecase.calculateRange && typeof this.usecase.explainAutoOtDays === "function") {
+            days = await this.usecase.explainAutoOtDays(Number(req.query.employee_id), days);
+          }
           res.json({ code: 200, days });
         } catch (err) {
           respondError(res, err);

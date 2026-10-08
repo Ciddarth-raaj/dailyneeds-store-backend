@@ -120,6 +120,7 @@ function validationError(message) {
  * somebody has to remember to change together.
  */
 const { MAX_BACKDATE_DAYS, MAX_FORWARD_DAYS } = shiftChangeEligibility;
+const { autoOtCreationGate } = require("../utils/attendance_ot_auto_gate");
 
 /**
  * `approverSetupRepo` is the EMPLOYEE-LEVEL approver store (Attendance
@@ -2512,8 +2513,16 @@ module.exports = (
   const DEFERRED_SOURCE = Object.freeze({
     BACKFILL: "BACKFILL",
     OT_WITHDRAWN_INCOMPLETE: "OT_WITHDRAWN_INCOMPLETE",
+    // A date an administrator authorised in a Historical OT Review
+    // (usecase/attendance_ot_historical_review.js): raised as Pending OT; in
+    // a locked month its approval settles forward as Prior-Month OT.
+    HISTORICAL_REVIEW: "HISTORICAL_REVIEW",
   });
-  const LOCKED_EXCEPTION_SOURCES = Object.freeze([DEFERRED_SOURCE.BACKFILL, DEFERRED_SOURCE.OT_WITHDRAWN_INCOMPLETE]);
+  const LOCKED_EXCEPTION_SOURCES = Object.freeze([
+    DEFERRED_SOURCE.BACKFILL,
+    DEFERRED_SOURCE.OT_WITHDRAWN_INCOMPLETE,
+    DEFERRED_SOURCE.HISTORICAL_REVIEW,
+  ]);
 
   /** What an approver is told when an OT's day has incomplete attendance. */
   const ATTENDANCE_INCOMPLETE_MESSAGE = "Attendance is incomplete. OT will be calculated after attendance is complete.";
@@ -2736,6 +2745,19 @@ module.exports = (
      * re-runs this sync for that date even though it is before the cutover.
      */
     track_deferred = false,
+    /*
+     * A sentence appended to the reason of a request this call CREATES -
+     * the Historical OT Review names its batch and item here, so the request
+     * itself says how it came to exist.
+     */
+    reason_note = null,
+    /*
+     * DRY RUN ONLY: dates to treat as already opened by a Historical OT
+     * Review marker, so its preview reports exactly what an authorised apply
+     * would do on each date (the live engine's minutes, the chain, every
+     * gate). Ignored when writing: a real apply opens real markers.
+     */
+    assume_review_dates = null,
   }) => {
     const employeeId = Number(employee_id);
     const result = {
@@ -2796,7 +2818,6 @@ module.exports = (
      * withdrawn when its OT goes, wherever its date falls.
      */
     const creationFrom = toDateOnly(allow_creation_from);
-    const effectiveCutover = cutover && creationFrom && creationFrom < cutover ? creationFrom : cutover;
     const inScope = calculated.filter((day) => day.attendance_date <= businessToday);
     if (inScope.length === 0) return result;
     const scopeDates = inScope.map((d) => d.attendance_date);
@@ -2827,14 +2848,21 @@ module.exports = (
         markerOn.set(toDateOnly(m.attendance_date), m)
       );
     }
+    // The shared rule (`utils/attendance_ot_auto_gate.js`): the attendance
+    // read explains a not-raised OT with this very function.
+    if (dry_run && Array.isArray(assume_review_dates)) {
+      assume_review_dates.map(toDateOnly).filter((d) => d && scopeDates.includes(d) && !markerOn.has(d)).forEach((d) =>
+        markerOn.set(d, { deferred_sync_id: null, attendance_date: d, source: DEFERRED_SOURCE.HISTORICAL_REVIEW, assumed: true })
+      );
+    }
     const creationGate = (date) =>
-      markerOn.has(date)
-        ? null
-        : effectiveCutover && date < effectiveCutover
-        ? AUTO_OT_SKIP.BEFORE_CUTOVER
-        : date < oldest && !(creationFrom && date >= creationFrom)
-        ? AUTO_OT_SKIP.OUTSIDE_WINDOW
-        : null;
+      autoOtCreationGate({
+        date,
+        cutover,
+        creation_from: creationFrom,
+        oldest,
+        marker_waiting: markerOn.has(date),
+      });
     const blockerOf = (c) => ({
       blocking_request_id: Number(c.attendance_approval_request_id),
       blocking_request_type: c.request_type,
@@ -3221,7 +3249,9 @@ module.exports = (
               attendance_date: date,
               outlet_id: who.outlet_id,
               requester_class: who.requester_class,
-              reason: `System: ${verdict.minutes} min eligible overtime calculated by the attendance engine`,
+              reason: `System: ${verdict.minutes} min eligible overtime calculated by the attendance engine${
+                reason_note ? `. ${reason_note}` : ""
+              }`,
               candidate_ot_minutes: verdict.minutes,
               auto_created: true,
               chain_source,

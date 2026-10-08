@@ -36,6 +36,7 @@ describe("the migration", () => {
       "20261125120000-attendance-ot-auto-pending",
       "20261126120000-attendance-ot-late-settlement",
       "20261127120000-attendance-ot-correction-priority",
+      "20261128120000-attendance-ot-historical-review",
       "20261129120000-lr-followup-manual",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);

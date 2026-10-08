@@ -1753,6 +1753,20 @@ class Server {
       this.sensitive,
       this.employeeBranchScope
     );
+    // Historical OT Review: preview, and administrator-authorised creation
+    // of PENDING OT for calculated OT dated before the automatic-OT cutover.
+    // Approving it stays with the ordinary chain (and, in a locked month,
+    // the existing Prior-Month OT settlement).
+    const attendanceOtHistoricalReviewRouter = require("./routes/attendance_ot_historical_review")(
+      require("./usecase/attendance_ot_historical_review")({
+        reviewRepo: require("./repository/attendance_ot_historical_review")(this.mysql.connection),
+        regularization: this.attendanceRegularizationUsecase,
+        // One Telegram summary per first approver per batch - the deploy
+        // backfill's message - never a card per date.
+        notifier: this.attendanceOtTelegramUsecase,
+      }),
+      this.permissions
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -2118,6 +2132,7 @@ class Server {
     app.use("/", attendanceMissingRouter.getRouter());
     app.use("/", attendanceShiftChangeReportRouter.getRouter());
     app.use("/", attendanceShiftChangeBlockRouter.getRouter());
+    app.use("/", attendanceOtHistoricalReviewRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendancePermissionRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());

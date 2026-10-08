@@ -1213,6 +1213,49 @@ class AttendanceCalculationRepository {
    * @param {Array} rows  `[{ employee_id, attendance_date }]`
    * @returns {Array} `[{ employee_id, year, month }]`, empty when none
    */
+  /**
+   * THE AUTOMATIC-OT CUTOVER ROW, for EXPLAINING a calculated OT that has no
+   * request (`utils/attendance_ot_auto_gate.js`). The same statement as
+   * `repository/attendance_regularization.js#getAutoOtSetting`; null when the
+   * automation is not installed. Read only.
+   */
+  async getAutoOtSetting() {
+    try {
+      const rows = await this._read(
+        "GET-AUTO-OT-SETTING",
+        `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date
+           FROM attendance_ot_auto_pending_setting
+          WHERE setting_id = 1`,
+        []
+      );
+      return rows && rows[0] ? rows[0] : null;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return null;
+      throw err;
+    }
+  }
+
+  /**
+   * The employee's REMEMBERED historical OT dates still waiting
+   * (`attendance_ot_deferred_sync`) among `dates` - the only dates the
+   * automation may raise before the cutover. Read only; none without the table.
+   */
+  async listWaitingDeferredOt(employeeId, dates) {
+    if (!Array.isArray(dates) || dates.length === 0) return [];
+    try {
+      return await this._read(
+        "LIST-WAITING-DEFERRED-OT",
+        `SELECT DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date
+           FROM attendance_ot_deferred_sync
+          WHERE employee_id = ? AND attendance_date IN (?) AND status = 'WAITING_FOR_CORRECTION'`,
+        [employeeId, dates]
+      );
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      throw err;
+    }
+  }
+
   async findPayrollLockedPeriods(rows = []) {
     const { periods } = periodsTouched(rows);
     if (periods.length === 0) return [];

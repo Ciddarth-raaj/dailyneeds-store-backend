@@ -47,6 +47,7 @@ describe(NAME, () => {
       "20261125120000-attendance-ot-auto-pending.js",
       "20261126120000-attendance-ot-late-settlement.js",
       "20261127120000-attendance-ot-correction-priority.js",
+      "20261128120000-attendance-ot-historical-review.js",
       "20261129120000-lr-followup-manual.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
