@@ -22,6 +22,13 @@ const {
 const { JOINED_ON } = require("../utils/joining_date");
 const { CORRECTION_REQUEST_TYPES } = require("../utils/ot_correction_priority");
 
+/** The review's own tables (migration 20261128120000). */
+const REVIEW_TABLES = Object.freeze([
+  "attendance_ot_historical_review_batch",
+  "attendance_ot_historical_review_item",
+  "attendance_ot_historical_review_raised",
+]);
+
 /** The deferred-marker source a review writes; see LOCKED_EXCEPTION_SOURCES. */
 const REVIEW_MARKER_SOURCE = "HISTORICAL_REVIEW";
 
@@ -62,6 +69,31 @@ class AttendanceOtHistoricalReviewRepository {
   }
 
   /**
+   * IS THE REVIEW INSTALLED? One read of `information_schema` (a SELECT, so
+   * it runs on the read-only handle too) for the review's own three tables
+   * (migration 20261128120000). Before that migration the feature has never
+   * run, so there is no review history to find: the preview treats "already
+   * reviewed" as absent, and `authorise` refuses outright. A failed lookup is
+   * an error, never "absent" - the never-twice check is not skipped on a
+   * guess. Only the REVIEW's tables are optional: the settlement, deferred
+   * marker and request tables every existing OT check reads must exist.
+   */
+  async reviewSchema() {
+    const rows = await this._read(
+      "REVIEW-SCHEMA",
+      `SELECT TABLE_NAME AS name FROM information_schema.TABLES
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (?)`,
+      [REVIEW_TABLES]
+    );
+    const present = new Set((rows || []).map((r) => String(r.name || r.TABLE_NAME)));
+    return {
+      installed: REVIEW_TABLES.every((t) => present.has(t)),
+      raised_table: present.has("attendance_ot_historical_review_raised"),
+      present: REVIEW_TABLES.filter((t) => present.has(t)),
+    };
+  }
+
+  /**
    * EVERY STORED DAY IN THE WINDOW WITH CALCULATED OT, with everything the
    * rule needs to classify it: the day's own figures and settlement, the
    * latest live OT request (and any withdrawn one), a Prior-Month OT
@@ -69,7 +101,14 @@ class AttendanceOtHistoricalReviewRepository {
    * a review already raised OT on it, the employment period, and the payroll
    * status of its month. ONE statement, read only.
    */
-  async listCandidates({ from_date, to_date, employee_id = null }) {
+  async listCandidates({ from_date, to_date, employee_id = null, schema = null }) {
+    const review = schema || (await this.reviewSchema());
+    // THE NEVER-TWICE CHECK whenever its table exists; only a database that
+    // has never had the review installed reads it as "not reviewed".
+    const alreadyReviewed = review.raised_table
+      ? `EXISTS (SELECT 1 FROM attendance_ot_historical_review_raised h
+                  WHERE h.employee_id = c.employee_id AND h.attendance_date = c.attendance_date)`
+      : "0";
     return this._read(
       "LIST-CANDIDATES",
       `SELECT c.employee_id, ne.employee_name,
@@ -101,8 +140,7 @@ class AttendanceOtHistoricalReviewRepository {
                        WHERE r.requested_for_employee_id = c.employee_id AND r.attendance_date = c.attendance_date
                          AND r.status = 'PENDING' AND r.request_type IN (?)) AS correction_pending,
               m.status AS marker_status, m.source AS marker_source,
-              EXISTS (SELECT 1 FROM attendance_ot_historical_review_raised h
-                       WHERE h.employee_id = c.employee_id AND h.attendance_date = c.attendance_date) AS already_reviewed,
+              ${alreadyReviewed} AS already_reviewed,
               (((${JOINED_ON("ne")}) IS NOT NULL AND c.attendance_date < (${JOINED_ON("ne")}))
                 OR (ne.resignation_date IS NOT NULL AND c.attendance_date > ne.resignation_date)) AS outside_employment,
               p.payrun_calculation_id AS payroll_calculation_id, p.status AS payroll_status,
@@ -326,3 +364,4 @@ class AttendanceOtHistoricalReviewRepository {
 module.exports = (db) => new AttendanceOtHistoricalReviewRepository(db);
 module.exports.AttendanceOtHistoricalReviewRepository = AttendanceOtHistoricalReviewRepository;
 module.exports.REVIEW_MARKER_SOURCE = REVIEW_MARKER_SOURCE;
+module.exports.REVIEW_TABLES = REVIEW_TABLES;

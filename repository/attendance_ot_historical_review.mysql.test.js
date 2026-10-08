@@ -311,6 +311,125 @@ describe("Historical OT Review, as SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL 
     assert.equal((await q(pool, "SELECT COUNT(*) AS n FROM attendance_ot_historical_review_raised"))[0].n, 0);
   });
 
+  /**
+   * THE PRE-MIGRATION SCHEMA - production today: every OT, payroll, settlement
+   * and deferred-marker table exists, the review's three do not. The preview
+   * runs through the diagnostics' READ-ONLY connection (a READ ONLY session
+   * and a SELECT-only filter), exactly as scripts/attendance/
+   * ot-historical-review-preview.js does.
+   */
+  const readOnlyReview = async () => {
+    const os = require("os");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ot-review-ro-"));
+    const u = new (require("url").URL)(URL);
+    const cfg = path.join(dir, "config.json");
+    fs.writeFileSync(cfg, JSON.stringify({ db: { mysql: { production: {
+      host: u.hostname, port: Number(u.port || 3306), username: decodeURIComponent(u.username),
+      password: decodeURIComponent(u.password), database: u.pathname.replace(/^\//, "").split("?")[0],
+    } } } }));
+    const prevConfig = process.env.DN_CONFIG;
+    const prevEnv = process.env.NODE_ENV;
+    process.env.DN_CONFIG = cfg;
+    process.env.NODE_ENV = "production";
+    const { openReadOnly } = require("../scripts/diagnostics/lib/read_only_db");
+    const ro = openReadOnly();
+    if (prevConfig === undefined) delete process.env.DN_CONFIG; else process.env.DN_CONFIG = prevConfig;
+    if (prevEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevEnv;
+    const roRepo = buildRepo(ro.db);
+    const roCalc = buildCalcRepo(ro.db);
+    const engine = {
+      findPayrollLockedPeriods: (rows) => roCalc.findPayrollLockedPeriods(rows),
+      attendanceDayState: () => ({ closed: true }),
+      employmentWindowFor: async () => ({ joined_on: "2020-01-01", ended_on: null }),
+      calculateRange: async ({ employee_id, from_date, to_date }) => {
+        const out = [];
+        for (let d = from_date; d <= to_date; d = addDays(d, 1)) {
+          const ot = eligible.get(`${employee_id}:${d}`) || 0;
+          out.push({ employee_id, attendance_date: d, status: "FINAL", is_final: true, punch_count: 2,
+            shift_snapshot: { work_shift_id: 7 }, effective_punches: [], worked_minutes: 600,
+            candidate_ot_minutes: ot, excess_ot_minutes: ot, attendance_calculation_mode: "STANDARD" });
+        }
+        return out;
+      },
+    };
+    return { ro, review: buildReview({ reviewRepo: buildReviewRepo(ro.db), regularization: buildRegularization(roRepo, engine) }) };
+  };
+  const counts = async () => {
+    const out = {};
+    for (const t of ["attendance_approval_request", "attendance_approval_step", "attendance_ot_deferred_sync",
+      "attendance_ot_deferred_sync_log", "attendance_ot_auto_pending_log", "attendance_ot_late_settlement", "payrun_employee_calculation"]) {
+      // eslint-disable-next-line no-await-in-loop
+      out[t] = Number((await q(pool, `SELECT COUNT(*) AS n FROM ${t}`))[0].n);
+    }
+    return out;
+  };
+
+  it("PRE-MIGRATION SCHEMA: the read-only preview runs, keeps every existing check, treats review history as absent, and writes nothing", async () => {
+    await q(pool, REVIEW_DOWN);
+    const { ro, review: roReview } = await readOnlyReview();
+    try {
+      // Existing records the checks must still see: 945's date has a WITHDRAWN
+      // system OT; a third employee has an APPROVED OT already settling as
+      // Prior-Month OT; 946's month is published.
+      await q(pool, "INSERT INTO new_employee (employee_id, employee_name, store_id, designation_id) VALUES (947, 'Staff Paid', 3, 1)");
+      eligible.set(`947:${SEP4}`, 40);
+      await q(pool, "INSERT INTO attendance_day_calculation VALUES (947, ?, 'FINAL', 1, 2, 40, 0, 0)", [SEP4]);
+      await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, requested_by_employee_id, attendance_date, outlet_id, reason, candidate_ot_minutes, auto_created, status, total_stages)
+                     VALUES ('OT', ?, ?, ?, 3, 'System', 22, 1, 'CANCELLED', 1), ('OT', 947, 947, ?, 3, 'System', 40, 1, 'APPROVED', 1)`, [EMP, EMP, SEP4, SEP4]);
+      const [paid] = await q(pool, "SELECT attendance_approval_request_id AS id FROM attendance_approval_request WHERE requested_for_employee_id = 947");
+      await q(pool, `INSERT INTO attendance_ot_late_settlement (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+                       eligible_ot_minutes, approved_ot_minutes, source_daily_rate, nrm_minutes, ot_hourly_rate, amount)
+                     VALUES (?, 947, ?, 2026, 9, 40, 40, 800, 480, 100, 66.67)`, [paid.id, SEP4]);
+      const before = await counts();
+
+      const p = await roReview.preview({ now: NOW });
+      assert.equal(p.review_installed, false);
+      assert.equal(p.review_history, "NONE_FEATURE_NOT_INSTALLED");
+      const by = Object.fromEntries(p.lines.map((l) => [l.employee_id, l]));
+      assert.deepEqual([by[EMP].proposed_action, by[EMP].withdrawn_request_id !== null], ["CREATE_PENDING_OT", true], "a withdrawn request is still seen");
+      assert.equal(by[EMP2].proposed_action, "CREATE_PENDING_OT_PRIOR_MONTH_SETTLEMENT", "the payroll lock is still seen");
+      assert.equal(by[EMP2].payroll_status, "PUBLISHED");
+      assert.equal(by[947].proposed_action, "SKIP_EXISTING_APPROVED", "an existing approval is still seen");
+      assert.equal(by[947].late_settlement_status, "PENDING_SETTLEMENT", "Prior-Month OT settlement is still seen");
+      assert.match(p.preview_hash, /^[0-9a-f]{64}$/);
+      assert.deepEqual(await counts(), before, "nothing written");
+
+      // And nothing CAN be written: the same handle refuses an INSERT outright.
+      await assert.rejects(
+        new Promise((resolve, reject) => ro.db.query("INSERT INTO all_permissions VALUES ('x')", [], (err) => (err ? reject(err) : resolve()))),
+        /READ-ONLY DIAGNOSTIC refused/
+      );
+      // Authorising without the review's tables is refused - no batch, no request.
+      await assert.rejects(
+        review.authorise({ actor: { employee_id: 1 }, preview_hash: p.preview_hash, now: NOW }),
+        (err) => err.code === "REVIEW_NOT_INSTALLED"
+      );
+      assert.deepEqual(await counts(), before, "the refusal writes nothing");
+    } finally {
+      await ro.end();
+      await q(pool, REVIEW_UP);
+    }
+  });
+
+  it("A FAILED SCHEMA LOOKUP IS AN ERROR, never 'not reviewed'", async () => {
+    const broken = buildReviewRepo({ query: (sql, params, cb) => cb(Object.assign(new Error("ER_ACCESS_DENIED"), { code: "ER_ACCESS_DENIED_ERROR" })) });
+    await assert.rejects(broken.reviewSchema(), /ER_ACCESS_DENIED/);
+  });
+
+  it("POST-MIGRATION SCHEMA: the never-twice check is enforced in the same read-only preview", async () => {
+    await q(pool, "INSERT INTO attendance_ot_historical_review_raised (employee_id, attendance_date, review_item_id) VALUES (?, ?, 1)", [EMP, SEP4]);
+    const { ro, review: roReview } = await readOnlyReview();
+    try {
+      const p = await roReview.preview({ now: NOW });
+      assert.equal(p.review_installed, true);
+      assert.equal(p.review_history, "CHECKED");
+      assert.equal(p.lines.find((l) => l.employee_id === EMP).proposed_action, "SKIP_ALREADY_REVIEWED");
+      assert.equal(p.lines.find((l) => l.employee_id === EMP2).proposed_action, "CREATE_PENDING_OT_PRIOR_MONTH_SETTLEMENT");
+    } finally {
+      await ro.end();
+    }
+  });
+
   it("an ordinary (non-review) locked-month date is still refused by createRequest - the exception is the marker's alone", async () => {
     const regularization = buildRegularization(buildRepo(pool), {
       findPayrollLockedPeriods: (rows) => buildCalcRepo(pool).findPayrollLockedPeriods(rows),

@@ -41,7 +41,12 @@ const { openReadOnly, arg } = require("../diagnostics/lib/read_only_db");
       return;
     }
     console.log(`Historical OT Review preview ${out.from_date}..${out.to_date} (automatic-OT cutover ${out.cutover})`);
-    console.log(`preview_hash ${out.preview_hash}\n`);
+    console.log(`preview_hash ${out.preview_hash}`);
+    // Before migration 20261128120000 no review has ever run: there is no
+    // review history to check, and authorising is refused until it is installed.
+    console.log(
+      `review history: ${out.review_history}${out.review_installed ? "" : " (review tables not installed - preview only; authorising is refused)"}\n`
+    );
     console.log(JSON.stringify(out.summary, null, 2));
     console.log("\nemployee_id\temployee\tdate\tcalc_min\tdry_run_min\texisting\tpayroll\tproposed_action");
     out.lines.forEach((l) =>

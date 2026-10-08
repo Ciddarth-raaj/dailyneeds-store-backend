@@ -120,12 +120,23 @@ module.exports = ({ reviewRepo, regularization }) => {
 
   const preview = async ({ from_date = null, to_date = null, employee_id = null, now = null } = {}) => {
     const { from, to, cutover } = await windowFor({ from_date, to_date });
-    const rows = await reviewRepo.listCandidates({ from_date: from, to_date: to, employee_id });
+    const schema =
+      typeof reviewRepo.reviewSchema === "function"
+        ? await reviewRepo.reviewSchema()
+        : { installed: true, raised_table: true, present: [] };
+    const rows = await reviewRepo.listCandidates({ from_date: from, to_date: to, employee_id, schema });
     const lines = await dryRun(buildPreview(rows, { cutover }), now);
     return {
       from_date: from,
       to_date: to,
       cutover,
+      /*
+       * WHETHER REVIEW HISTORY WAS CHECKED. Before migration 20261128120000
+       * the review has never run, so no date can have been raised by one;
+       * the preview says so rather than implying it looked.
+       */
+      review_installed: schema.installed,
+      review_history: schema.raised_table ? "CHECKED" : "NONE_FEATURE_NOT_INSTALLED",
       preview_hash: previewHash(lines),
       summary: summarize(lines),
       lines,
@@ -140,6 +151,14 @@ module.exports = ({ reviewRepo, regularization }) => {
     if (!actor || !actor.employee_id) throw validationError("An authorising administrator is required");
     if (!preview_hash) throw validationError("preview_hash is required: authorise the preview you reviewed");
     const current = await preview({ from_date, to_date, now });
+    // Nothing is created by a review that cannot record itself: without its
+    // tables there is no audit and no never-twice guard.
+    if (!current.review_installed) {
+      throw validationError(
+        "The Historical OT Review is not installed (migration 20261128120000 has not run). The preview works; authorising does not.",
+        "REVIEW_NOT_INSTALLED"
+      );
+    }
     if (current.preview_hash !== preview_hash) {
       throw validationError(
         "The data changed since this preview was taken. Refresh the preview, review it again, and authorise the new one.",
