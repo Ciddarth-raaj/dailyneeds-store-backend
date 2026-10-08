@@ -22,7 +22,8 @@ describe(`migration ${NAME}`, () => {
     assert.ok(js.includes(`${NAME}-up.sql`));
     assert.ok(js.includes(`${NAME}-down.sql`));
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, "")).sort();
-    assert.equal(all[all.length - 1], NAME, "the newest migration");
+    // Sorts after every OT migration before it; only the Historical OT Review follows.
+    assert.deepEqual(all.filter((f) => f > NAME), ["20261128120000-attendance-ot-historical-review"]);
   });
 
   it("a SYSTEM OT gets its own open-request group; manual requests keep theirs", () => {

@@ -53,7 +53,7 @@ const { CORRECTION_REQUEST_TYPES, correctionPendingRefusal } = require("../utils
  * the deploy backfill's own, and a date whose pending system OT was withdrawn
  * because its attendance became incomplete.
  */
-const LOCKED_EXCEPTION_SOURCES = ["BACKFILL", "OT_WITHDRAWN_INCOMPLETE"];
+const LOCKED_EXCEPTION_SOURCES = ["BACKFILL", "OT_WITHDRAWN_INCOMPLETE", "HISTORICAL_REVIEW"];
 
 /**
  * THE DEFERRED HISTORICAL EXCEPTION, proved on the connection that is about

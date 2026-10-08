@@ -241,7 +241,7 @@ function build(state = {}) {
         // correction pending on the date.
         const marker = request.deferred_sync_id
           ? store.deferred.find((d) => d.deferred_sync_id === request.deferred_sync_id && d.employee_id === request.requested_for_employee_id &&
-              d.attendance_date === request.attendance_date && d.status === "WAITING_FOR_CORRECTION" && ["BACKFILL", "OT_WITHDRAWN_INCOMPLETE"].includes(d.source))
+              d.attendance_date === request.attendance_date && d.status === "WAITING_FOR_CORRECTION" && ["BACKFILL", "OT_WITHDRAWN_INCOMPLETE", "HISTORICAL_REVIEW"].includes(d.source))
           : null;
         if (!marker || pendingCorrections(request.requested_for_employee_id, [request.attendance_date]).length > 0) throw lockedError();
       }
@@ -2371,5 +2371,262 @@ describe("HISTORICAL CUTOVER: calculated OT dated before automatic OT started is
     const [d] = await read(w, OCT6);
     assert.equal(d.ot_auto_status.reason, "AUTOMATION_OFF");
     assert.equal(otOf(w, 42, OCT6).length, 0);
+  });
+});
+
+/* ===================================== HISTORICAL OT REVIEW (1 Sep - before the cutover) */
+
+const buildReview = require("../usecase/attendance_ot_historical_review");
+
+/**
+ * The review's repository over the harness's own store, reading exactly the
+ * fields `repository/attendance_ot_historical_review.js#listCandidates`
+ * selects - so the REAL rule, usecase and OT sync run over it.
+ */
+function fakeReviewRepo(w, { published = [] } = {}) {
+  const review = { batches: [], items: [], raised: new Map() };
+  let nextMarker = 500;
+  const latestDays = () => {
+    const latest = new Map();
+    w.saved.calculations.flat().forEach((r) => latest.set(`${r.employee_id}|${r.attendance_date}`, r));
+    return [...latest.values()];
+  };
+  const repo = {
+    review,
+    getAutoOtSetting: () => w.regRepo.getAutoOtSetting(),
+    listCandidates: async ({ from_date, to_date, employee_id }) =>
+      latestDays()
+        .filter((d) => d.attendance_date >= from_date && d.attendance_date <= to_date && Number(d.candidate_ot_minutes) > 0)
+        .filter((d) => !employee_id || d.employee_id === employee_id)
+        .sort((a, b) => (a.attendance_date + a.employee_id < b.attendance_date + b.employee_id ? -1 : 1))
+        .map((d) => {
+          const reqs = w.store.requests.filter((r) => r.requested_for_employee_id === d.employee_id && r.attendance_date === d.attendance_date);
+          const live = reqs.filter((r) => ["OT", "REGULARIZATION_WITH_OT"].includes(r.request_type) && r.status !== "CANCELLED").pop() || null;
+          const withdrawn = reqs.filter((r) => r.request_type === "OT" && r.status === "CANCELLED").pop() || null;
+          const settled = w.store.settlements.find((s) => reqs.some((r) => r.attendance_approval_request_id === s.attendance_approval_request_id) && s.settlement_status !== "CANCELLED");
+          const marker = (w.store.deferred || []).find((m) => m.employee_id === d.employee_id && m.attendance_date === d.attendance_date) || null;
+          const monthKey = `${d.employee_id}:${Number(d.attendance_date.slice(0, 4))}-${Number(d.attendance_date.slice(5, 7))}`;
+          const locked = w.lockedMonths.has(monthKey);
+          return {
+            employee_id: d.employee_id,
+            employee_name: (EMPLOYEES.find((e) => e.employee_id === d.employee_id) || {}).employee_name,
+            attendance_date: d.attendance_date,
+            status: d.status,
+            is_final: d.is_final ? 1 : 0,
+            punch_count: d.punch_count,
+            candidate_ot_minutes: d.candidate_ot_minutes,
+            shift_authorised_ot_minutes: d.shift_authorised_ot_minutes || 0,
+            approved_ot_minutes: d.approved_ot_minutes,
+            ot_request_id: live ? live.attendance_approval_request_id : null,
+            ot_request_status: live ? live.status : null,
+            ot_request_closure_reason: live ? live.closure_reason || null : null,
+            withdrawn_request_id: withdrawn ? withdrawn.attendance_approval_request_id : null,
+            late_settlement_status: settled ? settled.settlement_status : null,
+            correction_pending: reqs.some((r) => r.status === "PENDING" && r.request_type !== "OT") ? 1 : 0,
+            marker_status: marker ? marker.status : null,
+            marker_source: marker ? marker.source : null,
+            already_reviewed: review.raised.has(`${d.employee_id}|${d.attendance_date}`) ? 1 : 0,
+            outside_employment: 0,
+            payroll_calculation_id: locked ? 7001 : null,
+            payroll_status: locked ? "APPROVED_LOCKED" : null,
+            payroll_published_at: published.includes(monthKey) ? "2026-10-06 10:00:00" : null,
+          };
+        }),
+    createBatch: async ({ from_date, to_date, preview_hash, actor, items }) => {
+      const id = review.batches.length + 1;
+      review.batches.push({ review_batch_id: id, from_date, to_date, preview_hash, authorised_by_employee_id: actor.employee_id, status: "AUTHORISED" });
+      items.forEach((i) => review.items.push({ review_item_id: review.items.length + 1, review_batch_id: id, ...i, outcome: "AUTHORISED" }));
+      return id;
+    },
+    listItems: async (id) => review.items.filter((i) => i.review_batch_id === id).map((i) => ({ ...i })),
+    openMarker: async ({ employee_id, attendance_date, minutes }) => {
+      w.store.deferred = w.store.deferred || [];
+      const m = w.store.deferred.find((x) => x.employee_id === employee_id && x.attendance_date === attendance_date);
+      if (m && m.status === "WAITING_FOR_CORRECTION") return { deferred_sync_id: m.deferred_sync_id, previous: { kept: true } };
+      if (m) {
+        const previous = { status: m.status, source: m.source, resolution: m.resolution };
+        Object.assign(m, { status: "WAITING_FOR_CORRECTION", source: "HISTORICAL_REVIEW", resolution: null, eligible_ot_minutes: minutes });
+        return { deferred_sync_id: m.deferred_sync_id, previous };
+      }
+      const row = { deferred_sync_id: (nextMarker += 1), employee_id, attendance_date, status: "WAITING_FOR_CORRECTION", source: "HISTORICAL_REVIEW", eligible_ot_minutes: minutes };
+      w.store.deferred.push(row);
+      return { deferred_sync_id: row.deferred_sync_id, previous: null };
+    },
+    closeMarker: async ({ deferred_sync_id, previous }) => {
+      if (previous && previous.kept) return;
+      const m = w.store.deferred.find((x) => x.deferred_sync_id === deferred_sync_id);
+      if (m && m.status === "WAITING_FOR_CORRECTION") Object.assign(m, { status: "RESOLVED", resolution: "HISTORICAL_REVIEW_NOT_RAISED" });
+    },
+    recordRaised: async ({ employee_id, attendance_date, attendance_approval_request_id }) => {
+      const key = `${employee_id}|${attendance_date}`;
+      if (review.raised.has(key)) return false;
+      review.raised.set(key, attendance_approval_request_id);
+      return true;
+    },
+    wasRaised: async (employee_id, attendance_date) => review.raised.has(`${employee_id}|${attendance_date}`),
+    setItemOutcome: async ({ review_item_id, outcome, created_request_id = null, detail = null }) => {
+      const i = review.items.find((x) => x.review_item_id === review_item_id);
+      if (i && i.outcome === "AUTHORISED") Object.assign(i, { outcome, created_request_id, outcome_detail: detail });
+    },
+    finishBatch: async ({ review_batch_id, status, summary }) => Object.assign(review.batches[review_batch_id - 1], { status, summary }),
+    listBatches: async () => review.batches,
+  };
+  return repo;
+}
+
+describe("HISTORICAL OT REVIEW: a controlled backfill of calculated OT dated before the cutover", () => {
+  // The automatic-OT cutover is the 20th here; 14 Sep is before it, so the
+  // automation itself never raised its OT.
+  const CUT = { enabled: 1, auto_pending_from_date: "2026-09-20" };
+  const ADMIN = { employee_id: 8, user_id: 1 };
+  const world = async (opts = {}) => {
+    const w = build({ setting: CUT, rawPunches: [...day(42, DATE), ...day(43, DATE)], ...opts });
+    await recalc(w, 42);
+    await recalc(w, 43);
+    const reviewRepo = fakeReviewRepo(w, opts);
+    const review = buildReview({ reviewRepo, regularization: w.regularization });
+    return { w, reviewRepo, review };
+  };
+  const preview = (review) => review.preview({ from_date: "2026-09-01", to_date: "2026-09-19", now: NOW });
+
+  it("the cutover itself raised nothing for 14 Sep (the starting point)", async () => {
+    const { w } = await world();
+    assert.equal(otOf(w, 42).length, 0);
+    assert.equal(otOf(w, 43).length, 0);
+  });
+
+  it("PREVIEW: employee, date, calculated OT, existing status, payroll status and proposed action - and writes NOTHING", async () => {
+    const { w, review, reviewRepo } = await world();
+    const before = JSON.stringify({ r: w.store.requests, d: w.store.deferred, s: w.store.settlements });
+    const p = await preview(review);
+    assert.equal(p.cutover, "2026-09-20");
+    assert.deepEqual(
+      p.lines.map((l) => [l.employee_id, l.attendance_date, l.calculated_ot_minutes, l.existing_status, l.payroll_status, l.proposed_action, l.dry_run.outcome, l.dry_run.ot_minutes]),
+      [
+        [42, DATE, 90, null, "NOT_CALCULATED", "CREATE_PENDING_OT", "WOULD_CREATE_PENDING", 90],
+        [43, DATE, 90, null, "NOT_CALCULATED", "CREATE_PENDING_OT", "WOULD_CREATE_PENDING", 90],
+      ]
+    );
+    assert.deepEqual(p.summary.to_create, { entries: 2, minutes: 180, employees: 2 });
+    assert.match(p.preview_hash, /^[0-9a-f]{64}$/);
+    assert.equal(JSON.stringify({ r: w.store.requests, d: w.store.deferred, s: w.store.settlements }), before, "a preview writes nothing");
+    assert.equal(reviewRepo.review.batches.length, 0);
+  });
+
+  it("UNLOCKED PAYROLL: an authorised review creates PENDING OT on the normal chain - never approved, never paid", async () => {
+    const { w, review, reviewRepo } = await world();
+    const p = await preview(review);
+    const out = await review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 42, attendance_date: DATE }], now: NOW });
+    assert.deepEqual(out.summary, { authorised: 1, created: 1, skipped: 0, failed: 0, created_minutes: 90 });
+    const [ot] = otOf(w, 42);
+    assert.deepEqual([ot.status, ot.candidate_ot_minutes, ot.auto_created, ot.attendance_date], ["PENDING", 90, 1, DATE], "original work date kept");
+    assert.match(ot.reason, /Historical OT review #1 \(item 1\) for the 2026-09-14 work date/);
+    assert.equal(ot.approved_ot_minutes == null || ot.approved_ot_minutes === 0, true, "nothing approved");
+    assert.equal(w.store.settlements.length, 0, "nothing paid");
+    assert.deepEqual(w.store.log.filter((l) => l.action === "CREATED").map((l) => l.trigger_source), ["HISTORICAL_REVIEW#1"], "audit trail");
+    assert.equal(otOf(w, 43).length, 0, "an unnamed date is untouched");
+    assert.equal(reviewRepo.review.items[0].outcome, "CREATED");
+    assert.equal(reviewRepo.review.items[0].created_request_id, ot.attendance_approval_request_id);
+    assert.equal(reviewRepo.review.batches[0].authorised_by_employee_id, 8);
+    // It is an ordinary request: the approver sees it in Pending.
+    const queue = await w.regularization.listApprovals({ actor: SM3, request_type: REQUEST_TYPE.OT, status: "PENDING" });
+    assert.ok(queue.rows.some((r) => r.attendance_approval_request_id === ot.attendance_approval_request_id));
+  });
+
+  it("DUPLICATE PREVENTION: the next preview proposes nothing for the date, and a repeat backfill after rejection or withdrawal is refused", async () => {
+    const { w, review } = await world();
+    let p = await preview(review);
+    await review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 42, attendance_date: DATE }], now: NOW });
+    p = await preview(review);
+    assert.equal(p.lines.find((l) => l.employee_id === 42).proposed_action, "SKIP_EXISTING_PENDING");
+    // Withdrawn later (eligible OT went away and came back): never raised twice by the review.
+    const [ot] = liveOt(w, 42);
+    await w.regRepo.withdrawAutoOtRequest({ requestId: ot.attendance_approval_request_id, reason: "test", triggerSource: "TEST" });
+    p = await preview(review);
+    const line = p.lines.find((l) => l.employee_id === 42);
+    assert.equal(line.proposed_action, "SKIP_ALREADY_REVIEWED");
+    assert.equal(line.withdrawn_request_id, ot.attendance_approval_request_id);
+    await assert.rejects(
+      review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 42, attendance_date: DATE }], now: NOW }),
+      /not creatable/
+    );
+    assert.equal(otOf(w, 42).filter((r) => r.status !== "CANCELLED").length, 0);
+  });
+
+  it("a STALE preview is refused and writes nothing", async () => {
+    const { w, review, reviewRepo } = await world();
+    const p = await preview(review);
+    // The data moves: 43's OT is raised another way before the authorisation lands.
+    await review.authorise({ actor: ADMIN, preview_hash: p.preview_hash, from_date: "2026-09-01", to_date: "2026-09-19", items: [{ employee_id: 43, attendance_date: DATE }], now: NOW });
+    const requests = w.store.requests.length;
+    await assert.rejects(
+      review.authorise({ actor: ADMIN, preview_hash: p.preview_hash, from_date: "2026-09-01", to_date: "2026-09-19", now: NOW }),
+      (err) => err.code === "PREVIEW_STALE"
+    );
+    assert.equal(w.store.requests.length, requests);
+    assert.equal(reviewRepo.review.batches.length, 1);
+  });
+
+  it("LOCKED PAYROLL: Pending OT is created without unlocking; its approval settles as Prior-Month OT; the locked calculation is untouched", async () => {
+    const lockedCalc = { "43:2026-09": { payrun_calculation_id: 7001, daily_rate: 800, monthly_gross: 20800, status: "APPROVED_LOCKED" } };
+    const { w, review } = await world({ lockedCalc });
+    w.lockedMonths.add("43:2026-9");
+    const frozen = JSON.stringify(lockedCalc);
+    const storedDayRows = w.saved.calculations.length;
+    const p = await preview(review);
+    const line = p.lines.find((l) => l.employee_id === 43);
+    assert.deepEqual([line.payroll_status, line.proposed_action, line.dry_run.settles_as_prior_month_ot], ["APPROVED_LOCKED", "CREATE_PENDING_OT_PRIOR_MONTH_SETTLEMENT", true]);
+    const out = await review.authorise({ actor: ADMIN, from_date: "2026-09-01", to_date: "2026-09-19", preview_hash: p.preview_hash, items: [{ employee_id: 43, attendance_date: DATE }], now: NOW });
+    assert.equal(out.summary.created, 1);
+    assert.match(out.results[0].detail, /payroll locked: an approval settles as Prior-Month OT/);
+    const [ot] = otOf(w, 43);
+    assert.equal(ot.status, "PENDING");
+    assert.equal(w.store.settlements.length, 0, "not payable until a human approves");
+    // 43's chain is one stage, decided by 7.
+    await w.regularization.decide({ actor: SM3, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, now: NOW });
+    assert.equal(otOf(w, 43)[0].status, "APPROVED");
+    assert.deepEqual(w.store.settlements.map((s) => [s.settlement_status, s.approved_ot_minutes, s.source_payrun_calculation_id]), [["PENDING_SETTLEMENT", 90, 7001]]);
+    assert.equal(JSON.stringify(lockedCalc), frozen, "the locked payroll calculation is not modified");
+    assert.equal(w.saved.calculations.length, storedDayRows, "no locked day row is rewritten");
+  });
+
+  it("PUBLISHED payroll is reported as such and takes the same Prior-Month OT route", async () => {
+    const { w, review } = await world({ published: ["43:2026-9"] });
+    w.lockedMonths.add("43:2026-9");
+    const p = await preview(review);
+    const line = p.lines.find((l) => l.employee_id === 43);
+    assert.deepEqual([line.payroll_status, line.proposed_action], ["PUBLISHED", "CREATE_PENDING_OT_PRIOR_MONTH_SETTLEMENT"]);
+  });
+
+  it("an existing APPROVED OT is never duplicated or repaid", async () => {
+    const { w, review } = await world({ setting: { enabled: 1, auto_pending_from_date: "2026-09-01" } });
+    // With an earlier cutover the automation raised 42's OT; approve it.
+    const [ot] = liveOt(w, 42);
+    await approveRoleChain(w, ot.attendance_approval_request_id);
+    w.regRepo.getAutoOtSetting = async () => CUT; // the review is about dates before the (later) cutover
+    const p = await preview(review);
+    assert.equal(p.lines.find((l) => l.employee_id === 42).proposed_action, "SKIP_EXISTING_APPROVED");
+  });
+
+  it("a date with a pending attendance correction or incomplete attendance is skipped, never raised", async () => {
+    const { w, review } = await world();
+    w.rawPunches.splice(w.rawPunches.findIndex((x) => x.employee_id === 42 && x.io_time === `${DATE} 23:30:00`), 1);
+    const p = await preview(review);
+    const line = p.lines.find((l) => l.employee_id === 42);
+    assert.equal(line.dry_run.outcome, "WOULD_NOT_CREATE", JSON.stringify(line));
+    assert.ok(line.proposed_action.startsWith("SKIP_"));
+  });
+
+  it("the window ends before the cutover: later dates stay with normal processing, and the cutover never moves", async () => {
+    const { w, review } = await world();
+    await assert.rejects(review.preview({ from_date: "2026-09-01", to_date: "2026-09-20", now: NOW }), /ends before the automatic-OT cutover/);
+    await assert.rejects(review.preview({ from_date: "2026-08-31", to_date: "2026-09-19", now: NOW }), /starts on 2026-09-01/);
+    const p = await preview(review);
+    await review.authorise({ actor: ADMIN, preview_hash: p.preview_hash, from_date: "2026-09-01", to_date: "2026-09-19", now: NOW });
+    assert.deepEqual(await w.regRepo.getAutoOtSetting(), CUT);
+    // An unreviewed pre-cutover date is still not raised by an ordinary recalculation.
+    w.rawPunches.push(...day(44, DATE));
+    await recalc(w, 44);
+    assert.equal(otOf(w, 44).length, 0);
   });
 });
