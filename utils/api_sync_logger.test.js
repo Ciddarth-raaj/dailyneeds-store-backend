@@ -149,7 +149,7 @@ describe("the cron registration returns its result", () => {
     // The bug was one missing `return` in a body that otherwise looked right.
     const init = synker.slice(synker.indexOf("initCronJobs("), synker.indexOf("async syncStockHoldingReportWithLogging"));
     const bodies = [...init.matchAll(/async \(\) => \{([\s\S]*?)\n\s*\}\s*\n?\s*\)/g)].map((m) => m[1]);
-    assert.ok(bodies.length >= 2, "expected the wrapped cron bodies to be found");
+    assert.ok(bodies.length >= 1, "expected the wrapped cron bodies to be found");
     for (const body of bodies) {
       const statements = body.replace(/^\s*\/\/.*$/gm, "").trim();
       assert.match(statements, /^return /, `a cron body must return its result, got: ${statements}`);

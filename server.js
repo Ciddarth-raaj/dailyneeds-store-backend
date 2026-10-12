@@ -2247,15 +2247,10 @@ class Server {
         });
       });
     }
-    // Edit schedule here if needed (node-cron: minute hour day month weekday)
-    const PURCHASE_ACK_GOFRUGAL_CRON = "*/5 * * * *";
-    this.cronService.register(
-      "purchase_acknowledgement_gofrugal_sync",
-      PURCHASE_ACK_GOFRUGAL_CRON,
-      async () => {
-        await this.purchaseAcknowledgementUsecase.syncFromGofrugal(null);
-      }
-    );
+    // The 5-minute purchase_acknowledgement_gofrugal_sync cron was removed:
+    // GoFrugal has been replaced by RetailPilot, so the GoFrugal copy it read
+    // (medishopdb_med_mrc_memo) no longer updates. The manual
+    // POST /purchase-acknowledgement/sync is kept.
 
     // 11PM everyday. preventOverlap: a run still going at the next tick is
     // skipped rather than started twice (it launches Chrome). The use case
