@@ -12,8 +12,9 @@ class AccountsRepository {
           date, no_of_bills, total_sales, cash_handover_1, cash_handover_2, cash_handover_5, 
           cash_handover_10, cash_handover_20, cash_handover_50, cash_handover_100, 
           cash_handover_200, cash_handover_500, card_sales, loyalty, sales_return, 
+          wallet_receipt, wallet_payment,
           cashier_id, user_id, store_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, IFNULL(?, 0), IFNULL(?, 0), ?, ?, ?)`,
         [
           account.date,
           account.no_of_bills,
@@ -30,6 +31,8 @@ class AccountsRepository {
           account.card_sales,
           account.loyalty,
           account.sales_return,
+          account.wallet_receipt ?? null,
+          account.wallet_payment ?? null,
           account.cashier_id,
           account.user_id,
           account.store_id,
@@ -178,6 +181,8 @@ class AccountsRepository {
           cash_handover_5 = ?, cash_handover_10 = ?, cash_handover_20 = ?, 
           cash_handover_50 = ?, cash_handover_100 = ?, cash_handover_200 = ?, 
           cash_handover_500 = ?, card_sales = ?, loyalty = ?, sales_return = ?, 
+          wallet_receipt = COALESCE(?, wallet_receipt),
+          wallet_payment = COALESCE(?, wallet_payment),
           cashier_id = ?, user_id = ?
         WHERE accounts_id = ?`,
         [
@@ -196,6 +201,9 @@ class AccountsRepository {
           account.card_sales,
           account.loyalty,
           account.sales_return,
+          // null (omitted) keeps the stored wallet amount.
+          account.wallet_receipt ?? null,
+          account.wallet_payment ?? null,
           account.cashier_id,
           account.user_id,
           account.accounts_id,
@@ -1152,6 +1160,8 @@ class AccountsRepository {
               'card_sales', IFNULL(a.card_sales, 0),
               'loyalty', IFNULL(a.loyalty, 0),
               'sales_return', IFNULL(a.sales_return, 0),
+              'wallet_receipt', IFNULL(a.wallet_receipt, 0),
+              'wallet_payment', IFNULL(a.wallet_payment, 0),
               'cashier_name', IFNULL(ne.employee_name, ''),
               'sales', IFNULL(
                 (
