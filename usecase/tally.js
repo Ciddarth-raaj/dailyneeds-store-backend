@@ -1,5 +1,6 @@
 const moment = require("moment");
 const { getAccountDifference } = require("../utils/account_difference");
+const { addRupees, getSalesEntryAmounts } = require("../utils/tally_amounts");
 const { uuid } = require("uuidv4");
 const {
   purchaseEntryMasterId,
@@ -938,15 +939,6 @@ class TallyUsecase {
     };
   }
 
-  getCashSales(accountData) {
-    const { total_sales, card_sales, loyalty } = accountData;
-    const totalSales = parseFloat(total_sales);
-    const cardSales = parseFloat(card_sales);
-    const parsedLoyalty = parseFloat(loyalty);
-
-    return totalSales - cardSales - parsedLoyalty;
-  }
-
   async getTallySalesEntry(from_date, to_date) {
     try {
       const data = {};
@@ -974,15 +966,12 @@ class TallyUsecase {
           };
         }
 
-        const cash_sales = this.getCashSales(item);
         const accountName = `Cash (${
           OUTLET_CASH_ID_MAP[item.store_id] ?? "N/A"
         })`;
 
-        const cashSales =
-          parseInt(cash_sales) +
-          parseInt(item.loyalty) -
-          parseInt(item.sales_return);
+        // Exact to the paisa; Cash + Card Sales always equals Sales.
+        const amounts = getSalesEntryAmounts(item);
 
         const checkAndInsert = (
           ledgerName,
@@ -996,34 +985,31 @@ class TallyUsecase {
             data[item.outlet_name][date].ledgerentries[index] =
               this.getLedgerObject(
                 ledgerName,
-                parseInt(ledgerAmount),
+                ledgerAmount,
                 storeName,
                 isCredit,
                 ledgerGroup
               );
           } else {
-            data[item.outlet_name][date].ledgerentries[index].LedgerAmount +=
-              parseInt(ledgerAmount);
+            const entry = data[item.outlet_name][date].ledgerentries[index];
+            entry.LedgerAmount = addRupees(entry.LedgerAmount, ledgerAmount);
 
-            data[item.outlet_name][date].ledgerentries[
-              index
-            ].CategoryAllocation[0].CostCentreAllocation[0].Amount +=
-              parseInt(ledgerAmount);
+            const costCentre = entry.CategoryAllocation[0].CostCentreAllocation[0];
+            costCentre.Amount = addRupees(costCentre.Amount, ledgerAmount);
           }
         };
 
-        checkAndInsert(accountName, cashSales, item.outlet_name, false, 0);
+        checkAndInsert(accountName, amounts.cash, item.outlet_name, false, 0);
         checkAndInsert(
           "Card Sales",
-          item.card_sales,
+          amounts.card,
           item.outlet_name,
           false,
           1
         );
         checkAndInsert(
           "sales",
-          parseInt(item.card_sales) +
-            (cash_sales + parseInt(item.loyalty) - parseInt(item.sales_return)),
+          amounts.sales,
           item.outlet_name,
           true,
           2,
@@ -1205,7 +1191,8 @@ class TallyUsecase {
           };
         }
 
-        totals[accountItem.outlet_name][date].loyalty += parseInt(
+        totals[accountItem.outlet_name][date].loyalty = addRupees(
+          totals[accountItem.outlet_name][date].loyalty,
           accountItem.loyalty
         );
 
@@ -1216,8 +1203,10 @@ class TallyUsecase {
         const currentDifference = this.getAmmountDifference(accountItem);
 
         if (currentDifference < 0) {
-          totals[accountItem.outlet_name][date].difference +=
-            Math.abs(currentDifference);
+          totals[accountItem.outlet_name][date].difference = addRupees(
+            totals[accountItem.outlet_name][date].difference,
+            Math.abs(currentDifference)
+          );
         } else if (currentDifference > 0) {
           totals[accountItem.outlet_name][date].difference_excess_list.push({
             ...this.getLedgerObject(
