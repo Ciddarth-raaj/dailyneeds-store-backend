@@ -1,4 +1,5 @@
 const moment = require("moment");
+const { getAccountDifference } = require("../utils/account_difference");
 const { uuid } = require("uuidv4");
 const {
   purchaseEntryMasterId,
@@ -1154,40 +1155,11 @@ class TallyUsecase {
     }
   }
 
-  getAmmountDifference(values, totalCashHandover) {
-    try {
-      const {
-        total_sales,
-        card_sales,
-        loyalty,
-        sales_return,
-        accounts,
-        sales,
-      } = values;
-
-      let calculated_sales =
-        totalCashHandover +
-        (card_sales ? parseFloat(card_sales) : 0) +
-        (loyalty ? parseFloat(loyalty) : 0) +
-        (sales_return ? parseFloat(sales_return) : 0);
-
-      if (accounts || sales) {
-        (accounts ?? sales).forEach((item) => {
-          if (item.payment_type == 1) {
-            // Payment
-            calculated_sales += item.amount ? parseFloat(item.amount) : 0;
-          } else {
-            // Receipt
-            calculated_sales -= item.amount ? parseFloat(item.amount) : 0;
-          }
-        });
-      }
-
-      return parseInt(total_sales) - calculated_sales;
-    } catch (err) {
-      console.log(err);
-      return 0;
-    }
+  // Same Total Difference the Account Sheet form shows (exact to the paisa);
+  // the rule lives in utils/account_difference.js. The cash total is read
+  // from the sheet's own denomination counts.
+  getAmmountDifference(values) {
+    return getAccountDifference(values);
   }
 
   getTotalCashHandover(accountItem) {
@@ -1241,10 +1213,7 @@ class TallyUsecase {
 
         totals[accountItem.outlet_name][date].cash += totalCash;
 
-        const currentDifference = this.getAmmountDifference(
-          accountItem,
-          totalCash
-        );
+        const currentDifference = this.getAmmountDifference(accountItem);
 
         if (currentDifference < 0) {
           totals[accountItem.outlet_name][date].difference +=
