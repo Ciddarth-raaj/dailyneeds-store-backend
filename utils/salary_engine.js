@@ -833,7 +833,19 @@ function calculateEsi(context = {}, config = CONFIG) {
    * arithmetic on a different number, and one implementation is what keeps
    * them from drifting apart.
    */
-  const contributionsFor = (wage, basis) => {
+  const contributionsFor = (unroundedWage, basis) => {
+    /*
+     * THE ESI WAGE IS ALWAYS A WHOLE RUPEE, ROUNDED UP. ₹12,345.01 is
+     * ₹12,346 - never down, never to the nearest. It is rounded here, before
+     * anything reads it, so the wage that is reported, filed, tested against
+     * the ceiling and the exemption, and charged at the rates is ONE figure.
+     *
+     * The ceiling and the exemption threshold are whole rupees (21,000 and
+     * 176 × 26 = 4,576), so rounding up never changes who is covered or who is
+     * exempt: a wage is above a whole-rupee limit exactly when its rounded-up
+     * figure is.
+     */
+    const wage = Math.ceil(unroundedWage / 100) * 100;
     const covered = context.contribution_period_continues === true || wage <= ceiling;
     if (!covered) {
       return {
