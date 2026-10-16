@@ -63,6 +63,15 @@ const FEATURE_TABLES = [
   "permissions",
 ];
 
+/* Stands in for the business confirming a component's PF / ESI treatment. */
+const { FNF_COMPONENT_BY_KEY } = require("../constants/fnf");
+const confirmed = [];
+const confirmTreatment = (keys) =>
+  keys.forEach((k) => {
+    FNF_COMPONENT_BY_KEY[k].statutory = "CONFIRMED";
+    confirmed.push(k);
+  });
+
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
 
@@ -192,6 +201,9 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
   });
 
   after(async () => {
+    confirmed.forEach((k) => {
+      FNF_COMPONENT_BY_KEY[k].statutory = "UNCONFIRMED";
+    });
     if (!pool) return;
     await dropAll();
     pool.end();
@@ -248,8 +260,19 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     );
     assert.equal(p(x.total_earnings) - p(x.total_employee_deductions) + p(x.net_pay_rounding), p(x.net_pay));
 
-    const approved = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [1, 2], actor: ACTOR });
-    assert.equal(approved.approved_count, 2, JSON.stringify(approved.results));
+    // The statutory treatment of Leave Encashment / Notice Recovery is NOT
+    // confirmed by default: the leaver's month is calculated but cannot be approved.
+    assert.equal(x.is_complete, 0);
+    const held = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [1, 2], actor: ACTOR });
+    assert.equal(held.approved_count, 1, JSON.stringify(held.results));
+    assert.ok(JSON.stringify(held.results).includes("CALCULATION_INCOMPLETE"), JSON.stringify(held.results));
+
+    // The business confirms the treatment (a reviewed change to constants/fnf.js);
+    // the recalculated month is complete and is approved.
+    confirmTreatment(["LEAVE_ENCASHMENT", "NOTICE_PERIOD_RECOVERY", "GRATUITY", "NOTICE_PAY"]);
+    await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [2], mode: "RECALCULATE", actor: ACTOR });
+    const approved = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [2], actor: ACTOR });
+    assert.equal(approved.approved_count, 1, JSON.stringify(approved.results));
   });
 
   it("an approved & locked month refuses F&F changes under the lock", async () => {
@@ -409,6 +432,29 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     const hist = await q(pool, "SELECT eligibility, is_override, override_reason FROM employee_rehire_assessment WHERE fnf_settlement_id = ? ORDER BY 1", [ids[0]]);
     assert.equal(hist.length, 2, "an override is a new row; the earlier assessment is kept");
     assert.equal((await exitUsecase.rehireStatus(2)).rehire.eligibility, "NO");
+  });
+
+  it("REPORTS: the payroll register's F&F columns execute over real SQL and show earnings, recoveries and settlement", async () => {
+    const rq = require("../utils/payroll_report_query");
+    const ADMIN = { userId: 5, employeeId: 50, isAdmin: true, permissions: [] };
+    const keys = ["employee_id", "last_working_day", "fnf_additions", "fnf_deductions", "gross_salary", "net_pay",
+      "fnf_month", "fnf_settlement_status", "fnf_paid_on", "fnf_payment_mode", "fnf_payment_reference", "fnf_settled_amount"];
+    const { fields } = rq.resolveFields(keys, ADMIN);
+    const built = rq.buildQuery({ reportType: "PAYROLL_REGISTER", fields, filters: rq.resolveFilters({}), period: rq.periodOf(YEAR, MONTH), store_ids: null });
+    const rows = await q(pool, built.sql, built.params);
+    const byId = new Map(rows.map((r) => rq.presentRow(r, fields)).map((r) => [Number(r.employee_id), r]));
+    const leaver = byId.get(2);
+    assert.equal(leaver.fnf_month, "Yes");
+    assert.equal(leaver.fnf_additions, 1500);
+    assert.equal(leaver.fnf_deductions, 400.5);
+    assert.equal(leaver.fnf_settlement_status, "Settled");
+    assert.equal(leaver.fnf_payment_reference, "UTR111");
+    const net = (await q(pool, "SELECT net_pay FROM payrun_employee_calculation WHERE employee_id = 2"))[0].net_pay;
+    assert.equal(leaver.fnf_settled_amount, Number(net));
+    const active = byId.get(1);
+    assert.equal(active.fnf_month, "No");
+    assert.equal(active.fnf_settlement_status, null);
+    assert.equal(active.fnf_additions, null);
   });
 
   it("REHIRE GATE SQL: reads the NEWEST assessment of the exit being rejoined from; records the approved exception", async () => {

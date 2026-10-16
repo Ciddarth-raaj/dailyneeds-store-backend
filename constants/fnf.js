@@ -46,11 +46,32 @@ const FNF_COMPONENT = {
  * anywhere in this system, so the F&F stage records the figure HR has worked
  * out and audits who entered it. It does not invent a policy.
  *
- * `pf` / `esi` are FALSE for all four, stated per component. Gratuity and
- * leave encashment are excluded from both wage definitions; pay in lieu of
- * notice and its recovery are treated the same way here. That last point is a
- * BUSINESS DECISION TO CONFIRM (see the F&F review report) - the flag is where
- * it changes, not a branch in the engine.
+ * ============================== STATUTORY TREATMENT IS NOT ASSUMED ======
+ *
+ * `pf` / `esi` say whether the component would join the PF / ESI wage. NO F&F
+ * COMPONENT IS PRICED INTO A STATUTORY WAGE BY THIS ENGINE: there is no
+ * verified rule here for doing so, and introducing one is out of scope.
+ *
+ * So each component also carries `statutory`:
+ *
+ *   CONFIRMED    the business / auditor has confirmed the treatment stated by
+ *                `pf` and `esi`; the engine applies it.
+ *   UNCONFIRMED  the treatment has NOT been confirmed. Using the component
+ *                makes the calculation INCOMPLETE (an `unresolved` question,
+ *                exactly like an unresolved ESI coverage) and it cannot be
+ *                approved until the treatment is confirmed here, in a
+ *                reviewed change.
+ *
+ * ALL FOUR START UNCONFIRMED. The readings below are the starting point for
+ * that confirmation, not a decision:
+ *   Gratuity          ESI Act s.2(22)(d) excludes gratuity payable on
+ *                     discharge; EPF "basic wages" (s.2(b)) do not include it.
+ *   Leave Encashment  generally treated as outside both at exit; to confirm.
+ *   Notice Pay        treatment differs between readings; to confirm.
+ *   Notice Recovery   a recovery, not wages earned; to confirm.
+ *
+ * TDS (income tax) is not computed anywhere in this payroll, for any month;
+ * the F&F does not compute it either. See the review report.
  */
 const FNF_COMPONENTS = [
   {
@@ -59,6 +80,7 @@ const FNF_COMPONENTS = [
     kind: FNF_KIND.ADDITION,
     pf: false,
     esi: false,
+    statutory: "UNCONFIRMED",
     help: "Unused leave paid out at exit. Added to net pay. No PF, no ESI.",
   },
   {
@@ -67,6 +89,7 @@ const FNF_COMPONENTS = [
     kind: FNF_KIND.ADDITION,
     pf: false,
     esi: false,
+    statutory: "UNCONFIRMED",
     help: "Paid by the company in lieu of notice. Added to net pay. No PF, no ESI.",
   },
   {
@@ -75,6 +98,7 @@ const FNF_COMPONENTS = [
     kind: FNF_KIND.ADDITION,
     pf: false,
     esi: false,
+    statutory: "UNCONFIRMED",
     help: "Gratuity payable at exit. Added to net pay. No PF, no ESI.",
   },
   {
@@ -83,11 +107,17 @@ const FNF_COMPONENTS = [
     kind: FNF_KIND.DEDUCTION,
     pf: false,
     esi: false,
+    statutory: "UNCONFIRMED",
     help: "Recovered for notice not served. Deducted from net pay. Does not reduce PF or ESI wages.",
   },
 ];
 
 const FNF_COMPONENT_KEYS = FNF_COMPONENTS.map((c) => c.key);
+
+/** The statutory treatment states (see the catalogue header). */
+const FNF_STATUTORY = { CONFIRMED: "CONFIRMED", UNCONFIRMED: "UNCONFIRMED" };
+/** The engine's unresolved-question code for an unconfirmed treatment. */
+const FNF_STATUTORY_UNRESOLVED = "FNF_STATUTORY_TREATMENT_UNCONFIRMED";
 const FNF_COMPONENT_BY_KEY = FNF_COMPONENTS.reduce((map, c) => {
   map[c.key] = c;
   return map;
@@ -233,6 +263,8 @@ module.exports = {
   FNF_COMPONENTS,
   FNF_COMPONENT_KEYS,
   FNF_COMPONENT_BY_KEY,
+  FNF_STATUTORY,
+  FNF_STATUTORY_UNRESOLVED,
   FNF_AMOUNT_MAX,
   FNF_REMARKS_MAX,
   FNF_ITEM_AUDIT_ACTION,

@@ -159,6 +159,41 @@ describe("the engine: an active employee is untouched", () => {
   });
 });
 
+describe("the engine: statutory treatment is never assumed", () => {
+  const { FNF_COMPONENT_BY_KEY, FNF_STATUTORY_UNRESOLVED } = require("../constants/fnf");
+  it("every F&F component starts UNCONFIRMED and none is priced into a PF / ESI wage", () => {
+    for (const def of Object.values(FNF_COMPONENT_BY_KEY)) {
+      assert.equal(def.statutory, "UNCONFIRMED", def.key);
+      assert.equal(def.pf, false);
+      assert.equal(def.esi, false);
+    }
+  });
+  it("an UNCONFIRMED component makes the calculation incomplete (cannot be approved), naming the component", () => {
+    const r = run({ fnf_items: [{ component: FNF_COMPONENT.LEAVE_ENCASHMENT, amount: 1000 }] });
+    assert.equal(r.is_complete, false);
+    assert.deepEqual(
+      r.unresolved.filter((u) => u.code === FNF_STATUTORY_UNRESOLVED).map((u) => u.component),
+      [FNF_COMPONENT.LEAVE_ENCASHMENT]
+    );
+    // The figures are still computed and shown - only approval is held.
+    assert.ok(r.net_pay !== null);
+  });
+  it("once the business CONFIRMS the treatment, the same calculation is complete", () => {
+    const def = FNF_COMPONENT_BY_KEY[FNF_COMPONENT.LEAVE_ENCASHMENT];
+    def.statutory = "CONFIRMED";
+    try {
+      const r = run({ fnf_items: [{ component: FNF_COMPONENT.LEAVE_ENCASHMENT, amount: 1000 }] });
+      assert.equal(r.unresolved.some((u) => u.code === FNF_STATUTORY_UNRESOLVED), false);
+      assert.equal(r.is_complete, true);
+    } finally {
+      def.statutory = "UNCONFIRMED";
+    }
+  });
+  it("a month with no F&F item has no such question", () => {
+    assert.equal(run().unresolved.some((u) => u.code === FNF_STATUTORY_UNRESOLVED), false);
+  });
+});
+
 describe("the engine: F&F earnings and recoveries", () => {
   const items = [
     { component: FNF_COMPONENT.LEAVE_ENCASHMENT, amount: "1500.00" },

@@ -6,7 +6,13 @@ const pfPeriod = require("./pf_period");
 const { computeContract } = require("./payrun_adjustments");
 const { COMPONENT } = require("../constants/payrun_adjustments");
 const { ADJUSTMENT_STATE } = require("../constants/payrun_adjustments");
-const { FNF_KIND, FNF_COMPONENT_BY_KEY, FNF_COMPONENT_KEYS } = require("../constants/fnf");
+const {
+  FNF_KIND,
+  FNF_COMPONENT_BY_KEY,
+  FNF_COMPONENT_KEYS,
+  FNF_STATUTORY,
+  FNF_STATUTORY_UNRESOLVED,
+} = require("../constants/fnf");
 const {
   CALCULATION_VERSION,
   CALC_STATUS,
@@ -985,6 +991,23 @@ function computeCalculation(input = {}, config = CONFIG) {
    */
   const fnf = normalizeFnfItems(fnf_items);
   fnf.errors.forEach((e) => errors.push(e));
+  /*
+   * AN UNCONFIRMED STATUTORY TREATMENT IS A QUESTION, NOT A ZERO. A component
+   * whose PF / ESI treatment the business has not confirmed is not priced on
+   * an assumption: the calculation is stored carrying the question and
+   * cannot be approved (see `constants/fnf.js`).
+   */
+  fnf.lines.forEach((l) => {
+    const def = FNF_COMPONENT_BY_KEY[l.component];
+    if (def.statutory !== FNF_STATUTORY.CONFIRMED) {
+      unresolved.push({
+        code: FNF_STATUTORY_UNRESOLVED,
+        component: l.component,
+        stage: "fnf",
+        message: `The PF / ESI treatment of ${def.label} has not been confirmed by the business; it cannot be approved until it is.`,
+      });
+    }
+  });
   const fnfAdditionsPaise = fnf.additions_paise;
   const fnfDeductionsPaise = fnf.deductions_paise;
 
