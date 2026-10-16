@@ -44,7 +44,8 @@ const STAFF = [
 ];
 
 const EXTRA_DDL = [
-  "ALTER TABLE new_employee ADD COLUMN previous_pf_member TINYINT(1) NULL, ADD COLUMN pf_number VARCHAR(45) NULL, ADD COLUMN status TINYINT(1) DEFAULT 1, ADD COLUMN ifsc VARCHAR(20) NULL",
+  // previous_pf_member and pf_number come from the shared new_employee stand-in.
+  "ALTER TABLE new_employee ADD COLUMN status TINYINT(1) DEFAULT 1, ADD COLUMN ifsc VARCHAR(20) NULL",
 ];
 const REPORT_MIGRATIONS = [
   "20261120120000-epfo-wage-ceiling-2026-up.sql",
