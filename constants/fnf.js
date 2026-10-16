@@ -42,36 +42,36 @@ const DOCUMENT_TYPE = {
 const FNF_TEMPLATE_VERSION = "fnf-v1";
 
 /*
- * THE EMPLOYEE ACKNOWLEDGEMENT - a PAYROLL-PAYMENT acknowledgement only.
+ * THE EMPLOYEE DECLARATION (business owner's final wording).
  *
- * It acknowledges the payroll amount this statement shows - the published
- * monthly payroll's own Net Pay - and nothing else. It contains NO waiver: no
- * release of legal dues, disputes, back wages, reinstatement or reemployment
- * claims. Gratuity, leave encashment and other separately payable statutory
- * dues are outside this statement (paid by Accounts outside DNDS), and the
- * statement says so in its note.
+ * PAYABLE (Net Pay zero or above): a declaration that the employee has
+ * RECEIVED the Full & Final Settlement amount. RECOVERABLE (Net Pay below
+ * zero): a separate acknowledgement of the amount recoverable - never a
+ * declaration of payment received.
+ *
+ * THE AMOUNT IN THE TEXT IS THE PUBLISHED PAYROLL SNAPSHOT'S OWN Net Pay and
+ * its amount in words, formatted into {amount} / {words} when the snapshot is
+ * frozen - not a second calculation.
+ *
+ * PRINTED, NOT SIGNED. The statement is published with the declaration
+ * unsigned; the employee signs and dates it only after actually receiving
+ * payment. Publishing marks nothing as paid or acknowledged, and Accounts'
+ * payment confirmation (confirm_fnf_payment) is a separate step.
  *
  * Frozen into each published snapshot, so a later wording change never alters
- * a statement already issued. Wording for HR / legal approval.
+ * a statement already issued.
  */
-const FNF_ACKNOWLEDGEMENT_HEADING = "Employee Acknowledgement";
+const FNF_DECLARATION_HEADING = "Employee Declaration";
+const FNF_DECLARATION =
+  "I hereby declare that I have received {amount} ({words}), being my Full & Final Settlement amount stated " +
+  "above, as calculated in the monthly payroll for my final month of service.";
+const FNF_DECLARATION_SIGNING = "To be signed by the employee only after the amount has been received.";
 
-/** Net Pay zero or above: the employee is paid. */
-const FNF_ACKNOWLEDGEMENT =
-  "I acknowledge receipt of the net amount stated above, being my salary and other payroll dues for my last " +
-  "month of service as calculated in the monthly payroll. This acknowledgement covers only the payroll amounts " +
-  "shown in this statement.";
-
-/** Net Pay below zero: the payroll deductions exceed the earnings. */
-const FNF_ACKNOWLEDGEMENT_RECOVERABLE =
-  "I acknowledge that, as calculated in the monthly payroll for my last month of service, the net amount stated " +
-  "above is shown as recoverable from me. This acknowledgement covers only the payroll amounts shown in this " +
-  "statement.";
-
-/** Printed on every F&F statement, payable or recoverable. */
-const FNF_STATUTORY_NOTE =
-  "Gratuity, leave encashment and any other statutory dues payable separately are outside this payroll " +
-  "statement. They are not included in the amount above and are settled separately by Accounts.";
+const FNF_RECOVERABLE_HEADING = "Employee Acknowledgement of Recoverable Amount";
+const FNF_RECOVERABLE_ACKNOWLEDGEMENT =
+  "I acknowledge that, as calculated in the monthly payroll for my final month of service, {amount} ({words}) " +
+  "stated above is recoverable from me.";
+const FNF_RECOVERABLE_SIGNING = "To be signed by the employee in acknowledgement of the recoverable amount.";
 
 /* ======================================= SETTLEMENT COMPLETION ========== */
 
@@ -184,10 +184,12 @@ const REHIRE_NOTE_MAX = 500;
 module.exports = {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
-  FNF_ACKNOWLEDGEMENT_HEADING,
-  FNF_ACKNOWLEDGEMENT,
-  FNF_ACKNOWLEDGEMENT_RECOVERABLE,
-  FNF_STATUTORY_NOTE,
+  FNF_DECLARATION_HEADING,
+  FNF_DECLARATION,
+  FNF_DECLARATION_SIGNING,
+  FNF_RECOVERABLE_HEADING,
+  FNF_RECOVERABLE_ACKNOWLEDGEMENT,
+  FNF_RECOVERABLE_SIGNING,
   SETTLEMENT_STATUS,
   SETTLEMENT_STAGE,
   SETTLEMENT_STAGE_LABEL,

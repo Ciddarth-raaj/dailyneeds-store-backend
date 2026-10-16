@@ -256,6 +256,16 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.deepEqual([...s.earnings.lines, ...s.deductions.lines].filter((l) => /^fnf_/.test(l.key)), [], "no F&F-only line");
     assert.ok(s.deductions.lines.some((l) => l.key === "advance_recovery" && l.amount === "1000.00"));
     assert.equal(JSON.parse(slips[0].snapshot_json).fnf, null);
+    // The declaration is printed UNSIGNED, with the snapshot's own Net Pay.
+    assert.match(s.fnf.declaration, new RegExp(`received ₹[\\d,]+\\.\\d{2} \\(${s.fnf.net_payable_words}\\)`));
+    assert.match(s.fnf.declaration_signing, /only after the amount has been received/);
+  });
+
+  it("PUBLISHING MARKS NOTHING AS PAID: no settlement is recorded and the stage says payment is not confirmed", async () => {
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM employee_fnf_settlement WHERE status = 'SETTLED'"))[0].n, 0);
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM employee_fnf_settlement_event"))[0].n, 0);
+    const row = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 2);
+    assert.deepEqual([row.stage, row.stage_label, row.settlement_status], ["PUBLISHED", "Published - payment not confirmed", "PENDING"]);
   });
 
   it("TELEGRAM: the F&F text is sent; a failed send is retried once and delivered once; concurrent retries queue ONE attempt", async () => {

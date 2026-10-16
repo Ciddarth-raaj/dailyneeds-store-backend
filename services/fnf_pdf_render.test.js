@@ -10,8 +10,9 @@
  *
  * What it proves: one A4 page; every amount printed is the snapshot's own and
  * the printed lines reconcile to the printed totals; the amount in words; the
- * payroll-payment acknowledgement (no waiver of any claim), the statutory-dues
- * note and the signature blocks; the recoverable wording for a negative F&F;
+ * Employee Declaration of receipt (printed unsigned, with signature and date
+ * fields) and the signature blocks; the separate recoverable acknowledgement
+ * for a negative F&F;
  * and that no confidential HR word and no full account number reaches the
  * document.
  */
@@ -128,45 +129,43 @@ describe("the F&F statement, rendered with the production renderer", { skip }, (
       assert.doesNotMatch(l.label, /gratuity|encashment|notice/i, l.label);
     }
     for (const label of ["Notice Pay", "Notice Period Recovery"]) assert.ok(!text.includes(label), label);
-    // ...they appear once, in the note saying they are outside this statement.
-    assert.equal((text.match(/Gratuity/g) || []).length, 1);
-    assert.equal((text.match(/leave encashment/gi) || []).length, 1);
+    assert.equal((text.match(/gratuity|encashment/gi) || []).length, 0);
     assert.match(text, /Last Working Day\s+:\s*2026-08-16/);
     assert.match(text, /LOP Days\s+:\s*3\b/);
     assert.match(text, /UAN\s+:\s*100200300400/);
   });
 
-  it("has the payroll-payment acknowledgement, the statutory-dues note and every signature block, and no blank label rows", () => {
+  it("payable: the Employee Declaration of receipt with the printed amount and words, signed only after payment, with signature and date fields", () => {
     const { text } = out.full;
-    for (const label of ["Employee Acknowledgement", "Prepared By :", "Checked By :", "Authorized By :", "Employee Signature :"]) {
+    const flat = text.replace(/\s+/g, " ");
+    for (const label of ["Employee Declaration", "Prepared By :", "Checked By :", "Authorized By :", "Employee Signature :", "Date :"]) {
       assert.ok(text.includes(label), label);
     }
-    const flat = text.replace(/\s+/g, " ");
-    assert.match(flat, /I acknowledge receipt of the net amount stated above, being my salary and other payroll dues/);
-    assert.match(flat, /covers only the payroll amounts shown in this statement/);
-    assert.match(flat, /Gratuity, leave encashment and any other statutory dues payable separately are outside this payroll statement/);
+    assert.match(flat, /I hereby declare that I have received ₹3,238\.00 \(Three Thousand Two Hundred Thirty Eight Rupees Only\), being my Full & Final Settlement amount stated above/);
+    assert.match(flat, /To be signed by the employee only after the amount has been received\./);
     assert.doesNotMatch(text, /^\s*PAN\s+:\s*$/m, "an empty PAN row is not printed");
   });
 
-  it("NO WAIVER: neither statement releases legal dues, disputes, back wages, reinstatement or reemployment", () => {
+  it("neither statement mentions gratuity, leave encashment or statutory dues, and neither waives anything", () => {
     for (const { text } of Object.values(out)) {
       const flat = text.replace(/\s+/g, " ");
-      for (const w of [/grievance/i, /dispute/i, /demands and claims/i, /legal dues/i, /back wages/i, /reinstatement/i, /reemployment/i,
-        /free will/i, /full and final settlement out of/i, /Declaration By the Receiver/]) {
+      for (const w of [/gratuity/i, /encashment/i, /statutory dues/i, /grievance/i, /dispute/i, /back wages/i, /reinstatement/i, /reemployment/i, /free will/i]) {
         assert.doesNotMatch(flat, w, String(w));
       }
     }
   });
 
-  it("a negative F&F is RECOVERABLE: amount without sign, the right label, formula, acknowledgement and the same note", () => {
+  it("a negative F&F is RECOVERABLE: amount without sign, the right label and formula, and a separate acknowledgement - not a declaration of receipt", () => {
     const { text } = out.negative;
     const flat = text.replace(/\s+/g, " ");
     assert.match(text, /Total Recoverable from Employee\s+970\.00/);
     assert.match(text, /Nine Hundred Seventy Rupees Only/);
     assert.match(text, /\(Total Deductions - Gross Earnings\) - Round-off/);
-    assert.match(flat, /the net amount stated above is shown as recoverable from me/);
-    assert.doesNotMatch(flat, /I acknowledge receipt/);
-    assert.match(flat, /statutory dues payable separately are outside this payroll statement/);
+    assert.match(flat, /Employee Acknowledgement of Recoverable Amount/);
+    assert.match(flat, /I acknowledge that, as calculated in the monthly payroll for my final month of service, ₹970\.00 \(Nine Hundred Seventy Rupees Only\) stated above is recoverable from me\./);
+    assert.doesNotMatch(flat, /I hereby declare|have received/);
+    assert.match(flat, /Employee Signature :/);
+    assert.match(flat, /Date :/);
     assert.doesNotMatch(text, /-970/);
   });
 

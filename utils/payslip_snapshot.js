@@ -43,10 +43,12 @@ const {
 const {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
-  FNF_ACKNOWLEDGEMENT_HEADING,
-  FNF_ACKNOWLEDGEMENT,
-  FNF_ACKNOWLEDGEMENT_RECOVERABLE,
-  FNF_STATUTORY_NOTE,
+  FNF_DECLARATION_HEADING,
+  FNF_DECLARATION,
+  FNF_DECLARATION_SIGNING,
+  FNF_RECOVERABLE_HEADING,
+  FNF_RECOVERABLE_ACKNOWLEDGEMENT,
+  FNF_RECOVERABLE_SIGNING,
 } = require("../constants/fnf");
 const { isExitMonth, amountInWords, dateOnly } = require("./fnf");
 
@@ -75,6 +77,18 @@ function money(paise) {
   const abs = Math.abs(paise);
   const text = `${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
   return negative && abs !== 0 ? `-${text}` : text;
+}
+
+/**
+ * Integer paise (zero or above) as "₹3,238.00", Indian digit grouping - the
+ * way the statement prints amounts. Formatting only: the figure is the one
+ * passed in.
+ */
+function rupeeText(paise) {
+  const rupees = String(Math.floor(paise / 100));
+  const last3 = rupees.slice(-3);
+  const rest = rupees.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",");
+  return `₹${rest ? `${rest},${last3}` : last3}.${String(paise % 100).padStart(2, "0")}`;
 }
 
 const moneyOf = (value) => money(toPaise(value));
@@ -288,9 +302,10 @@ function employerContributionOf(c, employee, pfApplicable, esiApplicable) {
  *                       amount the earnings line carries
  *   net_payable_words   the stored Net Pay in words; a negative Net Pay is an
  *                       amount RECOVERABLE from the employee and says so
- *   acknowledgement     the payroll-payment acknowledgement (payable or
- *                       recoverable wording) and the statutory-dues note,
- *                       frozen with the document - text only, no figure
+ *   declaration         the Employee Declaration of receipt (payable) or the
+ *                       acknowledgement of the recoverable amount, with the
+ *                       snapshot's own Net Pay and words filled in, and the
+ *                       signing instruction - printed unsigned
  */
 function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
   const actual = {};
@@ -311,9 +326,12 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
     net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
     recoverable,
     net_payable_words: amountInWords(money(Math.abs(netPay))),
-    acknowledgement_heading: FNF_ACKNOWLEDGEMENT_HEADING,
-    acknowledgement: recoverable ? FNF_ACKNOWLEDGEMENT_RECOVERABLE : FNF_ACKNOWLEDGEMENT,
-    statutory_note: FNF_STATUTORY_NOTE,
+    declaration_heading: recoverable ? FNF_RECOVERABLE_HEADING : FNF_DECLARATION_HEADING,
+    // The snapshot's own Net Pay (sign dropped: the heading says which way it goes) and its words.
+    declaration: (recoverable ? FNF_RECOVERABLE_ACKNOWLEDGEMENT : FNF_DECLARATION)
+      .replace("{amount}", rupeeText(Math.abs(netPay)))
+      .replace("{words}", amountInWords(money(Math.abs(netPay)))),
+    declaration_signing: recoverable ? FNF_RECOVERABLE_SIGNING : FNF_DECLARATION_SIGNING,
   };
 }
 
