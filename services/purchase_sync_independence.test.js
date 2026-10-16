@@ -90,8 +90,8 @@ describe("the Digisme employee sync is gone, and took nothing else with it", () 
   });
 });
 
-describe("the purchase table has no cron writing it", () => {
-  it("nothing schedules a write to `purchase` - it is an external push", () => {
+describe("the purchase table's only cron writer is the RetailPilot pull", () => {
+  it("nothing else schedules a write to `purchase`", () => {
     // Established during the 6 September investigation and worth keeping
     // recorded: if someone later adds a purchase cron, this test should fail
     // and make them say so deliberately.
@@ -100,8 +100,8 @@ describe("the purchase table has no cron writing it", () => {
     const purchaseJobs = names.filter((n) => /purchase/.test(n));
     assert.deepEqual(
       purchaseJobs.sort(),
-      ["purchase_ref_cache_warm"],
-      "the only purchase job is the Purchase Ref cache warm"
+      ["purchase_ref_cache_warm", "retailpilot_purchase_sync"],
+      "the only purchase jobs are the Purchase Ref cache warm and the RetailPilot pull"
     );
   });
 

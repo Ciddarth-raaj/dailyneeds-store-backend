@@ -2,8 +2,9 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
 class PurchaseRoutes {
-  constructor(purchaseUsecase) {
+  constructor(purchaseUsecase, retailPilotPurchaseSync) {
     this.purchaseUsecase = purchaseUsecase;
+    this.retailPilotPurchaseSync = retailPilotPurchaseSync;
     this.init();
   }
 
@@ -92,6 +93,32 @@ class PurchaseRoutes {
         }
 
         const result = await this.purchaseUsecase.bulkCreatePurchase(value);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Pull purchase invoices from RetailPilot now. Body (all optional):
+    // { days: 0-90 look-back, dry_run: true to return the mapped rows
+    // without saving them }.
+    router.post("/retailpilot-sync", async (req, res) => {
+      try {
+        if (!this.retailPilotPurchaseSync) {
+          return res.json({ code: 503, msg: "RetailPilot sync is not available" });
+        }
+        const { error, value } = Joi.object({
+          days: Joi.number().integer().min(0).max(90).optional(),
+          dry_run: Joi.boolean().default(false),
+        }).validate(req.body || {});
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+        const result = await this.retailPilotPurchaseSync.run({
+          days: value.days,
+          dryRun: value.dry_run,
+        });
         res.json(result);
       } catch (err) {
         console.log(err);
@@ -322,6 +349,6 @@ class PurchaseRoutes {
   }
 }
 
-module.exports = (purchaseUsecase) => {
-  return new PurchaseRoutes(purchaseUsecase);
+module.exports = (purchaseUsecase, retailPilotPurchaseSync) => {
+  return new PurchaseRoutes(purchaseUsecase, retailPilotPurchaseSync);
 };

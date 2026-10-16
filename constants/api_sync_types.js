@@ -67,6 +67,12 @@ const API_SYNC_TYPES = [
     server_script: "/home/delium/query_executor/query_exec.sh",
   },
   {
+    type: "retailpilot_purchase_sync",
+    category: "sync",
+    label: "RetailPilot Purchase Sync",
+    match: "/purchase/retailpilot-sync",
+  },
+  {
     type: "product_sales_bulk",
     category: "bulk",
     label: "Product Sales Bulk",

@@ -6,8 +6,6 @@ const moment = require("moment");
 
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
-// const GOFRUGAL_API_KEY =
-//   "92389031420AEF2B22174FA933F178040AFD9395A5E9C3F013A74C4CA152CE786116998975B7AF31";
 
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
 const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
