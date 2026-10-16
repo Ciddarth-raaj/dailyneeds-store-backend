@@ -400,13 +400,6 @@ const PAYROLL_FIELDS = [
       "(SELECT s.payment_reference FROM employee_fnf_settlement s " +
       "WHERE s.payrun_employee_id = pe.payrun_employee_id AND s.status = 'SETTLED')",
   }),
-  f("fnf_settled_amount", "F&F Settled Amount", G.FNF, {
-    select:
-      "(SELECT s.settled_net_amount FROM employee_fnf_settlement s " +
-      "WHERE s.payrun_employee_id = pe.payrun_employee_id AND s.status = 'SETTLED')",
-    type: TYPE.AMOUNT, transform: asAmount,
-    note: "The published F&F Net Pay recorded at settlement; negative = recovered from the employee.",
-  }),
 
   f("payrun_status", "Payrun Status", G.RECORD, { select: PAYRUN_STATUS, always: true, transform: (v) => PAYRUN_STATUS_LABEL[v] || v }),
   f("approved_at", "Approved At", G.RECORD, { select: "DATE_FORMAT(c.approved_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE, always: true }),

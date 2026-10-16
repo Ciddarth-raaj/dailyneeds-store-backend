@@ -64,6 +64,10 @@ describe("the F&F settlement migration", () => {
       assert.ok(!down.includes(word), word);
     }
     assert.ok(!/ALTER TABLE `payrun_calculation`/.test(up), "the calculation table is untouched");
+    // F&F references the published payroll document; it stores no amount of its own.
+    for (const col of ["settled_net_amount", "net_amount", "net_pay", "amount"]) {
+      assert.ok(!new RegExp("`" + col + "`").test(up), col);
+    }
   });
 
   it("the database enforces one case per exit and one payroll month per settlement", () => {

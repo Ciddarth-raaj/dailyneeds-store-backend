@@ -45,12 +45,11 @@ CREATE TABLE IF NOT EXISTS `employee_fnf_settlement` (
   `payrun_employee_id` BIGINT UNSIGNED NULL DEFAULT NULL,
   `period_year`  SMALLINT NULL DEFAULT NULL,
   `period_month` TINYINT NULL DEFAULT NULL,
-  -- WHAT WAS SETTLED, frozen at the moment it was settled: the published
-  -- document, the calculation it was built from, and its net amount (negative
-  -- = recovered from the employee).
+  -- WHAT WAS PAID: a REFERENCE to the published payroll document and the
+  -- calculation it was frozen from. No amount is stored here - the net pay is
+  -- read from that document's frozen snapshot, the single source of truth.
   `settled_payslip_id` BIGINT UNSIGNED NULL DEFAULT NULL,
   `settled_calculation_hash` CHAR(32) NULL DEFAULT NULL,
-  `settled_net_amount` DECIMAL(12,2) NULL DEFAULT NULL,
   `payment_mode` ENUM('BANK','CASH') NULL DEFAULT NULL,
   `payment_reference` VARCHAR(100) NULL DEFAULT NULL,
   `paid_on` DATE NULL DEFAULT NULL,
@@ -79,7 +78,6 @@ CREATE TABLE IF NOT EXISTS `employee_fnf_settlement_event` (
   `payrun_employee_id` BIGINT UNSIGNED NULL DEFAULT NULL,
   `payslip_id` BIGINT UNSIGNED NULL DEFAULT NULL,
   `calculation_hash` CHAR(32) NULL DEFAULT NULL,
-  `net_amount` DECIMAL(12,2) NULL DEFAULT NULL,
   `payment_mode` ENUM('BANK','CASH') NULL DEFAULT NULL,
   `payment_reference` VARCHAR(100) NULL DEFAULT NULL,
   `paid_on` DATE NULL DEFAULT NULL,

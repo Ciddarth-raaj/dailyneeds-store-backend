@@ -302,8 +302,17 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(cases.length, 1);
     assert.equal(cases[0].status, "SETTLED");
     assert.equal(Number(cases[0].period_id) > 0, true, "linked to the closed employment period");
+    // NO AMOUNT IS STORED: the settlement references the published document; the
+    // amount shown is read from that document's frozen snapshot, unchanged.
+    assert.ok(!("settled_net_amount" in cases[0]), "no copied amount column on the settlement");
     const calc = (await q(pool, "SELECT net_pay, payrun_employee_id FROM payrun_employee_calculation WHERE employee_id = 2"))[0];
-    assert.equal(Number(cases[0].settled_net_amount), Number(calc.net_pay));
+    const slip = (await q(pool, "SELECT payslip_id, snapshot_json FROM payrun_payslip WHERE employee_id = 2 AND status = 'ACTIVE'"))[0];
+    assert.equal(Number(cases[0].settled_payslip_id), Number(slip.payslip_id), "references the published document");
+    const shown = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 2);
+    assert.equal(shown.settled_net_amount, Number(JSON.parse(slip.snapshot_json).final.net_pay));
+    assert.equal(shown.settled_net_amount, Number(calc.net_pay));
+    const ev = await q(pool, "SHOW COLUMNS FROM employee_fnf_settlement_event LIKE 'net_amount'");
+    assert.equal(ev.length, 0, "the audit history references the document; it does not copy the amount");
     assert.equal((await q(pool, "SELECT COUNT(*) n FROM employee_fnf_settlement_event WHERE event_type = 'SETTLED'"))[0].n, 1);
   });
 
@@ -383,7 +392,7 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     const rq = require("../utils/payroll_report_query");
     const ADMIN = { userId: 5, employeeId: 50, isAdmin: true, permissions: [] };
     const keys = ["employee_id", "employee_classification", "last_working_day", "gross_salary", "net_pay",
-      "fnf_settlement_status", "fnf_paid_on", "fnf_payment_mode", "fnf_payment_reference", "fnf_settled_amount"];
+      "fnf_settlement_status", "fnf_paid_on", "fnf_payment_mode", "fnf_payment_reference"];
     const { fields } = rq.resolveFields(keys, ADMIN);
     const built = rq.buildQuery({ reportType: "PAYROLL_REGISTER", fields, filters: rq.resolveFilters({}), period: rq.periodOf(YEAR, MONTH), store_ids: null });
     const rows = await q(pool, built.sql, built.params);
@@ -392,8 +401,8 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(leaver.employee_classification, "Exited Employee");
     assert.equal(leaver.fnf_settlement_status, "Settled");
     assert.equal(leaver.fnf_payment_reference, "UTR111");
-    const net = (await q(pool, "SELECT net_pay FROM payrun_employee_calculation WHERE employee_id = 2"))[0].net_pay;
-    assert.equal(leaver.fnf_settled_amount, Number(net));
+    // The amount paid is the register's own Net Pay - no second F&F amount column exists.
+    assert.throws(() => rq.resolveFields(["fnf_settled_amount"], ADMIN), /not a column/);
     const active = byId.get(1);
     assert.equal(active.employee_classification, "Active Employee");
     assert.equal(active.fnf_settlement_status, null);
@@ -419,6 +428,28 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     }));
     const audit = await exitRepo.listRehireExceptions(2);
     assert.deepEqual(audit.map((a) => [a.eligibility, a.rejoin_date, a.approved_by]), [["NO", "2027-02-01", 55]]);
+  });
+
+  it("LEGACY RESIGNATION DELETE cannot bypass the rehire gate: refused for a lifecycle exit (assessed NO), allowed only where no exit is recorded", async () => {
+    const buildResignation = require("../usecase/resignation");
+    const writes = [];
+    const legacy = buildResignation(
+      { deleteResignation: async (id) => (writes.push(["resignation", id]), { code: 200 }) },
+      { getEmployeeIdByDelete: async (id) => Number(id), updateStatus: async (x) => writes.push(["employee", x.employee_id]) },
+      { updateStatus: async (x) => writes.push(["user", x.employee_id]) }
+    );
+    legacy.exitGuard = exitRepo; // the production wiring (server.js)
+    // Employee 2: exited 16 Aug through the lifecycle; latest exit assessed NO (override) above.
+    assert.equal((await exitUsecase.rehireStatus(2)).rehire.eligibility, "NO");
+    const refused = await legacy.deleteResignation("2");
+    assert.equal(refused.code, 409);
+    assert.equal(refused.error, "EXIT_RECORDED_USE_REJOIN");
+    assert.deepEqual(writes, []);
+    const still = (await q(pool, "SELECT DATE_FORMAT(resignation_date, '%Y-%m-%d') d FROM new_employee WHERE employee_id = 2"))[0];
+    assert.equal(still.d, "2026-08-16", "the exit stands");
+    // Employee 1: active, open employment period, no exit recorded -> the legacy delete behaves as before.
+    assert.equal(await legacy.deleteResignation("1"), 200);
+    assert.deepEqual(writes.map((w) => w[0]), ["employee", "user", "resignation"]);
   });
 
   it("the database refuses a second case for the same exit, and one payroll month settling two exits", async () => {

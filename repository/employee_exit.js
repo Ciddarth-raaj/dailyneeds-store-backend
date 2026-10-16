@@ -45,11 +45,22 @@ const rollbackAsync = (conn) => new Promise((resolve) => conn.rollback(() => res
  * table's values of the same name. `CASE_COLUMNS` adds them for reads of the
  * case table alone.
  */
+/*
+ * THE SETTLED AMOUNT IS NEVER STORED HERE. A settlement references the
+ * published payroll document (`settled_payslip_id`) and the calculation it
+ * was frozen from (`settled_calculation_hash`); the amount is read from that
+ * document's frozen snapshot - the single source of truth - every time.
+ * Published payslips are never deleted (Unpublish only archives them), so the
+ * reference always resolves to exactly the document that was paid.
+ */
+const SETTLED_NET_FROM_PAYSLIP = (ref) =>
+  `(SELECT JSON_UNQUOTE(JSON_EXTRACT(sp.snapshot_json, '$.final.net_pay')) FROM payrun_payslip sp WHERE sp.payslip_id = ${ref})`;
 const CASE_JOIN_COLUMNS = `
   s.fnf_settlement_id, s.period_id,
   s.status AS settlement_status, s.payrun_employee_id AS settled_payrun_employee_id,
   s.period_year AS settled_period_year, s.period_month AS settled_period_month,
-  s.settled_payslip_id, s.settled_net_amount, s.payment_mode, s.payment_reference,
+  s.settled_payslip_id, ${SETTLED_NET_FROM_PAYSLIP("s.settled_payslip_id")} AS settled_net_amount,
+  s.payment_mode, s.payment_reference,
   DATE_FORMAT(s.paid_on, '%Y-%m-%d') AS paid_on, s.settled_by,
   DATE_FORMAT(s.settled_at, '%Y-%m-%d %H:%i:%s') AS settled_at`;
 const CASE_COLUMNS = `s.employee_id, DATE_FORMAT(s.exit_date, '%Y-%m-%d') AS exit_date, ${CASE_JOIN_COLUMNS}`;
@@ -431,7 +442,7 @@ class EmployeeExitRepository {
     return this.withTransaction(async (conn) => {
       const [calcRow] = await this._read(
         "SETTLE-LOCK-CALCULATION",
-        `SELECT c.payrun_calculation_id, c.payrun_employee_id, c.status, c.published_at, c.net_pay, c.calculation_hash,
+        `SELECT c.payrun_calculation_id, c.payrun_employee_id, c.status, c.published_at, c.calculation_hash,
                 DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS exit_date
            FROM payrun_employee_calculation c
            JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id
@@ -486,13 +497,13 @@ class EmployeeExitRepository {
         "SETTLE-UPDATE",
         `UPDATE employee_fnf_settlement
             SET status = 'SETTLED', payrun_employee_id = ?, period_year = ?, period_month = ?,
-                settled_payslip_id = ?, settled_calculation_hash = ?, settled_net_amount = ?,
+                settled_payslip_id = ?, settled_calculation_hash = ?,
                 payment_mode = ?, payment_reference = ?, paid_on = ?,
                 settled_by = ?, settled_at = CURRENT_TIMESTAMP
           WHERE fnf_settlement_id = ? AND status = 'PENDING'`,
         [
           calcRow.payrun_employee_id, year, month,
-          slip.payslip_id, calcRow.calculation_hash, calcRow.net_pay,
+          slip.payslip_id, calcRow.calculation_hash,
           payment_mode, payment_reference, paid_on,
           actor.employeeId ?? null, caseId,
         ],
@@ -502,11 +513,11 @@ class EmployeeExitRepository {
       await this._read(
         "SETTLE-EVENT",
         `INSERT INTO employee_fnf_settlement_event
-                (fnf_settlement_id, event_type, payrun_employee_id, payslip_id, calculation_hash, net_amount,
+                (fnf_settlement_id, event_type, payrun_employee_id, payslip_id, calculation_hash,
                  payment_mode, payment_reference, paid_on, actor_employee_id, actor_user_id)
-         VALUES (?, 'SETTLED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, 'SETTLED', ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          caseId, calcRow.payrun_employee_id, slip.payslip_id, calcRow.calculation_hash, calcRow.net_pay,
+          caseId, calcRow.payrun_employee_id, slip.payslip_id, calcRow.calculation_hash,
           payment_mode, payment_reference, paid_on, actor.employeeId ?? null, actor.userId ?? null,
         ],
         conn
@@ -532,7 +543,7 @@ class EmployeeExitRepository {
       if (!calcRow) return { outcome: "NOT_SETTLED" };
       const [row] = await this._read(
         "REOPEN-LOCK-CASE",
-        `SELECT fnf_settlement_id, status, settled_payslip_id, settled_calculation_hash, settled_net_amount
+        `SELECT fnf_settlement_id, status, settled_payslip_id, settled_calculation_hash
            FROM employee_fnf_settlement WHERE payrun_employee_id = ? FOR UPDATE`,
         [calcRow.payrun_employee_id],
         conn
@@ -542,7 +553,7 @@ class EmployeeExitRepository {
         "REOPEN-UPDATE",
         `UPDATE employee_fnf_settlement
             SET status = 'PENDING', payrun_employee_id = NULL, period_year = NULL, period_month = NULL,
-                settled_payslip_id = NULL, settled_calculation_hash = NULL, settled_net_amount = NULL,
+                settled_payslip_id = NULL, settled_calculation_hash = NULL,
                 payment_mode = NULL, payment_reference = NULL, paid_on = NULL,
                 settled_by = NULL, settled_at = NULL
           WHERE fnf_settlement_id = ? AND status = 'SETTLED'`,
@@ -552,12 +563,12 @@ class EmployeeExitRepository {
       await this._read(
         "REOPEN-EVENT",
         `INSERT INTO employee_fnf_settlement_event
-                (fnf_settlement_id, event_type, payrun_employee_id, payslip_id, calculation_hash, net_amount,
+                (fnf_settlement_id, event_type, payrun_employee_id, payslip_id, calculation_hash,
                  reason, actor_employee_id, actor_user_id)
-         VALUES (?, 'REOPENED', ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, 'REOPENED', ?, ?, ?, ?, ?, ?)`,
         [
           row.fnf_settlement_id, calcRow.payrun_employee_id, row.settled_payslip_id,
-          row.settled_calculation_hash, row.settled_net_amount, reason, actor.employeeId ?? null, actor.userId ?? null,
+          row.settled_calculation_hash, reason, actor.employeeId ?? null, actor.userId ?? null,
         ],
         conn
       );
@@ -568,7 +579,8 @@ class EmployeeExitRepository {
   async listSettlementEvents(caseId) {
     return this._read(
       "LIST-SETTLEMENT-EVENTS",
-      `SELECT event_type, payslip_id, net_amount, payment_mode, payment_reference,
+      `SELECT event_type, payslip_id, ${SETTLED_NET_FROM_PAYSLIP("employee_fnf_settlement_event.payslip_id")} AS net_amount,
+              payment_mode, payment_reference,
               DATE_FORMAT(paid_on, '%Y-%m-%d') AS paid_on, reason, actor_employee_id,
               DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
          FROM employee_fnf_settlement_event
@@ -708,6 +720,27 @@ class EmployeeExitRepository {
   }
 
   /** The newest assessment of the employee's most recent assessed exit, or null. */
+  /**
+   * IS AN EXIT RECORDED FOR THIS EMPLOYEE IN THE EMPLOYEE LIFECYCLE? The
+   * Resign action sets `new_employee.resignation_date` and closes the
+   * employment period; only Rejoin (which applies the rehire assessment)
+   * clears / reopens them. Read by the legacy resignation delete, which must
+   * not reactivate such an employee behind Rejoin's back.
+   */
+  async lifecycleExitOf(employeeId) {
+    const rows = await this._read(
+      "LIFECYCLE-EXIT-OF",
+      `SELECT DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
+              (SELECT ep.period_state FROM employee_employment_period ep
+                WHERE ep.employee_id = ne.employee_id
+                ORDER BY ep.period_no DESC LIMIT 1) AS latest_period_state
+         FROM new_employee ne
+        WHERE ne.employee_id = ?`,
+      [employeeId]
+    );
+    return rows.length ? rows[0] : null;
+  }
+
   async latestRehireForEmployee(employeeId) {
     const rows = await this._read(
       "LATEST-REHIRE",

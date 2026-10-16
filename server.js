@@ -918,8 +918,9 @@ class Server {
     });
     // Full & Final Settlement, Exit Interview and Rehire Eligibility. The F&F
     // month itself is calculated, approved and published by the payrun above;
-    // this records F&F items, settlement completion and the confidential
-    // interview / rehire assessments.
+    // this records Accounts' payment confirmation (a reference to the published
+    // payroll document - no amount of its own) and the confidential interview /
+    // rehire assessments.
     this.employeeExitRepo = require("./repository/employee_exit")(this.mysql.connection);
     this.employeeExitUsecase = require("./usecase/employee_exit")(this.employeeExitRepo);
     // The rehire gate on Rejoin: NO / CONDITIONAL need management approval.
@@ -1067,6 +1068,9 @@ class Server {
       this.employeeRepo,
       this.userRepo
     );
+    // The legacy resignation delete may not reactivate an employee whose exit
+    // is recorded in the employee lifecycle: only Rejoin (with its rehire gate).
+    this.resignationUsecase.exitGuard = this.employeeExitRepo;
     this.productImageLogUsecase = require("./usecase/product_image_log")(
       this.productImageLogRepo
     );
