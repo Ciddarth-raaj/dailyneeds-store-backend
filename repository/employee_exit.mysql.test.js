@@ -418,6 +418,119 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     );
   });
 
+  it("P0 LATE EXIT: a resignation recorded after initialization blocks approval and publish until reconciled; the month then publishes an F&F", async () => {
+    // Employee 5: initialized and approved for August with NO exit...
+    await seedEmployee(5, { presentDays: 26 });
+    assert.equal((await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [5], actor: ACTOR })).calculated_count, 1);
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [5], actor: ACTOR })).approved_count, 1);
+    // ...then HR records the resignation, last working day 25 Aug.
+    await q(pool, "UPDATE new_employee SET resignation_date = '2026-08-25' WHERE employee_id = 5");
+    await q(pool, `INSERT INTO employee_employment_period (employee_id, period_no, period_state, joined_on, ended_on, end_reason_type)
+                   VALUES (5, 1, 'closed', '2026-02-02', '2026-08-25', 'resignation')`);
+
+    // Publish refuses: the approved month is the wrong document.
+    const pub = await act("PUBLISH", [5]);
+    assert.equal(pub.blocked_count, 1, JSON.stringify(pub.results));
+    assert.match(pub.results[0].message, /exit was recorded or changed after this month was initialized/);
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM payrun_payslip WHERE employee_id = 5"))[0].n, 0, "no regular payslip released");
+
+    // The F&F list flags it; reconcile is refused while a calculation exists.
+    const listed = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 5);
+    assert.equal(listed.needs_reconcile, true);
+    await assert.rejects(exitUsecase.reconcileExit({ year: YEAR, month: MONTH, employee_id: 5, actor: ACTOR }), /Unlock it and reset/);
+
+    // The explicit correction: Unlock -> (blocked from re-approval) -> Reset -> Reconcile -> Calculate -> Approve -> Publish.
+    assert.equal((await act("UNLOCK", [5])).unlocked_count, 1);
+    const row = (await calcUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 5);
+    assert.ok(row.blockers.some((b) => b.code === "EXIT_NOT_RECONCILED"), JSON.stringify(row.blockers));
+    assert.notEqual(row.status, "READY_FOR_APPROVAL");
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [5], actor: ACTOR })).approved_count, 0);
+    await assert.rejects(exitUsecase.reconcileExit({ year: YEAR, month: MONTH, employee_id: 5, actor: ACTOR }), /Reset the calculation first/);
+    await calcUsecase.reset({ year: YEAR, month: MONTH, employee_ids: [5], reason: "OTHER", remark: "exit recorded late", mode: "INDIVIDUAL", actor: ACTOR });
+    const rec = await exitUsecase.reconcileExit({ year: YEAR, month: MONTH, employee_id: 5, actor: ACTOR });
+    assert.equal(rec.outcome, "RECONCILED");
+    assert.deepEqual([rec.old_exit_date, rec.new_exit_date], [null, "2026-08-25"]);
+    const audit = await q(pool, "SELECT DATE_FORMAT(new_resignation_date, '%Y-%m-%d') d, actor_employee_id FROM payrun_exit_reconcile_audit WHERE employee_id = 5");
+    assert.deepEqual(audit.map((a) => [a.d, a.actor_employee_id]), [["2026-08-25", 77]]);
+    await assert.rejects(exitUsecase.reconcileExit({ year: YEAR, month: MONTH, employee_id: 5, actor: ACTOR }), /already carries/);
+
+    assert.equal((await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [5], actor: ACTOR })).calculated_count, 1);
+    const fresh = (await calcUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 5);
+    assert.equal(fresh.is_fnf, true);
+    assert.equal(fresh.exit_reconcile, null);
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [5], actor: ACTOR })).approved_count, 1);
+    assert.equal((await act("PUBLISH", [5])).published_count, 1);
+    const slip = (await q(pool, "SELECT document_type FROM payrun_payslip WHERE employee_id = 5 AND status = 'ACTIVE'"))[0];
+    assert.equal(slip.document_type, "FNF");
+  });
+
+  it("P0 OUTSTANDING OT: approved OT pending settlement blocks the F&F publish and settle; unlock + recalculate pays it exactly once; cancelled/rejected OT is never paid", async () => {
+    // Employee 6 leaves on 20 Aug; the F&F month is approved & locked.
+    await seedEmployee(6, { exit: "2026-08-20", presentDays: 15 });
+    await q(pool, `INSERT INTO employee_employment_period (employee_id, period_no, period_state, joined_on, ended_on, end_reason_type)
+                   VALUES (6, 1, 'closed', '2026-02-02', '2026-08-20', 'resignation')`);
+    await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [6], actor: ACTOR });
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [6], actor: ACTOR })).approved_count, 1);
+    // OT for 12 Aug is then APPROVED (after the lock) -> a PENDING settlement row, priced at approval.
+    const approvedReq = await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, attendance_date, status, approved_ot_minutes)
+                                       VALUES ('OT', 6, '2026-08-12', 'APPROVED', 120)`);
+    await q(pool, `INSERT INTO attendance_ot_late_settlement (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+                     eligible_ot_minutes, approved_ot_minutes, source_daily_rate, nrm_minutes, ot_hourly_rate, amount)
+                   VALUES (?, 6, '2026-08-12', 2026, 8, 120, 120, 384.62, 480, 48.08, 96.16)`, [approvedReq.insertId]);
+    // A REJECTED request never gets a settlement row; a CANCELLED one must never be paid.
+    await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, attendance_date, status, approved_ot_minutes)
+                   VALUES ('OT', 6, '2026-08-13', 'REJECTED', NULL)`);
+    const cancelledReq = await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, attendance_date, status, approved_ot_minutes)
+                                        VALUES ('OT', 6, '2026-08-14', 'APPROVED', 60)`);
+    await q(pool, `INSERT INTO attendance_ot_late_settlement (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+                     eligible_ot_minutes, approved_ot_minutes, source_daily_rate, nrm_minutes, ot_hourly_rate, amount, settlement_status)
+                   VALUES (?, 6, '2026-08-14', 2026, 8, 60, 60, 384.62, 480, 48.08, 48.08, 'CANCELLED')`, [cancelledReq.insertId]);
+
+    const listed = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 6);
+    assert.deepEqual(listed.outstanding_ot, { items: 1, minutes: 120, amount: 96.16 });
+    const pub = await act("PUBLISH", [6]);
+    assert.equal(pub.blocked_count, 1, JSON.stringify(pub.results));
+    assert.match(pub.results[0].message, /approved OT is still pending settlement/);
+
+    // Unlock -> Recalculate claims the item into the F&F -> Approve -> Publish -> Settle.
+    assert.equal((await act("UNLOCK", [6])).unlocked_count, 1);
+    const recalc = await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [6], mode: "RECALCULATE", actor: ACTOR });
+    assert.equal(recalc.results[0].result, "RECALCULATED", JSON.stringify(recalc.results));
+    const calcRow = (await q(pool, "SELECT payrun_calculation_id, prior_month_ot_amount, prior_month_ot FROM payrun_employee_calculation WHERE employee_id = 6"))[0];
+    assert.equal(Number(calcRow.prior_month_ot_amount), 96.16);
+    const paid = JSON.parse(typeof calcRow.prior_month_ot === "string" ? calcRow.prior_month_ot : JSON.stringify(calcRow.prior_month_ot));
+    assert.deepEqual(paid.map((i) => i.attendance_date), ["2026-08-12"], "the cancelled item is not paid");
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [6], actor: ACTOR })).approved_count, 1);
+    assert.equal((await act("PUBLISH", [6])).published_count, 1);
+    const snap = JSON.parse((await q(pool, "SELECT snapshot_json FROM payrun_payslip WHERE employee_id = 6 AND status = 'ACTIVE'"))[0].snapshot_json);
+    assert.ok(snap.earnings.lines.some((l) => /OT Approved After Lock/.test(l.label) && l.amount === "96.16"), JSON.stringify(snap.earnings.lines));
+    const items = await q(pool, "SELECT attendance_date, settlement_status, settlement_payrun_calculation_id FROM attendance_ot_late_settlement WHERE employee_id = 6 ORDER BY attendance_date");
+    assert.deepEqual(items.map((i) => [i.settlement_status, i.settlement_payrun_calculation_id]), [
+      ["SETTLED", calcRow.payrun_calculation_id],
+      ["CANCELLED", null],
+    ]);
+    assert.equal((await exitUsecase.settle({ year: YEAR, month: MONTH, employee_id: 6, payment_mode: "CASH", paid_on: "2026-09-10", actor: ACTOR })).outcome, "SETTLED");
+    assert.equal((await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 6).outstanding_ot, null);
+  });
+
+  it("P0 OUTSTANDING OT AFTER SETTLEMENT: Settle refuses while approved OT is pending; the settled month needs reopen to pay it", async () => {
+    // OT for 18 Aug approved AFTER employee 6's F&F was settled.
+    const req = await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, attendance_date, status, approved_ot_minutes)
+                               VALUES ('OT', 6, '2026-08-18', 'APPROVED', 60)`);
+    await q(pool, `INSERT INTO attendance_ot_late_settlement (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+                     eligible_ot_minutes, approved_ot_minutes, source_daily_rate, nrm_minutes, ot_hourly_rate, amount)
+                   VALUES (?, 6, '2026-08-18', 2026, 8, 60, 60, 384.62, 480, 48.08, 48.08)`, [req.insertId]);
+    const row = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 6);
+    assert.equal(row.stage, "SETTLED");
+    assert.equal(row.outstanding_ot.items, 1, "visible on the settled row");
+    // Reopen, and a re-settle is refused until it is paid.
+    await exitUsecase.reopen({ year: YEAR, month: MONTH, employee_id: 6, reason: "late OT", actor: ACTOR });
+    await assert.rejects(
+      exitUsecase.settle({ year: YEAR, month: MONTH, employee_id: 6, payment_mode: "CASH", paid_on: "2026-09-12", actor: ACTOR }),
+      /pending settlement/
+    );
+  });
+
   it("MIGRATION down -> up: removes only this feature's schema; every payroll figure and payslip survives", async () => {
     const before = await q(pool, "SELECT employee_id, net_pay, calculation_hash, status FROM payrun_employee_calculation ORDER BY employee_id");
     const slipsBefore = await q(pool, "SELECT payslip_id, snapshot_sha256, status FROM payrun_payslip ORDER BY payslip_id");

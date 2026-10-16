@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS `employee_rehire_assessment`;
 DROP TABLE IF EXISTS `employee_exit_interview`;
 DROP TABLE IF EXISTS `employee_fnf_settlement_event`;
 DROP TABLE IF EXISTS `employee_fnf_settlement`;
+DROP TABLE IF EXISTS `payrun_exit_reconcile_audit`;
 DROP TABLE IF EXISTS `payrun_fnf_item_audit`;
 DROP TABLE IF EXISTS `payrun_fnf_item`;
 

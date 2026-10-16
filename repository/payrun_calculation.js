@@ -537,6 +537,49 @@ class PayrunCalculationRepository {
   }
 
   /**
+   * THE EMPLOYEE MASTER'S CURRENT EXIT DATE, per employee - read live so a
+   * resignation recorded (or moved, or cleared by a rejoin) AFTER the month
+   * was initialized is noticed rather than paid as an ordinary month. Compared
+   * with the payrun snapshot's own `resignation_date`; nothing here writes.
+   */
+  async listLiveExitDates(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-LIVE-EXIT-DATES",
+      `SELECT employee_id, DATE_FORMAT(resignation_date, '%Y-%m-%d') AS live_exit_date
+         FROM new_employee WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
+   * APPROVED OT STILL WAITING FOR A PAYROLL MONTH (`PENDING_SETTLEMENT`) for
+   * these employees, up to the end of the given month - for the F&F month,
+   * which is the leaver's LAST payroll month: an item still pending there
+   * would otherwise wait for a "next open month" the leaver never has.
+   * A database without the table has none.
+   */
+  async listOutstandingLateOt(employeeIds, year, month) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    try {
+      return await this._read(
+        "LIST-OUTSTANDING-LATE-OT",
+        `SELECT employee_id, late_settlement_id, attendance_approval_request_id,
+                DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                source_year, source_month, approved_ot_minutes, amount
+           FROM attendance_ot_late_settlement
+          WHERE employee_id IN (?) AND settlement_status = 'PENDING_SETTLEMENT'
+            AND (source_year * 12 + source_month) <= (? * 12 + ?)
+          ORDER BY employee_id, attendance_date`,
+        [employeeIds, year, month]
+      );
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      throw err;
+    }
+  }
+
+  /**
    * THE F&F ITEMS ENTERED FOR THIS MONTH (`payrun_fnf_item`), per employee -
    * an input of the calculation exactly like the adjustments. Only exit
    * months ever have rows. A database without the table (before migration

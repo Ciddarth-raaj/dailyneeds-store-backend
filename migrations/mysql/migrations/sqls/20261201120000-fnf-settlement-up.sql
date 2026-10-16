@@ -227,7 +227,28 @@ CREATE TABLE IF NOT EXISTS `employee_rehire_assessment` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='CONFIDENTIAL: append-only fit-for-rehire assessments per exit event';
 
--- ======================================================= 7. PERMISSIONS
+-- ================================== 7. EXIT RECONCILIATION (append-only)
+--
+-- A resignation recorded after a month was initialized is brought into that
+-- month's snapshot by an explicit, audited action - the old and the new
+-- `payrun_employee.resignation_date`, who, when. No figure is written.
+CREATE TABLE IF NOT EXISTS `payrun_exit_reconcile_audit` (
+  `payrun_exit_reconcile_audit_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `payrun_employee_id` BIGINT UNSIGNED NOT NULL,
+  `period_year`  SMALLINT NOT NULL,
+  `period_month` TINYINT NOT NULL,
+  `employee_id`  INT NOT NULL,
+  `old_resignation_date` DATE NULL DEFAULT NULL,
+  `new_resignation_date` DATE NULL DEFAULT NULL,
+  `actor_employee_id` INT NULL DEFAULT NULL,
+  `actor_user_id` INT NULL DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`payrun_exit_reconcile_audit_id`),
+  KEY `idx_exit_reconcile_employee` (`period_year`, `period_month`, `employee_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='append-only: exit dates reconciled into an initialized payrun month';
+
+-- ======================================================= 8. PERMISSIONS
 -- Declared, granted to NOBODY. Administrators hold them through user_type 2.
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_fnf_settlement' FROM DUAL

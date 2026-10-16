@@ -33,6 +33,7 @@ const TABLES = [
   "employee_exit_interview",
   "employee_fnf_settlement_event",
   "employee_fnf_settlement",
+  "payrun_exit_reconcile_audit",
   "payrun_fnf_item_audit",
   "payrun_fnf_item",
   "employee_employment_period",

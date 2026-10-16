@@ -205,8 +205,10 @@ class EmployeeExitRepository {
               DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
               c.net_pay, c.fnf_additions, c.fnf_deductions, c.calculation_hash,
               p.payslip_id, p.document_type,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS live_exit_date,
               ${CASE_JOIN_COLUMNS}
          FROM payrun_employee pe
+         LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
          LEFT JOIN payrun_employee_calculation c
            ON c.period_year = pe.period_year AND c.period_month = pe.period_month AND c.employee_id = pe.employee_id
          LEFT JOIN payrun_payslip p
@@ -389,6 +391,134 @@ class EmployeeExitRepository {
     );
   }
 
+  /** Like `_read`, but a table that does not exist yet reads as no rows. */
+  async _readTolerant(code, sql, params, conn = null) {
+    try {
+      return await new Promise((resolve, reject) =>
+        (conn || this.db).query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])))
+      );
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      this._log(code, err);
+      throw err;
+    }
+  }
+
+  /** One employee's payrun row for the month, inside the caller's branch scope. */
+  async getPayrunRow({ year, month, employee_id, store_ids = null }) {
+    const params = [year, month, employee_id];
+    let clause = "";
+    if (Array.isArray(store_ids)) {
+      if (store_ids.length === 0) return null;
+      clause = " AND pe.store_id IN (?)";
+      params.push(store_ids);
+    }
+    const rows = await this._read(
+      "GET-PAYRUN-ROW",
+      `SELECT pe.payrun_employee_id, pe.employee_id, pe.employee_name,
+              DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS snapshot_exit_date,
+              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS live_exit_date
+         FROM payrun_employee pe
+         LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
+        WHERE pe.period_year = ? AND pe.period_month = ? AND pe.employee_id = ?${clause}`,
+      params
+    );
+    return rows.length ? rows[0] : null;
+  }
+
+  /** Approved OT still PENDING_SETTLEMENT up to this month, per employee (counts). */
+  async listOutstandingOt(employeeIds, year, month) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._readTolerant(
+      "LIST-OUTSTANDING-OT",
+      `SELECT employee_id, COUNT(*) AS items, SUM(approved_ot_minutes) AS minutes, SUM(amount) AS amount
+         FROM attendance_ot_late_settlement
+        WHERE employee_id IN (?) AND settlement_status = 'PENDING_SETTLEMENT'
+          AND (source_year * 12 + source_month) <= (? * 12 + ?)
+        GROUP BY employee_id`,
+      [employeeIds, year, month]
+    );
+  }
+
+  /* ===================================================== exit reconcile */
+
+  /**
+   * RECONCILE A LATE-RECORDED EXIT INTO THE MONTH'S SNAPSHOT.
+   *
+   * The payrun snapshot's `resignation_date` is set to the employee master's
+   * current one - the ONLY write - with an audit row, in one transaction.
+   *
+   * IT NEVER TOUCHES FIGURES. It refuses whenever the month holds a
+   * calculation of any kind (the user resets it first with the existing,
+   * audited Reset, which also releases any prior-month OT it had claimed);
+   * an approved or published month must be unpublished / unlocked first with
+   * the existing lifecycle actions. A locked payroll month refuses. An exit
+   * date BEFORE the month means the employee was not employed in it at all,
+   * which this action does not decide.
+   */
+  async reconcileExit({ year, month, from, to, employee_id, actor = {} }) {
+    return this.withTransaction(async (conn) => {
+      const [periodRow] = await this._read(
+        "RECONCILE-LOCK-PERIOD",
+        "SELECT status FROM payrun_period WHERE period_year = ? AND period_month = ? LOCK IN SHARE MODE",
+        [year, month],
+        conn
+      );
+      if (periodRow && periodRow.status === "LOCKED") return { outcome: "MONTH_LOCKED" };
+      const [calcRow] = await this._read(
+        "RECONCILE-LOCK-CALCULATION",
+        `SELECT status, published_at FROM payrun_employee_calculation
+          WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
+        [year, month, employee_id],
+        conn
+      );
+      if (calcRow && calcRow.status === "APPROVED_LOCKED") {
+        return { outcome: calcRow.published_at ? "PUBLISHED" : "APPROVED_LOCKED" };
+      }
+      if (calcRow) return { outcome: "CALCULATED" };
+      const [payrun] = await this._read(
+        "RECONCILE-LOCK-PAYRUN",
+        `SELECT payrun_employee_id, DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
+           FROM payrun_employee WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
+        [year, month, employee_id],
+        conn
+      );
+      if (!payrun) return { outcome: "NOT_INITIALIZED" };
+      const [live] = await this._read(
+        "RECONCILE-READ-MASTER",
+        `SELECT DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
+           FROM new_employee WHERE employee_id = ? LOCK IN SHARE MODE`,
+        [employee_id],
+        conn
+      );
+      const liveExit = live ? live.resignation_date || null : null;
+      const snapshotExit = payrun.resignation_date || null;
+      if (liveExit === snapshotExit) return { outcome: "NOTHING_TO_RECONCILE" };
+      if (liveExit && liveExit < from) return { outcome: "EXIT_BEFORE_MONTH", live_exit_date: liveExit };
+      // An exit AFTER this month is not this month's: the snapshot keeps none.
+      const next = liveExit && liveExit <= to ? liveExit : null;
+      if (next === snapshotExit) return { outcome: "NOTHING_TO_RECONCILE" };
+      const res = await this._read(
+        "RECONCILE-UPDATE",
+        `UPDATE payrun_employee SET resignation_date = ?
+          WHERE payrun_employee_id = ? AND (resignation_date <=> ?)`,
+        [next, payrun.payrun_employee_id, snapshotExit],
+        conn
+      );
+      if (Number(res.affectedRows) !== 1) throw new Error("RECONCILE moved no row; rolled back");
+      await this._read(
+        "RECONCILE-AUDIT",
+        `INSERT INTO payrun_exit_reconcile_audit
+                (payrun_employee_id, period_year, period_month, employee_id,
+                 old_resignation_date, new_resignation_date, actor_employee_id, actor_user_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [payrun.payrun_employee_id, year, month, employee_id, snapshotExit, next, actor.employeeId ?? null, actor.userId ?? null],
+        conn
+      );
+      return { outcome: "RECONCILED", old_exit_date: snapshotExit, new_exit_date: next };
+    });
+  }
+
   /* ================================================ settlement completion */
 
   /**
@@ -427,6 +557,21 @@ class EmployeeExitRepository {
       if (!slip) return { outcome: "NOT_PUBLISHED" };
       if (slip.document_type !== "FNF") return { outcome: "NOT_FNF" };
       if (String(slip.calculation_hash) !== String(calcRow.calculation_hash)) return { outcome: "CALCULATION_CHANGED" };
+      /*
+       * APPROVED OT STILL WAITING FOR A MONTH. The F&F month is the leaver's
+       * last; an approved OT item still PENDING_SETTLEMENT up to it would
+       * never be paid once this settlement closes. Refused until the month is
+       * unlocked and recalculated (which claims the item into the F&F).
+       */
+      const pendingOt = await this._readTolerant(
+        "SETTLE-OUTSTANDING-OT",
+        `SELECT COUNT(*) AS n FROM attendance_ot_late_settlement
+          WHERE employee_id = ? AND settlement_status = 'PENDING_SETTLEMENT'
+            AND (source_year * 12 + source_month) <= (? * 12 + ?)`,
+        [employee_id, year, month],
+        conn
+      );
+      if (pendingOt.length && Number(pendingOt[0].n) > 0) return { outcome: "OUTSTANDING_OT" };
 
       const caseId = await this.ensureCase({ employee_id, exit_date: calcRow.exit_date, actor: actor.employeeId ?? null }, conn);
       const existing = await this.getCase(caseId, conn, { forUpdate: true });
