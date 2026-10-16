@@ -150,6 +150,17 @@ const FNF_DECLARATION =
   "grievances, disputes, demands and claims about my legal dues, back wages, reinstatement or " +
   "reemployment against the company.";
 
+/**
+ * WHEN THE F&F IS NEGATIVE the employee owes the company, and "I have
+ * received the above said amount" would be false. This wording is a draft for
+ * HR / legal to approve (see the review report); it is frozen into each
+ * snapshot, so a later wording change never alters a published statement.
+ */
+const FNF_DECLARATION_RECOVERABLE =
+  "I, the undersigned, hereby acknowledge the above full and final settlement, under which the amount stated " +
+  "above is recoverable from me, and I assure that I have no grievances, disputes, demands and claims about my " +
+  "legal dues, back wages, reinstatement or reemployment against the company.";
+
 /* ======================================= SETTLEMENT COMPLETION ========== */
 
 /**
@@ -271,6 +282,7 @@ module.exports = {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
   FNF_DECLARATION,
+  FNF_DECLARATION_RECOVERABLE,
   SETTLEMENT_STATUS,
   SETTLEMENT_STAGE,
   SETTLEMENT_STAGE_LABEL,

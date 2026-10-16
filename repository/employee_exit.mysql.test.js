@@ -8,12 +8,9 @@
  * SKIPPED unless `ATTENDANCE_TEST_MYSQL` names a SCRATCH database (it drops
  * and recreates every table it uses).
  *
- * Every payrun table is built from the MIGRATION FILES, including
- * 20261201120000-fnf-settlement under test. The shared stand-ins
- * (test_support/payrun_mysql_fixture.js) are used, and the two
- * `new_employee` columns and the EPFO ceiling migration that the current
- * calculation repository reads - which that shared fixture predates - are
- * added here, locally, with explicit column lists.
+ * Every payrun table is built from the MIGRATION FILES (the shared list in
+ * test_support/payrun_mysql_fixture.js), including
+ * 20261201120000-fnf-settlement under test.
  *
  * August 2026, two employees:
  *   1  ACTIVE all month           -> an ordinary Salary Payslip
@@ -49,7 +46,6 @@ const AUG = Array.from({ length: 31 }, (_, i) => `2026-08-${String(i + 1).padSta
 const ACTOR = { employeeId: 77, userId: 7 };
 const FNF_UP = "20261201120000-fnf-settlement-up.sql";
 const FNF_DOWN = "20261201120000-fnf-settlement-down.sql";
-const EPFO_UP = "20261120120000-epfo-wage-ceiling-2026-up.sql";
 const FEATURE_TABLES = [
   "employee_rehire_exception",
   "payrun_exit_reconcile_audit",
@@ -147,20 +143,9 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     pool = require("mysql").createPool(`${URL}?connectionLimit=12&multipleStatements=true`);
     await dropAll();
     for (const ddl of STAND_INS) await q(pool, ddl);
-    // What the current statutory read needs from new_employee (see header).
-    await q(pool, "ALTER TABLE new_employee ADD COLUMN previous_pf_member TINYINT(1) NULL, ADD COLUMN pf_number VARCHAR(45) NULL");
-    // What Publish reads from the priced salary record (the M2 salary engine's columns).
-    await q(pool, `ALTER TABLE employee_salary
-        ADD COLUMN pf_status VARCHAR(32) NULL, ADD COLUMN employee_pf DECIMAL(12,2) NULL, ADD COLUMN employer_pf_total DECIMAL(12,2) NULL,
-        ADD COLUMN edli DECIMAL(12,2) NULL, ADD COLUMN pf_admin_charge DECIMAL(12,2) NULL, ADD COLUMN esi_status VARCHAR(32) NULL,
-        ADD COLUMN esi_wage DECIMAL(12,2) NULL, ADD COLUMN employee_esi DECIMAL(12,2) NULL, ADD COLUMN employer_esi DECIMAL(12,2) NULL,
-        ADD COLUMN monthly_ctc DECIMAL(12,2) NULL, ADD COLUMN ctc_status VARCHAR(32) NULL, ADD COLUMN unresolved_notes TEXT NULL,
-        ADD COLUMN statutory_snapshot JSON NULL`);
     // The designation grants table the down migration cleans.
     await q(pool, "CREATE TABLE permissions (designation_id INT NOT NULL, permission_key VARCHAR(100) NOT NULL) ENGINE=InnoDB");
-    // The shared list already ends with the feature migration; the EPFO
-    // ceiling columns are added after it here (they are independent).
-    for (const file of [...MIGRATIONS, EPFO_UP]) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
+    for (const file of MIGRATIONS) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
     // The feature migration ran once in the shared list; run it AGAIN: every
     // statement is guarded.
     await q(pool, fs.readFileSync(path.join(SQLS, FNF_UP), "utf8"));

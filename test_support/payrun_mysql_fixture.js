@@ -20,6 +20,11 @@ const MIGRATIONS = [
   // Prior-Month OT carry-forward: the settlement tables and the two
   // calculation columns the repository now reads and writes.
   "20261126120000-attendance-ot-late-settlement-up.sql",
+  // The EPFO wage ceiling: the calculation's eps_wage / edli / pf_segments ...
+  // columns and new_employee's PF basis columns, which the calculation
+  // repository reads and writes. Missing here, every suite that calculates
+  // failed in its before() hook (ER_BAD_FIELD_ERROR).
+  "20261120120000-epfo-wage-ceiling-2026-up.sql",
   // Full & Final Settlement: the calculation's F&F columns, the payslip's
   // document type, and the exit tables (FK to employee_employment_period,
   // stood in below).
@@ -109,7 +114,10 @@ const STAND_INS = [
      dob DATE, date_of_joining VARCHAR(40), resignation_date DATE NULL,
      uan VARCHAR(45), esi_number VARCHAR(45), attendance_required TINYINT(1) DEFAULT 1,
      bank_name VARCHAR(100) NULL, account_no VARCHAR(45) NULL, pan_no VARCHAR(20) NULL,
-     department_id INT NULL
+     department_id INT NULL,
+     -- Read by the calculation's statutory context. Suites insert with
+     -- EXPLICIT column lists, so a column added here breaks nothing.
+     previous_pf_member TINYINT(1) NULL, pf_number VARCHAR(45) NULL
    ) ENGINE=InnoDB`,
   // The 20210929103343 + 20211004184520 company_details shape.
   `CREATE TABLE company_details (
@@ -127,7 +135,14 @@ const STAND_INS = [
      salary_id INT AUTO_INCREMENT PRIMARY KEY, employee_id INT NOT NULL,
      monthly_gross DECIMAL(12,2), daily_salary DECIMAL(12,2), basic DECIMAL(12,2),
      conveyance DECIMAL(12,2), hra DECIMAL(12,2), special_allowance DECIMAL(12,2),
-     effective_from DATE NOT NULL, status VARCHAR(20) NOT NULL
+     effective_from DATE NOT NULL, status VARCHAR(20) NOT NULL,
+     -- The M2 salary engine's stored figures, read by Publish for the
+     -- payslip's fixed CTC / take home.
+     pf_status VARCHAR(32) NULL, employee_pf DECIMAL(12,2) NULL, employer_pf_total DECIMAL(12,2) NULL,
+     edli DECIMAL(12,2) NULL, pf_admin_charge DECIMAL(12,2) NULL, esi_status VARCHAR(32) NULL,
+     esi_wage DECIMAL(12,2) NULL, employee_esi DECIMAL(12,2) NULL, employer_esi DECIMAL(12,2) NULL,
+     monthly_ctc DECIMAL(12,2) NULL, ctc_status VARCHAR(32) NULL, unresolved_notes TEXT NULL,
+     statutory_snapshot JSON NULL
    ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_monthly_payroll (
      attendance_monthly_payroll_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,

@@ -168,8 +168,12 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
       <td>${er ? esc(er.label) : ""}</td><td class="num">${er ? esc(num(er.amount)) : ""}</td><td class="num">${esc(act)}</td>
       <td>${dr ? esc(dr.label) : ""}</td><td class="num">${dr ? esc(num(dr.amount)) : ""}</td></tr>`;
   }).join("");
+  // A row with nothing to say is left out rather than printed as ": ".
   const kv = (label, value) =>
-    `<tr><td class="k">${esc(label)}</td><td class="v">: ${esc(value === null || value === undefined ? "" : value)}</td></tr>`;
+    value === null || value === undefined || value === ""
+      ? ""
+      : `<tr><td class="k">${esc(label)}</td><td class="v">: ${esc(value)}</td></tr>`;
+  const st = s.statutory || {};
   const net = f.net_pay;
   const absNet = net === null || net === undefined ? net : String(net).replace("-", "");
   const payLabel = x.net_payable_label || "Total Net Payable";
@@ -190,6 +194,8 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
     kv("Payroll Month", s.period && s.period.label),
     kv("Bank Account Number", e.bank_account_masked),
     kv("PAN", e.pan_masked),
+    kv("UAN", st.pf_applicable ? st.uan : null),
+    kv("ESI Number", st.esi_applicable ? st.esi_number : null),
   ];
   return `<!doctype html><html><head><meta charset="utf-8"><title>Full &amp; Final Settlement</title><style>
   @page { size: A4; margin: 12mm; }
@@ -249,7 +255,7 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
 </table>
 <div class="band">${esc(payLabel)} ${esc(inr(absNet))}</div>
 <div class="band">In Words: ${esc(x.net_payable_words || "")}</div>
-<div class="formula">**Total Net Payable = (Gross Earnings - Total Deductions) + Round-off</div>
+<div class="formula">**${esc(payLabel)} = ${x.recoverable ? "(Total Deductions - Gross Earnings) - Round-off" : "(Gross Earnings - Total Deductions) + Round-off"}</div>
 <div><b>Note :</b></div>
 <div class="sign"><span>Prepared By :</span><span>Checked By :</span><span>Authorized By :</span></div>
 <section class="decl"><h2>Declaration By the Receiver</h2><p>${esc(x.declaration || "")}</p></section>

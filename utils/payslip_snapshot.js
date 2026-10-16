@@ -44,6 +44,7 @@ const {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
   FNF_DECLARATION,
+  FNF_DECLARATION_RECOVERABLE,
   FNF_KIND,
   FNF_COMPONENT_BY_KEY,
 } = require("../constants/fnf");
@@ -309,7 +310,7 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
     net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
     recoverable,
     net_payable_words: amountInWords(money(Math.abs(netPay))),
-    declaration: FNF_DECLARATION,
+    declaration: recoverable ? FNF_DECLARATION_RECOVERABLE : FNF_DECLARATION,
   };
 }
 

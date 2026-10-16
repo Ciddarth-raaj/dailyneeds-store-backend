@@ -69,7 +69,7 @@ describe("payroll lifecycle over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYS
     for (const file of MIGRATIONS) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
 
     for (const id of IDS) {
-      await q(pool, "INSERT INTO new_employee VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1, 'State Bank', '123456789012', 'ABCDE1234F', 3)", [id, `E${id}`]);
+      await q(pool, "INSERT INTO new_employee (employee_id, employee_name, store_id, pf_applicable, esi_applicable, previous_eps_member, dob, date_of_joining, resignation_date, uan, esi_number, attendance_required, bank_name, account_no, pan_no, department_id) VALUES (?, ?, 1, 1, 1, 0, '1990-06-15', '2018-04-01', NULL, '100200300400', '3100000000', 1, 'State Bank', '123456789012', 'ABCDE1234F', 3)", [id, `E${id}`]);
       // 26,013.37 a month: a gross whose Net Pay is NOT a whole rupee.
       const s = await q(pool, "INSERT INTO employee_salary (employee_id, monthly_gross, daily_salary, basic, conveyance, hra, special_allowance, effective_from, status) VALUES (?, 26013.37, 1000.51, 13006.69, 2500, 5000, 5506.68, '2026-04-01', 'APPROVED')", [id]);
       const pe = await q(pool, `INSERT INTO payrun_employee
