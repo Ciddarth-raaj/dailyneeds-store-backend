@@ -227,6 +227,31 @@ CREATE TABLE IF NOT EXISTS `employee_rehire_assessment` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   COMMENT='CONFIDENTIAL: append-only fit-for-rehire assessments per exit event';
 
+-- ========================== 6b. REHIRE EXCEPTIONS AT REJOIN (append-only)
+--
+-- A rejoin from an exit assessed NO or CONDITIONAL needs management approval
+-- (approve_rehire_exception) and a reason; the approval is written here in
+-- the SAME transaction as the rejoin. The assessment itself is never edited.
+CREATE TABLE IF NOT EXISTS `employee_rehire_exception` (
+  `employee_rehire_exception_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `fnf_settlement_id` BIGINT UNSIGNED NOT NULL,
+  `rehire_assessment_id` BIGINT UNSIGNED NOT NULL,
+  `employee_id` INT NOT NULL,
+  `eligibility` ENUM('NO','CONDITIONAL') NOT NULL,
+  `conditions` VARCHAR(500) NULL DEFAULT NULL,
+  `reason` VARCHAR(500) NOT NULL,
+  `rejoin_date` DATE NOT NULL,
+  `approved_by` INT NULL DEFAULT NULL,
+  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`employee_rehire_exception_id`),
+  KEY `idx_rehire_exception_employee` (`employee_id`),
+  CONSTRAINT `fk_rehire_exception_case`
+    FOREIGN KEY (`fnf_settlement_id`) REFERENCES `employee_fnf_settlement` (`fnf_settlement_id`),
+  CONSTRAINT `fk_rehire_exception_assessment`
+    FOREIGN KEY (`rehire_assessment_id`) REFERENCES `employee_rehire_assessment` (`rehire_assessment_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT='CONFIDENTIAL: management approvals to rejoin despite a NO / CONDITIONAL rehire assessment';
+
 -- ================================== 7. EXIT RECONCILIATION (append-only)
 --
 -- A resignation recorded after a month was initialized is brought into that
@@ -265,3 +290,6 @@ INSERT INTO `all_permissions` (`permission_key`)
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'override_rehire_eligibility' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'override_rehire_eligibility');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'approve_rehire_exception' FROM DUAL
+   WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'approve_rehire_exception');

@@ -753,6 +753,55 @@ class EmployeeExitRepository {
     });
   }
 
+  /**
+   * THE NEWEST REHIRE ASSESSMENT OF ONE EXIT, read on the REJOIN's own
+   * transaction connection (`tx.query`), so the gate decides on committed
+   * data under the rejoin's employee lock. No assessment table (migration not
+   * run) reads as no assessment.
+   */
+  async rehireForExitTx(tx, employeeId, exitDate) {
+    if (!exitDate) return null;
+    try {
+      const rows = await tx.query(
+        `SELECT r.rehire_assessment_id, r.eligibility, r.conditions, s.fnf_settlement_id
+           FROM employee_fnf_settlement s
+           JOIN employee_rehire_assessment r ON r.fnf_settlement_id = s.fnf_settlement_id
+          WHERE s.employee_id = ? AND s.exit_date = ?
+          ORDER BY r.rehire_assessment_id DESC
+          LIMIT 1`,
+        [employeeId, exitDate]
+      );
+      return rows && rows[0] ? rows[0] : null;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return null;
+      throw err;
+    }
+  }
+
+  /** The audit row of an approved rehire exception, in the rejoin's transaction. */
+  async recordRehireExceptionTx(tx, row) {
+    await tx.query(
+      `INSERT INTO employee_rehire_exception
+              (fnf_settlement_id, rehire_assessment_id, employee_id, eligibility, conditions,
+               reason, rejoin_date, approved_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        row.fnf_settlement_id, row.rehire_assessment_id, row.employee_id, row.eligibility,
+        row.conditions || null, row.reason, row.rejoin_date, row.approved_by ?? null,
+      ]
+    );
+  }
+
+  async listRehireExceptions(employeeId) {
+    return this._readTolerant(
+      "LIST-REHIRE-EXCEPTIONS",
+      `SELECT eligibility, conditions, reason, DATE_FORMAT(rejoin_date, '%Y-%m-%d') AS rejoin_date,
+              approved_by, DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s') AS created_at
+         FROM employee_rehire_exception WHERE employee_id = ? ORDER BY employee_rehire_exception_id DESC`,
+      [employeeId]
+    );
+  }
+
   /** The newest assessment of the employee's most recent assessed exit, or null. */
   async latestRehireForEmployee(employeeId) {
     const rows = await this._read(

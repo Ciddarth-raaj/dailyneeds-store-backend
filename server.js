@@ -922,6 +922,8 @@ class Server {
     // interview / rehire assessments.
     this.employeeExitRepo = require("./repository/employee_exit")(this.mysql.connection);
     this.employeeExitUsecase = require("./usecase/employee_exit")(this.employeeExitRepo);
+    // The rehire gate on Rejoin: NO / CONDITIONAL need management approval.
+    this.employeeMasterUsecase.rehireGate = this.employeeExitRepo;
     this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
       payslipRepo: this.payrunPayslipRepo,
       renderPdf: require("./services/payslip_pdf").renderPayslipPdf,

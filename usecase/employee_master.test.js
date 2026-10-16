@@ -1873,3 +1873,103 @@ describe("historical joining-date correction", () => {
     assert.equal(event.detail.new_date_of_joining, "2012-04-01");
   });
 });
+
+/* ======================================================= rehire gate ===== */
+/*
+ * F&F review round 2: the rehire assessment of the exit being rejoined FROM
+ * is enforced INSIDE the rejoin transaction. YES (or none) is the ordinary
+ * rejoin; CONDITIONAL needs approve_rehire_exception and a reason; NO needs
+ * the same management override with a mandatory reason. A refusal writes
+ * nothing; an approval is audited in the same transaction.
+ */
+describe("Rejoin - rehire gate", () => {
+  const gated = async (assessment) => {
+    const { world, uc } = build();
+    const { employee_id } = await uc.createEmployee({ ...VALID });
+    await uc.resignEmployee(employee_id, { resignation_date: "2024-05-31" });
+    const seen = { exitDates: [], recorded: [] };
+    uc.rehireGate = {
+      rehireForExitTx: async (tx, id, exitDate) => {
+        seen.exitDates.push(exitDate);
+        return assessment ? { rehire_assessment_id: 9, fnf_settlement_id: 4, ...assessment } : null;
+      },
+      recordRehireExceptionTx: async (tx, row) => {
+        seen.recorded.push(row);
+      },
+    };
+    return { world, uc, employee_id, seen };
+  };
+
+  it("YES and no assessment: the ordinary rejoin, nothing recorded", async () => {
+    for (const a of [null, { eligibility: "YES" }]) {
+      const { uc, employee_id, seen } = await gated(a);
+      const res = await uc.rejoinEmployee(employee_id, { date_of_joining: "2025-02-01" });
+      assert.equal(res.lifecycle_action, "open_rejoin");
+      assert.deepEqual(seen.exitDates, ["2024-05-31"], "judged on the exit being rejoined from");
+      assert.deepEqual(seen.recorded, []);
+    }
+  });
+
+  it("NO: refused without the management key, even with a reason; nothing is written", async () => {
+    const { world, uc, employee_id } = await gated({ eligibility: "NO" });
+    const before = world.snapshot();
+    await assert.rejects(
+      () => uc.rejoinEmployee(employee_id, { date_of_joining: "2025-02-01", rehire_exception_reason: "Needed for festival season" }),
+      (err) => err.httpCode === 403 && err.detail.error === "REHIRE_APPROVAL_REQUIRED" && /NOT fit for rehire/.test(err.message)
+    );
+    assert.equal(world.snapshot(), before, "rolled back");
+  });
+
+  it("NO: with the management key but no (or a too-short) reason, refused", async () => {
+    const { world, uc, employee_id } = await gated({ eligibility: "NO" });
+    const before = world.snapshot();
+    for (const reason of [undefined, "", "too short"]) {
+      await assert.rejects(
+        () => uc.rejoinEmployee(employee_id, { date_of_joining: "2025-02-01", rehire_exception_reason: reason }, { canApproveRehireException: true }),
+        (err) => err.httpCode === 422 && err.detail.error === "REHIRE_REASON_REQUIRED"
+      );
+    }
+    assert.equal(world.snapshot(), before);
+  });
+
+  it("NO: a management override with a reason rejoins and is audited in the same transaction", async () => {
+    const { uc, employee_id, seen } = await gated({ eligibility: "NO" });
+    const res = await uc.rejoinEmployee(
+      employee_id,
+      { date_of_joining: "2025-02-01", rehire_exception_reason: "Shortage repaid in full; GM approved" },
+      { actorEmployeeId: 55, canApproveRehireException: true }
+    );
+    assert.equal(res.new_period_no, 2);
+    assert.deepEqual(seen.recorded.map((r) => [r.eligibility, r.reason, r.rejoin_date, r.approved_by, r.rehire_assessment_id]), [
+      ["NO", "Shortage repaid in full; GM approved", "2025-02-01", 55, 9],
+    ]);
+  });
+
+  it("CONDITIONAL: management approval with a reason is required too", async () => {
+    const { uc, employee_id, seen } = await gated({ eligibility: "CONDITIONAL", conditions: "Different outlet only" });
+    await assert.rejects(
+      () => uc.rejoinEmployee(employee_id, { date_of_joining: "2025-02-01" }),
+      (err) => err.httpCode === 403 && /CONDITIONS/.test(err.message)
+    );
+    await uc.rejoinEmployee(
+      employee_id,
+      { date_of_joining: "2025-02-01", rehire_exception_reason: "Posted to Moolakulam as required" },
+      { canApproveRehireException: true }
+    );
+    assert.equal(seen.recorded[0].eligibility, "CONDITIONAL");
+    assert.equal(seen.recorded[0].conditions, "Different outlet only");
+  });
+
+  it("an audit failure rolls the rejoin back", async () => {
+    const { world, uc, employee_id } = await gated({ eligibility: "NO" });
+    uc.rehireGate.recordRehireExceptionTx = async () => {
+      throw new Error("simulated audit failure");
+    };
+    const before = world.snapshot();
+    await assert.rejects(
+      () => uc.rejoinEmployee(employee_id, { date_of_joining: "2025-02-01", rehire_exception_reason: "Shortage repaid in full; GM approved" }, { canApproveRehireException: true }),
+      /simulated audit failure/
+    );
+    assert.equal(world.snapshot(), before);
+  });
+});

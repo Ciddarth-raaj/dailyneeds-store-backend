@@ -23,6 +23,7 @@ const KEYS = [
   P.VIEW_EXIT_INTERVIEW,
   P.MANAGE_EXIT_INTERVIEW,
   P.OVERRIDE_REHIRE_ELIGIBILITY,
+  P.APPROVE_REHIRE_EXCEPTION,
 ];
 
 describe("the F&F settlement migration", () => {
@@ -37,6 +38,7 @@ describe("the F&F settlement migration", () => {
   it("declares every key the routes check, idempotently, and grants them to NOBODY", () => {
     assert.deepEqual(KEYS, [
       "view_fnf_settlement", "manage_fnf_settlement", "view_exit_interview", "manage_exit_interview", "override_rehire_eligibility",
+      "approve_rehire_exception",
     ]);
     KEYS.forEach((k) => {
       assert.match(up, new RegExp(`INSERT INTO \`all_permissions\`[\\s\\S]*?'${k}'[\\s\\S]*?WHERE NOT EXISTS`));
@@ -66,7 +68,7 @@ describe("the F&F settlement migration", () => {
   });
 
   it("down removes exactly what up added", () => {
-    for (const t of ["employee_rehire_assessment", "employee_exit_interview", "employee_fnf_settlement_event",
+    for (const t of ["employee_rehire_exception", "payrun_exit_reconcile_audit", "employee_rehire_assessment", "employee_exit_interview", "employee_fnf_settlement_event",
       "employee_fnf_settlement", "payrun_fnf_item_audit", "payrun_fnf_item"]) {
       assert.match(down, new RegExp(`DROP TABLE IF EXISTS \`${t}\``));
     }

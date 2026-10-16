@@ -5,6 +5,7 @@
 -- any F&F has been processed. Payroll figures of ordinary months are not
 -- touched; a calculation that carried F&F items loses its F&F columns, so any
 -- such month must be unlocked and recalculated after a rollback.
+DROP TABLE IF EXISTS `employee_rehire_exception`;
 DROP TABLE IF EXISTS `employee_rehire_assessment`;
 DROP TABLE IF EXISTS `employee_exit_interview`;
 DROP TABLE IF EXISTS `employee_fnf_settlement_event`;
@@ -42,6 +43,6 @@ SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 DELETE FROM `permissions` WHERE `permission_key` IN
-  ('view_fnf_settlement','manage_fnf_settlement','view_exit_interview','manage_exit_interview','override_rehire_eligibility');
+  ('view_fnf_settlement','manage_fnf_settlement','view_exit_interview','manage_exit_interview','override_rehire_eligibility','approve_rehire_exception');
 DELETE FROM `all_permissions` WHERE `permission_key` IN
-  ('view_fnf_settlement','manage_fnf_settlement','view_exit_interview','manage_exit_interview','override_rehire_eligibility');
+  ('view_fnf_settlement','manage_fnf_settlement','view_exit_interview','manage_exit_interview','override_rehire_eligibility','approve_rehire_exception');

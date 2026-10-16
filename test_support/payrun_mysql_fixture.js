@@ -29,6 +29,7 @@ const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 
 /** Every table this suite creates, children first so they drop cleanly. */
 const TABLES = [
+  "employee_rehire_exception",
   "employee_rehire_assessment",
   "employee_exit_interview",
   "employee_fnf_settlement_event",

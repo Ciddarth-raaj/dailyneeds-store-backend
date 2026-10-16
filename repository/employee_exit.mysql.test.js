@@ -51,6 +51,8 @@ const FNF_UP = "20261201120000-fnf-settlement-up.sql";
 const FNF_DOWN = "20261201120000-fnf-settlement-down.sql";
 const EPFO_UP = "20261120120000-epfo-wage-ceiling-2026-up.sql";
 const FEATURE_TABLES = [
+  "employee_rehire_exception",
+  "payrun_exit_reconcile_audit",
   "employee_rehire_assessment",
   "employee_exit_interview",
   "employee_fnf_settlement_event",
@@ -200,7 +202,7 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(cols[0].Default, "PAYSLIP");
     const keys = await q(pool, "SELECT permission_key FROM all_permissions WHERE permission_key LIKE '%fnf%' OR permission_key LIKE '%exit%' OR permission_key LIKE '%rehire%' ORDER BY 1");
     assert.deepEqual(keys.map((k) => k.permission_key), [
-      "manage_exit_interview", "manage_fnf_settlement", "override_rehire_eligibility", "view_exit_interview", "view_fnf_settlement",
+      "approve_rehire_exception", "manage_exit_interview", "manage_fnf_settlement", "override_rehire_eligibility", "view_exit_interview", "view_fnf_settlement",
     ]);
   });
 
@@ -407,6 +409,24 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     const hist = await q(pool, "SELECT eligibility, is_override, override_reason FROM employee_rehire_assessment WHERE fnf_settlement_id = ? ORDER BY 1", [ids[0]]);
     assert.equal(hist.length, 2, "an override is a new row; the earlier assessment is kept");
     assert.equal((await exitUsecase.rehireStatus(2)).rehire.eligibility, "NO");
+  });
+
+  it("REHIRE GATE SQL: reads the NEWEST assessment of the exit being rejoined from; records the approved exception", async () => {
+    const tx = (fn) => exitRepo.withTransaction((conn) => fn({ query: (sql, params) => new Promise((r, j) => conn.query(sql, params, (e, rows) => (e ? j(e) : r(rows)))) }));
+    // Exit 2026-12-20: CONDITIONAL, then overridden to NO -> the gate sees NO.
+    const dec = await tx((t) => exitRepo.rehireForExitTx(t, 2, "2026-12-20"));
+    assert.equal(dec.eligibility, "NO");
+    // Exit 2026-08-16: YES.
+    assert.equal((await tx((t) => exitRepo.rehireForExitTx(t, 2, "2026-08-16"))).eligibility, "YES");
+    // No assessment / no exit date: null (the ordinary rejoin).
+    assert.equal(await tx((t) => exitRepo.rehireForExitTx(t, 1, "2026-08-31")), null);
+    assert.equal(await tx((t) => exitRepo.rehireForExitTx(t, 2, null)), null);
+    await tx((t) => exitRepo.recordRehireExceptionTx(t, {
+      fnf_settlement_id: dec.fnf_settlement_id, rehire_assessment_id: dec.rehire_assessment_id, employee_id: 2,
+      eligibility: "NO", conditions: null, reason: "Shortage repaid in full; GM approved", rejoin_date: "2027-02-01", approved_by: 55,
+    }));
+    const audit = await exitRepo.listRehireExceptions(2);
+    assert.deepEqual(audit.map((a) => [a.eligibility, a.rejoin_date, a.approved_by]), [["NO", "2027-02-01", 55]]);
   });
 
   it("the database refuses a second case for the same exit, and one payroll month settling two exits", async () => {

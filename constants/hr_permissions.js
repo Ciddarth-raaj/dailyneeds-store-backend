@@ -804,4 +804,9 @@ module.exports = {
   VIEW_EXIT_INTERVIEW: "view_exit_interview",
   MANAGE_EXIT_INTERVIEW: "manage_exit_interview",
   OVERRIDE_REHIRE_ELIGIBILITY: "override_rehire_eligibility",
+  //   APPROVE_REHIRE_EXCEPTION     MANAGEMENT: rejoin somebody whose previous
+  //                                exit was assessed NO or CONDITIONAL, with a
+  //                                mandatory reason (audited). Checked inside
+  //                                the rejoin transaction.
+  APPROVE_REHIRE_EXCEPTION: "approve_rehire_exception",
 };
