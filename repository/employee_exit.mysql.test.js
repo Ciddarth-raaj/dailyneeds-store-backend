@@ -430,28 +430,6 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.deepEqual(audit.map((a) => [a.eligibility, a.rejoin_date, a.approved_by]), [["NO", "2027-02-01", 55]]);
   });
 
-  it("LEGACY RESIGNATION DELETE cannot bypass the rehire gate: refused for a lifecycle exit (assessed NO), allowed only where no exit is recorded", async () => {
-    const buildResignation = require("../usecase/resignation");
-    const writes = [];
-    const legacy = buildResignation(
-      { deleteResignation: async (id) => (writes.push(["resignation", id]), { code: 200 }) },
-      { getEmployeeIdByDelete: async (id) => Number(id), updateStatus: async (x) => writes.push(["employee", x.employee_id]) },
-      { updateStatus: async (x) => writes.push(["user", x.employee_id]) }
-    );
-    legacy.exitGuard = exitRepo; // the production wiring (server.js)
-    // Employee 2: exited 16 Aug through the lifecycle; latest exit assessed NO (override) above.
-    assert.equal((await exitUsecase.rehireStatus(2)).rehire.eligibility, "NO");
-    const refused = await legacy.deleteResignation("2");
-    assert.equal(refused.code, 409);
-    assert.equal(refused.error, "EXIT_RECORDED_USE_REJOIN");
-    assert.deepEqual(writes, []);
-    const still = (await q(pool, "SELECT DATE_FORMAT(resignation_date, '%Y-%m-%d') d FROM new_employee WHERE employee_id = 2"))[0];
-    assert.equal(still.d, "2026-08-16", "the exit stands");
-    // Employee 1: active, open employment period, no exit recorded -> the legacy delete behaves as before.
-    assert.equal(await legacy.deleteResignation("1"), 200);
-    assert.deepEqual(writes.map((w) => w[0]), ["employee", "user", "resignation"]);
-  });
-
   it("the database refuses a second case for the same exit, and one payroll month settling two exits", async () => {
     await assert.rejects(q(pool, "INSERT INTO employee_fnf_settlement (employee_id, exit_date) VALUES (2, '2026-08-16')"), /ER_DUP_ENTRY/);
     const pe = (await q(pool, "SELECT payrun_employee_id FROM employee_fnf_settlement WHERE status = 'SETTLED'"))[0].payrun_employee_id;

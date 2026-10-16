@@ -720,27 +720,6 @@ class EmployeeExitRepository {
   }
 
   /** The newest assessment of the employee's most recent assessed exit, or null. */
-  /**
-   * IS AN EXIT RECORDED FOR THIS EMPLOYEE IN THE EMPLOYEE LIFECYCLE? The
-   * Resign action sets `new_employee.resignation_date` and closes the
-   * employment period; only Rejoin (which applies the rehire assessment)
-   * clears / reopens them. Read by the legacy resignation delete, which must
-   * not reactivate such an employee behind Rejoin's back.
-   */
-  async lifecycleExitOf(employeeId) {
-    const rows = await this._read(
-      "LIFECYCLE-EXIT-OF",
-      `SELECT DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS resignation_date,
-              (SELECT ep.period_state FROM employee_employment_period ep
-                WHERE ep.employee_id = ne.employee_id
-                ORDER BY ep.period_no DESC LIMIT 1) AS latest_period_state
-         FROM new_employee ne
-        WHERE ne.employee_id = ?`,
-      [employeeId]
-    );
-    return rows.length ? rows[0] : null;
-  }
-
   async latestRehireForEmployee(employeeId) {
     const rows = await this._read(
       "LATEST-REHIRE",

@@ -43,8 +43,10 @@ const {
 const {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
-  FNF_DECLARATION,
-  FNF_DECLARATION_RECOVERABLE,
+  FNF_ACKNOWLEDGEMENT_HEADING,
+  FNF_ACKNOWLEDGEMENT,
+  FNF_ACKNOWLEDGEMENT_RECOVERABLE,
+  FNF_STATUTORY_NOTE,
 } = require("../constants/fnf");
 const { isExitMonth, amountInWords, dateOnly } = require("./fnf");
 
@@ -286,6 +288,9 @@ function employerContributionOf(c, employee, pfApplicable, esiApplicable) {
  *                       amount the earnings line carries
  *   net_payable_words   the stored Net Pay in words; a negative Net Pay is an
  *                       amount RECOVERABLE from the employee and says so
+ *   acknowledgement     the payroll-payment acknowledgement (payable or
+ *                       recoverable wording) and the statutory-dues note,
+ *                       frozen with the document - text only, no figure
  */
 function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
   const actual = {};
@@ -306,7 +311,9 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
     net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
     recoverable,
     net_payable_words: amountInWords(money(Math.abs(netPay))),
-    declaration: recoverable ? FNF_DECLARATION_RECOVERABLE : FNF_DECLARATION,
+    acknowledgement_heading: FNF_ACKNOWLEDGEMENT_HEADING,
+    acknowledgement: recoverable ? FNF_ACKNOWLEDGEMENT_RECOVERABLE : FNF_ACKNOWLEDGEMENT,
+    statutory_note: FNF_STATUTORY_NOTE,
   };
 }
 

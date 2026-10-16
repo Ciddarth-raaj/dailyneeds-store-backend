@@ -14,7 +14,7 @@
  *     existing payroll readiness
  *   - zero and negative F&F (recoverable from the employee)
  *   - the snapshot of an exit month is an F&F document; the PDF prints its
- *     stored figures, the declaration and the amount in words
+ *     stored figures, the payroll-payment acknowledgement and the amount in words
  *   - no confidential HR field can be in a snapshot
  */
 const { describe, it } = require("node:test");
@@ -291,7 +291,7 @@ describe("the snapshot: which document", () => {
 });
 
 describe("the snapshot: recoverable and zero F&F", () => {
-  it("a negative Net Pay is printed as RECOVERABLE from the employee, with the recoverable declaration", () => {
+  it("a negative Net Pay is printed as RECOVERABLE from the employee, with the recoverable acknowledgement", () => {
     const s = build({
       advance_recovery: "6000.00",
       total_employee_deductions: "6000.00",
@@ -302,7 +302,8 @@ describe("the snapshot: recoverable and zero F&F", () => {
     assert.equal(s.fnf.recoverable, true);
     assert.equal(s.fnf.net_payable_label, "Total Recoverable from Employee");
     assert.equal(s.fnf.net_payable_words, "Nine Hundred Sixty Nine Rupees Only");
-    assert.match(s.fnf.declaration, /recoverable from me/);
+    assert.match(s.fnf.acknowledgement, /shown as recoverable from me/);
+    assert.match(s.fnf.statutory_note, /outside this payroll statement/);
     // The advance block still tells the employee what was recovered.
     assert.equal(s.advance.recovery_this_month, "6000.00");
   });
@@ -311,7 +312,7 @@ describe("the snapshot: recoverable and zero F&F", () => {
     const s = build({ shortage_recovery: "5031.21", total_employee_deductions: "5031.21", net_pay: "0.00", net_pay_rounding: "0.00" });
     assert.equal(s.final.net_pay, "0.00");
     assert.equal(s.fnf.net_payable_words, "Zero Rupees Only");
-    assert.match(s.fnf.declaration, /I have received the above said amount/);
+    assert.match(s.fnf.acknowledgement, /I acknowledge receipt of the net amount stated above/);
   });
 
   it("an exit-month snapshot has no F&F earning / recovery line of any kind", () => {
@@ -341,7 +342,8 @@ describe("the F&F PDF", () => {
   it("is the Full & Final statement, not a Salary Payslip", () => {
     assert.match(html, /Full &amp; Final Settlement/);
     assert.match(html, /Employee Pay Summary/);
-    assert.match(html, /Declaration By the Receiver/);
+    assert.match(html, /Employee Acknowledgement/);
+    assert.doesNotMatch(html, /Declaration By the Receiver/);
     assert.doesNotMatch(html, /Salary Payslip/);
   });
 
@@ -363,7 +365,38 @@ describe("the F&F PDF", () => {
   it("an ordinary month still renders the Salary Payslip", () => {
     const h = pdf.payslipHtml(build({}, { resignation_date: null }), { logo: null });
     assert.match(h, /Salary Payslip/);
-    assert.doesNotMatch(h, /Declaration By the Receiver/);
+    assert.doesNotMatch(h, /Employee Acknowledgement|statutory dues/);
+  });
+});
+
+describe("the acknowledgement is a payroll-payment acknowledgement, never a waiver", () => {
+  const WAIVER = [/grievance/i, /dispute/i, /claims?\b/i, /legal dues/i, /back wages/i, /reinstatement/i, /reemployment/i, /free will/i];
+  const payable = build();
+  const recoverable = build({ advance_recovery: "6000.00", total_employee_deductions: "6000.00", net_pay: "-969.00", net_pay_rounding: "-0.21" });
+
+  it("payable and recoverable wording: acknowledges only the payroll amounts shown; waives nothing", () => {
+    for (const s of [payable, recoverable]) {
+      assert.equal(s.fnf.acknowledgement_heading, "Employee Acknowledgement");
+      assert.match(s.fnf.acknowledgement, /covers only the payroll amounts shown in this statement/);
+      for (const w of WAIVER) assert.doesNotMatch(s.fnf.acknowledgement, w, String(w));
+      assert.equal("declaration" in s.fnf, false);
+    }
+    assert.notEqual(payable.fnf.acknowledgement, recoverable.fnf.acknowledgement);
+  });
+
+  it("every F&F statement says gratuity, leave encashment and other statutory dues are outside it", () => {
+    for (const s of [payable, recoverable]) {
+      assert.match(s.fnf.statutory_note, /Gratuity, leave encashment and any other statutory dues payable separately are outside this payroll statement/);
+      for (const w of WAIVER) assert.doesNotMatch(s.fnf.statutory_note, w, String(w));
+    }
+  });
+
+  it("the wording carries no figure: the amount on the statement is the payroll snapshot's Net Pay alone", () => {
+    for (const s of [payable, recoverable]) {
+      assert.doesNotMatch(`${s.fnf.acknowledgement} ${s.fnf.statutory_note}`, /\d/);
+    }
+    assert.equal(payable.final.net_pay, "5031.00");
+    assert.equal(recoverable.final.net_pay, "-969.00");
   });
 });
 

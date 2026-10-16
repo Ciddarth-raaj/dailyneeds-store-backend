@@ -41,22 +41,37 @@ const DOCUMENT_TYPE = {
 /** The renderer an F&F snapshot was frozen for. */
 const FNF_TEMPLATE_VERSION = "fnf-v1";
 
-const FNF_DECLARATION =
-  "I, the undersigned, hereby state that I have received the above said amount as my full and final " +
-  "settlement out of my own free will and choice on tendering my resignation and I assure that I have no " +
-  "grievances, disputes, demands and claims about my legal dues, back wages, reinstatement or " +
-  "reemployment against the company.";
-
-/**
- * WHEN THE F&F IS NEGATIVE the employee owes the company, and "I have
- * received the above said amount" would be false. This wording is a draft for
- * HR / legal to approve (see the review report); it is frozen into each
- * snapshot, so a later wording change never alters a published statement.
+/*
+ * THE EMPLOYEE ACKNOWLEDGEMENT - a PAYROLL-PAYMENT acknowledgement only.
+ *
+ * It acknowledges the payroll amount this statement shows - the published
+ * monthly payroll's own Net Pay - and nothing else. It contains NO waiver: no
+ * release of legal dues, disputes, back wages, reinstatement or reemployment
+ * claims. Gratuity, leave encashment and other separately payable statutory
+ * dues are outside this statement (paid by Accounts outside DNDS), and the
+ * statement says so in its note.
+ *
+ * Frozen into each published snapshot, so a later wording change never alters
+ * a statement already issued. Wording for HR / legal approval.
  */
-const FNF_DECLARATION_RECOVERABLE =
-  "I, the undersigned, hereby acknowledge the above full and final settlement, under which the amount stated " +
-  "above is recoverable from me, and I assure that I have no grievances, disputes, demands and claims about my " +
-  "legal dues, back wages, reinstatement or reemployment against the company.";
+const FNF_ACKNOWLEDGEMENT_HEADING = "Employee Acknowledgement";
+
+/** Net Pay zero or above: the employee is paid. */
+const FNF_ACKNOWLEDGEMENT =
+  "I acknowledge receipt of the net amount stated above, being my salary and other payroll dues for my last " +
+  "month of service as calculated in the monthly payroll. This acknowledgement covers only the payroll amounts " +
+  "shown in this statement.";
+
+/** Net Pay below zero: the payroll deductions exceed the earnings. */
+const FNF_ACKNOWLEDGEMENT_RECOVERABLE =
+  "I acknowledge that, as calculated in the monthly payroll for my last month of service, the net amount stated " +
+  "above is shown as recoverable from me. This acknowledgement covers only the payroll amounts shown in this " +
+  "statement.";
+
+/** Printed on every F&F statement, payable or recoverable. */
+const FNF_STATUTORY_NOTE =
+  "Gratuity, leave encashment and any other statutory dues payable separately are outside this payroll " +
+  "statement. They are not included in the amount above and are settled separately by Accounts.";
 
 /* ======================================= SETTLEMENT COMPLETION ========== */
 
@@ -169,8 +184,10 @@ const REHIRE_NOTE_MAX = 500;
 module.exports = {
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
-  FNF_DECLARATION,
-  FNF_DECLARATION_RECOVERABLE,
+  FNF_ACKNOWLEDGEMENT_HEADING,
+  FNF_ACKNOWLEDGEMENT,
+  FNF_ACKNOWLEDGEMENT_RECOVERABLE,
+  FNF_STATUTORY_NOTE,
   SETTLEMENT_STATUS,
   SETTLEMENT_STAGE,
   SETTLEMENT_STAGE_LABEL,

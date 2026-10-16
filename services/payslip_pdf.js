@@ -144,7 +144,9 @@ function num(amount) {
 /**
  * THE FULL & FINAL SETTLEMENT STATEMENT - the reference layout HR uses
  * (Employee Pay Summary, Earnings with Amount and Actual, Deductions, Net
- * Pay, Total Net Payable in words, the receiver's declaration).
+ * Pay, Total Net Payable in words, the employee's payroll-payment
+ * acknowledgement and the note that separately payable statutory dues are
+ * outside this statement).
  *
  * THE SAME SNAPSHOT, THE SAME FIGURES: every amount is the frozen snapshot's
  * own - the earnings and deductions lines, their totals and the rounded Net
@@ -228,6 +230,7 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
   .sign { display: flex; justify-content: space-between; margin-top: 18px; font-weight: bold; }
   .decl h2 { margin-top: 18px; }
   .decl p { font-weight: bold; margin: 4px 0 0; line-height: 1.4; }
+  .note { margin: 2px 0; line-height: 1.4; }
   .esig { text-align: right; margin: 26px 40px 0 0; font-weight: bold; }
   .foot { text-align: center; font-weight: bold; margin-top: 22px; }
 </style></head><body>
@@ -256,9 +259,9 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
 <div class="band">${esc(payLabel)} ${esc(inr(absNet))}</div>
 <div class="band">In Words: ${esc(x.net_payable_words || "")}</div>
 <div class="formula">**${esc(payLabel)} = ${x.recoverable ? "(Total Deductions - Gross Earnings) - Round-off" : "(Gross Earnings - Total Deductions) + Round-off"}</div>
-<div><b>Note :</b></div>
+<div class="note"><b>Note :</b> ${esc(x.statutory_note || "")}</div>
 <div class="sign"><span>Prepared By :</span><span>Checked By :</span><span>Authorized By :</span></div>
-<section class="decl"><h2>Declaration By the Receiver</h2><p>${esc(x.declaration || "")}</p></section>
+<section class="decl"><h2>${esc(x.acknowledgement_heading || "Employee Acknowledgement")}</h2><p>${esc(x.acknowledgement || "")}</p></section>
 <div class="esig">Employee Signature :</div>
 <div class="foot">This is a system generated statement</div>
 </body></html>`;

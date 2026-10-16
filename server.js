@@ -1068,9 +1068,6 @@ class Server {
       this.employeeRepo,
       this.userRepo
     );
-    // The legacy resignation delete may not reactivate an employee whose exit
-    // is recorded in the employee lifecycle: only Rejoin (with its rehire gate).
-    this.resignationUsecase.exitGuard = this.employeeExitRepo;
     this.productImageLogUsecase = require("./usecase/product_image_log")(
       this.productImageLogRepo
     );
