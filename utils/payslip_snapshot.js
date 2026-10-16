@@ -40,6 +40,14 @@ const {
   MONTH_SHORT,
   monthLabel,
 } = require("../constants/payslip");
+const {
+  DOCUMENT_TYPE,
+  FNF_TEMPLATE_VERSION,
+  FNF_DECLARATION,
+  FNF_KIND,
+  FNF_COMPONENT_BY_KEY,
+} = require("../constants/fnf");
+const { isExitMonth, amountInWords, dateOnly } = require("./fnf");
 
 class SnapshotError extends Error {
   constructor(code, message) {
@@ -267,6 +275,45 @@ function employerContributionOf(c, employee, pfApplicable, esiApplicable) {
 }
 
 /**
+ * THE F&F BLOCK - what the Full & Final Settlement statement prints beyond a
+ * payslip. INFORMATIONAL COPIES of stored figures only:
+ *
+ *   last_working_day    the payrun snapshot's resignation date
+ *   lop_days            the stored NCP days (base days less salary days)
+ *   actual_working_days the stored salary days
+ *   lateness_amount     the stored missing-hours deduction
+ *   actual              the FULL-MONTH structure value of each salary
+ *                       component (the "Actual" column), beside the earned
+ *                       amount the earnings line carries
+ *   net_payable_words   the stored Net Pay in words; a negative Net Pay is an
+ *                       amount RECOVERABLE from the employee and says so
+ */
+function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
+  const actual = {};
+  if (split) {
+    COMPONENTS.forEach(([key], i) => {
+      actual[key] = money(weights[i] === null ? null : weights[i]);
+    });
+  }
+  const recoverable = netPay < 0;
+  return {
+    last_working_day: dateOnly(employee.resignation_date),
+    date_of_joining: textOrNull(employee.date_of_joining),
+    lop_days: c.ncp_days === null || c.ncp_days === undefined ? null : Number(c.ncp_days),
+    actual_working_days: salaryDays === null || salaryDays === undefined ? null : Number(salaryDays),
+    lateness_amount: moneyOf(c.missing_hours_deduction),
+    actual_monthly_gross: moneyOf(employee.monthly_gross),
+    actual,
+    additions_total: moneyOf(c.fnf_additions) || "0.00",
+    deductions_total: moneyOf(c.fnf_deductions) || "0.00",
+    net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
+    recoverable,
+    net_payable_words: amountInWords(money(Math.abs(netPay))),
+    declaration: FNF_DECLARATION,
+  };
+}
+
+/**
  * @param {object} args
  * @param {object} args.period       { year, month }
  * @param {object} args.calculation  the stored `payrun_employee_calculation` row (APPROVED_LOCKED)
@@ -341,6 +388,27 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored prior-month OT items do not add up to their total");
   }
 
+  /*
+   * F&F EARNINGS / RECOVERIES - the stored items of an exit month, one line
+   * each, copied as calculated. Checked against their stored totals: a
+   * snapshot whose items do not add up is refused, like any other.
+   */
+  const fnfItems = parseJsonList(c.fnf_items).filter((i) => i && FNF_COMPONENT_BY_KEY[i.component]);
+  const fnfLinesOf = (kind) =>
+    fnfItems
+      .filter((i) => FNF_COMPONENT_BY_KEY[i.component].kind === kind)
+      .map((i) => ({ ...line(`fnf_${String(i.component).toLowerCase()}`, FNF_COMPONENT_BY_KEY[i.component].label, paiseOr0(i.amount)), fnf: true }));
+  const fnfEarningLines = fnfLinesOf(FNF_KIND.ADDITION);
+  const fnfDeductionLines = fnfLinesOf(FNF_KIND.DEDUCTION);
+  const fnfAdd = fnfEarningLines.reduce((n, l) => n + toPaise(l.amount), 0);
+  const fnfDed = fnfDeductionLines.reduce((n, l) => n + toPaise(l.amount), 0);
+  if (fnfAdd !== paiseOr0(c.fnf_additions)) {
+    throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored F&F earnings do not add up to their total");
+  }
+  if (fnfDed !== paiseOr0(c.fnf_deductions)) {
+    throw new SnapshotError("SNAPSHOT_DEDUCTIONS_MISMATCH", "The stored F&F recoveries do not add up to their total");
+  }
+
   const earningsLines = [
     ...salaryLines,
     line("extra_day_amount", "Extra Days", extraDay, true),
@@ -349,8 +417,9 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     line("incentive", "Incentive", incentive, true),
     line("bonus", "Bonus", bonus, true),
     line("arrears", "Arrears", arrears, true),
+    ...fnfEarningLines,
   ];
-  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears;
+  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears + fnfAdd;
   const totalEarnings = toPaise(c.total_earnings);
   if (totalEarnings === null || earningsSum !== totalEarnings) {
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored earnings do not add up to the stored total");
@@ -368,8 +437,9 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     line("employee_esi", "Employee ESI", esi, true),
     line("advance_recovery", "Advance Recovery", advance, true),
     line("shortage_recovery", "Other Deductions (Shortage Recovery)", shortage, true),
+    ...fnfDeductionLines,
   ];
-  const deductionsSum = missing + pf + esi + advance + shortage;
+  const deductionsSum = missing + pf + esi + advance + shortage + fnfDed;
   const totalDeductions = toPaise(c.total_employee_deductions);
   if (totalDeductions === null || deductionsSum !== totalDeductions) {
     throw new SnapshotError("SNAPSHOT_DEDUCTIONS_MISMATCH", "The stored deductions do not add up to the stored total");
@@ -413,9 +483,27 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     ? null
     : Number(c.effective_nrm_minutes);
 
+  /*
+   * WHICH DOCUMENT THIS IS. The employee's exit month publishes a FULL &
+   * FINAL SETTLEMENT statement instead of a Salary Payslip - decided by the
+   * payrun snapshot's last working day, the same date the calculation used.
+   * The figures are the same stored figures either way.
+   */
+  const documentType = isExitMonth({ year: period.year, month: period.month, resignation_date: employee.resignation_date })
+    ? DOCUMENT_TYPE.FNF
+    : DOCUMENT_TYPE.PAYSLIP;
+  const fnf = documentType === DOCUMENT_TYPE.FNF
+    ? fnfBlockOf({ c, employee, split, weights, netPay, salaryDays: c.salary_days })
+    : null;
+  if (fnf && fnfItems.length !== parseJsonList(c.fnf_items).length) {
+    throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored F&F items name a component this server does not know");
+  }
+
   return {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
-    template_version: TEMPLATE_VERSION,
+    template_version: documentType === DOCUMENT_TYPE.FNF ? FNF_TEMPLATE_VERSION : TEMPLATE_VERSION,
+    document_type: documentType,
+    fnf,
     // AS IT WAS AT PUBLISH: a later edit of the company record never
     // changes a payslip already released.
     company: {
@@ -583,7 +671,8 @@ function payslipFilename(snapshot) {
     .slice(0, 40);
   const mon = Number.isInteger(m) && m >= 1 && m <= 12 ? MONTH_SHORT[m - 1] : "Month";
   const year = Number.isInteger(y) ? y : "";
-  const parts = [`Payslip_${mon}-${year}`, Number.isInteger(id) && id > 0 ? String(id) : null, name || null];
+  const prefix = snapshot && snapshot.document_type === DOCUMENT_TYPE.FNF ? "FnF_Settlement" : "Payslip";
+  const parts = [`${prefix}_${mon}-${year}`, Number.isInteger(id) && id > 0 ? String(id) : null, name || null];
   return `${parts.filter(Boolean).join("_")}.pdf`;
 }
 

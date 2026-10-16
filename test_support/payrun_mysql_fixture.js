@@ -20,11 +20,22 @@ const MIGRATIONS = [
   // Prior-Month OT carry-forward: the settlement tables and the two
   // calculation columns the repository now reads and writes.
   "20261126120000-attendance-ot-late-settlement-up.sql",
+  // Full & Final Settlement: the calculation's F&F columns, the payslip's
+  // document type, and the exit tables (FK to employee_employment_period,
+  // stood in below).
+  "20261201120000-fnf-settlement-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
 
 /** Every table this suite creates, children first so they drop cleanly. */
 const TABLES = [
+  "employee_rehire_assessment",
+  "employee_exit_interview",
+  "employee_fnf_settlement_event",
+  "employee_fnf_settlement",
+  "payrun_fnf_item_audit",
+  "payrun_fnf_item",
+  "employee_employment_period",
   "attendance_ot_late_settlement_log",
   "attendance_ot_late_settlement",
   "payrun_payslip_notification",
@@ -78,6 +89,14 @@ const PAYRUN_INPUTS = [
 ];
 
 const STAND_INS = [
+  // The C1a employment-period table (the columns the F&F feature reads).
+  `CREATE TABLE employee_employment_period (
+     period_id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, employee_id INT NOT NULL,
+     period_no SMALLINT UNSIGNED NOT NULL, period_state ENUM('open','closed') NOT NULL,
+     joined_on DATE NULL, ended_on DATE NULL,
+     end_reason_type ENUM('resignation','termination','contract_end','absconded','deceased','unknown') NULL,
+     UNIQUE KEY uq_period_seq (employee_id, period_no)
+   ) ENGINE=InnoDB`,
   `CREATE TABLE attendance_recalculation_run (
      attendance_recalculation_run_id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
      work_shift_id INT NULL, status VARCHAR(32) NOT NULL, trigger_source VARCHAR(32) NOT NULL

@@ -6,6 +6,7 @@ const pfPeriod = require("./pf_period");
 const { computeContract } = require("./payrun_adjustments");
 const { COMPONENT } = require("../constants/payrun_adjustments");
 const { ADJUSTMENT_STATE } = require("../constants/payrun_adjustments");
+const { FNF_KIND, FNF_COMPONENT_BY_KEY, FNF_COMPONENT_KEYS } = require("../constants/fnf");
 const {
   CALCULATION_VERSION,
   CALC_STATUS,
@@ -101,6 +102,55 @@ const intOr0 = (value) => {
   const n = Number(value);
   return Number.isFinite(n) ? Math.trunc(n) : 0;
 };
+
+/* ------------------------------------------------------------ F&F ITEMS */
+
+/**
+ * THE F&F ITEMS AS THE ENGINE PRICES THEM - entered amounts for an exit
+ * month, in the catalogue's order (`constants/fnf.js`), zero amounts dropped.
+ * What each one does (adds or deducts) is the catalogue's answer; this only
+ * reads it. An unknown component or an unusable amount is an ERROR, never a
+ * zero: a settlement must not quietly lose a line.
+ */
+function normalizeFnfItems(items = []) {
+  const errors = [];
+  const byKey = new Map();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const key = item && item.component;
+    const def = FNF_COMPONENT_BY_KEY[key];
+    if (!def) {
+      errors.push(`Unknown F&F component ${String(key)}`);
+      return;
+    }
+    const paise = toPaise(item.amount);
+    if (paise === null || paise < 0) {
+      errors.push(`The ${def.label} amount is not a valid non-negative figure`);
+      return;
+    }
+    byKey.set(key, (byKey.get(key) || 0) + paise);
+  });
+  const lines = FNF_COMPONENT_KEYS.filter((k) => (byKey.get(k) || 0) > 0).map((k) => ({
+    component: k,
+    label: FNF_COMPONENT_BY_KEY[k].label,
+    kind: FNF_COMPONENT_BY_KEY[k].kind,
+    amount: toRupees(byKey.get(k)),
+  }));
+  const sum = (kind) =>
+    lines.filter((l) => l.kind === kind).reduce((n, l) => n + toPaise(l.amount), 0);
+  return {
+    lines,
+    additions_paise: sum(FNF_KIND.ADDITION),
+    deductions_paise: sum(FNF_KIND.DEDUCTION),
+    errors,
+  };
+}
+
+/** The identity of a set of F&F items, for the inputs hash. */
+function fnfMarker(items = []) {
+  return normalizeFnfItems(items)
+    .lines.map((l) => `${l.component}:${toPaise(l.amount)}`)
+    .join(",");
+}
 
 /* ------------------------------------------------------------ OT PRICE */
 
@@ -534,7 +584,7 @@ function splitLateOt(items = [], year, month) {
   };
 }
 
-function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [] } = {}) {
+function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [], fnf_items = [] } = {}) {
   const contract = computeContract(amounts);
   return hashOf([
     contract.by_component[COMPONENT.INCENTIVE],
@@ -549,6 +599,10 @@ function inputsHash({ amounts = {}, pay_type = null, prior_month_ot = [] } = {})
     // recalculated. Appended only when there is some, so every existing
     // calculation keeps the hash it was stored with.
     ...(Array.isArray(prior_month_ot) && prior_month_ot.length > 0 ? [lateOtMarker(prior_month_ot)] : []),
+    // F&F ITEMS ARE AN INPUT, appended the same way and only when there are
+    // some: every month without F&F keeps the hash it was stored with, and
+    // entering or changing an F&F amount makes the stored calculation stale.
+    ...(fnfMarker(fnf_items) !== "" ? [`fnf:${fnfMarker(fnf_items)}`] : []),
   ]);
 }
 
@@ -721,6 +775,13 @@ function computeCalculation(input = {}, config = CONFIG) {
      * and decides nothing about it.
      */
     prior_month_ot = [],
+    /**
+     * F&F EARNINGS AND RECOVERIES for an exit month, as entered
+     * (`payrun_fnf_item`): `[{ component, amount }]`. Additions join Total
+     * Earnings and deductions join Total Deductions; NEITHER touches the PF or
+     * the ESI wage (see `constants/fnf.js`). Empty for every other month.
+     */
+    fnf_items = [],
   } = input;
 
   const errors = [];
@@ -913,6 +974,19 @@ function computeCalculation(input = {}, config = CONFIG) {
 
   const additionsPaise = incentivePaise + bonusPaise + arrearsPaise;
   const deductionsFromNetPaise = advanceRecoveryPaise + shortageRecoveryPaise;
+
+  /* ----------------------------------------------------------- F&F ITEMS */
+
+  /*
+   * FULL & FINAL EARNINGS AND RECOVERIES. Priced nowhere: they are the
+   * amounts HR entered for the exit month. Like the Adjustments above they
+   * are excluded from the PF and ESI wage BY CONSTRUCTION - neither base
+   * below ever adds them.
+   */
+  const fnf = normalizeFnfItems(fnf_items);
+  fnf.errors.forEach((e) => errors.push(e));
+  const fnfAdditionsPaise = fnf.additions_paise;
+  const fnfDeductionsPaise = fnf.deductions_paise;
 
   /* ------------------------------------------------------------- THE PF */
 
@@ -1194,10 +1268,12 @@ function computeCalculation(input = {}, config = CONFIG) {
    * eventual payslip can print the employee's remaining advance balance.
    */
   const totalEarningsPaise =
-    salaryEarningsPaise + extraDayAmountPaise + monthOtPaise + priorMonthOtPaise + additionsPaise;
+    salaryEarningsPaise + extraDayAmountPaise + monthOtPaise + priorMonthOtPaise + additionsPaise +
+    fnfAdditionsPaise;
 
   const totalEmployeeDeductionsPaise = contributionsResolved
-    ? missingDeductionPaise + employeePfPaise + employeeEsiPaise + deductionsFromNetPaise
+    ? missingDeductionPaise + employeePfPaise + employeeEsiPaise + deductionsFromNetPaise +
+      fnfDeductionsPaise
     : null;
 
   /*
@@ -1271,6 +1347,11 @@ function computeCalculation(input = {}, config = CONFIG) {
     balance_advance: toRupees(balanceAdvancePaise),
     additions_total: toRupees(additionsPaise),
     deductions_total: toRupees(deductionsFromNetPaise),
+
+    /* ------------------------------------------------------ F&F ITEMS */
+    fnf_additions: toRupees(fnfAdditionsPaise),
+    fnf_deductions: toRupees(fnfDeductionsPaise),
+    fnf_items: fnf.lines,
 
     /* ----------------------------------------------------- STATUTORY */
     pf_status: pf.status,
@@ -1782,6 +1863,10 @@ function calculationHash(result = {}) {
     result.pay_type,
     // Appended only when present: an ordinary month hashes exactly as before.
     ...(toPaise(result.prior_month_ot_amount) ? [result.prior_month_ot_amount] : []),
+    // F&F items, likewise only when there are some.
+    ...((result.fnf_items || []).length > 0
+      ? [`fnf:${(result.fnf_items || []).map((l) => `${l.component}:${toPaise(l.amount)}`).join(",")}`]
+      : []),
   ]);
 }
 
@@ -1797,6 +1882,8 @@ module.exports = {
   inputsHash,
   lateOtMarker,
   lateOtChanged,
+  normalizeFnfItems,
+  fnfMarker,
   splitLateOt,
   detectChanges,
   computeCalculation,

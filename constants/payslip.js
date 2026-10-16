@@ -15,8 +15,12 @@
  * 3: `employer_contribution.monthly_ctc` is the FIXED CTC of the approved
  * salary record (changes only on revision), no longer Monthly Gross plus the
  * month's contributions; `monthly_gross` leaves that block.
+ *
+ * 4: `document_type` (PAYSLIP / FNF) and, on an exit month, the `fnf` block
+ * and the F&F earnings / recovery lines (`constants/fnf.js`). A version-3
+ * snapshot has none of them and is a PAYSLIP.
  */
-const SNAPSHOT_SCHEMA_VERSION = 3;
+const SNAPSHOT_SCHEMA_VERSION = 4;
 
 /** The renderer the snapshot was frozen for (Mini App detail + PDF). */
 const TEMPLATE_VERSION = "payslip-v3";
@@ -64,7 +68,10 @@ function monthLabel(year, month) {
   return `${MONTH_NAMES[m - 1]} ${y}`;
 }
 
-function notificationText(year, month) {
+function notificationText(year, month, documentType = "PAYSLIP") {
+  if (documentType === "FNF") {
+    return `Your Full & Final Settlement statement for ${monthLabel(year, month)} is now available in My Payslips.`;
+  }
   return `Your payslip for ${monthLabel(year, month)} is now available in My Payslips.`;
 }
 

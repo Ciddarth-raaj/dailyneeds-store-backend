@@ -24,6 +24,7 @@ const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
 const crypto = require("crypto");
 const payslipSnapshot = require("../utils/payslip_snapshot");
+const { isExitMonth } = require("../utils/fnf");
 const pfCeilingImpact = require("../utils/pf_ceiling_impact");
 const epfoEcr = require("../utils/epfo_ecr");
 const { resolvePayslipCompany, payslipCompanyStatus } = require("../utils/payslip_company");
@@ -447,6 +448,7 @@ class PayrunCalculationUsecase {
       calculations,
       periodRow,
       lateOt,
+      fnfItems,
     ] = await Promise.all([
       this.repo.listAttendanceMonths(ids, period.year, period.month),
       typeof this.repo.listAttendanceDayRows === "function"
@@ -469,6 +471,10 @@ class PayrunCalculationUsecase {
       // PRIOR-MONTH OT this month settles (approved after its own month locked).
       typeof this.repo.listLateOtForSettlement === "function"
         ? this.repo.listLateOtForSettlement(ids, period.year, period.month)
+        : Promise.resolve([]),
+      // F&F EARNINGS / RECOVERIES entered for an exit month.
+      typeof this.repo.listFnfItems === "function"
+        ? this.repo.listFnfItems(ids, period.year, period.month)
         : Promise.resolve([]),
     ]);
 
@@ -566,6 +572,7 @@ class PayrunCalculationUsecase {
       stateOf: index(states),
       calculationOf: index(calculations),
       lateOtOf: group(lateOt),
+      fnfOf: group(fnfItems),
     };
   }
 
@@ -650,7 +657,23 @@ class PayrunCalculationUsecase {
     });
     const currentSourceHash = calc.sourceHash(currentMarkers);
     const priorMonthOt = (context.lateOtOf && context.lateOtOf.get(id)) || [];
-    const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type, prior_month_ot: priorMonthOt });
+    /*
+     * F&F ITEMS COUNT ONLY IN THE EXIT MONTH. Rows can only be written for an
+     * exit month (the F&F usecase refuses anybody else), and this is the
+     * second net: an item can never price into an ordinary month.
+     */
+    const exitMonth = isExitMonth({
+      year: context.period.year,
+      month: context.period.month,
+      resignation_date: employee.resignation_date,
+    });
+    const fnfItems = exitMonth ? (context.fnfOf && context.fnfOf.get(id)) || [] : [];
+    const currentInputsHash = calc.inputsHash({
+      amounts,
+      pay_type: employee.pay_type,
+      prior_month_ot: priorMonthOt,
+      fnf_items: fnfItems,
+    });
 
     /*
      * THE SHARED PAYROLL READINESS. A dry run of the very calculation
@@ -669,6 +692,7 @@ class PayrunCalculationUsecase {
         coverage_entry_salary: entrySalary,
         day_rows: context.dayRowsOf ? context.dayRowsOf.get(id) || [] : null,
         prior_month_ot: priorMonthOt,
+        fnf_items: fnfItems,
       });
       readiness = evaluatePayrollReadiness({
         year: context.period.year,
@@ -788,6 +812,8 @@ class PayrunCalculationUsecase {
         statutory,
         amounts,
         priorMonthOt,
+        fnfItems,
+        exitMonth,
         entrySalary,
         currentMarkers,
         currentSourceHash,
@@ -799,6 +825,13 @@ class PayrunCalculationUsecase {
         employee_id: id,
         payrun_employee_id: employee.payrun_employee_id,
         employee_name: employee.employee_name,
+        /**
+         * THE F&F MONTH: the last working day falls in this month, so this
+         * month is the employee's Full & Final Settlement and Publish issues
+         * an F&F statement rather than a Salary Payslip.
+         */
+        is_fnf: exitMonth,
+        last_working_day: exitMonth ? employee.resignation_date || null : null,
         /**
          * THE STATUTORY SETUP HOLD, when there is one: the payroll user sees
          * why this employee cannot be calculated and exactly which fields HR
@@ -902,11 +935,15 @@ class PayrunCalculationUsecase {
          * as they will be afterwards. Blanking them would hide work that has
          * already been done.
          */
+        // F&F earnings / recoveries are additions and deductions too, so the
+        // columns still reconcile to Net Pay on an exit month.
         additions: stored
-          ? Number(stored.incentive) + Number(stored.bonus) + Number(stored.arrears)
+          ? Number(stored.incentive) + Number(stored.bonus) + Number(stored.arrears) +
+            Number(stored.fnf_additions || 0)
           : null,
         deductions: stored
-          ? Number(stored.advance_recovery) + Number(stored.shortage_recovery)
+          ? Number(stored.advance_recovery) + Number(stored.shortage_recovery) +
+            Number(stored.fnf_deductions || 0)
           : null,
         employee_pf: attendanceDependent(stored ? stored.employee_pf : null),
         employee_esi: attendanceDependent(stored ? stored.employee_esi : null),
@@ -1230,6 +1267,15 @@ class PayrunCalculationUsecase {
               shortage_recovery: stored.shortage_recovery,
               /** INFORMATIONAL. It moves no figure above or below it. */
               balance_advance: stored.balance_advance,
+            },
+            /**
+             * FULL & FINAL EARNINGS / RECOVERIES, as calculated - an exit
+             * month only. Empty items and null totals everywhere else.
+             */
+            fnf: {
+              items: this._json(stored.fnf_items) || [],
+              additions: stored.fnf_additions === undefined ? null : stored.fnf_additions,
+              deductions: stored.fnf_deductions === undefined ? null : stored.fnf_deductions,
             },
             statutory: {
               pf_status: stored.pf_status,
@@ -1669,7 +1715,7 @@ class PayrunCalculationUsecase {
    * own. Nothing here writes either.
    */
   _buildRow(context, presented, actor) {
-    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary, priorMonthOt } = presented.internals;
+    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary, priorMonthOt, fnfItems } = presented.internals;
 
     const result = calc.computeCalculation({
       /* Priced on the one resolved salary; its markers below are the same object's. */
@@ -1698,6 +1744,8 @@ class PayrunCalculationUsecase {
        * month in the save's own transaction (see `saveCalculations`).
        */
       prior_month_ot: priorMonthOt || [],
+      /* F&F EARNINGS / RECOVERIES - the exit month only (see `_present`). */
+      fnf_items: fnfItems || [],
     });
 
     const hash = calc.calculationHash(result);
@@ -1752,6 +1800,9 @@ class PayrunCalculationUsecase {
         attendance_ot_earnings: result.attendance_ot_earnings,
         prior_month_ot_amount: (result.prior_month_ot || []).length > 0 ? result.prior_month_ot_amount : null,
         prior_month_ot: (result.prior_month_ot || []).length > 0 ? JSON.stringify(result.prior_month_ot) : null,
+        fnf_additions: (result.fnf_items || []).length > 0 ? result.fnf_additions : null,
+        fnf_deductions: (result.fnf_items || []).length > 0 ? result.fnf_deductions : null,
+        fnf_items: (result.fnf_items || []).length > 0 ? JSON.stringify(result.fnf_items) : null,
         // Not a column: the settlement rows this calculation claims.
         late_ot_settlement_ids: (result.prior_month_ot || [])
           .map((i) => i.late_settlement_id)
@@ -2407,6 +2458,7 @@ class PayrunCalculationUsecase {
       MONTH_LOCKED: [ROW_RESULT.LOCKED, `Payroll month ${monthLabel} is locked.`],
       SOURCE_MOVED: [ROW_RESULT.BLOCKED, "Not published — the attendance changed after this month was calculated. Unlock, recalculate and approve again."],
       CALCULATION_CHANGED: [ROW_RESULT.BLOCKED, "Not published — the calculation changed while publishing. Reload and try again."],
+      FNF_SETTLED: [ROW_RESULT.BLOCKED, "Not changed — this Full & Final Settlement is marked settled (paid). Reopen the settlement first."],
       ATTENDANCE_STALE: [ROW_RESULT.BLOCKED, "Not published — the attendance summary is not current with its days. Unlock, process attendance, recalculate and approve again."],
     };
 
@@ -2492,7 +2544,10 @@ class PayrunCalculationUsecase {
             payrun_calculation_id: presented.internals.stored.payrun_calculation_id,
             calculation_hash: presented.internals.stored.calculation_hash,
             schema_version: SNAPSHOT_SCHEMA_VERSION,
-            template_version: TEMPLATE_VERSION,
+            // The template the snapshot itself names: an exit month is frozen
+            // for the F&F renderer, every other month for the payslip one.
+            template_version: snapshot.template_version || TEMPLATE_VERSION,
+            document_type: snapshot.document_type,
             text: frozen.text,
             sha256: frozen.sha256,
           };

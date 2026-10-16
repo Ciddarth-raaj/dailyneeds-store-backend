@@ -779,4 +779,29 @@ module.exports = {
   // Approving the OT is still the employee's ordinary chain. GRANTED TO
   // NOBODY: administrators hold it through the user_type 2 bypass.
   ATTENDANCE_OT_HISTORICAL_REVIEW: "attendance_ot_historical_review",
+
+  // ================================ FULL & FINAL SETTLEMENT / EXIT ========
+  //
+  // Migration 20261201120000-fnf-settlement. ALL FIVE ARE GRANTED TO NOBODY:
+  // administrators hold them through the user_type 2 bypass, anybody else
+  // only by a deliberate grant on the Designation screen.
+  //
+  //   VIEW_FNF_SETTLEMENT          the F&F list and one employee's F&F items
+  //                                (needs view_employees + view_salary too:
+  //                                it shows net pay)
+  //   MANAGE_FNF_SETTLEMENT        enter F&F earnings / recoveries, mark a
+  //                                published F&F as settled, reopen it
+  //   VIEW_EXIT_INTERVIEW          CONFIDENTIAL: the exit interview answers
+  //                                and the rehire assessment. Never reaches a
+  //                                payslip, the Mini App or Telegram.
+  //   MANAGE_EXIT_INTERVIEW        record the exit interview and the FIRST
+  //                                rehire assessment of an exit
+  //   OVERRIDE_REHIRE_ELIGIBILITY  change a rehire assessment already given
+  //                                (a new history row with a reason; the old
+  //                                one is kept)
+  VIEW_FNF_SETTLEMENT: "view_fnf_settlement",
+  MANAGE_FNF_SETTLEMENT: "manage_fnf_settlement",
+  VIEW_EXIT_INTERVIEW: "view_exit_interview",
+  MANAGE_EXIT_INTERVIEW: "manage_exit_interview",
+  OVERRIDE_REHIRE_ELIGIBILITY: "override_rehire_eligibility",
 };

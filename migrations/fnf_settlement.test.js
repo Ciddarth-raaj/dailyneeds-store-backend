@@ -1,0 +1,78 @@
+/**
+ * Migration 20261201120000-fnf-settlement - static checks.
+ *
+ *   node --test migrations/fnf_settlement.test.js
+ *
+ * The SQL itself is executed (up twice, down, up) against MySQL in
+ * repository/employee_exit.mysql.test.js.
+ */
+const { describe, it } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("fs");
+const path = require("path");
+const P = require("../constants/hr_permissions");
+
+const NAME = "20261201120000-fnf-settlement";
+const dir = path.join(__dirname, "mysql/migrations");
+const strip = (sql) => sql.replace(/--[^\n]*/g, "");
+const up = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8"));
+const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8"));
+const KEYS = [
+  P.VIEW_FNF_SETTLEMENT,
+  P.MANAGE_FNF_SETTLEMENT,
+  P.VIEW_EXIT_INTERVIEW,
+  P.MANAGE_EXIT_INTERVIEW,
+  P.OVERRIDE_REHIRE_ELIGIBILITY,
+];
+
+describe("the F&F settlement migration", () => {
+  it("is unique, is the newest migration, and its runner reads its own files", () => {
+    const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, ""));
+    assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
+    assert.deepEqual(all.filter((f) => f > NAME), []);
+    const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
+    assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
+  });
+
+  it("declares every key the routes check, idempotently, and grants them to NOBODY", () => {
+    assert.deepEqual(KEYS, [
+      "view_fnf_settlement", "manage_fnf_settlement", "view_exit_interview", "manage_exit_interview", "override_rehire_eligibility",
+    ]);
+    KEYS.forEach((k) => {
+      assert.match(up, new RegExp(`INSERT INTO \`all_permissions\`[\\s\\S]*?'${k}'[\\s\\S]*?WHERE NOT EXISTS`));
+    });
+    assert.ok(!/INSERT INTO `permissions`/.test(up));
+  });
+
+  it("is additive: no UPDATE, no DELETE and no DROP on an existing table; every ALTER is guarded", () => {
+    // As STATEMENTS (an `ON UPDATE CURRENT_TIMESTAMP` column default is not one).
+    assert.ok(!/(^|;)\s*UPDATE\s/im.test(up));
+    assert.ok(!/(^|;)\s*DELETE\s/im.test(up));
+    assert.ok(!/\bDROP\s+(TABLE|COLUMN)/i.test(up));
+    const alters = up.match(/'ALTER TABLE[^']*/g) || [];
+    assert.equal(alters.length, 4);
+    assert.equal((up.match(/information_schema`\.`COLUMNS`/g) || []).length, 4);
+    assert.match(up, /`document_type` ENUM\(''PAYSLIP'',''FNF''\) NOT NULL DEFAULT ''PAYSLIP''/);
+    for (const col of ["fnf_additions", "fnf_deductions", "fnf_items"]) {
+      assert.match(up, new RegExp(`ADD COLUMN \`${col}\` [A-Z]+[^']*NULL DEFAULT NULL|ADD COLUMN \`${col}\` JSON NULL`));
+    }
+  });
+
+  it("the database enforces one case per exit and one payroll month per settlement", () => {
+    assert.match(up, /UNIQUE KEY `uq_fnf_exit` \(`employee_id`, `exit_date`\)/);
+    assert.match(up, /UNIQUE KEY `uq_fnf_payrun` \(`payrun_employee_id`\)/);
+    assert.match(up, /UNIQUE KEY `uq_exit_interview_case` \(`fnf_settlement_id`\)/);
+    assert.match(up, /UNIQUE KEY `uq_payrun_fnf_item_component`/);
+  });
+
+  it("down removes exactly what up added", () => {
+    for (const t of ["employee_rehire_assessment", "employee_exit_interview", "employee_fnf_settlement_event",
+      "employee_fnf_settlement", "payrun_fnf_item_audit", "payrun_fnf_item"]) {
+      assert.match(down, new RegExp(`DROP TABLE IF EXISTS \`${t}\``));
+    }
+    for (const col of ["document_type", "fnf_items", "fnf_deductions", "fnf_additions"]) {
+      assert.match(down, new RegExp(`DROP COLUMN \`${col}\``));
+    }
+    KEYS.forEach((k) => assert.ok(down.includes(`'${k}'`), k));
+  });
+});

@@ -916,6 +916,12 @@ class Server {
       // Admin bulk payslip export: several PDFs in one Chrome.
       renderPdfs: require("./services/payslip_pdf").renderPayslipPdfs,
     });
+    // Full & Final Settlement, Exit Interview and Rehire Eligibility. The F&F
+    // month itself is calculated, approved and published by the payrun above;
+    // this records F&F items, settlement completion and the confidential
+    // interview / rehire assessments.
+    this.employeeExitRepo = require("./repository/employee_exit")(this.mysql.connection);
+    this.employeeExitUsecase = require("./usecase/employee_exit")(this.employeeExitRepo);
     this.telegramPayslipUsecase = require("./usecase/telegram_payslip")({
       payslipRepo: this.payrunPayslipRepo,
       renderPdf: require("./services/payslip_pdf").renderPayslipPdf,
@@ -1827,6 +1833,12 @@ class Server {
       this.sensitive,
       this.employeeBranchScope
     );
+    // F&F settlement (/payrun/fnf) and exit interview / rehire (/hr/exit).
+    const employeeExitRouter = require("./routes/employee_exit")(
+      this.employeeExitUsecase,
+      this.permissions,
+      this.employeeBranchScope
+    );
     const storeRouter = require("./routes/store")(this.storeUsecase);
     const outletRouter = require("./routes/outlet")(
       this.outletUsecase,
@@ -2110,6 +2122,7 @@ class Server {
     app.use("/", payrunAdjustmentRouter.getRouter());
     // Likewise /payrun/calculation, which is disjoint from both.
     app.use("/", payrunCalculationRouter.getRouter());
+    app.use("/", employeeExitRouter.getRouter());
     // /payroll/dashboard - claimed by no other router.
     app.use("/", payrollDashboardRouter.getRouter());
 

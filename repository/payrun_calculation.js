@@ -449,6 +449,7 @@ class PayrunCalculationRepository {
               approved_ot_minutes, approved_ot_hours, ot_hourly_rate, ot_amount,
               ot_groups, attendance_ot_earnings,
               prior_month_ot_amount, prior_month_ot,
+              fnf_additions, fnf_deductions, fnf_items,
               incentive, bonus, arrears, advance_recovery, shortage_recovery,
               balance_advance,
               pf_status, pf_wage, employee_pf, employer_pf_total, employer_epf, employer_eps,
@@ -536,6 +537,32 @@ class PayrunCalculationRepository {
   }
 
   /**
+   * THE F&F ITEMS ENTERED FOR THIS MONTH (`payrun_fnf_item`), per employee -
+   * an input of the calculation exactly like the adjustments. Only exit
+   * months ever have rows. A database without the table (before migration
+   * 20261201120000) has none.
+   */
+  async listFnfItems(employeeIds, year, month) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    try {
+      return await new Promise((resolve, reject) => {
+        this.db.query(
+          `SELECT employee_id, component, amount
+             FROM payrun_fnf_item
+            WHERE period_year = ? AND period_month = ? AND employee_id IN (?)
+            ORDER BY employee_id, component`,
+          [year, month, employeeIds],
+          (err, rows) => (err ? reject(err) : resolve(rows || []))
+        );
+      });
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      this._log("LIST-FNF-ITEMS", err);
+      throw err;
+    }
+  }
+
+  /**
    * WHICH OF THESE EMPLOYEES' MONTHS ARE LOCKED.
    *
    * THE ONE READ THE OTHER STAGES NEED FROM THIS ONE. A locked employee's
@@ -594,6 +621,7 @@ class PayrunCalculationRepository {
       "approved_ot_minutes", "approved_ot_hours", "ot_hourly_rate", "ot_amount",
       "ot_groups", "attendance_ot_earnings",
       "prior_month_ot_amount", "prior_month_ot",
+      "fnf_additions", "fnf_deductions", "fnf_items",
       "incentive", "bonus", "arrears", "advance_recovery", "shortage_recovery",
       "balance_advance",
       "pf_status", "pf_wage", "employee_pf", "employer_pf_total",
@@ -1525,6 +1553,16 @@ class PayrunCalculationRepository {
       const published = locked && row.published_at !== null && row.published_at !== undefined;
       const previous = published ? CALC_STATUS.PUBLISHED : locked ? CALC_STATUS.APPROVED_LOCKED : row.status;
 
+      /*
+       * A SETTLED FULL & FINAL IS PAID MONEY. Its month cannot be unpublished
+       * or unlocked - either would let the figures that were paid change -
+       * until the settlement is explicitly reopened (with a reason) on the
+       * F&F screen. Read under this row's lock, which Settle also takes.
+       */
+      if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK || action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH) {
+        if (await this._fnfSettledLocked(conn, row.payrun_employee_id)) return done("FNF_SETTLED");
+      }
+
       let update;
       let next;
       let payslipId = null;
@@ -1666,6 +1704,24 @@ class PayrunCalculationRepository {
     }
   }
 
+  /** Is this payrun month a SETTLED F&F? A database before migration 20261201120000 has none. */
+  async _fnfSettledLocked(conn, payrunEmployeeId) {
+    try {
+      const rows = await new Promise((resolve, reject) =>
+        conn.query(
+          `SELECT fnf_settlement_id FROM employee_fnf_settlement
+            WHERE payrun_employee_id = ? AND status = 'SETTLED' LOCK IN SHARE MODE`,
+          [payrunEmployeeId],
+          (err, r) => (err ? reject(err) : resolve(r || []))
+        )
+      );
+      return rows.length > 0;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return false;
+      throw err;
+    }
+  }
+
   /**
    * THE FROZEN SNAPSHOT, inserted inside the Publish transaction. The version
    * is the next one for this employee month, read under the calculation row's
@@ -1692,9 +1748,9 @@ class PayrunCalculationRepository {
               (payslip_ref, payrun_employee_id, payrun_calculation_id, employee_id,
                period_year, period_month, payslip_version,
                calculation_version, calculation_revision, calculation_hash, source_hash, inputs_hash,
-               snapshot_schema_version, template_version, snapshot_json, snapshot_sha256,
+               snapshot_schema_version, template_version, document_type, snapshot_json, snapshot_sha256,
                status, published_by, published_by_user, published_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
          FROM payrun_employee_calculation c
         WHERE c.payrun_calculation_id = ?`,
       [
@@ -1702,7 +1758,8 @@ class PayrunCalculationRepository {
         year, month, Number(last.v) + 1,
         row.calculation_version, row.calculation_revision, row.calculation_hash,
         row.source_hash, row.inputs_hash,
-        payslip.schema_version, payslip.template_version, payslip.text, payslip.sha256,
+        payslip.schema_version, payslip.template_version, payslip.document_type || "PAYSLIP",
+        payslip.text, payslip.sha256,
         actorEmployee, actorUser, row.payrun_calculation_id,
       ],
       conn
