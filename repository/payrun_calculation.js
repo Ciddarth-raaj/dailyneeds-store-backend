@@ -449,7 +449,6 @@ class PayrunCalculationRepository {
               approved_ot_minutes, approved_ot_hours, ot_hourly_rate, ot_amount,
               ot_groups, attendance_ot_earnings,
               prior_month_ot_amount, prior_month_ot,
-              fnf_additions, fnf_deductions, fnf_items,
               incentive, bonus, arrears, advance_recovery, shortage_recovery,
               balance_advance,
               pf_status, pf_wage, employee_pf, employer_pf_total, employer_epf, employer_eps,
@@ -553,6 +552,27 @@ class PayrunCalculationRepository {
   }
 
   /**
+   * OT REQUESTS STILL UNDECIDED on any date up to `to` - the same predicate
+   * `repository/payrun.js#listPendingApprovals` counts for a month, without
+   * its month start. For the F&F month, where an undecided request in an
+   * EARLIER month would otherwise never be paid.
+   */
+  async listOpenOtRequestsUpTo(employeeIds, to) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-OPEN-OT-REQUESTS-UP-TO",
+      `SELECT r.requested_for_employee_id AS employee_id, COUNT(*) AS pending_ot
+         FROM attendance_approval_request r
+        WHERE r.requested_for_employee_id IN (?)
+          AND r.request_type IN ('OT','REGULARIZATION_WITH_OT')
+          AND r.attendance_date <= ?
+          AND (r.status = 'PENDING' OR r.finalization_state = 'PENDING')
+        GROUP BY r.requested_for_employee_id`,
+      [employeeIds, to]
+    );
+  }
+
+  /**
    * APPROVED OT STILL WAITING FOR A PAYROLL MONTH (`PENDING_SETTLEMENT`) for
    * these employees, up to the end of the given month - for the F&F month,
    * which is the leaver's LAST payroll month: an item still pending there
@@ -575,32 +595,6 @@ class PayrunCalculationRepository {
       );
     } catch (err) {
       if (err && err.code === "ER_NO_SUCH_TABLE") return [];
-      throw err;
-    }
-  }
-
-  /**
-   * THE F&F ITEMS ENTERED FOR THIS MONTH (`payrun_fnf_item`), per employee -
-   * an input of the calculation exactly like the adjustments. Only exit
-   * months ever have rows. A database without the table (before migration
-   * 20261201120000) has none.
-   */
-  async listFnfItems(employeeIds, year, month) {
-    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
-    try {
-      return await new Promise((resolve, reject) => {
-        this.db.query(
-          `SELECT employee_id, component, amount
-             FROM payrun_fnf_item
-            WHERE period_year = ? AND period_month = ? AND employee_id IN (?)
-            ORDER BY employee_id, component`,
-          [year, month, employeeIds],
-          (err, rows) => (err ? reject(err) : resolve(rows || []))
-        );
-      });
-    } catch (err) {
-      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
-      this._log("LIST-FNF-ITEMS", err);
       throw err;
     }
   }
@@ -664,7 +658,6 @@ class PayrunCalculationRepository {
       "approved_ot_minutes", "approved_ot_hours", "ot_hourly_rate", "ot_amount",
       "ot_groups", "attendance_ot_earnings",
       "prior_month_ot_amount", "prior_month_ot",
-      "fnf_additions", "fnf_deductions", "fnf_items",
       "incentive", "bonus", "arrears", "advance_recovery", "shortage_recovery",
       "balance_advance",
       "pf_status", "pf_wage", "employee_pf", "employer_pf_total",

@@ -203,7 +203,7 @@ class EmployeeExitRepository {
               DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS exit_date,
               c.payrun_calculation_id, c.status AS calc_stored_status,
               DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
-              c.net_pay, c.fnf_additions, c.fnf_deductions, c.calculation_hash,
+              c.net_pay, c.calculation_hash,
               p.payslip_id, p.document_type,
               DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS live_exit_date,
               ${CASE_JOIN_COLUMNS}
@@ -265,132 +265,6 @@ class EmployeeExitRepository {
     }
   }
 
-  /* ================================================= F&F items (writes) */
-
-  async listItems({ year, month, employee_id }) {
-    return this._read(
-      "LIST-ITEMS",
-      `SELECT component, amount, remarks, updated_by,
-              DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
-         FROM payrun_fnf_item
-        WHERE period_year = ? AND period_month = ? AND employee_id = ?
-        ORDER BY component`,
-      [year, month, employee_id]
-    );
-  }
-
-  async listItemAudit({ year, month, employee_id }) {
-    return this._read(
-      "LIST-ITEM-AUDIT",
-      `SELECT action, component, old_amount, new_amount, remarks, changed_by,
-              DATE_FORMAT(changed_at, '%Y-%m-%d %H:%i:%s') AS changed_at
-         FROM payrun_fnf_item_audit
-        WHERE period_year = ? AND period_month = ? AND employee_id = ?
-        ORDER BY payrun_fnf_item_audit_id DESC`,
-      [year, month, employee_id]
-    );
-  }
-
-  /**
-   * SET OR CLEAR AN EXIT MONTH'S F&F AMOUNTS - all of them or none of them.
-   *
-   * REFUSED UNDER THE LOCK, not just before it: the month's period row is
-   * read shared and the employee's calculation row FOR UPDATE (Approve's own
-   * lock), and an APPROVED_LOCKED row or a LOCKED month refuses every write.
-   * The payrun snapshot is re-read in the same transaction so the exit-month
-   * rule is judged on what is committed.
-   *
-   * `entries`: `[{ component, amount|null, remarks }]` - null clears.
-   * @returns {{ outcome, set, cleared }}
-   */
-  async saveItems({ year, month, employee_id, entries, actor = null, isExitMonth }) {
-    return this.withTransaction(async (conn) => {
-      const [periodRow] = await this._read(
-        "ITEMS-LOCK-PERIOD",
-        "SELECT status FROM payrun_period WHERE period_year = ? AND period_month = ? LOCK IN SHARE MODE",
-        [year, month],
-        conn
-      );
-      if (periodRow && periodRow.status === "LOCKED") return { outcome: "MONTH_LOCKED" };
-
-      const [calcRow] = await this._read(
-        "ITEMS-LOCK-CALCULATION",
-        `SELECT status FROM payrun_employee_calculation
-          WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
-        [year, month, employee_id],
-        conn
-      );
-      if (calcRow && calcRow.status === "APPROVED_LOCKED") return { outcome: "APPROVED_LOCKED" };
-
-      const [payrun] = await this._read(
-        "ITEMS-READ-PAYRUN",
-        `SELECT payrun_employee_id, DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
-           FROM payrun_employee WHERE period_year = ? AND period_month = ? AND employee_id = ?`,
-        [year, month, employee_id],
-        conn
-      );
-      if (!payrun) return { outcome: "NOT_INITIALIZED" };
-      if (!isExitMonth({ year, month, resignation_date: payrun.resignation_date })) {
-        return { outcome: "NOT_EXIT_MONTH" };
-      }
-
-      const current = await this._read(
-        "ITEMS-LOCK-CURRENT",
-        `SELECT component, amount, remarks FROM payrun_fnf_item
-          WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
-        [year, month, employee_id],
-        conn
-      );
-      const currentOf = new Map(current.map((r) => [r.component, r]));
-      let set = 0;
-      let cleared = 0;
-      for (const entry of entries) {
-        const had = currentOf.get(entry.component);
-        const remarks = entry.remarks === undefined || entry.remarks === "" ? null : entry.remarks;
-        /* eslint-disable no-await-in-loop */
-        if (entry.amount === null) {
-          if (!had) continue;
-          await this._read(
-            "ITEMS-DELETE",
-            `DELETE FROM payrun_fnf_item
-              WHERE period_year = ? AND period_month = ? AND employee_id = ? AND component = ?`,
-            [year, month, employee_id, entry.component],
-            conn
-          );
-          await this._audit(conn, { payrun, year, month, employee_id, action: "CLEAR_AMOUNT", component: entry.component, old: had.amount, next: null, remarks, actor });
-          cleared += 1;
-          continue;
-        }
-        if (had && Number(had.amount) === Number(entry.amount) && (had.remarks || null) === remarks) continue;
-        await this._read(
-          "ITEMS-UPSERT",
-          `INSERT INTO payrun_fnf_item
-                  (payrun_employee_id, period_year, period_month, employee_id, component, amount, remarks, created_by, updated_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-           ON DUPLICATE KEY UPDATE amount = VALUES(amount), remarks = VALUES(remarks), updated_by = VALUES(updated_by)`,
-          [payrun.payrun_employee_id, year, month, employee_id, entry.component, entry.amount, remarks, actor, actor],
-          conn
-        );
-        await this._audit(conn, { payrun, year, month, employee_id, action: "SET_AMOUNT", component: entry.component, old: had ? had.amount : null, next: entry.amount, remarks, actor });
-        set += 1;
-        /* eslint-enable no-await-in-loop */
-      }
-      return { outcome: "SAVED", set, cleared };
-    });
-  }
-
-  async _audit(conn, { payrun, year, month, employee_id, action, component, old, next, remarks, actor }) {
-    await this._read(
-      "ITEMS-AUDIT",
-      `INSERT INTO payrun_fnf_item_audit
-              (payrun_employee_id, period_year, period_month, employee_id, action, component,
-               old_amount, new_amount, remarks, changed_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [payrun.payrun_employee_id, year, month, employee_id, action, component, old, next, remarks, actor],
-      conn
-    );
-  }
-
   /** Like `_read`, but a table that does not exist yet reads as no rows. */
   async _readTolerant(code, sql, params, conn = null) {
     try {
@@ -437,6 +311,27 @@ class EmployeeExitRepository {
           AND (source_year * 12 + source_month) <= (? * 12 + ?)
         GROUP BY employee_id`,
       [employeeIds, year, month]
+    );
+  }
+
+  /**
+   * OT REQUESTS STILL AWAITING A DECISION up to each leaver's last working
+   * day - the same predicate Settle refuses on. `exits` is
+   * [{ employee_id, exit_date }].
+   */
+  async listOpenOtRequests(exits) {
+    const list = (exits || []).filter((e) => e && e.employee_id && e.exit_date);
+    if (list.length === 0) return [];
+    const where = list.map(() => "(r.requested_for_employee_id = ? AND r.attendance_date <= ?)").join(" OR ");
+    return this._readTolerant(
+      "LIST-OPEN-OT-REQUESTS",
+      `SELECT r.requested_for_employee_id AS employee_id, COUNT(*) AS n
+         FROM attendance_approval_request r
+        WHERE r.request_type IN ('OT','REGULARIZATION_WITH_OT')
+          AND (r.status = 'PENDING' OR r.finalization_state = 'PENDING')
+          AND (${where})
+        GROUP BY r.requested_for_employee_id`,
+      list.flatMap((e) => [e.employee_id, e.exit_date])
     );
   }
 
@@ -572,6 +467,16 @@ class EmployeeExitRepository {
         conn
       );
       if (pendingOt.length && Number(pendingOt[0].n) > 0) return { outcome: "OUTSTANDING_OT" };
+      // ...and no OT request up to the last working day may still be undecided.
+      const [openOt] = await this._read(
+        "SETTLE-OPEN-OT-REQUESTS",
+        `SELECT COUNT(*) AS n FROM attendance_approval_request
+          WHERE requested_for_employee_id = ? AND request_type IN ('OT','REGULARIZATION_WITH_OT')
+            AND attendance_date <= ? AND (status = 'PENDING' OR finalization_state = 'PENDING')`,
+        [employee_id, calcRow.exit_date],
+        conn
+      );
+      if (openOt && Number(openOt.n) > 0) return { outcome: "OUTSTANDING_OT" };
 
       const caseId = await this.ensureCase({ employee_id, exit_date: calcRow.exit_date, actor: actor.employeeId ?? null }, conn);
       const existing = await this.getCase(caseId, conn, { forUpdate: true });

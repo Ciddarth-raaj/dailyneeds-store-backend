@@ -16,7 +16,6 @@ function memoryRepo() {
     payrun: [], // { year, month, employee_id, employee_name, store_id, exit_date, calc_status, published, document_type }
     periods: [], // { employee_id, period_id, ended_on }
     cases: [], // { fnf_settlement_id, employee_id, exit_date, status, payrun_key }
-    items: [],
     interviews: new Map(),
     rehire: [],
     saveCalls: [],
@@ -47,20 +46,6 @@ function memoryRepo() {
     },
     async listMonthUninitializedExits() {
       return [];
-    },
-    async listItems() {
-      return state.items;
-    },
-    async listItemAudit() {
-      return [];
-    },
-    async saveItems(args) {
-      state.saveCalls.push(args);
-      const r = find(args.year, args.month, args.employee_id);
-      if (!r) return { outcome: "NOT_INITIALIZED" };
-      if (r.calc_status === "APPROVED_LOCKED") return { outcome: "APPROVED_LOCKED" };
-      if (!args.isExitMonth({ year: args.year, month: args.month, resignation_date: r.exit_date })) return { outcome: "NOT_EXIT_MONTH" };
-      return { outcome: "SAVED", set: args.entries.filter((e) => e.amount !== null).length, cleared: 0 };
     },
     async ensureCase({ employee_id, exit_date }) {
       let c = caseOf(employee_id, exit_date);
@@ -153,37 +138,6 @@ describe("the F&F list", () => {
   });
   it("respects the caller's branch scope", async () => {
     assert.equal((await uc.getMonth({ ...AUG, store_ids: [1] })).rows.length, 0);
-  });
-});
-
-describe("F&F items", () => {
-  it("validates before anything is written: unknown component, duplicate, negative, three decimals", async () => {
-    for (const items of [
-      [{ component: "OTHER", amount: 1 }],
-      [{ component: "GRATUITY", amount: 1 }, { component: "GRATUITY", amount: 2 }],
-      [{ component: "GRATUITY", amount: -1 }],
-      [{ component: "GRATUITY", amount: 1.234 }],
-    ]) {
-      await assert.rejects(uc.saveItems({ ...AUG, employee_id: 2095, items }), { name: "ValidationError" });
-    }
-    assert.equal(repo.state.saveCalls.length, 0);
-  });
-
-  it("zero clears a line, like an Adjustment's zero", async () => {
-    await uc.saveItems({ ...AUG, employee_id: 2095, items: [{ component: "GRATUITY", amount: 0 }] });
-    assert.equal(repo.state.saveCalls[0].entries[0].amount, null);
-  });
-
-  it("an active employee (no exit this month) cannot be given F&F items", async () => {
-    await assert.rejects(uc.saveItems({ ...AUG, employee_id: 300, items: [{ component: "GRATUITY", amount: 10 }] }), { name: "NotFoundError" });
-  });
-
-  it("an approved & locked month refuses F&F changes - the published payroll is never silently modified", async () => {
-    repo.state.payrun[0].calc_status = "APPROVED_LOCKED";
-    await assert.rejects(
-      uc.saveItems({ ...AUG, employee_id: 2095, items: [{ component: "GRATUITY", amount: 10 }] }),
-      (err) => err.name === "ConflictError" && /approved & locked/.test(err.message)
-    );
   });
 });
 

@@ -19,7 +19,7 @@ const up = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8
 const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8"));
 const KEYS = [
   P.VIEW_FNF_SETTLEMENT,
-  P.MANAGE_FNF_SETTLEMENT,
+  P.CONFIRM_FNF_PAYMENT,
   P.VIEW_EXIT_INTERVIEW,
   P.MANAGE_EXIT_INTERVIEW,
   P.OVERRIDE_REHIRE_ELIGIBILITY,
@@ -37,7 +37,7 @@ describe("the F&F settlement migration", () => {
 
   it("declares every key the routes check, idempotently, and grants them to NOBODY", () => {
     assert.deepEqual(KEYS, [
-      "view_fnf_settlement", "manage_fnf_settlement", "view_exit_interview", "manage_exit_interview", "override_rehire_eligibility",
+      "view_fnf_settlement", "confirm_fnf_payment", "view_exit_interview", "manage_exit_interview", "override_rehire_eligibility",
       "approve_rehire_exception",
     ]);
     KEYS.forEach((k) => {
@@ -52,29 +52,32 @@ describe("the F&F settlement migration", () => {
     assert.ok(!/(^|;)\s*DELETE\s/im.test(up));
     assert.ok(!/\bDROP\s+(TABLE|COLUMN)/i.test(up));
     const alters = up.match(/'ALTER TABLE[^']*/g) || [];
-    assert.equal(alters.length, 4);
-    assert.equal((up.match(/information_schema`\.`COLUMNS`/g) || []).length, 4);
+    // ONE column, on payrun_payslip: which document a published snapshot is.
+    assert.equal(alters.length, 1);
+    assert.equal((up.match(/information_schema`\.`COLUMNS`/g) || []).length, 1);
     assert.match(up, /`document_type` ENUM\(''PAYSLIP'',''FNF''\) NOT NULL DEFAULT ''PAYSLIP''/);
-    for (const col of ["fnf_additions", "fnf_deductions", "fnf_items"]) {
-      assert.match(up, new RegExp(`ADD COLUMN \`${col}\` [A-Z]+[^']*NULL DEFAULT NULL|ADD COLUMN \`${col}\` JSON NULL`));
+  });
+
+  it("adds NO F&F earning / recovery field: no leave encashment, gratuity, notice pay or recovery anywhere", () => {
+    for (const word of ["fnf_items", "fnf_additions", "fnf_deductions", "payrun_fnf_item", "GRATUITY", "LEAVE_ENCASHMENT", "NOTICE_PAY", "NOTICE_PERIOD_RECOVERY"]) {
+      assert.ok(!up.includes(word), word);
+      assert.ok(!down.includes(word), word);
     }
+    assert.ok(!/ALTER TABLE `payrun_calculation`/.test(up), "the calculation table is untouched");
   });
 
   it("the database enforces one case per exit and one payroll month per settlement", () => {
     assert.match(up, /UNIQUE KEY `uq_fnf_exit` \(`employee_id`, `exit_date`\)/);
     assert.match(up, /UNIQUE KEY `uq_fnf_payrun` \(`payrun_employee_id`\)/);
     assert.match(up, /UNIQUE KEY `uq_exit_interview_case` \(`fnf_settlement_id`\)/);
-    assert.match(up, /UNIQUE KEY `uq_payrun_fnf_item_component`/);
   });
 
   it("down removes exactly what up added", () => {
     for (const t of ["employee_rehire_exception", "payrun_exit_reconcile_audit", "employee_rehire_assessment", "employee_exit_interview", "employee_fnf_settlement_event",
-      "employee_fnf_settlement", "payrun_fnf_item_audit", "payrun_fnf_item"]) {
+      "employee_fnf_settlement"]) {
       assert.match(down, new RegExp(`DROP TABLE IF EXISTS \`${t}\``));
     }
-    for (const col of ["document_type", "fnf_items", "fnf_deductions", "fnf_additions"]) {
-      assert.match(down, new RegExp(`DROP COLUMN \`${col}\``));
-    }
+    assert.match(down, /DROP COLUMN `document_type`/);
     KEYS.forEach((k) => assert.ok(down.includes(`'${k}'`), k));
   });
 });

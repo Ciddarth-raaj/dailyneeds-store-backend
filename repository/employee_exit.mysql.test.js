@@ -15,9 +15,10 @@
  * August 2026, two employees:
  *   1  ACTIVE all month           -> an ordinary Salary Payslip
  *   2  last working day 16 Aug    -> the Full & Final Settlement, with an
- *                                    advance recovery (Adjustment) and two
- *                                    F&F items (Leave Encashment, Notice
- *                                    Period Recovery)
+ *                                    advance recovery (the existing
+ *                                    Adjustment) - and NO F&F-only component
+ * plus later employees for the late-exit, outstanding-OT and final-month
+ * OT-clearance cases.
  */
 const { describe, it, before, after } = require("node:test");
 const assert = require("node:assert/strict");
@@ -53,20 +54,9 @@ const FEATURE_TABLES = [
   "employee_exit_interview",
   "employee_fnf_settlement_event",
   "employee_fnf_settlement",
-  "payrun_fnf_item_audit",
-  "payrun_fnf_item",
   "employee_employment_period",
   "permissions",
 ];
-
-/* Stands in for the business confirming a component's PF / ESI treatment. */
-const { FNF_COMPONENT_BY_KEY } = require("../constants/fnf");
-const confirmed = [];
-const confirmTreatment = (keys) =>
-  keys.forEach((k) => {
-    FNF_COMPONENT_BY_KEY[k].statutory = "CONFIRMED";
-    confirmed.push(k);
-  });
 
 const q = (pool, sql, params = []) =>
   new Promise((resolve, reject) => pool.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows))));
@@ -95,7 +85,7 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     await q(pool, "SET FOREIGN_KEY_CHECKS = 1");
   };
 
-  const seedEmployee = async (id, { exit = null, presentDays, advance = null }) => {
+  const seedEmployee = async (id, { exit = null, presentDays, advance = null, ot = null, closed = false }) => {
     await q(pool,
       `INSERT INTO new_employee (employee_id, employee_name, store_id, pf_applicable, esi_applicable, previous_eps_member,
                                  previous_pf_member, dob, date_of_joining, resignation_date, uan, pf_number, esi_number,
@@ -126,7 +116,8 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
       await q(pool, `INSERT INTO attendance_day_calculation
           (employee_id, attendance_date, nrm_minutes, break_allowance_source, is_final, approved_ot_minutes,
            status, attendance_day_count, base_nrm_minutes, worked_minutes)
-        VALUES (?, ?, 480, 'SHIFT', 1, 0, ?, ?, 480, ?)`, [id, d, present ? "FINAL" : "ABSENT", present ? 1 : 0, present ? 480 : 0]);
+        VALUES (?, ?, 480, 'SHIFT', 1, ?, ?, ?, 480, ?)`,
+      [id, d, ot && ot.date === d ? ot.minutes : 0, present ? "FINAL" : "ABSENT", present ? 1 : 0, present ? 480 : 0]);
     }
     const stored = await q(pool, dayRowsSql(), [id, AUG[0], AUG[30]]);
     const earn = Math.round(presentDays * 384.62 * 100) / 100;
@@ -134,8 +125,9 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
         (employee_id, period_year, period_month, is_final, payroll_version, salary_days, extra_days, base_days,
          monthly_gross, daily_rate, salary_day_earnings, extra_day_earnings, shortage_minutes, missing_minute_deduction,
          approved_ot_minutes, approved_ot_earnings, calculated_at, day_rows_fingerprint)
-       VALUES (?, ?, ?, 1, 1, ?, 0, ?, 10000, 384.62, ?, 0, 0, 0, 0, 0, '2026-09-01 02:00:00.000', ?)`,
-    [id, YEAR, MONTH, presentDays, lastDay, earn, dayRowsFingerprint(stored)]);
+       VALUES (?, ?, ?, 1, 1, ?, 0, ?, 10000, 384.62, ?, 0, 0, 0, ?, 0, '2026-09-01 02:00:00.000', ?)`,
+    [id, YEAR, MONTH, presentDays, lastDay, earn, ot ? ot.minutes : 0, dayRowsFingerprint(stored)]);
+    if (closed) await q(pool, "UPDATE payrun_employee SET attendance_closed_for_payroll = 1, attendance_closed_by = 9 WHERE payrun_employee_id = ?", [pe.insertId]);
     return pe.insertId;
   };
 
@@ -186,9 +178,6 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
   });
 
   after(async () => {
-    confirmed.forEach((k) => {
-      FNF_COMPONENT_BY_KEY[k].statutory = "UNCONFIRMED";
-    });
     if (!pool) return;
     await dropAll();
     pool.end();
@@ -199,74 +188,46 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(cols[0].Default, "PAYSLIP");
     const keys = await q(pool, "SELECT permission_key FROM all_permissions WHERE permission_key LIKE '%fnf%' OR permission_key LIKE '%exit%' OR permission_key LIKE '%rehire%' ORDER BY 1");
     assert.deepEqual(keys.map((k) => k.permission_key), [
-      "approve_rehire_exception", "manage_exit_interview", "manage_fnf_settlement", "override_rehire_eligibility", "view_exit_interview", "view_fnf_settlement",
+      "approve_rehire_exception", "confirm_fnf_payment", "manage_exit_interview", "override_rehire_eligibility", "view_exit_interview", "view_fnf_settlement",
     ]);
   });
 
-  it("F&F items: refused for an active employee, saved and audited for the exit month", async () => {
-    const active = await exitRepo.saveItems({ year: YEAR, month: MONTH, employee_id: 1, entries: [{ component: "GRATUITY", amount: 10 }], actor: 77, isExitMonth });
-    assert.equal(active.outcome, "NOT_EXIT_MONTH");
-    const saved = await exitUsecase.saveItems({
-      year: YEAR, month: MONTH, employee_id: 2, actor: ACTOR,
-      items: [
-        { component: "LEAVE_ENCASHMENT", amount: 1500, remarks: "6 days EL" },
-        { component: "NOTICE_PERIOD_RECOVERY", amount: 400.5 },
-      ],
-    });
-    assert.equal(saved.set, 2);
-    const audit = await q(pool, "SELECT action, component, old_amount, new_amount, changed_by FROM payrun_fnf_item_audit ORDER BY 1, component");
-    assert.equal(audit.length, 2);
-    assert.ok(audit.every((a) => a.action === "SET_AMOUNT" && a.changed_by === 77));
-    assert.equal((await q(pool, "SELECT COUNT(*) n FROM payrun_fnf_item WHERE employee_id = 1"))[0].n, 0);
+  it("there is NO F&F-only field: the calculation table, the snapshot keys and the feature tables carry no encashment / gratuity / notice amount", async () => {
+    const cols = await q(pool, "SHOW COLUMNS FROM payrun_employee_calculation");
+    assert.deepEqual(cols.map((c) => c.Field).filter((f) => /fnf|gratuity|encash|notice/i.test(f)), []);
+    for (const t of ["payrun_fnf_item", "payrun_fnf_item_audit"]) assert.equal((await q(pool, "SHOW TABLES LIKE ?", [t])).length, 0, t);
+    const featureCols = await q(pool, `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+                                        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'employee_%' AND COLUMN_NAME REGEXP 'gratuity|encash|notice'`);
+    assert.deepEqual(featureCols, []);
   });
 
-  it("CALCULATE + APPROVE through the one payroll engine: F&F items and the advance recovery priced once; the active employee untouched", async () => {
+  it("CALCULATE + APPROVE through the one payroll engine: the exit month is priced like any month, the advance recovered once", async () => {
     const calculated = await calcUsecase.calculate({ year: YEAR, month: MONTH, all_eligible: true, actor: ACTOR });
     assert.equal(calculated.calculated_count, 2, JSON.stringify(calculated.results));
     const rows = await q(pool, "SELECT * FROM payrun_employee_calculation ORDER BY employee_id");
     const [a, x] = rows;
-    assert.equal(a.fnf_additions, null);
-    assert.equal(a.fnf_deductions, null);
-    assert.equal(a.fnf_items, null);
-    assert.equal(Number(x.fnf_additions), 1500);
-    assert.equal(Number(x.fnf_deductions), 400.5);
     assert.equal(Number(x.advance_recovery), 1000);
     assert.equal(x.salary_days, 13);
+    assert.equal(a.salary_days, 26);
     const p = (v) => Math.round(Number(v) * 100);
-    assert.equal(
-      p(x.total_earnings),
-      p(x.salary_earnings) + p(x.extra_day_amount) + p(x.ot_amount) + 150000,
-      "earnings = salary + extra days + OT + F&F additions"
-    );
+    assert.equal(p(x.total_earnings), p(x.salary_earnings) + p(x.extra_day_amount) + p(x.ot_amount) + p(x.prior_month_ot_amount),
+      "earnings = salary + extra days + OT: the ordinary formula, nothing added");
     assert.equal(
       p(x.total_employee_deductions),
-      p(x.missing_hours_deduction) + p(x.employee_pf) + p(x.employee_esi) + 100000 + 40050,
-      "deductions = statutory + advance recovery (once) + F&F recovery"
+      p(x.missing_hours_deduction) + p(x.employee_pf) + p(x.employee_esi) + 100000 + p(x.shortage_recovery),
+      "deductions = statutory + advance recovery (once)"
     );
     assert.equal(p(x.total_earnings) - p(x.total_employee_deductions) + p(x.net_pay_rounding), p(x.net_pay));
-
-    // The statutory treatment of Leave Encashment / Notice Recovery is NOT
-    // confirmed by default: the leaver's month is calculated but cannot be approved.
-    assert.equal(x.is_complete, 0);
-    const held = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [1, 2], actor: ACTOR });
-    assert.equal(held.approved_count, 1, JSON.stringify(held.results));
-    assert.ok(JSON.stringify(held.results).includes("CALCULATION_INCOMPLETE"), JSON.stringify(held.results));
-
-    // The business confirms the treatment (a reviewed change to constants/fnf.js);
-    // the recalculated month is complete and is approved.
-    confirmTreatment(["LEAVE_ENCASHMENT", "NOTICE_PERIOD_RECOVERY", "GRATUITY", "NOTICE_PAY"]);
-    await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [2], mode: "RECALCULATE", actor: ACTOR });
-    const approved = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [2], actor: ACTOR });
-    assert.equal(approved.approved_count, 1, JSON.stringify(approved.results));
+    assert.equal(x.is_complete, 1);
+    const approved = await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [1, 2], actor: ACTOR });
+    assert.equal(approved.approved_count, 2, JSON.stringify(approved.results));
   });
 
-  it("an approved & locked month refuses F&F changes under the lock", async () => {
-    const res = await exitRepo.saveItems({ year: YEAR, month: MONTH, employee_id: 2, entries: [{ component: "GRATUITY", amount: 10 }], actor: 77, isExitMonth });
-    assert.equal(res.outcome, "APPROVED_LOCKED");
-    await assert.rejects(
-      exitUsecase.saveItems({ year: YEAR, month: MONTH, employee_id: 2, items: [{ component: "GRATUITY", amount: 10 }], actor: ACTOR }),
-      { name: "ConflictError" }
-    );
+  it("a PUBLISHED-payroll month is never modified without unlock: Recalculate of an approved & locked F&F row changes nothing", async () => {
+    const before = (await q(pool, "SELECT calculation_hash, calculation_revision, net_pay FROM payrun_employee_calculation WHERE employee_id = 2"))[0];
+    await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [2], mode: "RECALCULATE", actor: ACTOR }).catch(() => null);
+    const after = (await q(pool, "SELECT calculation_hash, calculation_revision, net_pay FROM payrun_employee_calculation WHERE employee_id = 2"))[0];
+    assert.deepEqual(after, before);
   });
 
   it("settling before publish is refused", async () => {
@@ -292,8 +253,7 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(s.deductions.total, Number(calc.total_employee_deductions).toFixed(2));
     assert.equal(s.source.calculation_hash, calc.calculation_hash);
     assert.equal(s.fnf.last_working_day, "2026-08-16");
-    assert.ok(s.earnings.lines.some((l) => l.key === "fnf_leave_encashment" && l.amount === "1500.00"));
-    assert.ok(s.deductions.lines.some((l) => l.key === "fnf_notice_period_recovery" && l.amount === "400.50"));
+    assert.deepEqual([...s.earnings.lines, ...s.deductions.lines].filter((l) => /^fnf_/.test(l.key)), [], "no F&F-only line");
     assert.ok(s.deductions.lines.some((l) => l.key === "advance_recovery" && l.amount === "1000.00"));
     assert.equal(JSON.parse(slips[0].snapshot_json).fnf, null);
   });
@@ -419,27 +379,28 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal((await exitUsecase.rehireStatus(2)).rehire.eligibility, "NO");
   });
 
-  it("REPORTS: the payroll register's F&F columns execute over real SQL and show earnings, recoveries and settlement", async () => {
+  it("REPORTS: active and exited employees in the SAME payroll register, told apart by Employee Classification; settlement facts alongside", async () => {
     const rq = require("../utils/payroll_report_query");
     const ADMIN = { userId: 5, employeeId: 50, isAdmin: true, permissions: [] };
-    const keys = ["employee_id", "last_working_day", "fnf_additions", "fnf_deductions", "gross_salary", "net_pay",
-      "fnf_month", "fnf_settlement_status", "fnf_paid_on", "fnf_payment_mode", "fnf_payment_reference", "fnf_settled_amount"];
+    const keys = ["employee_id", "employee_classification", "last_working_day", "gross_salary", "net_pay",
+      "fnf_settlement_status", "fnf_paid_on", "fnf_payment_mode", "fnf_payment_reference", "fnf_settled_amount"];
     const { fields } = rq.resolveFields(keys, ADMIN);
     const built = rq.buildQuery({ reportType: "PAYROLL_REGISTER", fields, filters: rq.resolveFilters({}), period: rq.periodOf(YEAR, MONTH), store_ids: null });
     const rows = await q(pool, built.sql, built.params);
     const byId = new Map(rows.map((r) => rq.presentRow(r, fields)).map((r) => [Number(r.employee_id), r]));
     const leaver = byId.get(2);
-    assert.equal(leaver.fnf_month, "Yes");
-    assert.equal(leaver.fnf_additions, 1500);
-    assert.equal(leaver.fnf_deductions, 400.5);
+    assert.equal(leaver.employee_classification, "Exited Employee");
     assert.equal(leaver.fnf_settlement_status, "Settled");
     assert.equal(leaver.fnf_payment_reference, "UTR111");
     const net = (await q(pool, "SELECT net_pay FROM payrun_employee_calculation WHERE employee_id = 2"))[0].net_pay;
     assert.equal(leaver.fnf_settled_amount, Number(net));
     const active = byId.get(1);
-    assert.equal(active.fnf_month, "No");
+    assert.equal(active.employee_classification, "Active Employee");
     assert.equal(active.fnf_settlement_status, null);
-    assert.equal(active.fnf_additions, null);
+    // The same register, without the new column, is the report it always was.
+    const plain = rq.resolveFields(["employee_id", "gross_salary", "net_pay"], ADMIN).fields;
+    const old = rq.buildQuery({ reportType: "PAYROLL_REGISTER", fields: plain, filters: rq.resolveFilters({}), period: rq.periodOf(YEAR, MONTH), store_ids: null });
+    assert.equal((await q(pool, old.sql, old.params)).length, rows.length);
   });
 
   it("REHIRE GATE SQL: reads the NEWEST assessment of the exit being rejoined from; records the approved exception", async () => {
@@ -541,7 +502,7 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.deepEqual(listed.outstanding_ot, { items: 1, minutes: 120, amount: 96.16 });
     const pub = await act("PUBLISH", [6]);
     assert.equal(pub.blocked_count, 1, JSON.stringify(pub.results));
-    assert.match(pub.results[0].message, /approved OT is still pending settlement/);
+    assert.match(pub.results[0].message, /OT is still undecided or approved-but-unpaid/);
 
     // Unlock -> Recalculate claims the item into the F&F -> Approve -> Publish -> Settle.
     assert.equal((await act("UNLOCK", [6])).unlocked_count, 1);
@@ -578,15 +539,96 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     await exitUsecase.reopen({ year: YEAR, month: MONTH, employee_id: 6, reason: "late OT", actor: ACTOR });
     await assert.rejects(
       exitUsecase.settle({ year: YEAR, month: MONTH, employee_id: 6, payment_mode: "CASH", paid_on: "2026-09-12", actor: ACTOR }),
-      /pending settlement/
+      /approved but not yet paid/
     );
+  });
+
+  it("FINAL-MONTH OT, END TO END: pending OT blocks calculation even with attendance closed; approved OT is paid; rejected stays rejected; earlier-paid OT is not paid again; deferred OT is cleared; Accounts confirms only when nothing is undecided", async () => {
+    const req = async (id, date, status, minutes = null) =>
+      (await q(pool, `INSERT INTO attendance_approval_request (request_type, requested_for_employee_id, attendance_date, status, approved_ot_minutes)
+                      VALUES ('OT', ?, ?, ?, ?)`, [id, date, status, minutes])).insertId;
+    const late = (requestId, id, date, srcMonth, minutes, amount, extra = {}) =>
+      q(pool, `INSERT INTO attendance_ot_late_settlement (attendance_approval_request_id, employee_id, attendance_date, source_year, source_month,
+                 eligible_ot_minutes, approved_ot_minutes, source_daily_rate, nrm_minutes, ot_hourly_rate, amount,
+                 settlement_status, settlement_year, settlement_month, settlement_payrun_calculation_id)
+               VALUES (?, ?, ?, 2026, ?, ?, ?, 384.62, 480, 48.08, ?, ?, ?, ?, ?)`,
+      [requestId, id, date, srcMonth, minutes, minutes, amount, extra.status || "PENDING_SETTLEMENT", extra.year || null, extra.month || null, extra.calc || null]);
+
+    // Employee 7 leaves on 22 Aug. Attendance is CLOSED for payroll. Approved OT on 5 Aug (120 min) is in Attendance.
+    await seedEmployee(7, { exit: "2026-08-22", presentDays: 18, ot: { date: "2026-08-05", minutes: 120 }, closed: true });
+    await q(pool, `INSERT INTO employee_employment_period (employee_id, period_no, period_state, joined_on, ended_on, end_reason_type)
+                   VALUES (7, 1, 'closed', '2026-02-02', '2026-08-22', 'resignation')`);
+    await req(7, "2026-08-05", "APPROVED", 120);
+    // July OT approved AFTER July locked -> deferred (PENDING_SETTLEMENT): the leaver has no "next month" but this one.
+    await late(await req(7, "2026-07-28", "APPROVED", 120), 7, "2026-07-28", 7, 120, "96.16");
+    // July OT already PAID in July's payroll (SETTLED there): must not be paid again.
+    await late(await req(7, "2026-07-20", "APPROVED", 60), 7, "2026-07-20", 7, 60, "48.08", { status: "SETTLED", year: 2026, month: 7, calc: 1 });
+    // OT for 6 Aug still awaiting a decision.
+    const pendingId = await req(7, "2026-08-06", "PENDING");
+
+    // Contrast, the ordinary rule unchanged: an ACTIVE employee with a pending OT request and closed attendance is calculable.
+    await seedEmployee(8, { presentDays: 26, closed: true });
+    await req(8, "2026-08-07", "PENDING");
+
+    // 1. PENDING OT BLOCKS the final month - Close Attendance does not accept it as it does for an ordinary month.
+    const month = await calcUsecase.getMonth({ year: YEAR, month: MONTH });
+    const r7 = month.rows.find((r) => r.employee_id === 7);
+    const r8 = month.rows.find((r) => r.employee_id === 8);
+    assert.equal(r7.calculable, false, JSON.stringify(r7.readiness || r7.blockers));
+    assert.ok(JSON.stringify(r7.readiness || r7).includes("PENDING_OT_APPROVAL"));
+    assert.equal(r8.calculable, true, JSON.stringify(r8.readiness || r8.blockers));
+    const refused = await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [7, 8], actor: ACTOR });
+    assert.deepEqual(refused.results.filter((x) => x.employee_id === 7).map((x) => x.result === "CALCULATED" || x.result === "RECALCULATED"), [false], JSON.stringify(refused.results));
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM payrun_employee_calculation WHERE employee_id = 7"))[0].n, 0, "nothing calculated for the leaver");
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM payrun_employee_calculation WHERE employee_id = 8"))[0].n, 1, "the active employee is calculated as before");
+
+    // 2. The supervisor REJECTS it; it stays rejected (no settlement row, no minutes).
+    await q(pool, "UPDATE attendance_approval_request SET status = 'REJECTED' WHERE attendance_approval_request_id = ?", [pendingId]);
+    const ok = await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [7], actor: ACTOR });
+    assert.equal(ok.calculated_count, 1, JSON.stringify(ok.results));
+    const c = (await q(pool, "SELECT * FROM payrun_employee_calculation WHERE employee_id = 7"))[0];
+    // 3. Approved OT of the month is paid by the ordinary OT formula ...
+    assert.equal(Number(c.approved_ot_hours), 2);
+    assert.equal(Number(c.ot_amount), 96.16);
+    // 4. ... the deferred July OT is cleared into the final settlement, and the already-paid July OT is NOT paid again.
+    const prior = typeof c.prior_month_ot === "string" ? JSON.parse(c.prior_month_ot) : c.prior_month_ot;
+    assert.deepEqual(prior.map((i) => i.attendance_date), ["2026-07-28"]);
+    assert.equal(Number(c.prior_month_ot_amount), 96.16);
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM attendance_ot_late_settlement l JOIN attendance_approval_request r USING (attendance_approval_request_id) WHERE r.status = 'REJECTED'"))[0].n, 0);
+
+    assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [7], actor: ACTOR })).approved_count, 1);
+    assert.equal((await act("PUBLISH", [7])).published_count, 1);
+    const snap = JSON.parse((await q(pool, "SELECT snapshot_json FROM payrun_payslip WHERE employee_id = 7 AND status = 'ACTIVE'"))[0].snapshot_json);
+    assert.equal(snap.document_type, "FNF");
+    assert.ok(snap.earnings.lines.some((l) => l.key === "ot_amount" && l.amount === "96.16"), "this month's approved OT");
+    assert.ok(snap.earnings.lines.some((l) => l.key === "prior_month_ot_2026-07" && l.amount === "96.16"), "the deferred July OT");
+    assert.equal(snap.earnings.lines.filter((l) => /^prior_month_ot/.test(l.key)).length, 1, "the July OT paid in July is not printed or paid");
+
+    // 5. An OT request for a day before the exit, raised AFTER publish, keeps Accounts from confirming payment until decided.
+    const lateAsk = await req(7, "2026-08-21", "PENDING");
+    const pay = { year: YEAR, month: MONTH, employee_id: 7, payment_mode: "BANK", payment_reference: "UTR7007", paid_on: "2026-09-12", actor: ACTOR };
+    await assert.rejects(exitUsecase.settle(pay), /still undecided/);
+    const shown = (await exitUsecase.getMonth({ year: YEAR, month: MONTH })).rows.find((r) => r.employee_id === 7);
+    assert.equal(shown.open_ot_requests, 1);
+    assert.match(shown.warning, /awaiting a decision/);
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM employee_fnf_settlement WHERE employee_id = 7 AND status = 'SETTLED'"))[0].n, 0);
+    await q(pool, "UPDATE attendance_approval_request SET status = 'REJECTED' WHERE attendance_approval_request_id = ?", [lateAsk]);
+    assert.equal((await exitUsecase.settle(pay)).outcome, "SETTLED");
+
+    // 6. After completion: no approved OT for the leaver is left unpaid, and nothing was paid twice.
+    const left = await q(pool, "SELECT attendance_date, settlement_status, settlement_month FROM attendance_ot_late_settlement WHERE employee_id = 7 ORDER BY attendance_date");
+    assert.deepEqual(left.map((l) => [l.attendance_date instanceof Date ? l.attendance_date.toISOString().slice(0, 10) : String(l.attendance_date).slice(0, 10), l.settlement_status, l.settlement_month]), [
+      ["2026-07-20", "SETTLED", 7],
+      ["2026-07-28", "SETTLED", 8],
+    ]);
+    assert.equal((await q(pool, "SELECT COUNT(*) n FROM attendance_approval_request WHERE requested_for_employee_id = 7 AND status = 'PENDING'"))[0].n, 0);
   });
 
   it("MIGRATION down -> up: removes only this feature's schema; every payroll figure and payslip survives", async () => {
     const before = await q(pool, "SELECT employee_id, net_pay, calculation_hash, status FROM payrun_employee_calculation ORDER BY employee_id");
     const slipsBefore = await q(pool, "SELECT payslip_id, snapshot_sha256, status FROM payrun_payslip ORDER BY payslip_id");
     await q(pool, fs.readFileSync(path.join(SQLS, FNF_DOWN), "utf8"));
-    for (const t of ["payrun_fnf_item", "employee_fnf_settlement", "employee_exit_interview", "employee_rehire_assessment"]) {
+    for (const t of ["employee_fnf_settlement", "employee_exit_interview", "employee_rehire_assessment", "employee_rehire_exception", "payrun_exit_reconcile_audit"]) {
       assert.equal((await q(pool, "SHOW TABLES LIKE ?", [t])).length, 0, t);
     }
     assert.equal((await q(pool, "SHOW COLUMNS FROM payrun_payslip LIKE 'document_type'")).length, 0);

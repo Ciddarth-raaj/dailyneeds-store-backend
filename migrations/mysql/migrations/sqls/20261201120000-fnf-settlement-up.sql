@@ -1,89 +1,13 @@
 -- Full & Final Settlement, Exit Interview and Rehire Eligibility.
 --
--- ADDITIVE ONLY. Six new tables, three nullable columns on the calculation,
--- one defaulted column on the payslip, and five permission keys granted to
--- NOBODY. No existing row is recalculated, republished, unlocked or moved:
---
---   - every existing calculation gets NULL F&F columns, which the engine and
---     the snapshot read as "no F&F items" - the same figures as before;
---   - every existing payslip gets document_type = 'PAYSLIP', which is what it
---     already is.
+-- ADDITIVE ONLY. New tables for the exit case, settlement history, exit
+-- interview, rehire assessments / exceptions and exit reconciliation; one
+-- defaulted column on the payslip; permission keys granted to NOBODY. No
+-- existing row is recalculated, republished, unlocked or moved, and no payroll
+-- calculation column is added: every existing payslip gets
+-- document_type = 'PAYSLIP', which is what it already is.
 --
 -- Every statement is guarded so the file can be re-run without error.
-
--- ================================================ 1. F&F EARNINGS / RECOVERIES
---
--- ONE ROW PER EMPLOYEE MONTH PER COMPONENT, the shape of
--- `payrun_employee_adjustment`. Only an employee whose last working day falls
--- in the month may have a row (the usecase refuses anybody else), and no row
--- may change once the month is approved & locked (the usecase checks under
--- the calculation row's lock). Amounts are non-negative: the component says
--- whether it adds or deducts.
-CREATE TABLE IF NOT EXISTS `payrun_fnf_item` (
-  `payrun_fnf_item_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `payrun_employee_id` BIGINT UNSIGNED NOT NULL,
-  `period_year`  SMALLINT NOT NULL,
-  `period_month` TINYINT NOT NULL COMMENT '1-12',
-  `employee_id`  INT NOT NULL,
-  `component` ENUM('LEAVE_ENCASHMENT','NOTICE_PAY','GRATUITY','NOTICE_PERIOD_RECOVERY') NOT NULL,
-  `amount` DECIMAL(12,2) NOT NULL,
-  `remarks` VARCHAR(500) NULL DEFAULT NULL,
-  `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `created_by` INT NULL DEFAULT NULL,
-  `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  `updated_by` INT NULL DEFAULT NULL,
-  PRIMARY KEY (`payrun_fnf_item_id`),
-  UNIQUE KEY `uq_payrun_fnf_item_component` (`period_year`, `period_month`, `employee_id`, `component`),
-  KEY `idx_payrun_fnf_item_payrun` (`payrun_employee_id`),
-  CONSTRAINT `chk_payrun_fnf_item_amount` CHECK (`amount` >= 0),
-  CONSTRAINT `fk_payrun_fnf_item_payrun`
-    FOREIGN KEY (`payrun_employee_id`) REFERENCES `payrun_employee` (`payrun_employee_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='F&F earnings and recoveries entered for an exit month';
-
--- Append-only: every set and clear, with the value it replaced.
-CREATE TABLE IF NOT EXISTS `payrun_fnf_item_audit` (
-  `payrun_fnf_item_audit_id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
-  `payrun_employee_id` BIGINT UNSIGNED NOT NULL,
-  `period_year`  SMALLINT NOT NULL,
-  `period_month` TINYINT NOT NULL,
-  `employee_id`  INT NOT NULL,
-  `action` ENUM('SET_AMOUNT','CLEAR_AMOUNT') NOT NULL,
-  `component` ENUM('LEAVE_ENCASHMENT','NOTICE_PAY','GRATUITY','NOTICE_PERIOD_RECOVERY') NOT NULL,
-  `old_amount` DECIMAL(12,2) NULL DEFAULT NULL,
-  `new_amount` DECIMAL(12,2) NULL DEFAULT NULL,
-  `remarks` VARCHAR(500) NULL DEFAULT NULL,
-  `changed_by` INT NULL DEFAULT NULL,
-  `changed_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (`payrun_fnf_item_audit_id`),
-  KEY `idx_payrun_fnf_item_audit_employee` (`period_year`, `period_month`, `employee_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-  COMMENT='append-only history of F&F item amounts';
-
--- ================================== 2. THE CALCULATION CARRIES THE F&F ITEMS
---
--- Written by Calculate exactly like `prior_month_ot`: NULL when there are no
--- items, so every ordinary month stores and hashes exactly as before.
-SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
-                WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'payrun_employee_calculation'
-                  AND `COLUMN_NAME` = 'fnf_additions') = 0,
-  'ALTER TABLE `payrun_employee_calculation` ADD COLUMN `fnf_additions` DECIMAL(12,2) NULL DEFAULT NULL COMMENT ''F&F earnings added to net pay''',
-  'DO 0');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
-                WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'payrun_employee_calculation'
-                  AND `COLUMN_NAME` = 'fnf_deductions') = 0,
-  'ALTER TABLE `payrun_employee_calculation` ADD COLUMN `fnf_deductions` DECIMAL(12,2) NULL DEFAULT NULL COMMENT ''F&F recoveries deducted from net pay''',
-  'DO 0');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
-                WHERE `TABLE_SCHEMA` = DATABASE() AND `TABLE_NAME` = 'payrun_employee_calculation'
-                  AND `COLUMN_NAME` = 'fnf_items') = 0,
-  'ALTER TABLE `payrun_employee_calculation` ADD COLUMN `fnf_items` JSON NULL COMMENT ''the F&F items priced: component, label, kind, amount''',
-  'DO 0');
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- ======================================== 3. WHICH DOCUMENT WAS PUBLISHED
 SET @sql = IF((SELECT COUNT(*) FROM `information_schema`.`COLUMNS`
@@ -279,8 +203,8 @@ INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_fnf_settlement' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_fnf_settlement');
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'manage_fnf_settlement' FROM DUAL
-   WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_fnf_settlement');
+  SELECT 'confirm_fnf_payment' FROM DUAL
+   WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'confirm_fnf_payment');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_exit_interview' FROM DUAL
    WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_exit_interview');

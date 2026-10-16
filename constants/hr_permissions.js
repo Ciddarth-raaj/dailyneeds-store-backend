@@ -789,8 +789,10 @@ module.exports = {
   //   VIEW_FNF_SETTLEMENT          the F&F list and one employee's F&F items
   //                                (needs view_employees + view_salary too:
   //                                it shows net pay)
-  //   MANAGE_FNF_SETTLEMENT        enter F&F earnings / recoveries, mark a
-  //                                published F&F as settled, reopen it
+  //   CONFIRM_FNF_PAYMENT          ACCOUNTS: confirm that a PUBLISHED F&F was
+  //                                actually paid (mode, reference, date), or
+  //                                reopen that confirmation with a reason.
+  //                                Publishing is NOT payment.
   //   VIEW_EXIT_INTERVIEW          CONFIDENTIAL: the exit interview answers
   //                                and the rehire assessment. Never reaches a
   //                                payslip, the Mini App or Telegram.
@@ -800,7 +802,7 @@ module.exports = {
   //                                (a new history row with a reason; the old
   //                                one is kept)
   VIEW_FNF_SETTLEMENT: "view_fnf_settlement",
-  MANAGE_FNF_SETTLEMENT: "manage_fnf_settlement",
+  CONFIRM_FNF_PAYMENT: "confirm_fnf_payment",
   VIEW_EXIT_INTERVIEW: "view_exit_interview",
   MANAGE_EXIT_INTERVIEW: "manage_exit_interview",
   OVERRIDE_REHIRE_ELIGIBILITY: "override_rehire_eligibility",

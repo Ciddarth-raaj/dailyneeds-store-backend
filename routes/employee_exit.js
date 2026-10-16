@@ -4,9 +4,6 @@ const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const respondError = require("../utils/http");
 const {
-  FNF_COMPONENT_KEYS,
-  FNF_REMARKS_MAX,
-  FNF_AMOUNT_MAX,
   PAYMENT_MODE,
   SETTLEMENT_REFERENCE_MAX,
   SETTLEMENT_REASON_MAX,
@@ -21,13 +18,11 @@ const {
  * FULL & FINAL SETTLEMENT, EXIT INTERVIEW AND REHIRE ELIGIBILITY - the API.
  *
  *   GET  /payrun/fnf/month         the month's exits and where each F&F stands
- *   GET  /payrun/fnf/items         one exit month's F&F items and their history
- *   POST /payrun/fnf/items         set / clear F&F amounts (before approval)
- *   POST /payrun/fnf/settle        record that a PUBLISHED F&F was paid
- *   POST /payrun/fnf/reopen        undo that, with a reason
+ *   POST /payrun/fnf/settle        ACCOUNTS confirms a PUBLISHED F&F was paid
+ *   POST /payrun/fnf/reopen        ACCOUNTS reopens that, with a reason
  *   POST /payrun/fnf/reconcile-exit bring a late-recorded exit into the
  *                                  month's snapshot (view_employees +
- *                                  process_payroll + manage_fnf_settlement)
+ *                                  process_payroll)
  *
  *   GET  /hr/exit/employee/:employee_id                  every exit (CONFIDENTIAL)
  *   GET  /hr/exit/employee/:employee_id/case/:case_id    interview + rehire history
@@ -39,7 +34,7 @@ const {
  *
  *   F&F reads    view_employees AND view_salary AND view_fnf_settlement
  *                (the list carries net pay - the view_salary disclosure)
- *   F&F writes   view_employees AND manage_fnf_settlement
+ *   payment      view_employees AND confirm_fnf_payment (Accounts)
  *   exit reads   view_employees AND view_exit_interview  (CONFIDENTIAL)
  *   interview    view_employees AND manage_exit_interview
  *   rehire       view_employees AND (manage_exit_interview for the first
@@ -111,56 +106,9 @@ class EmployeeExitRoutes {
       }
     );
 
-    r.get(
-      "/payrun/fnf/items",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.VIEW_FNF_SETTLEMENT),
-      async (req, res) => {
-        try {
-          const v = Joi.validate(req.query, { ...this._month(), employee_id: Joi.number().integer().positive().required() });
-          if (v.error !== null) throw v.error;
-          const scoped = await this._scope(req, res);
-          if (!scoped) return;
-          res.json({ code: 200, ...(await this.usecase.getItems({ ...v.value, store_ids: scoped.store_ids })) });
-        } catch (err) {
-          this._fail(res, err);
-        }
-      }
-    );
-
-    r.post(
-      "/payrun/fnf/items",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.MANAGE_FNF_SETTLEMENT),
-      async (req, res) => {
-        try {
-          const v = Joi.validate(req.body, {
-            ...this._month(),
-            employee_id: Joi.number().integer().positive().required(),
-            items: Joi.array()
-              .items(
-                Joi.object({
-                  component: Joi.string().valid(...FNF_COMPONENT_KEYS).required(),
-                  amount: Joi.number().min(0).max(FNF_AMOUNT_MAX).allow(null).required(),
-                  remarks: Joi.string().trim().max(FNF_REMARKS_MAX).allow("", null).optional(),
-                })
-              )
-              .min(1)
-              .max(FNF_COMPONENT_KEYS.length)
-              .required(),
-          });
-          if (v.error !== null) throw v.error;
-          const scoped = await this._scope(req, res);
-          if (!scoped) return;
-          const actor = await this.permissions.actorFor(req);
-          res.json(await this.usecase.saveItems({ ...req.body, store_ids: scoped.store_ids, actor }));
-        } catch (err) {
-          this._fail(res, err);
-        }
-      }
-    );
-
     r.post(
       "/payrun/fnf/settle",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.MANAGE_FNF_SETTLEMENT),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.CONFIRM_FNF_PAYMENT),
       async (req, res) => {
         try {
           const v = Joi.validate(req.body, {
@@ -183,12 +131,12 @@ class EmployeeExitRoutes {
 
     /*
      * RECONCILE A LATE-RECORDED EXIT into the month's payroll snapshot. It
-     * changes what the month IS (an F&F or not), so it needs the payroll
-     * processing key as well as the F&F one.
+     * changes the payroll snapshot, so it takes the existing payroll
+     * processing key - the one that initializes and calculates a month.
      */
     r.post(
       "/payrun/fnf/reconcile-exit",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL, P.MANAGE_FNF_SETTLEMENT),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL),
       async (req, res) => {
         try {
           const v = Joi.validate(req.body, { ...this._month(), employee_id: Joi.number().integer().positive().required() });
@@ -205,7 +153,7 @@ class EmployeeExitRoutes {
 
     r.post(
       "/payrun/fnf/reopen",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.MANAGE_FNF_SETTLEMENT),
+      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.CONFIRM_FNF_PAYMENT),
       async (req, res) => {
         try {
           const v = Joi.validate(req.body, {

@@ -43,7 +43,6 @@ const LATER_COLUMN_MIGRATIONS = [
   "20261111120000-payrun-lifecycle-up.sql",
   "20261120120000-epfo-wage-ceiling-2026-up.sql",
   "20261126120000-attendance-ot-late-settlement-up.sql",
-  "20261201120000-fnf-settlement-up.sql",
 ];
 
 /** Comments may NAME a column to explain it; only statements declare one. */

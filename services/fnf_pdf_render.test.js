@@ -61,16 +61,12 @@ const EXTRAS = { account_no: "7895383811", bank_name: "INDIAN BANK", department_
 
 const FULL = {
   pf_applicable: 1, esi_applicable: 1, pf_wage: "4999.00", employee_pf: "599.88", employer_pf_total: "599.88",
-  employer_epf: "183.47", employer_eps: "416.41", edli: "25.00", pf_admin_charge: "25.00", esi_wage: "5031.21",
+  employer_epf: "183.47", employer_eps: "416.41", edli: "25.00", pf_admin_charge: "25.00", 
   employee_esi: "37.74", employer_esi: "163.52", advance_recovery: "1000.00", shortage_recovery: "250.00",
   prior_month_ot_amount: "96.16",
   prior_month_ot: JSON.stringify([{ attendance_approval_request_id: 5, attendance_date: "2026-08-12", source_year: 2026, source_month: 8, approved_ot_minutes: 120, ot_hourly_rate: "48.08", amount: "96.16" }]),
-  fnf_items: JSON.stringify([
-    { component: "LEAVE_ENCASHMENT", amount: 2307.72 }, { component: "NOTICE_PAY", amount: 3846.2 },
-    { component: "GRATUITY", amount: 4615.38 }, { component: "NOTICE_PERIOD_RECOVERY", amount: 1500 },
-  ]),
-  fnf_additions: "10769.30", fnf_deductions: "1500.00",
-  total_earnings: "15896.67", total_employee_deductions: "3389.06", net_pay: "12508.00", net_pay_rounding: "0.39",
+  esi_wage: "5127.37",
+  total_earnings: "5127.37", total_employee_deductions: "1889.06", net_pay: "3238.00", net_pay_rounding: "-0.31",
 };
 const NEGATIVE = { advance_recovery: "6000.00", total_employee_deductions: "6001.44", net_pay: "-970.00", net_pay_rounding: "0.23" };
 
@@ -114,16 +110,19 @@ describe("the F&F statement, rendered with the production renderer", { skip }, (
     assert.equal(earnings.reduce((n, l) => n + paise(l.amount), 0), paise(s.earnings.total));
     assert.equal(deductions.reduce((n, l) => n + paise(l.amount), 0), paise(s.deductions.total));
     assert.equal(paise(s.earnings.total) - paise(s.deductions.total) + paise(s.final.net_pay_rounding), paise(s.final.net_pay));
-    assert.match(text, /Gross Earnings\s+15,896\.67/);
-    assert.match(text, /Total Deductions\s+3,389\.06/);
-    assert.match(text, /Total Net Payable\s+12,508\.00/);
-    assert.match(text, /Twelve Thousand Five Hundred Eight Rupees Only/);
+    assert.match(text, /Gross Earnings\s+5,127\.37/);
+    assert.match(text, /Total Deductions\s+1,889\.06/);
+    assert.match(text, /Total Net Payable\s+3,238\.00/);
+    assert.match(text, /Three Thousand Two Hundred Thirty Eight Rupees Only/);
   });
 
-  it("carries the F&F lines, the exit facts and the statutory numbers that apply", () => {
+  it("carries the ordinary payroll lines, the exit facts and the statutory numbers that apply - and no F&F-only component", () => {
     const { text } = out.full;
-    for (const label of ["Leave Encashment", "Notice Pay (in lieu)", "Gratuity", "Notice Period Recovery", "Advance Recovery", "OT Approved After Lock"]) {
+    for (const label of ["Advance Recovery", "OT Approved After Lock"]) {
       assert.ok(text.includes(label), label);
+    }
+    for (const label of ["Leave Encashment", "Notice Pay", "Gratuity", "Notice Period Recovery"]) {
+      assert.ok(!text.includes(label), label);
     }
     assert.match(text, /Last Working Day\s+:\s*2026-08-16/);
     assert.match(text, /LOP Days\s+:\s*3\b/);

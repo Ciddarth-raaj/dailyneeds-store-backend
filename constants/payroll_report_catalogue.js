@@ -202,6 +202,14 @@ const PAYROLL_FIELDS = [
     select: "DATE_FORMAT(pe.date_of_joining, '%Y-%m-%d')", sort: "pe.date_of_joining",
     type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
   }),
+  // ACTIVE AND EXITED EMPLOYEES ARE ONE REPORT: an employee whose last working
+  // day falls in the payroll month is that month's F&F (Exited Employee).
+  f("employee_classification", "Employee Classification", G.EMPLOYEE, {
+    select:
+      "CASE WHEN pe.resignation_date IS NOT NULL AND YEAR(pe.resignation_date) = pe.period_year " +
+      "AND MONTH(pe.resignation_date) = pe.period_month THEN 'Exited Employee' ELSE 'Active Employee' END",
+    source: SOURCE.PAYRUN_SNAPSHOT,
+  }),
   f("last_working_day", "Last Working Day", G.EMPLOYEE, {
     select: "DATE_FORMAT(pe.resignation_date, '%Y-%m-%d')", sort: "pe.resignation_date",
     type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
@@ -262,10 +270,6 @@ const PAYROLL_FIELDS = [
     select: "c.prior_month_ot_amount", type: TYPE.AMOUNT, transform: asAmount,
     note: "OT approved after its own month was locked, settled in this month (see the payslip for each source month).",
   }),
-  f("fnf_additions", "F&F Earnings", G.EARNINGS, {
-    select: "c.fnf_additions", type: TYPE.AMOUNT, transform: asAmount,
-    note: "Leave Encashment + Notice Pay + Gratuity, in the exit (F&F) month only. Part of Gross Salary.",
-  }),
   f("gross_salary", "Gross Salary", G.EARNINGS, { select: "c.total_earnings", type: TYPE.AMOUNT, transform: asAmount }),
 
   /* ----------------------------------------------------------- deductions */
@@ -273,10 +277,6 @@ const PAYROLL_FIELDS = [
   f("employee_esi", "ESI (Employee)", G.DEDUCTIONS, { select: "c.employee_esi", type: TYPE.AMOUNT, transform: asAmount }),
   f("advance_recovery", "Advance Recovery", G.DEDUCTIONS, { select: "c.advance_recovery", type: TYPE.AMOUNT, transform: asAmount }),
   f("shortage_recovery", "Other Deduction (Shortage Recovery)", G.DEDUCTIONS, { select: "c.shortage_recovery", type: TYPE.AMOUNT, transform: asAmount }),
-  f("fnf_deductions", "F&F Recoveries", G.DEDUCTIONS, {
-    select: "c.fnf_deductions", type: TYPE.AMOUNT, transform: asAmount,
-    note: "Notice Period Recovery, in the exit (F&F) month only. Part of Total Deductions.",
-  }),
   f("missing_hours_deduction", "Missing Hours Deduction", G.DEDUCTIONS, { select: "c.missing_hours_deduction", type: TYPE.AMOUNT, transform: asAmount }),
   f("total_deductions", "Total Deductions", G.DEDUCTIONS, { select: "c.total_employee_deductions", type: TYPE.AMOUNT, transform: asAmount }),
   f("balance_advance", "Balance Advance (informational)", G.DEDUCTIONS, { select: "c.balance_advance", type: TYPE.AMOUNT, transform: asAmount }),
@@ -377,11 +377,6 @@ const PAYROLL_FIELDS = [
   // The exit month and its settlement completion. Settlement facts are read
   // from `employee_fnf_settlement` by the month's own payrun row, so only the
   // month that settled an exit shows them.
-  f("fnf_month", "F&F Month", G.FNF, {
-    select:
-      "CASE WHEN pe.resignation_date IS NOT NULL AND YEAR(pe.resignation_date) = pe.period_year " +
-      "AND MONTH(pe.resignation_date) = pe.period_month THEN 'Yes' ELSE 'No' END",
-  }),
   f("fnf_settlement_status", "F&F Settlement Status", G.FNF, {
     select:
       "CASE WHEN pe.resignation_date IS NULL OR YEAR(pe.resignation_date) <> pe.period_year " +

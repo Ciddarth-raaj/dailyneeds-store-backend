@@ -17,8 +17,7 @@
  * month's contributions; `monthly_gross` leaves that block.
  *
  * 4: `document_type` (PAYSLIP / FNF) and, on an exit month, the `fnf` block
- * and the F&F earnings / recovery lines (`constants/fnf.js`). A version-3
- * snapshot has none of them and is a PAYSLIP.
+ * (`constants/fnf.js`). A version-3 snapshot has neither and is a PAYSLIP.
  */
 const SNAPSHOT_SCHEMA_VERSION = 4;
 

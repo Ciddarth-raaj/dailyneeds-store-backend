@@ -450,9 +450,9 @@ class PayrunCalculationUsecase {
       calculations,
       periodRow,
       lateOt,
-      fnfItems,
       liveExits,
       outstandingLateOt,
+      openOtToDate,
     ] = await Promise.all([
       this.repo.listAttendanceMonths(ids, period.year, period.month),
       typeof this.repo.listAttendanceDayRows === "function"
@@ -476,10 +476,6 @@ class PayrunCalculationUsecase {
       typeof this.repo.listLateOtForSettlement === "function"
         ? this.repo.listLateOtForSettlement(ids, period.year, period.month)
         : Promise.resolve([]),
-      // F&F EARNINGS / RECOVERIES entered for an exit month.
-      typeof this.repo.listFnfItems === "function"
-        ? this.repo.listFnfItems(ids, period.year, period.month)
-        : Promise.resolve([]),
       // The employee master's exit date NOW, against the snapshot's.
       typeof this.repo.listLiveExitDates === "function"
         ? this.repo.listLiveExitDates(ids)
@@ -487,6 +483,10 @@ class PayrunCalculationUsecase {
       // Approved OT still waiting for a month - final for a leaver.
       typeof this.repo.listOutstandingLateOt === "function"
         ? this.repo.listOutstandingLateOt(ids, period.year, period.month)
+        : Promise.resolve([]),
+      // Undecided OT requests up to the month end - final for a leaver.
+      typeof this.repo.listOpenOtRequestsUpTo === "function"
+        ? this.repo.listOpenOtRequestsUpTo(ids, to)
         : Promise.resolve([]),
     ]);
 
@@ -584,10 +584,10 @@ class PayrunCalculationUsecase {
       stateOf: index(states),
       calculationOf: index(calculations),
       lateOtOf: group(lateOt),
-      fnfOf: group(fnfItems),
       // null when the repository cannot read it: no exit check is made.
       liveExitOf: liveExits === null ? null : index(liveExits),
       outstandingLateOtOf: group(outstandingLateOt),
+      openOtToDateOf: index(openOtToDate),
     };
   }
 
@@ -673,23 +673,31 @@ class PayrunCalculationUsecase {
     const currentSourceHash = calc.sourceHash(currentMarkers);
     const priorMonthOt = (context.lateOtOf && context.lateOtOf.get(id)) || [];
     /*
-     * F&F ITEMS COUNT ONLY IN THE EXIT MONTH. Rows can only be written for an
-     * exit month (the F&F usecase refuses anybody else), and this is the
-     * second net: an item can never price into an ordinary month.
+     * THE F&F MONTH: the payrun snapshot's last working day falls in this
+     * month. It is calculated exactly like any other month; Publish issues an
+     * F&F statement for it.
      */
     const exitMonth = isExitMonth({
       year: context.period.year,
       month: context.period.month,
       resignation_date: employee.resignation_date,
     });
-    const fnfItems = exitMonth ? (context.fnfOf && context.fnfOf.get(id)) || [] : [];
-    const currentInputsHash = calc.inputsHash({
-      amounts,
-      pay_type: employee.pay_type,
-      prior_month_ot: priorMonthOt,
-      fnf_items: fnfItems,
-    });
+    const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type, prior_month_ot: priorMonthOt });
 
+    /*
+     * ===================== AN EXIT THE SNAPSHOT DOES NOT KNOW ABOUT ========
+     * The master's exit date against the snapshot's, decided BEFORE readiness
+     * so the existing readiness refuses the calculation (and therefore the
+     * approval) - see `utils/payroll_readiness.js#EXIT_NOT_RECONCILED`. Only
+     * dates on or before the month end matter.
+     */
+    const liveExit = context.liveExitOf
+      ? ((context.liveExitOf.get(id) || {}).live_exit_date || null)
+      : undefined;
+    const snapshotExit = employee.resignation_date || null;
+    const inScope = (d) => Boolean(d) && d <= context.window.to;
+    const exitMismatch =
+      liveExit !== undefined && liveExit !== snapshotExit && (inScope(liveExit) || inScope(snapshotExit));
     /*
      * THE SHARED PAYROLL READINESS. A dry run of the very calculation
      * Calculate performs supplies its errors, so "calculable" here and
@@ -707,7 +715,6 @@ class PayrunCalculationUsecase {
         coverage_entry_salary: entrySalary,
         day_rows: context.dayRowsOf ? context.dayRowsOf.get(id) || [] : null,
         prior_month_ot: priorMonthOt,
-        fnf_items: fnfItems,
       });
       readiness = evaluatePayrollReadiness({
         year: context.period.year,
@@ -721,6 +728,10 @@ class PayrunCalculationUsecase {
         latest_closed_date: context.latestClosedDate,
         calculation_errors: dryRun.errors,
         statutory_gaps: statutoryGaps,
+        // F&F: the final month's own rules, inside the existing readiness.
+        final_month: exitMonth,
+        pending_ot_to_exit: Number(((context.openOtToDateOf && context.openOtToDateOf.get(id)) || {}).pending_ot || 0),
+        exit_mismatch: exitMismatch ? { snapshot_exit_date: snapshotExit, live_exit_date: liveExit } : null,
       });
     }
 
@@ -817,25 +828,11 @@ class PayrunCalculationUsecase {
     const attendanceDependent = (value) => (verdict.attendance_pending ? null : value);
 
     /*
-     * ===================== AN EXIT THE SNAPSHOT DOES NOT KNOW ABOUT ========
-     *
-     * The month was initialized with one exit date (or none) and the employee
-     * master now says another: a resignation recorded, moved or voided by a
-     * rejoin after initialization. Approving would pay the wrong document -
-     * an ordinary payslip to a leaver, or an F&F to somebody still employed -
-     * so the employee is NOT ready until the exit is reconciled
-     * (`usecase/employee_exit.js#reconcileExit`). Only dates on or before the
-     * month end matter: an exit after this month is a later month's question.
+     * THE SAME RULE WHERE READINESS COULD NOT BE EVALUATED (no day-row read):
+     * the mismatch is still an approval blocker, in the existing vocabulary.
      * A locked month is never re-judged here; Publish refuses it instead.
      */
-    const liveExit = context.liveExitOf
-      ? ((context.liveExitOf.get(id) || {}).live_exit_date || null)
-      : undefined;
-    const snapshotExit = employee.resignation_date || null;
-    const inScope = (d) => Boolean(d) && d <= context.window.to;
-    const exitMismatch =
-      liveExit !== undefined && liveExit !== snapshotExit && (inScope(liveExit) || inScope(snapshotExit));
-    if (exitMismatch && !isLockedStatus(verdict.status)) {
+    if (exitMismatch && !readiness && !isLockedStatus(verdict.status)) {
       verdict.blockers = [...(verdict.blockers || []), calc.blockerOf(READY_BLOCKER.EXIT_NOT_RECONCILED)];
       if (verdict.status === CALC_STATUS.READY_FOR_APPROVAL) {
         verdict.status = CALC_STATUS.CALCULATED;
@@ -847,6 +844,9 @@ class PayrunCalculationUsecase {
      * on the row, refused at Publish and at Settle - see `lifecycle`.
      */
     const outstandingOt = exitMonth ? (context.outstandingLateOtOf && context.outstandingLateOtOf.get(id)) || [] : [];
+    const openOtRequests = exitMonth
+      ? Number(((context.openOtToDateOf && context.openOtToDateOf.get(id)) || {}).pending_ot || 0)
+      : 0;
 
     return {
       internals: {
@@ -859,10 +859,10 @@ class PayrunCalculationUsecase {
         statutory,
         amounts,
         priorMonthOt,
-        fnfItems,
         exitMonth,
         exitMismatch,
         outstandingOt,
+        openOtRequests,
         entrySalary,
         currentMarkers,
         currentSourceHash,
@@ -994,15 +994,11 @@ class PayrunCalculationUsecase {
          * as they will be afterwards. Blanking them would hide work that has
          * already been done.
          */
-        // F&F earnings / recoveries are additions and deductions too, so the
-        // columns still reconcile to Net Pay on an exit month.
         additions: stored
-          ? Number(stored.incentive) + Number(stored.bonus) + Number(stored.arrears) +
-            Number(stored.fnf_additions || 0)
+          ? Number(stored.incentive) + Number(stored.bonus) + Number(stored.arrears)
           : null,
         deductions: stored
-          ? Number(stored.advance_recovery) + Number(stored.shortage_recovery) +
-            Number(stored.fnf_deductions || 0)
+          ? Number(stored.advance_recovery) + Number(stored.shortage_recovery)
           : null,
         employee_pf: attendanceDependent(stored ? stored.employee_pf : null),
         employee_esi: attendanceDependent(stored ? stored.employee_esi : null),
@@ -1326,15 +1322,6 @@ class PayrunCalculationUsecase {
               shortage_recovery: stored.shortage_recovery,
               /** INFORMATIONAL. It moves no figure above or below it. */
               balance_advance: stored.balance_advance,
-            },
-            /**
-             * FULL & FINAL EARNINGS / RECOVERIES, as calculated - an exit
-             * month only. Empty items and null totals everywhere else.
-             */
-            fnf: {
-              items: this._json(stored.fnf_items) || [],
-              additions: stored.fnf_additions === undefined ? null : stored.fnf_additions,
-              deductions: stored.fnf_deductions === undefined ? null : stored.fnf_deductions,
             },
             statutory: {
               pf_status: stored.pf_status,
@@ -1774,7 +1761,7 @@ class PayrunCalculationUsecase {
    * own. Nothing here writes either.
    */
   _buildRow(context, presented, actor) {
-    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary, priorMonthOt, fnfItems } = presented.internals;
+    const { employee, priced, attendance, nrm, statutory, amounts, entrySalary, priorMonthOt } = presented.internals;
 
     const result = calc.computeCalculation({
       /* Priced on the one resolved salary; its markers below are the same object's. */
@@ -1803,8 +1790,6 @@ class PayrunCalculationUsecase {
        * month in the save's own transaction (see `saveCalculations`).
        */
       prior_month_ot: priorMonthOt || [],
-      /* F&F EARNINGS / RECOVERIES - the exit month only (see `_present`). */
-      fnf_items: fnfItems || [],
     });
 
     const hash = calc.calculationHash(result);
@@ -1859,9 +1844,6 @@ class PayrunCalculationUsecase {
         attendance_ot_earnings: result.attendance_ot_earnings,
         prior_month_ot_amount: (result.prior_month_ot || []).length > 0 ? result.prior_month_ot_amount : null,
         prior_month_ot: (result.prior_month_ot || []).length > 0 ? JSON.stringify(result.prior_month_ot) : null,
-        fnf_additions: (result.fnf_items || []).length > 0 ? result.fnf_additions : null,
-        fnf_deductions: (result.fnf_items || []).length > 0 ? result.fnf_deductions : null,
-        fnf_items: (result.fnf_items || []).length > 0 ? JSON.stringify(result.fnf_items) : null,
         // Not a column: the settlement rows this calculation claims.
         late_ot_settlement_ids: (result.prior_month_ot || [])
           .map((i) => i.late_settlement_id)
@@ -2518,7 +2500,7 @@ class PayrunCalculationUsecase {
       SOURCE_MOVED: [ROW_RESULT.BLOCKED, "Not published — the attendance changed after this month was calculated. Unlock, recalculate and approve again."],
       CALCULATION_CHANGED: [ROW_RESULT.BLOCKED, "Not published — the calculation changed while publishing. Reload and try again."],
       EXIT_NOT_RECONCILED: [ROW_RESULT.BLOCKED, "Not published — the employee's exit was recorded or changed after this month was initialized. Unlock, reset, reconcile the exit on the F&F Settlement screen, recalculate and approve again."],
-      FNF_OUTSTANDING_OT: [ROW_RESULT.BLOCKED, "Not published — this is the employee's final (F&F) month and approved OT is still pending settlement. Unlock and recalculate so the F&F pays it, then approve again."],
+      FNF_OUTSTANDING_OT: [ROW_RESULT.BLOCKED, "Not published — this is the employee's final (F&F) month and OT is still undecided or approved-but-unpaid. Decide it, unlock and recalculate so the F&F pays it, then approve again."],
       FNF_SETTLED: [ROW_RESULT.BLOCKED, "Not changed — this Full & Final Settlement is marked settled (paid). Reopen the settlement first."],
       ATTENDANCE_STALE: [ROW_RESULT.BLOCKED, "Not published — the attendance summary is not current with its days. Unlock, process attendance, recalculate and approve again."],
     };
@@ -2569,7 +2551,10 @@ class PayrunCalculationUsecase {
           push(SKIP.EXIT_NOT_RECONCILED);
           continue;
         }
-        if (presented.internals.exitMonth && (presented.internals.outstandingOt || []).length > 0) {
+        if (
+          presented.internals.exitMonth &&
+          ((presented.internals.outstandingOt || []).length > 0 || presented.internals.openOtRequests > 0)
+        ) {
           push(SKIP.FNF_OUTSTANDING_OT);
           continue;
         }

@@ -1,8 +1,4 @@
 const {
-  FNF_COMPONENTS,
-  FNF_COMPONENT_BY_KEY,
-  FNF_AMOUNT_MAX,
-  FNF_REMARKS_MAX,
   PAYMENT_MODE,
   SETTLEMENT_REFERENCE_MAX,
   SETTLEMENT_REASON_MAX,
@@ -13,7 +9,7 @@ const {
   REHIRE_ELIGIBILITY,
   REHIRE_NOTE_MAX,
 } = require("../constants/fnf");
-const { isExitMonth, settlementStage, dateOnly } = require("../utils/fnf");
+const { settlementStage, dateOnly } = require("../utils/fnf");
 const { monthWindow } = require("../utils/payrun_eligibility");
 const { istToday } = require("../utils/istDate");
 
@@ -24,16 +20,16 @@ const { istToday } = require("../utils/istDate");
  *
  * IT CALCULATES NO PAYROLL. The F&F month is calculated, approved, locked
  * and published by the ordinary payrun (`usecase/payrun_calculation.js`):
- * salary days, OT (approved only), PF, ESI, adjustments - advance recovery
- * included - and the F&F items entered here all go through the one engine.
- * This usecase records the F&F items, reports where each exit's settlement
- * stands, records that a published F&F was paid, and keeps the confidential
- * exit interview and rehire assessments.
+ * salary days, OT (approved only), PF, ESI and the existing adjustments -
+ * advance recovery included - all go through the one engine, unchanged. This
+ * usecase reports where each exit's settlement stands, records Accounts'
+ * confirmation that a published F&F was paid, reconciles a late-recorded
+ * exit, and keeps the confidential exit interview and rehire assessments.
  *
- * IT NEVER CHANGES AN APPROVED OR PUBLISHED MONTH. Items are refused under
- * the calculation row's lock once the month is Approved & Locked; Settle only
- * records a fact about the published figures; Unlock / Unpublish of a SETTLED
- * month is refused by the payroll lifecycle itself.
+ * IT NEVER CHANGES AN APPROVED OR PUBLISHED MONTH. Settle only records a
+ * fact about the published figures; Reconcile Exit refuses any calculated
+ * month; Unlock / Unpublish of a SETTLED month is refused by the payroll
+ * lifecycle itself.
  */
 
 function validationError(message) {
@@ -56,20 +52,6 @@ function conflict(message) {
 }
 
 const toMoney = (value) => (value === null || value === undefined ? null : Number(value));
-
-/** A rupee amount with at most two decimals, inside the accepted range; null clears. */
-function normalizeAmount(value, label) {
-  if (value === null || value === undefined || value === "") return null;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n < 0 || n > FNF_AMOUNT_MAX) {
-    throw validationError(`${label} must be between 0 and ${FNF_AMOUNT_MAX}`);
-  }
-  if (Math.round(n * 100) !== Math.round(n * 100 * 1e6) / 1e6) {
-    throw validationError(`${label} may have at most two decimals`);
-  }
-  // ZERO IS "NONE", as an Adjustment's zero is: it clears the line.
-  return n === 0 ? null : Math.round(n * 100) / 100;
-}
 
 const textOrNull = (value, max, label) => {
   if (value === null || value === undefined) return null;
@@ -111,9 +93,16 @@ class EmployeeExitUsecase {
         : []
       ).map((o) => [Number(o.employee_id), o])
     );
+    const undecided = new Map(
+      (typeof this.repo.listOpenOtRequests === "function"
+        ? await this.repo.listOpenOtRequests(inPayroll.map((r) => ({ employee_id: Number(r.employee_id), exit_date: r.exit_date })))
+        : []
+      ).map((o) => [Number(o.employee_id), Number(o.n)])
+    );
     const rows = inPayroll.map((r) => {
       const published = r.calc_stored_status === "APPROVED_LOCKED" && Boolean(r.published_at);
       const ot = outstanding.get(Number(r.employee_id));
+      const openOt = undecided.get(Number(r.employee_id)) || 0;
       const exitChanged = r.live_exit_date !== undefined && (r.live_exit_date || null) !== (r.exit_date || null);
       const calcStatus = published ? "PUBLISHED" : r.calc_stored_status || null;
       return {
@@ -126,8 +115,6 @@ class EmployeeExitUsecase {
         calculated: Boolean(r.payrun_calculation_id),
         calc_status: calcStatus,
         net_pay: toMoney(r.net_pay),
-        fnf_additions: toMoney(r.fnf_additions),
-        fnf_deductions: toMoney(r.fnf_deductions),
         document_type: r.document_type || null,
         settlement_id: r.fnf_settlement_id ? Number(r.fnf_settlement_id) : null,
         settlement_status: r.settlement_status || "PENDING",
@@ -144,12 +131,16 @@ class EmployeeExitUsecase {
         outstanding_ot: ot
           ? { items: Number(ot.items), minutes: Number(ot.minutes || 0), amount: toMoney(ot.amount) }
           : null,
+        /* OT requests up to the last working day still awaiting a decision. */
+        open_ot_requests: openOt,
         live_exit_date: r.live_exit_date || null,
         needs_reconcile: exitChanged,
         warning: exitChanged
           ? `The employee master's exit date (${r.live_exit_date || "none"}) differs from this month's payroll snapshot (${r.exit_date}). Reconcile the exit before approving or publishing.`
           : ot
-          ? `${ot.items} approved OT item(s) are still pending settlement. Unlock and recalculate this month so the F&F pays them; Publish and Settle are refused until then.`
+          ? `${ot.items} approved OT item(s) are still pending settlement. Unlock and recalculate this month so the F&F pays them; Publish and payment confirmation are refused until then.`
+          : openOt
+          ? `${openOt} OT request(s) up to the last working day are still awaiting a decision. Decide them; payment cannot be confirmed until then.`
           : null,
         ...settlementStage({ settlement_status: r.settlement_status, initialized: true, calc_status: calcStatus }),
       };
@@ -165,8 +156,6 @@ class EmployeeExitUsecase {
         calculated: false,
         calc_status: null,
         net_pay: null,
-        fnf_additions: null,
-        fnf_deductions: null,
         document_type: null,
         settlement_id: r.fnf_settlement_id ? Number(r.fnf_settlement_id) : null,
         settlement_status: r.settlement_status || "PENDING",
@@ -192,7 +181,7 @@ class EmployeeExitUsecase {
       acc[r.stage] = (acc[r.stage] || 0) + 1;
       return acc;
     }, {});
-    return { period_year: p.year, period_month: p.month, rows, counts, components: FNF_COMPONENTS };
+    return { period_year: p.year, period_month: p.month, rows, counts };
   }
 
   async _inScopeExit(p, employeeId, store_ids) {
@@ -203,76 +192,6 @@ class EmployeeExitUsecase {
       );
     }
     return row;
-  }
-
-  /** One exit month's F&F items, their history and whether they may still change. */
-  async getItems({ year, month, employee_id, store_ids = null }) {
-    const p = this._month(year, month);
-    const row = await this._inScopeExit(p, employee_id, store_ids);
-    const [items, audit] = await Promise.all([
-      this.repo.listItems({ year: p.year, month: p.month, employee_id: Number(employee_id) }),
-      this.repo.listItemAudit({ year: p.year, month: p.month, employee_id: Number(employee_id) }),
-    ]);
-    return {
-      period_year: p.year,
-      period_month: p.month,
-      employee_id: Number(employee_id),
-      employee_name: row.employee_name,
-      exit_date: row.exit_date,
-      editable: row.calc_stored_status !== "APPROVED_LOCKED",
-      components: FNF_COMPONENTS,
-      items: items.map((i) => ({ ...i, amount: toMoney(i.amount) })),
-      audit,
-    };
-  }
-
-  /**
-   * SET / CLEAR F&F AMOUNTS. Every component named is validated before
-   * anything is written; the write itself is one transaction that refuses a
-   * locked month and a non-exit month under the lock (see the repository).
-   * The stored calculation becomes stale through its inputs hash, exactly as
-   * an Adjustment makes it - so the month must be recalculated before it can
-   * be approved, and a month approved in the meantime can never be published
-   * with figures that no longer match its inputs.
-   */
-  async saveItems({ year, month, employee_id, items, store_ids = null, actor = {} }) {
-    const p = this._month(year, month);
-    if (!Array.isArray(items) || items.length === 0) throw validationError("Name at least one F&F component");
-    const seen = new Set();
-    const entries = items.map((item) => {
-      const def = FNF_COMPONENT_BY_KEY[item && item.component];
-      if (!def) throw validationError(`Unknown F&F component ${String(item && item.component)}`);
-      if (seen.has(def.key)) throw validationError(`${def.label} is named twice`);
-      seen.add(def.key);
-      return {
-        component: def.key,
-        amount: normalizeAmount(item.amount, def.label),
-        remarks: textOrNull(item.remarks, FNF_REMARKS_MAX, "Remarks"),
-      };
-    });
-    await this._inScopeExit(p, employee_id, store_ids);
-    const res = await this.repo.saveItems({
-      year: p.year,
-      month: p.month,
-      employee_id: Number(employee_id),
-      entries,
-      actor: actor.employeeId ?? null,
-      isExitMonth,
-    });
-    const refusals = {
-      MONTH_LOCKED: "The payroll month is locked.",
-      APPROVED_LOCKED: "This employee's month is approved & locked. Unlock it before changing F&F amounts.",
-      NOT_INITIALIZED: "This employee is not initialized for the selected month.",
-      NOT_EXIT_MONTH: "F&F amounts can only be entered in the month of the employee's last working day.",
-    };
-    if (refusals[res.outcome]) throw conflict(refusals[res.outcome]);
-    return {
-      code: 200,
-      set: res.set,
-      cleared: res.cleared,
-      message: "Saved. Recalculate this employee before approving.",
-      ...(await this.getItems({ year: p.year, month: p.month, employee_id, store_ids })),
-    };
   }
 
   /* ===================================================== exit reconcile */
@@ -330,7 +249,7 @@ class EmployeeExitUsecase {
       NOT_PUBLISHED: "The F&F statement must be approved and published before it can be marked settled.",
       NOT_FNF: "The published document for this month is not a Full & Final Settlement statement.",
       CALCULATION_CHANGED: "The published statement does not match the calculation. Reload and try again.",
-      OUTSTANDING_OT: "Approved OT is still pending settlement for this employee. Unlock and recalculate the F&F month so it is paid, then publish again before settling.",
+      OUTSTANDING_OT: "OT for this employee is still undecided, or approved but not yet paid. Decide it, unlock and recalculate the F&F month so it is paid, then publish again before confirming payment.",
       ALREADY_SETTLED: "This Full & Final Settlement is already marked settled.",
     };
     if (refusals[res.outcome]) throw conflict(refusals[res.outcome]);

@@ -4,9 +4,8 @@
  *
  * ONE PLACE FOR THE STRINGS THAT CROSS THE WIRE, as `constants/payrun.js` and
  * `constants/payrun_adjustments.js` are for their stages. NOTHING HERE
- * CALCULATES: what an F&F component does to the money is declared here as
- * data and applied by `utils/payrun_calculation.js#computeCalculation` - the
- * SAME engine that prices every month. There is no second payroll engine.
+ * CALCULATES: the F&F month is priced by `utils/payrun_calculation.js` - the
+ * SAME engine, unchanged, that prices every month. There is no second engine.
  *
  * ========================================== WHAT AN F&F MONTH IS ==========
  *
@@ -16,122 +15,20 @@
  * (`utils/payrun_eligibility.js#exitedByMonthEnd`). That month is calculated,
  * approved and published by the ordinary payrun; the only differences are:
  *
- *   - F&F earnings / recoveries may be entered for it (below), and
  *   - the published document is a Full & Final Settlement statement rather
- *     than a Salary Payslip.
+ *     than a Salary Payslip, and
+ *   - its payment is confirmed by Accounts (settlement completion, below).
  */
 
-/** What an F&F component does to the money. The same three kinds as Adjustments V1. */
-const FNF_KIND = {
-  ADDITION: "ADDITION",
-  DEDUCTION: "DEDUCTION",
-};
-
-const FNF_COMPONENT = {
-  LEAVE_ENCASHMENT: "LEAVE_ENCASHMENT",
-  NOTICE_PAY: "NOTICE_PAY",
-  GRATUITY: "GRATUITY",
-  NOTICE_PERIOD_RECOVERY: "NOTICE_PERIOD_RECOVERY",
-};
-
-/**
- * THE F&F CATALOGUE. Closed and named, for the reason Adjustments V1 gives:
- * "Other F&F Deduction 4,000" on a settlement is an argument, not an
- * explanation. Advance and shortage recovery are NOT here - they already
- * exist as Adjustments and are recovered through them, so an F&F month cannot
- * recover the same advance twice under two names.
- *
- * AMOUNTS ARE ENTERED, NEVER DERIVED. Leave balance, gratuity eligibility
- * (five years' continuous service) and the notice shortfall are not modelled
- * anywhere in this system, so the F&F stage records the figure HR has worked
- * out and audits who entered it. It does not invent a policy.
- *
- * ============================== STATUTORY TREATMENT IS NOT ASSUMED ======
- *
- * `pf` / `esi` say whether the component would join the PF / ESI wage. NO F&F
- * COMPONENT IS PRICED INTO A STATUTORY WAGE BY THIS ENGINE: there is no
- * verified rule here for doing so, and introducing one is out of scope.
- *
- * So each component also carries `statutory`:
- *
- *   CONFIRMED    the business / auditor has confirmed the treatment stated by
- *                `pf` and `esi`; the engine applies it.
- *   UNCONFIRMED  the treatment has NOT been confirmed. Using the component
- *                makes the calculation INCOMPLETE (an `unresolved` question,
- *                exactly like an unresolved ESI coverage) and it cannot be
- *                approved until the treatment is confirmed here, in a
- *                reviewed change.
- *
- * ALL FOUR START UNCONFIRMED. The readings below are the starting point for
- * that confirmation, not a decision:
- *   Gratuity          ESI Act s.2(22)(d) excludes gratuity payable on
- *                     discharge; EPF "basic wages" (s.2(b)) do not include it.
- *   Leave Encashment  generally treated as outside both at exit; to confirm.
- *   Notice Pay        treatment differs between readings; to confirm.
- *   Notice Recovery   a recovery, not wages earned; to confirm.
- *
- * TDS (income tax) is not computed anywhere in this payroll, for any month;
- * the F&F does not compute it either. See the review report.
+/*
+ * NO F&F EARNING / RECOVERY COMPONENTS. By the business owner's decision
+ * (review round 2) there are no extra fields for leave encashment, gratuity,
+ * notice pay or notice-period recovery: the exit month is paid exactly as the
+ * ordinary payrun pays it (salary days, approved OT, PF / ESI, the existing
+ * Adjustments - advance and shortage recovery included). Gratuity and any
+ * statutory dues outside the payrun are listed for clarification in the
+ * review report; nothing here pays or withholds them.
  */
-const FNF_COMPONENTS = [
-  {
-    key: FNF_COMPONENT.LEAVE_ENCASHMENT,
-    label: "Leave Encashment",
-    kind: FNF_KIND.ADDITION,
-    pf: false,
-    esi: false,
-    statutory: "UNCONFIRMED",
-    help: "Unused leave paid out at exit. Added to net pay. No PF, no ESI.",
-  },
-  {
-    key: FNF_COMPONENT.NOTICE_PAY,
-    label: "Notice Pay (in lieu)",
-    kind: FNF_KIND.ADDITION,
-    pf: false,
-    esi: false,
-    statutory: "UNCONFIRMED",
-    help: "Paid by the company in lieu of notice. Added to net pay. No PF, no ESI.",
-  },
-  {
-    key: FNF_COMPONENT.GRATUITY,
-    label: "Gratuity",
-    kind: FNF_KIND.ADDITION,
-    pf: false,
-    esi: false,
-    statutory: "UNCONFIRMED",
-    help: "Gratuity payable at exit. Added to net pay. No PF, no ESI.",
-  },
-  {
-    key: FNF_COMPONENT.NOTICE_PERIOD_RECOVERY,
-    label: "Notice Period Recovery",
-    kind: FNF_KIND.DEDUCTION,
-    pf: false,
-    esi: false,
-    statutory: "UNCONFIRMED",
-    help: "Recovered for notice not served. Deducted from net pay. Does not reduce PF or ESI wages.",
-  },
-];
-
-const FNF_COMPONENT_KEYS = FNF_COMPONENTS.map((c) => c.key);
-
-/** The statutory treatment states (see the catalogue header). */
-const FNF_STATUTORY = { CONFIRMED: "CONFIRMED", UNCONFIRMED: "UNCONFIRMED" };
-/** The engine's unresolved-question code for an unconfirmed treatment. */
-const FNF_STATUTORY_UNRESOLVED = "FNF_STATUTORY_TREATMENT_UNCONFIRMED";
-const FNF_COMPONENT_BY_KEY = FNF_COMPONENTS.reduce((map, c) => {
-  map[c.key] = c;
-  return map;
-}, {});
-
-/** The largest single F&F amount accepted. Larger is a typing error, not a settlement. */
-const FNF_AMOUNT_MAX = 10000000;
-const FNF_REMARKS_MAX = 500;
-
-/** The F&F item audit log's verbs. */
-const FNF_ITEM_AUDIT_ACTION = {
-  SET_AMOUNT: "SET_AMOUNT",
-  CLEAR_AMOUNT: "CLEAR_AMOUNT",
-};
 
 /* ================================================== THE DOCUMENT ======== */
 
@@ -165,7 +62,8 @@ const FNF_DECLARATION_RECOVERABLE =
 
 /**
  * THE STORED SETTLEMENT STATE. Two values: the settlement is either still
- * open, or HR has recorded that the money changed hands.
+ * open, or Accounts has confirmed that the money was actually paid
+ * (`confirm_fnf_payment`). Publishing the statement is NOT payment.
  */
 const SETTLEMENT_STATUS = {
   PENDING: "PENDING",
@@ -189,8 +87,8 @@ const SETTLEMENT_STAGE_LABEL = {
   [SETTLEMENT_STAGE.NOT_IN_PAYROLL]: "Not in payroll yet",
   [SETTLEMENT_STAGE.IN_PAYROLL]: "In payroll",
   [SETTLEMENT_STAGE.APPROVED]: "Approved & locked",
-  [SETTLEMENT_STAGE.PUBLISHED]: "F&F published",
-  [SETTLEMENT_STAGE.SETTLED]: "Settled",
+  [SETTLEMENT_STAGE.PUBLISHED]: "Published - payment not confirmed",
+  [SETTLEMENT_STAGE.SETTLED]: "Paid (confirmed by Accounts)",
 };
 
 const PAYMENT_MODE = {
@@ -269,16 +167,6 @@ const REHIRE_ELIGIBILITY_LABEL = {
 const REHIRE_NOTE_MAX = 500;
 
 module.exports = {
-  FNF_KIND,
-  FNF_COMPONENT,
-  FNF_COMPONENTS,
-  FNF_COMPONENT_KEYS,
-  FNF_COMPONENT_BY_KEY,
-  FNF_STATUTORY,
-  FNF_STATUTORY_UNRESOLVED,
-  FNF_AMOUNT_MAX,
-  FNF_REMARKS_MAX,
-  FNF_ITEM_AUDIT_ACTION,
   DOCUMENT_TYPE,
   FNF_TEMPLATE_VERSION,
   FNF_DECLARATION,

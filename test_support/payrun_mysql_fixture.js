@@ -25,9 +25,8 @@ const MIGRATIONS = [
   // repository reads and writes. Missing here, every suite that calculates
   // failed in its before() hook (ER_BAD_FIELD_ERROR).
   "20261120120000-epfo-wage-ceiling-2026-up.sql",
-  // Full & Final Settlement: the calculation's F&F columns, the payslip's
-  // document type, and the exit tables (FK to employee_employment_period,
-  // stood in below).
+  // Full & Final Settlement: the payslip's document type and the exit
+  // tables (FK to employee_employment_period, stood in below).
   "20261201120000-fnf-settlement-up.sql",
 ];
 const RESET_DOWN = "20261110120000-payrun-calculation-reset-down.sql";
@@ -40,8 +39,6 @@ const TABLES = [
   "employee_fnf_settlement_event",
   "employee_fnf_settlement",
   "payrun_exit_reconcile_audit",
-  "payrun_fnf_item_audit",
-  "payrun_fnf_item",
   "employee_employment_period",
   "attendance_ot_late_settlement_log",
   "attendance_ot_late_settlement",

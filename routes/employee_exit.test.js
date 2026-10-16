@@ -42,7 +42,8 @@ const ECR = 2;
 
 const PAYROLL_VIEWER = { designation: 71, employee: 911 }; // payroll reads, no F&F key
 const FNF_VIEWER = { designation: 72, employee: 912 };     // F&F list, ECR only
-const FNF_MANAGER = { designation: 73, employee: 913 };    // F&F writes, ECR only
+const FNF_MANAGER = { designation: 73, employee: 913 };    // Accounts: confirms F&F payment, ECR only
+const PAYROLL_PROCESSOR = { designation: 78, employee: 918 }; // runs payroll, no Accounts key
 const HR_VIEWER = { designation: 74, employee: 914 };      // confidential reads, all branches
 const HR_MANAGER = { designation: 75, employee: 915 };     // interview + first rehire, all branches
 const HR_OVERRIDER = { designation: 76, employee: 916 };   // rehire override only, all branches
@@ -51,13 +52,14 @@ const OUTLET_HR = { designation: 77, employee: 917 };      // confidential reads
 const GRANTS = {
   [PAYROLL_VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY],
   [FNF_VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_SALARY, P.VIEW_FNF_SETTLEMENT],
-  [FNF_MANAGER.designation]: [P.VIEW_EMPLOYEES, P.MANAGE_FNF_SETTLEMENT],
+  [FNF_MANAGER.designation]: [P.VIEW_EMPLOYEES, P.CONFIRM_FNF_PAYMENT],
+  [PAYROLL_PROCESSOR.designation]: [P.VIEW_EMPLOYEES, P.VIEW_PAYROLL, P.VIEW_SALARY, P.PROCESS_PAYROLL],
   [HR_VIEWER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_EXIT_INTERVIEW, P.EMPLOYEE_SCOPE_ALL_BRANCHES],
   [HR_MANAGER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_EXIT_INTERVIEW, P.MANAGE_EXIT_INTERVIEW, P.EMPLOYEE_SCOPE_ALL_BRANCHES],
   [HR_OVERRIDER.designation]: [P.VIEW_EMPLOYEES, P.VIEW_EXIT_INTERVIEW, P.OVERRIDE_REHIRE_ELIGIBILITY, P.EMPLOYEE_SCOPE_ALL_BRANCHES],
   [OUTLET_HR.designation]: [P.VIEW_EMPLOYEES, P.VIEW_EXIT_INTERVIEW],
 };
-const CALLERS = [PAYROLL_VIEWER, FNF_VIEWER, FNF_MANAGER, HR_VIEWER, HR_MANAGER, HR_OVERRIDER, OUTLET_HR];
+const CALLERS = [PAYROLL_VIEWER, PAYROLL_PROCESSOR, FNF_VIEWER, FNF_MANAGER, HR_VIEWER, HR_MANAGER, HR_OVERRIDER, OUTLET_HR];
 const EMPLOYEES = [
   ...CALLERS.map((who) => ({ employee_id: who.employee, store_id: ECR, status: 1 })),
   { employee_id: 2095, store_id: ECR, status: 0 },
@@ -71,8 +73,7 @@ const spy = (name, out = {}) => async (...args) => {
 };
 const usecase = {
   getMonth: spy("getMonth", { rows: [] }),
-  getItems: spy("getItems", { items: [] }),
-  saveItems: spy("saveItems"),
+  reconcileExit: spy("reconcileExit"),
   settle: spy("settle"),
   reopen: spy("reopen"),
   employeeExits: spy("employeeExits", { exits: [] }),
@@ -126,7 +127,6 @@ const call = async (who, method, url, body) => {
   return { status: res.status, body: await res.json().catch(() => ({})) };
 };
 const MONTH = { year: 2026, month: 8 };
-const ITEMS = { ...MONTH, employee_id: 2095, items: [{ component: "GRATUITY", amount: 1000 }] };
 const SETTLE = { ...MONTH, employee_id: 2095, payment_mode: "BANK", payment_reference: "UTR1", paid_on: "2026-09-10" };
 const INTERVIEW = { exit_date: "2026-08-16", interview_date: "2026-08-16", primary_reason: "RELOCATION" };
 
@@ -142,31 +142,46 @@ describe("F&F payroll endpoints", () => {
     assert.deepEqual(seen[0].args[0].store_ids, [ECR]);
   });
 
-  it("reading is not writing: an F&F viewer cannot change F&F money or settle", async () => {
-    assert.equal((await call(FNF_VIEWER, "POST", "/payrun/fnf/items", ITEMS)).status, 403);
+  it("there is no F&F items endpoint: no extra money can be entered outside the payrun", async () => {
+    for (const who of [FNF_MANAGER, PAYROLL_PROCESSOR]) {
+      assert.equal((await call(who, "POST", "/payrun/fnf/items", { ...MONTH, employee_id: 2095, items: [] })).status, 404);
+      assert.equal((await call(who, "GET", `/payrun/fnf/items?${new URLSearchParams({ ...MONTH, employee_id: 2095 })}`)).status, 404);
+    }
+    assert.equal(seen.length, 0);
+  });
+
+  it("reading is not writing: an F&F viewer cannot settle or reopen", async () => {
     assert.equal((await call(FNF_VIEWER, "POST", "/payrun/fnf/settle", SETTLE)).status, 403);
     assert.equal((await call(FNF_VIEWER, "POST", "/payrun/fnf/reopen", { ...MONTH, employee_id: 2095, reason: "x" })).status, 403);
     assert.equal(seen.length, 0);
   });
 
-  it("an F&F manager writes, with the server's actor and branch scope", async () => {
-    assert.equal((await call(FNF_MANAGER, "POST", "/payrun/fnf/items", ITEMS)).status, 200);
+  it("ONLY Accounts (confirm_fnf_payment) confirms payment, with the server's actor and branch scope", async () => {
+    assert.equal((await call(FNF_MANAGER, "POST", "/payrun/fnf/settle", SETTLE)).status, 200);
     assert.equal(seen[0].args[0].actor.employeeId, FNF_MANAGER.employee);
     assert.deepEqual(seen[0].args[0].store_ids, [ECR]);
-    assert.equal((await call(FNF_MANAGER, "POST", "/payrun/fnf/settle", SETTLE)).status, 200);
+    seen = [];
+    // Running (and publishing) payroll is not confirming payment.
+    assert.equal((await call(PAYROLL_PROCESSOR, "POST", "/payrun/fnf/settle", SETTLE)).status, 403);
+    assert.equal((await call(PAYROLL_PROCESSOR, "POST", "/payrun/fnf/reopen", { ...MONTH, employee_id: 2095, reason: "wrong reference" })).status, 403);
+    assert.equal(seen.length, 0);
+  });
+
+  it("reconciling a late-recorded exit is a payroll action (process_payroll), not an Accounts one", async () => {
+    const body = { ...MONTH, employee_id: 2095 };
+    assert.equal((await call(FNF_MANAGER, "POST", "/payrun/fnf/reconcile-exit", body)).status, 403);
+    assert.equal(seen.length, 0);
+    assert.equal((await call(PAYROLL_PROCESSOR, "POST", "/payrun/fnf/reconcile-exit", body)).status, 200);
+    assert.equal(seen[0].name, "reconcileExit");
   });
 
   it("the schema refuses figures and fields a client may not send", async () => {
     for (const body of [
-      { ...ITEMS, net_pay: 999 },
-      { ...ITEMS, items: [{ component: "OTHER", amount: 1 }] },
-      { ...ITEMS, items: [{ component: "GRATUITY", amount: -1 }] },
       { ...SETTLE, settled_net_amount: 1 },
       { ...SETTLE, payment_mode: "UPI" },
       { ...SETTLE, paid_on: "10/09/2026" },
     ]) {
-      const url = body.items ? "/payrun/fnf/items" : "/payrun/fnf/settle";
-      assert.notEqual((await call(FNF_MANAGER, "POST", url, body)).status, 200, JSON.stringify(body));
+      assert.notEqual((await call(FNF_MANAGER, "POST", "/payrun/fnf/settle", body)).status, 200, JSON.stringify(body));
     }
     assert.equal(seen.length, 0);
   });
@@ -174,7 +189,7 @@ describe("F&F payroll endpoints", () => {
 
 describe("CONFIDENTIAL exit interview and rehire", () => {
   it("unauthorized HR access: payroll and F&F roles cannot read interviews or rehire assessments", async () => {
-    for (const who of [PAYROLL_VIEWER, FNF_VIEWER, FNF_MANAGER]) {
+    for (const who of [PAYROLL_VIEWER, PAYROLL_PROCESSOR, FNF_VIEWER, FNF_MANAGER]) {
       assert.equal((await call(who, "GET", "/hr/exit/employee/2095")).status, 403);
       assert.equal((await call(who, "GET", "/hr/exit/employee/2095/case/1")).status, 403);
       assert.equal((await call(who, "GET", "/hr/exit/employee/2095/rehire-status")).status, 403);

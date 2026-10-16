@@ -45,8 +45,6 @@ const {
   FNF_TEMPLATE_VERSION,
   FNF_DECLARATION,
   FNF_DECLARATION_RECOVERABLE,
-  FNF_KIND,
-  FNF_COMPONENT_BY_KEY,
 } = require("../constants/fnf");
 const { isExitMonth, amountInWords, dateOnly } = require("./fnf");
 
@@ -305,8 +303,6 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
     lateness_amount: moneyOf(c.missing_hours_deduction),
     actual_monthly_gross: moneyOf(employee.monthly_gross),
     actual,
-    additions_total: moneyOf(c.fnf_additions) || "0.00",
-    deductions_total: moneyOf(c.fnf_deductions) || "0.00",
     net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
     recoverable,
     net_payable_words: amountInWords(money(Math.abs(netPay))),
@@ -389,27 +385,6 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored prior-month OT items do not add up to their total");
   }
 
-  /*
-   * F&F EARNINGS / RECOVERIES - the stored items of an exit month, one line
-   * each, copied as calculated. Checked against their stored totals: a
-   * snapshot whose items do not add up is refused, like any other.
-   */
-  const fnfItems = parseJsonList(c.fnf_items).filter((i) => i && FNF_COMPONENT_BY_KEY[i.component]);
-  const fnfLinesOf = (kind) =>
-    fnfItems
-      .filter((i) => FNF_COMPONENT_BY_KEY[i.component].kind === kind)
-      .map((i) => ({ ...line(`fnf_${String(i.component).toLowerCase()}`, FNF_COMPONENT_BY_KEY[i.component].label, paiseOr0(i.amount)), fnf: true }));
-  const fnfEarningLines = fnfLinesOf(FNF_KIND.ADDITION);
-  const fnfDeductionLines = fnfLinesOf(FNF_KIND.DEDUCTION);
-  const fnfAdd = fnfEarningLines.reduce((n, l) => n + toPaise(l.amount), 0);
-  const fnfDed = fnfDeductionLines.reduce((n, l) => n + toPaise(l.amount), 0);
-  if (fnfAdd !== paiseOr0(c.fnf_additions)) {
-    throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored F&F earnings do not add up to their total");
-  }
-  if (fnfDed !== paiseOr0(c.fnf_deductions)) {
-    throw new SnapshotError("SNAPSHOT_DEDUCTIONS_MISMATCH", "The stored F&F recoveries do not add up to their total");
-  }
-
   const earningsLines = [
     ...salaryLines,
     line("extra_day_amount", "Extra Days", extraDay, true),
@@ -418,9 +393,8 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     line("incentive", "Incentive", incentive, true),
     line("bonus", "Bonus", bonus, true),
     line("arrears", "Arrears", arrears, true),
-    ...fnfEarningLines,
   ];
-  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears + fnfAdd;
+  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears;
   const totalEarnings = toPaise(c.total_earnings);
   if (totalEarnings === null || earningsSum !== totalEarnings) {
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored earnings do not add up to the stored total");
@@ -438,9 +412,8 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     line("employee_esi", "Employee ESI", esi, true),
     line("advance_recovery", "Advance Recovery", advance, true),
     line("shortage_recovery", "Other Deductions (Shortage Recovery)", shortage, true),
-    ...fnfDeductionLines,
   ];
-  const deductionsSum = missing + pf + esi + advance + shortage + fnfDed;
+  const deductionsSum = missing + pf + esi + advance + shortage;
   const totalDeductions = toPaise(c.total_employee_deductions);
   if (totalDeductions === null || deductionsSum !== totalDeductions) {
     throw new SnapshotError("SNAPSHOT_DEDUCTIONS_MISMATCH", "The stored deductions do not add up to the stored total");
@@ -496,9 +469,6 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
   const fnf = documentType === DOCUMENT_TYPE.FNF
     ? fnfBlockOf({ c, employee, split, weights, netPay, salaryDays: c.salary_days })
     : null;
-  if (fnf && fnfItems.length !== parseJsonList(c.fnf_items).length) {
-    throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored F&F items name a component this server does not know");
-  }
 
   return {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
