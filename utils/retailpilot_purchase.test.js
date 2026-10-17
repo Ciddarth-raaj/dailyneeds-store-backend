@@ -127,6 +127,23 @@ describe("mapPurchases", () => {
   });
 });
 
+describe("the store map", () => {
+  const { parseStoreMap, DEFAULT_STORE_MAP } = require("../config/retailpilot");
+  const { WAREHOUSE_OUTLET_ID } = require("../constants/outlets");
+
+  it("defaults to the six RetailPilot stores", () => {
+    assert.deepEqual(parseStoreMap(""), {
+      "9rJMC": WAREHOUSE_OUTLET_ID, FuUGY: 4, huABy: 3, sooWy: 5, rnMT1: 6, kKFom: 7,
+    });
+    assert.deepEqual(parseStoreMap(undefined), DEFAULT_STORE_MAP);
+  });
+
+  it("is replaced by RETAILPILOT_STORE_MAP, and a broken value falls back", () => {
+    assert.deepEqual(parseStoreMap('{"abc": 9, "bad": "x"}'), { abc: 9 });
+    assert.deepEqual(parseStoreMap("not json"), DEFAULT_STORE_MAP);
+  });
+});
+
 describe("the SPECTRA client", () => {
   const config = { baseUrl: "https://rp.example", apiKey: "k", product: "runway", pageSize: 2, timeoutMs: 1000 };
 
