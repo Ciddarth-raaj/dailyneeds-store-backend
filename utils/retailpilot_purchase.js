@@ -19,6 +19,11 @@ const LIMITS = {
 };
 
 /**
+ * Purchase invoices received, invoiced, created or updated in the last
+ * {days} days. The created/updated test catches a back-dated entry or an
+ * edit to an older bill, which a window on the bill date alone would miss.
+ * FREIGHT and any other invoice_type are left out.
+ *
  * {days} must be a non-negative integer. `CURRENT_DATE - <int>`, not
  * `INTERVAL '<n> days'`: SPECTRA parameterises the literal and Postgres
  * rejects `INTERVAL $1`.
@@ -56,7 +61,9 @@ SELECT
 FROM public.invoice_headers h
 JOIN line l                   ON l.invoice_slug = h.slug
 LEFT JOIN masterhub.vendors v ON v.id = h.supplier_id
-WHERE COALESCE(h.received_date, h.invoice_date) >= CURRENT_DATE - ${n}
+WHERE h.invoice_type = 'PURCHASE'
+  AND (COALESCE(h.received_date, h.invoice_date) >= CURRENT_DATE - ${n}
+       OR COALESCE(h.updated_at, h.created_at) >= CURRENT_DATE - ${n})
 GROUP BY h.slug, h.invoice_id, h.store_id, h.supplier_id, v.name,
          h.supplier_gstin, h.received_date, h.invoice_date, h.total_net,
          h.total_tcs, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate

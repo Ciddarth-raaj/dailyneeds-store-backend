@@ -35,6 +35,13 @@ describe("buildPurchaseQuery", () => {
     assert.doesNotMatch(q, /INTERVAL/i);
   });
 
+  it("reads PURCHASE invoices only, by bill date or by when they were entered or changed", () => {
+    const q = buildPurchaseQuery(3);
+    assert.match(q, /h\.invoice_type = 'PURCHASE'/);
+    assert.match(q, /COALESCE\(h\.received_date, h\.invoice_date\) >= CURRENT_DATE - 3/);
+    assert.match(q, /COALESCE\(h\.updated_at, h\.created_at\) >= CURRENT_DATE - 3/);
+  });
+
   it("refuses anything but a non-negative integer", () => {
     for (const bad of [-1, 1.5, "3; DROP", null, undefined]) {
       assert.throws(() => buildPurchaseQuery(bad));
