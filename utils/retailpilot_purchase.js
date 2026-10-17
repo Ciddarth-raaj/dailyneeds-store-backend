@@ -11,8 +11,8 @@ const crypto = require("crypto");
 
 // Column limits of the `purchase` table.
 const LIMITS = {
-  MRC_REF: 20,
-  SUPPLIER_ID: 20,
+  MRC_REF: 50,
+  SUPPLIER_ID: 50,
   SUPPLIER_GSTN: 20,
   DIST_BILL_NO: 50,
   SUPPLIER_NAME: 100,

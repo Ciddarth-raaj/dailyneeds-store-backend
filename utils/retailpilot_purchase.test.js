@@ -100,7 +100,7 @@ describe("mapPurchases", () => {
     const { purchases, skipped } = mapPurchases(
       [
         row({ invoice_slug: "A", store_id: "unknown" }),
-        row({ invoice_slug: "x".repeat(21) }),
+        row({ invoice_slug: "x".repeat(51) }),
         row({ invoice_slug: "B", received_date: null, invoice_date: null }),
       ],
       STORE_MAP
