@@ -296,6 +296,14 @@ const READY_BLOCKER = {
   STATUTORY_SETUP_INCOMPLETE: "STATUTORY_SETUP_INCOMPLETE",
   CALCULATION_INCOMPLETE: "CALCULATION_INCOMPLETE",
   ALREADY_LOCKED: "ALREADY_LOCKED",
+  /*
+   * THE EMPLOYEE MASTER'S EXIT DATE DISAGREES WITH THE MONTH'S SNAPSHOT - a
+   * resignation recorded (or moved, or voided by a rejoin) after the month was
+   * initialized. Approving would pay the month as an ordinary month (or as an
+   * F&F that is no longer one), so it is refused until the exit is reconciled
+   * on the F&F screen.
+   */
+  EXIT_NOT_RECONCILED: "EXIT_NOT_RECONCILED",
 };
 
 const READY_BLOCKER_LABEL = {
@@ -308,6 +316,7 @@ const READY_BLOCKER_LABEL = {
   [READY_BLOCKER.STATUTORY_SETUP_INCOMPLETE]: "Statutory setup incomplete",
   [READY_BLOCKER.CALCULATION_INCOMPLETE]: "Calculation incomplete",
   [READY_BLOCKER.ALREADY_LOCKED]: "Already approved",
+  [READY_BLOCKER.EXIT_NOT_RECONCILED]: "Exit not reconciled",
 };
 
 const READY_BLOCKER_MESSAGE = {
@@ -336,6 +345,8 @@ const READY_BLOCKER_MESSAGE = {
     "The calculation left a statutory figure unresolved. It is on the employee's detail and must be settled before approval.",
   [READY_BLOCKER.ALREADY_LOCKED]:
     "This employee's month is already approved and locked.",
+  [READY_BLOCKER.EXIT_NOT_RECONCILED]:
+    "The employee's exit was recorded or changed after this month was initialized. Reset the calculation, then use Reconcile Exit on the F&F Settlement screen and recalculate.",
 };
 
 /**

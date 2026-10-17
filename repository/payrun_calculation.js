@@ -536,6 +536,70 @@ class PayrunCalculationRepository {
   }
 
   /**
+   * THE EMPLOYEE MASTER'S CURRENT EXIT DATE, per employee - read live so a
+   * resignation recorded (or moved, or cleared by a rejoin) AFTER the month
+   * was initialized is noticed rather than paid as an ordinary month. Compared
+   * with the payrun snapshot's own `resignation_date`; nothing here writes.
+   */
+  async listLiveExitDates(employeeIds) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-LIVE-EXIT-DATES",
+      `SELECT employee_id, DATE_FORMAT(resignation_date, '%Y-%m-%d') AS live_exit_date
+         FROM new_employee WHERE employee_id IN (?)`,
+      [employeeIds]
+    );
+  }
+
+  /**
+   * OT REQUESTS STILL UNDECIDED on any date up to `to` - the same predicate
+   * `repository/payrun.js#listPendingApprovals` counts for a month, without
+   * its month start. For the F&F month, where an undecided request in an
+   * EARLIER month would otherwise never be paid.
+   */
+  async listOpenOtRequestsUpTo(employeeIds, to) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    return this._read(
+      "LIST-OPEN-OT-REQUESTS-UP-TO",
+      `SELECT r.requested_for_employee_id AS employee_id, COUNT(*) AS pending_ot
+         FROM attendance_approval_request r
+        WHERE r.requested_for_employee_id IN (?)
+          AND r.request_type IN ('OT','REGULARIZATION_WITH_OT')
+          AND r.attendance_date <= ?
+          AND (r.status = 'PENDING' OR r.finalization_state = 'PENDING')
+        GROUP BY r.requested_for_employee_id`,
+      [employeeIds, to]
+    );
+  }
+
+  /**
+   * APPROVED OT STILL WAITING FOR A PAYROLL MONTH (`PENDING_SETTLEMENT`) for
+   * these employees, up to the end of the given month - for the F&F month,
+   * which is the leaver's LAST payroll month: an item still pending there
+   * would otherwise wait for a "next open month" the leaver never has.
+   * A database without the table has none.
+   */
+  async listOutstandingLateOt(employeeIds, year, month) {
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) return [];
+    try {
+      return await this._read(
+        "LIST-OUTSTANDING-LATE-OT",
+        `SELECT employee_id, late_settlement_id, attendance_approval_request_id,
+                DATE_FORMAT(attendance_date, '%Y-%m-%d') AS attendance_date,
+                source_year, source_month, approved_ot_minutes, amount
+           FROM attendance_ot_late_settlement
+          WHERE employee_id IN (?) AND settlement_status = 'PENDING_SETTLEMENT'
+            AND (source_year * 12 + source_month) <= (? * 12 + ?)
+          ORDER BY employee_id, attendance_date`,
+        [employeeIds, year, month]
+      );
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return [];
+      throw err;
+    }
+  }
+
+  /**
    * WHICH OF THESE EMPLOYEES' MONTHS ARE LOCKED.
    *
    * THE ONE READ THE OTHER STAGES NEED FROM THIS ONE. A locked employee's
@@ -1525,6 +1589,16 @@ class PayrunCalculationRepository {
       const published = locked && row.published_at !== null && row.published_at !== undefined;
       const previous = published ? CALC_STATUS.PUBLISHED : locked ? CALC_STATUS.APPROVED_LOCKED : row.status;
 
+      /*
+       * A SETTLED FULL & FINAL IS PAID MONEY. Its month cannot be unpublished
+       * or unlocked - either would let the figures that were paid change -
+       * until the settlement is explicitly reopened (with a reason) on the
+       * F&F screen. Read under this row's lock, which Settle also takes.
+       */
+      if (action === AUDIT_ACTION_LIFECYCLE.UNLOCK || action === AUDIT_ACTION_LIFECYCLE.UNPUBLISH) {
+        if (await this._fnfSettledLocked(conn, row.payrun_employee_id)) return done("FNF_SETTLED");
+      }
+
       let update;
       let next;
       let payslipId = null;
@@ -1666,6 +1740,24 @@ class PayrunCalculationRepository {
     }
   }
 
+  /** Is this payrun month a SETTLED F&F? A database before migration 20261201120000 has none. */
+  async _fnfSettledLocked(conn, payrunEmployeeId) {
+    try {
+      const rows = await new Promise((resolve, reject) =>
+        conn.query(
+          `SELECT fnf_settlement_id FROM employee_fnf_settlement
+            WHERE payrun_employee_id = ? AND status = 'SETTLED' LOCK IN SHARE MODE`,
+          [payrunEmployeeId],
+          (err, r) => (err ? reject(err) : resolve(r || []))
+        )
+      );
+      return rows.length > 0;
+    } catch (err) {
+      if (err && err.code === "ER_NO_SUCH_TABLE") return false;
+      throw err;
+    }
+  }
+
   /**
    * THE FROZEN SNAPSHOT, inserted inside the Publish transaction. The version
    * is the next one for this employee month, read under the calculation row's
@@ -1692,9 +1784,9 @@ class PayrunCalculationRepository {
               (payslip_ref, payrun_employee_id, payrun_calculation_id, employee_id,
                period_year, period_month, payslip_version,
                calculation_version, calculation_revision, calculation_hash, source_hash, inputs_hash,
-               snapshot_schema_version, template_version, snapshot_json, snapshot_sha256,
+               snapshot_schema_version, template_version, document_type, snapshot_json, snapshot_sha256,
                status, published_by, published_by_user, published_at)
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, c.published_at
          FROM payrun_employee_calculation c
         WHERE c.payrun_calculation_id = ?`,
       [
@@ -1702,7 +1794,8 @@ class PayrunCalculationRepository {
         year, month, Number(last.v) + 1,
         row.calculation_version, row.calculation_revision, row.calculation_hash,
         row.source_hash, row.inputs_hash,
-        payslip.schema_version, payslip.template_version, payslip.text, payslip.sha256,
+        payslip.schema_version, payslip.template_version, payslip.document_type || "PAYSLIP",
+        payslip.text, payslip.sha256,
         actorEmployee, actorUser, row.payrun_calculation_id,
       ],
       conn

@@ -71,6 +71,8 @@ const EXPECTED = {
   rejoin: ["open_rejoin"],
 };
 
+const { decideRehire } = require("../utils/rehire_gate");
+
 class ValidationError extends Error {
   constructor(message, code = 422) {
     super(message);
@@ -187,6 +189,13 @@ class EmployeeMasterUsecase {
      * this wired, every path behaves exactly as it did before Phase 3C.
      */
     this.membershipQueue = null;
+    /**
+     * F&F / REHIRE, OPTIONAL. `{ rehireForExitTx, recordRehireExceptionTx }`
+     * (repository/employee_exit.js). With it, a rejoin from an exit assessed
+     * NO or CONDITIONAL needs `approve_rehire_exception` and a reason - see
+     * `utils/rehire_gate.js`. Without it, rejoin behaves exactly as before.
+     */
+    this.rehireGate = null;
     this.repo = employeeMasterRepo;
     // M1. Answers `getActiveWorkShift(id)` - the employee work shift
     // repository - so a create can refuse an unknown or inactive initial
@@ -984,7 +993,7 @@ class EmployeeMasterUsecase {
    * C1c's own NULL-only path, or refuses and says which date is missing.
    * Nothing is guessed either way.
    */
-  async rejoinEmployee(employeeId, input, { actorEmployeeId = null } = {}) {
+  async rejoinEmployee(employeeId, input, { actorEmployeeId = null, canApproveRehireException = false } = {}) {
     const joinedOn = effectiveDate(input.date_of_joining, "date_of_joining");
     rejectOutsideJoiningWindow(joinedOn, this.today());
 
@@ -1040,12 +1049,47 @@ class EmployeeMasterUsecase {
         );
       }
 
+      /*
+       * THE REHIRE GATE, decided here under the employee lock and inside the
+       * rejoin's transaction - the backend, not a screen. The assessment is
+       * the one of the exit being rejoined FROM (the previous period's end).
+       */
+      let rehireException = null;
+      if (this.rehireGate) {
+        const assessment = await this.rehireGate.rehireForExitTx(tx, employeeId, previousEnded);
+        const decision = decideRehire({
+          assessment,
+          canApprove: canApproveRehireException === true,
+          reason: input.rehire_exception_reason,
+        });
+        if (!decision.allowed) {
+          const err = new ConflictError(decision.message);
+          err.httpCode = decision.code === "REHIRE_APPROVAL_REQUIRED" ? 403 : 422;
+          err.detail = { error: decision.code, rehire_eligibility: assessment.eligibility };
+          throw err;
+        }
+        if (decision.exception) rehireException = { ...assessment, reason: decision.reason };
+      }
+
       const affected = await this.repo.markRejoined(tx, employeeId, joinedOn);
       if (affected === 0) throw new ConflictError(`employee ${employeeId} was changed concurrently`);
 
       const outcome = await this._reconcile(tx, employeeId, "rejoin", actorEmployeeId);
       const sessionsRevoked = await this._revokeIfOwed(tx, outcome);
       const opened = await this.lifecycleRepo.getLatestPeriod(tx, employeeId);
+      // The approved exception, audited in the SAME transaction as the rejoin.
+      if (rehireException) {
+        await this.rehireGate.recordRehireExceptionTx(tx, {
+          fnf_settlement_id: rehireException.fnf_settlement_id,
+          rehire_assessment_id: rehireException.rehire_assessment_id,
+          employee_id: employeeId,
+          eligibility: rehireException.eligibility,
+          conditions: rehireException.conditions,
+          reason: rehireException.reason,
+          rejoin_date: joinedOn,
+          approved_by: actorEmployeeId,
+        });
+      }
       // Rejoining re-derives the RULE claims from the mappings. It does NOT
       // revive a MANUAL grant that employment ended closed - that was a
       // person's decision about a person in a job, and giving it back is a

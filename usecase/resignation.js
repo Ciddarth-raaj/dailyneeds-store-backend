@@ -1,4 +1,11 @@
 
+/**
+ * LEGACY RESIGNATION RECORDS - READ ONLY. Exits are recorded with Employee
+ * Master -> Resign and returns with Rejoin (which applies the rehire
+ * assessment); see routes/resignation.js. The old create / edit / delete
+ * writes, which changed employee and login status outside that workflow, are
+ * gone.
+ */
 class ResignationUsecase {
     constructor(resignationRepo, employeeRepo, userRepo) {
         this.resignationRepo = resignationRepo;
@@ -16,32 +23,6 @@ class ResignationUsecase {
             }
         });
     }
-    updateResignationDetails(resignation) {
-      return new Promise(async (resolve, reject) => {
-        try {
-          const resignation_id = resignation.resignation_id;
-          const { code } = await this.resignationRepo.updateResignationDetails(resignation.resignation_details, resignation_id);
-          resolve(code);
-        } catch (err) {
-          reject(err);
-        }
-      });
-    }
-    deleteResignation(resignation_id) {
-      return new Promise(async (resolve, reject) => {
-        try {
-          const employee_id = await this.employeeRepo.getEmployeeIdByDelete(resignation_id);
-          await this.employeeRepo.updateStatus({status: 1, employee_id: employee_id});
-          await this.userRepo.updateStatus({status: 1, employee_id: employee_id});
-          const { code } = await this.resignationRepo.deleteResignation(resignation_id);
-          resolve(code);
-        } catch (err) {
-          console.log(err);
-          reject(err);
-        }
-      });
-    }
- 
     getResignationByResigId(resignation_id) {
       return new Promise(async (resolve, reject) => {
         try {
@@ -64,19 +45,6 @@ class ResignationUsecase {
           }
         });
       }
-    create(resignation) {
-        return new Promise(async (resolve, reject) => {
-            try {
-                const employee_id = await this.employeeRepo.getEmployeeIdByName(resignation.employee_name);
-                await this.employeeRepo.updateStatus({status: 0, employee_id: employee_id});
-                await this.userRepo.updateStatus({status: 0, employee_id: employee_id});
-                this.resignationRepo.create(resignation);
-                resolve(200);
-            } catch (err) {
-                reject(err);
-            }
-        });
-    }
 
 }
 

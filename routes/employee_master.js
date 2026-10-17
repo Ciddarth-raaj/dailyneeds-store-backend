@@ -68,6 +68,13 @@ class EmployeeMasterRoutes {
         err.detail && Number.isInteger(Number(err.detail.existing_employee_id))
           ? { existing_employee_id: Number(err.detail.existing_employee_id) }
           : {};
+      // The rehire gate's refusal says which approval is missing.
+      if (err.detail && typeof err.detail.error === "string" && /^REHIRE_/.test(err.detail.error)) {
+        detail.error = err.detail.error;
+        if (["NO", "CONDITIONAL"].includes(err.detail.rehire_eligibility)) {
+          detail.rehire_eligibility = err.detail.rehire_eligibility;
+        }
+      }
       res.json({ code: err.httpCode, msg: err.message, ...detail });
       return;
     }
@@ -578,12 +585,18 @@ class EmployeeMasterRoutes {
         const schema = {
           date_of_joining: Joi.string().required(),
           previous_ended_on: Joi.string().allow("", null).optional(),
+          // Needed only when the previous exit was assessed NO / CONDITIONAL
+          // for rehire - decided in the usecase (utils/rehire_gate.js).
+          rehire_exception_reason: Joi.string().trim().max(500).allow("", null).optional(),
         };
         const isValid = Joi.validate(req.body, schema);
         if (isValid.error !== null) throw isValid.error;
 
         res.json(
-          await this.usecase.rejoinEmployee(employeeId, req.body, { actorEmployeeId: this._actor(req) })
+          await this.usecase.rejoinEmployee(employeeId, req.body, {
+            actorEmployeeId: this._actor(req),
+            canApproveRehireException: await this.permissions.has(req, P.APPROVE_REHIRE_EXCEPTION),
+          })
         );
       } catch (err) {
         this._fail(res, err);

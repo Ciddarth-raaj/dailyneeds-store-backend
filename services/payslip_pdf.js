@@ -135,7 +135,143 @@ function moneyTable(kind, title, lines, total, totalLabel, height) {
 </table></div>`;
 }
 
+/** "12345.5" -> "12,345.50" - Indian grouping, no currency sign (the F&F table's style). */
+function num(amount) {
+  if (amount === null || amount === undefined || amount === "") return "";
+  return inr(amount).replace("₹", "");
+}
+
+/**
+ * THE FULL & FINAL SETTLEMENT STATEMENT - the reference layout HR uses
+ * (Employee Pay Summary, Earnings with Amount and Actual, Deductions, Net
+ * Pay, Total Net Payable in words, the employee's payroll-payment
+ * declaration - printed unsigned, with signature and date fields - or, for a
+ * negative Net Pay, the acknowledgement of the recoverable amount).
+ *
+ * THE SAME SNAPSHOT, THE SAME FIGURES: every amount is the frozen snapshot's
+ * own - the earnings and deductions lines, their totals and the rounded Net
+ * Pay - exactly as `payslipHtml` would print them. Nothing is recomputed;
+ * only the layout differs.
+ */
+function fnfHtml(s, { logo = logoDataUri() } = {}) {
+  const e = s.employee || {};
+  const f = s.final || {};
+  const co = s.company || {};
+  const x = s.fnf || {};
+  const actual = x.actual || {};
+  const earnings = printable(s.earnings && s.earnings.lines);
+  const deductions = printable(s.deductions && s.deductions.lines);
+  const rows = Math.max(earnings.length, deductions.length, 1);
+  const body = Array.from({ length: rows }, (_, i) => {
+    const er = earnings[i];
+    const dr = deductions[i];
+    const act = er && actual[er.key] !== undefined && actual[er.key] !== null ? num(actual[er.key]) : "";
+    return `<tr>
+      <td>${er ? esc(er.label) : ""}</td><td class="num">${er ? esc(num(er.amount)) : ""}</td><td class="num">${esc(act)}</td>
+      <td>${dr ? esc(dr.label) : ""}</td><td class="num">${dr ? esc(num(dr.amount)) : ""}</td></tr>`;
+  }).join("");
+  // A row with nothing to say is left out rather than printed as ": ".
+  const kv = (label, value) =>
+    value === null || value === undefined || value === ""
+      ? ""
+      : `<tr><td class="k">${esc(label)}</td><td class="v">: ${esc(value)}</td></tr>`;
+  const st = s.statutory || {};
+  const net = f.net_pay;
+  const absNet = net === null || net === undefined ? net : String(net).replace("-", "");
+  const payLabel = x.net_payable_label || "Total Net Payable";
+  const left = [
+    kv("Employee Code", e.employee_id),
+    kv("Date of Joining", x.date_of_joining || e.date_of_joining),
+    kv("Location", e.store_name),
+    kv("Department", e.department_name),
+    kv("Lateness Amount", num(x.lateness_amount || "0.00")),
+    kv("Bank Name", e.bank_name || (e.pay_type === "CASH" ? "Cash" : "")),
+    kv("Last Working Day", x.last_working_day),
+  ];
+  const right = [
+    kv("Employee Name", e.employee_name),
+    kv("Designation", e.designation_name),
+    kv("LOP Days", x.lop_days),
+    kv("Actual Working Days", x.actual_working_days),
+    kv("Payroll Month", s.period && s.period.label),
+    kv("Bank Account Number", e.bank_account_masked),
+    kv("PAN", e.pan_masked),
+    kv("UAN", st.pf_applicable ? st.uan : null),
+    kv("ESI Number", st.esi_applicable ? st.esi_number : null),
+  ];
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Full &amp; Final Settlement</title><style>
+  @page { size: A4; margin: 12mm; }
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10.5px; color: #1f1a24; margin: 0;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  table { width: 100%; border-collapse: collapse; }
+  .num { text-align: right; white-space: nowrap; }
+  .head { display: flex; gap: 24px; align-items: center; padding-bottom: 10px; border-bottom: 1px solid #9a9a9a; }
+  .logo { width: 170px; height: auto; }
+  .co b { display: block; font-size: 13px; }
+  .co div { font-size: 10.5px; white-space: pre-line; }
+  h2 { color: #1f3b63; font-size: 13px; margin: 12px 0 6px; }
+  .sum { display: flex; gap: 20px; }
+  .sum table td { padding: 1.5px 0; vertical-align: top; }
+  .sum .k { width: 45%; }
+  .sum .v { font-weight: bold; }
+  .grid { margin-top: 12px; border: 1px solid #c7ccd4; }
+  .grid th { color: #1f3b63; background: #f0f4f8; font-size: 12px; padding: 6px 8px; text-align: left; border: 1px solid #c7ccd4; }
+  .grid th.num { text-align: right; }
+  .grid td { padding: 3px 8px; border-left: 1px solid #c7ccd4; border-right: 1px solid #c7ccd4; border-top: 1px solid #e3e6ea; }
+  .grid tfoot td { font-weight: bold; border-top: 1px solid #9aa3ad; }
+  .netpay { margin-top: 6px; border: 1px solid #c7ccd4; }
+  .netpay th { color: #1f3b63; background: #f0f4f8; font-size: 12px; padding: 6px 8px; text-align: left; }
+  .netpay th.num { text-align: right; }
+  .netpay td { padding: 3px 8px; border-top: 1px solid #e3e6ea; }
+  .netpay .tot td { font-weight: bold; }
+  .band { margin-top: 12px; background: #eef3f8; border-radius: 6px; text-align: center; padding: 8px; font-size: 12.5px; font-weight: bold; }
+  .formula { text-align: center; font-weight: bold; font-size: 9.5px; margin: 8px 0 4px; padding-bottom: 4px; border-bottom: 1px solid #9a9a9a; }
+  .sign { display: flex; justify-content: space-between; margin-top: 18px; font-weight: bold; }
+  .decl h2 { margin-top: 18px; }
+  .decl p { font-weight: bold; margin: 4px 0 0; line-height: 1.4; }
+  .note { margin: 2px 0; line-height: 1.4; }
+  .signing { font-style: italic; margin-top: 6px; }
+  .esig { display: flex; justify-content: space-between; margin: 30px 0 0; font-weight: bold; }
+  .foot { text-align: center; font-weight: bold; margin-top: 22px; }
+</style></head><body>
+<header class="head">
+  ${logo ? `<img class="logo" src="${logo}" alt="${esc(co.name || "DailyNeeds")}">` : ""}
+  <div class="co"><b>${esc(co.name || "")}</b>${co.address ? `<div>${esc(co.address)}</div>` : ""}</div>
+</header>
+<h2>Full &amp; Final Settlement</h2>
+<h2>Employee Pay Summary</h2>
+<div class="sum"><table>${left.join("")}</table><table>${right.join("")}</table></div>
+<table class="grid">
+  <thead><tr><th>Earnings</th><th class="num">Amount</th><th class="num">Actual</th><th>Deductions</th><th class="num">(-)Amount</th></tr></thead>
+  <tbody>${body}</tbody>
+  <tfoot><tr><td>Gross Earnings</td><td class="num">${esc(num(s.earnings && s.earnings.total))}</td><td class="num">${esc(num(x.actual_monthly_gross))}</td>
+    <td>Total Deductions</td><td class="num">${esc(num(s.deductions && s.deductions.total))}</td></tr></tfoot>
+</table>
+<table class="netpay">
+  <thead><tr><th>NET PAY</th><th class="num">AMOUNT</th></tr></thead>
+  <tbody>
+    <tr><td>Gross Earnings</td><td class="num">${esc(num(s.earnings && s.earnings.total))}</td></tr>
+    <tr><td>Total Deductions</td><td class="num">${esc(num(s.deductions && s.deductions.total))}</td></tr>
+    ${Number(f.net_pay_rounding) ? `<tr><td>Round-off</td><td class="num">${esc(num(f.net_pay_rounding))}</td></tr>` : ""}
+    <tr class="tot"><td class="num">${esc(payLabel)}</td><td class="num">${esc(num(absNet))}</td></tr>
+  </tbody>
+</table>
+<div class="band">${esc(payLabel)} ${esc(inr(absNet))}</div>
+<div class="band">In Words: ${esc(x.net_payable_words || "")}</div>
+<div class="formula">**${esc(payLabel)} = ${x.recoverable ? "(Total Deductions - Gross Earnings) - Round-off" : "(Gross Earnings - Total Deductions) + Round-off"}</div>
+<div class="note"><b>Note :</b></div>
+<div class="sign"><span>Prepared By :</span><span>Authorized By :</span></div>
+<section class="decl"><h2>${esc(x.declaration_heading || "Employee Declaration")}</h2><p>${esc(x.declaration || "")}</p>
+<div class="signing">${esc(x.declaration_signing || "")}</div></section>
+<div class="esig"><span>Employee Signature : ____________________</span><span>Date : ______________</span></div>
+<div class="foot">This is a system generated statement</div>
+</body></html>`;
+}
+
 function payslipHtml(s, { logo = logoDataUri() } = {}) {
+  // AN EXIT MONTH IS A FULL & FINAL SETTLEMENT STATEMENT, from the same snapshot.
+  if (s && s.document_type === "FNF") return fnfHtml(s, { logo });
   const e = s.employee || {};
   const a = s.attendance || {};
   const st = s.statutory || {};
@@ -398,4 +534,4 @@ async function renderPayslipPdfs(snapshots, deps = {}) {
   }
 }
 
-module.exports = { payslipHtml, renderPayslipPdf, renderPayslipPdfs, inr, printable, esc, logoDataUri, LOGO_PATH };
+module.exports = { payslipHtml, fnfHtml, renderPayslipPdf, renderPayslipPdfs, inr, printable, esc, logoDataUri, LOGO_PATH };

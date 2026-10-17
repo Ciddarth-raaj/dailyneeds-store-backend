@@ -147,7 +147,7 @@ module.exports = ({
         const sent = await withTimeout(
           telegram.sendMessage(
             identity.private_chat_id,
-            notificationText(row.period_year, row.period_month),
+            notificationText(row.period_year, row.period_month, row.document_type),
             keyboard
               ? { parseMode: null, replyMarkup: keyboard, disableNotification: false }
               : { parseMode: null, disableNotification: false }
