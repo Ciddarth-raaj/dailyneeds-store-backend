@@ -12,6 +12,7 @@ const STORE_MAP = { "store-a": 2 };
 const row = (over = {}) => ({
   invoice_slug: "INV-1001",
   supplier_invoice_id: "B-1",
+  mrc_no: 6372,
   store_id: "store-a",
   supplier_id: "S1",
   supplier_name: "A Supplier",
@@ -38,6 +39,7 @@ describe("buildPurchaseQuery", () => {
   it("reads PURCHASE invoices only, by bill date or by when they were entered or changed", () => {
     const q = buildPurchaseQuery(3);
     assert.match(q, /h\.invoice_type = 'PURCHASE'/);
+    assert.match(q, /h\.seq\s+AS mrc_no/);
     assert.match(q, /COALESCE\(h\.received_date, h\.invoice_date\) >= CURRENT_DATE - 3/);
     assert.match(q, /COALESCE\(h\.updated_at, h\.created_at\) >= CURRENT_DATE - 3/);
   });
@@ -67,6 +69,7 @@ describe("mapPurchases", () => {
     assert.equal(p.MRC_DATE, "2026-10-15");
     assert.equal(p.DIST_BILL_DT, "2026-10-14");
     assert.equal(p.DIST_BILL_NO, "B-1");
+    assert.equal(p.MRC_NO, 6372);
     assert.equal(p.MRC_AMT, 1640);
     assert.deepEqual(p.SGST, [
       { PERC: 2.5, TAXABLE: 1000, VALUE: 25 },
@@ -121,6 +124,11 @@ describe("mapPurchases", () => {
     assert.match(skipped[0].reason, /RETAILPILOT_STORE_MAP/);
     assert.match(skipped[1].reason, /MRC_REF/);
     assert.match(skipped[2].reason, /date/);
+  });
+
+  it("leaves MRC_NO empty when RetailPilot has no seq", () => {
+    assert.equal(mapPurchases([row({ mrc_no: null })], STORE_MAP).purchases[0].MRC_NO, null);
+    assert.equal(mapPurchases([row({ mrc_no: "6400" })], STORE_MAP).purchases[0].MRC_NO, 6400);
   });
 
   it("keeps the date part of a timestamp without shifting it", () => {

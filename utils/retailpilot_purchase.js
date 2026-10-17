@@ -49,6 +49,7 @@ WITH line AS (
 SELECT
   h.slug                                    AS invoice_slug,
   h.invoice_id                              AS supplier_invoice_id,
+  h.seq                                     AS mrc_no,
   h.store_id,
   h.supplier_id,
   COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS supplier_name,
@@ -65,7 +66,7 @@ LEFT JOIN masterhub.vendors v ON v.id = h.supplier_id
 WHERE h.invoice_type = 'PURCHASE'
   AND (COALESCE(h.received_date, h.invoice_date) >= CURRENT_DATE - ${n}
        OR COALESCE(h.updated_at, h.created_at) >= CURRENT_DATE - ${n})
-GROUP BY h.slug, h.invoice_id, h.store_id, h.supplier_id, v.name, v.trade_name,
+GROUP BY h.slug, h.invoice_id, h.seq, h.store_id, h.supplier_id, v.name, v.trade_name,
          h.supplier_gstin, h.received_date, h.invoice_date, h.total_net,
          h.total_tcs, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
 ORDER BY h.slug, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
@@ -188,12 +189,17 @@ function mapPurchases(rows, storeMap) {
     }
     [sgst, cgst, igst, cess].forEach((l) => l.sort(byPerc));
 
+    const seq = h.mrc_no == null || h.mrc_no === "" ? NaN : Number(h.mrc_no);
+    const mrcNo = Number.isInteger(seq) ? seq : null;
+
     const payload = {
       STORE_ID: outletId,
       SUPPLIER_ID: fields.SUPPLIER_ID,
       SUPPLIER_NAME: str(h.supplier_name).slice(0, LIMITS.SUPPLIER_NAME),
       SUPPLIER_GSTN: fields.SUPPLIER_GSTN,
-      MRC_NO: null, // RetailPilot has no numeric GRN number
+      // RetailPilot's per-store, per-type running number (Warehouse
+      // purchases 6372, 6373, ...), the same continuous series as the MRC no.
+      MRC_NO: mrcNo,
       MRC_DATE: mrcDate,
       MRC_AMT: round2(h.invoice_amount),
       DIST_BILL_DT: billDate,
