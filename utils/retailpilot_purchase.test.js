@@ -42,6 +42,10 @@ describe("buildPurchaseQuery", () => {
     assert.match(q, /COALESCE\(h\.updated_at, h\.created_at\) >= CURRENT_DATE - 3/);
   });
 
+  it("names the supplier by trade name, falling back to the vendor name", () => {
+    assert.match(buildPurchaseQuery(3), /COALESCE\(NULLIF\(TRIM\(v\.trade_name\), ''\), v\.name\) AS supplier_name/);
+  });
+
   it("refuses anything but a non-negative integer", () => {
     for (const bad of [-1, 1.5, "3; DROP", null, undefined]) {
       assert.throws(() => buildPurchaseQuery(bad));

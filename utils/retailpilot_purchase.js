@@ -22,7 +22,8 @@ const LIMITS = {
  * Purchase invoices received, invoiced, created or updated in the last
  * {days} days. The created/updated test catches a back-dated entry or an
  * edit to an older bill, which a window on the bill date alone would miss.
- * FREIGHT and any other invoice_type are left out.
+ * FREIGHT and any other invoice_type are left out. The supplier name is the
+ * vendor's trade name, falling back to its registered name.
  *
  * {days} must be a non-negative integer. `CURRENT_DATE - <int>`, not
  * `INTERVAL '<n> days'`: SPECTRA parameterises the literal and Postgres
@@ -50,7 +51,7 @@ SELECT
   h.invoice_id                              AS supplier_invoice_id,
   h.store_id,
   h.supplier_id,
-  v.name                                    AS supplier_name,
+  COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS supplier_name,
   h.supplier_gstin                          AS supplier_gstn,
   COALESCE(h.received_date, h.invoice_date) AS received_date,
   h.invoice_date,
@@ -64,7 +65,7 @@ LEFT JOIN masterhub.vendors v ON v.id = h.supplier_id
 WHERE h.invoice_type = 'PURCHASE'
   AND (COALESCE(h.received_date, h.invoice_date) >= CURRENT_DATE - ${n}
        OR COALESCE(h.updated_at, h.created_at) >= CURRENT_DATE - ${n})
-GROUP BY h.slug, h.invoice_id, h.store_id, h.supplier_id, v.name,
+GROUP BY h.slug, h.invoice_id, h.store_id, h.supplier_id, v.name, v.trade_name,
          h.supplier_gstin, h.received_date, h.invoice_date, h.total_net,
          h.total_tcs, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
 ORDER BY h.slug, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
