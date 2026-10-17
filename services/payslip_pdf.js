@@ -261,7 +261,7 @@ function fnfHtml(s, { logo = logoDataUri() } = {}) {
 <div class="band">In Words: ${esc(x.net_payable_words || "")}</div>
 <div class="formula">**${esc(payLabel)} = ${x.recoverable ? "(Total Deductions - Gross Earnings) - Round-off" : "(Gross Earnings - Total Deductions) + Round-off"}</div>
 <div class="note"><b>Note :</b></div>
-<div class="sign"><span>Prepared By :</span><span>Checked By :</span><span>Authorized By :</span></div>
+<div class="sign"><span>Prepared By :</span><span>Authorized By :</span></div>
 <section class="decl"><h2>${esc(x.declaration_heading || "Employee Declaration")}</h2><p>${esc(x.declaration || "")}</p>
 <div class="signing">${esc(x.declaration_signing || "")}</div></section>
 <div class="esig"><span>Employee Signature : ____________________</span><span>Date : ______________</span></div>

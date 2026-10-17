@@ -138,9 +138,10 @@ describe("the F&F statement, rendered with the production renderer", { skip }, (
   it("payable: the Employee Declaration of receipt with the printed amount and words, signed only after payment, with signature and date fields", () => {
     const { text } = out.full;
     const flat = text.replace(/\s+/g, " ");
-    for (const label of ["Employee Declaration", "Prepared By :", "Checked By :", "Authorized By :", "Employee Signature :", "Date :"]) {
+    for (const label of ["Employee Declaration", "Prepared By :", "Authorized By :", "Employee Signature :", "Date :"]) {
       assert.ok(text.includes(label), label);
     }
+    for (const { text: t } of Object.values(out)) assert.ok(!t.includes("Checked By"), "only Prepared By and Authorized By");
     assert.match(flat, /I hereby declare that I have received ₹3,238\.00 \(Three Thousand Two Hundred Thirty Eight Rupees Only\), being my Full & Final Settlement amount stated above/);
     assert.match(flat, /To be signed by the employee only after the amount has been received\./);
     assert.doesNotMatch(text, /^\s*PAN\s+:\s*$/m, "an empty PAN row is not printed");
