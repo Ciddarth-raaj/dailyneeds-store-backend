@@ -89,6 +89,10 @@ class PurchaseUsecase {
     }
   }
 
+  findByOutletRefnos(pairs) {
+    return this.purchaseRepo.findByOutletRefnos(pairs);
+  }
+
   async bulkCreatePurchase(purchaseList) {
     try {
       const result = await this.purchaseRepo.bulkCreate(purchaseList);

@@ -15,6 +15,35 @@ class RetailPilotPurchaseSync {
     this.running = false;
   }
 
+  /**
+   * The reference is RetailPilot's seq, so it can coincide with an older
+   * (GoFrugal) purchase's mmh_mrc_refno at the same outlet. Saving would then
+   * overwrite that bill; a clash is skipped and reported instead. The same
+   * bill coming back (same GSTIN and bill number) is not a clash.
+   */
+  async _withoutRefnoClashes(purchases, skipped) {
+    if (!purchases.length || typeof this.purchaseUsecase.findByOutletRefnos !== "function") {
+      return purchases;
+    }
+    const existing = await this.purchaseUsecase.findByOutletRefnos(
+      purchases.map((p) => [p.STORE_ID, p.MRC_REF])
+    );
+    const norm = (v) => String(v == null ? "" : v).trim().toUpperCase();
+    const byKey = new Map(existing.map((r) => [`${r.retail_outlet_id}|${norm(r.mmh_mrc_refno)}`, r]));
+    return purchases.filter((p) => {
+      const row = byKey.get(`${p.STORE_ID}|${norm(p.MRC_REF)}`);
+      if (!row) return true;
+      if (norm(row.supplier_gstn) === norm(p.SUPPLIER_GSTN) && norm(row.mmh_dist_bill_no) === norm(p.DIST_BILL_NO)) {
+        return true;
+      }
+      skipped.push({
+        invoice_slug: p.RP_INVOICE_SLUG,
+        reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${row.purchase_id} (bill ${row.mmh_dist_bill_no}, GSTIN ${row.supplier_gstn || "-"}) at this outlet`,
+      });
+      return false;
+    });
+  }
+
   async run({ days, dryRun = false } = {}) {
     const lookback = days == null ? this.config.purchaseLookbackDays : Number(days);
     if (!Number.isInteger(lookback) || lookback < 0 || lookback > MAX_DAYS) {
@@ -30,7 +59,9 @@ class RetailPilotPurchaseSync {
     this.running = true;
     try {
       const rows = await this.spectra.queryAll(buildPurchaseQuery(lookback));
-      const { purchases, skipped } = mapPurchases(rows, this.config.storeMap);
+      const mapped = mapPurchases(rows, this.config.storeMap);
+      const skipped = mapped.skipped;
+      const purchases = await this._withoutRefnoClashes(mapped.purchases, skipped);
       const warnings = skipped.length
         ? [`${skipped.length} invoice(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.invoice_slug} (${s.reason})`).join("; ")}`]
         : [];

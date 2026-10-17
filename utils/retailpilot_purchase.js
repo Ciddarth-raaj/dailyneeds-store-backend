@@ -133,6 +133,7 @@ function mapPurchases(rows, storeMap) {
 
   const purchases = [];
   const skipped = [];
+  const seen = new Map();
 
   for (const [slug, { header: h, lines }] of groups) {
     const skip = (reason) => skipped.push({ invoice_slug: slug, reason });
@@ -149,8 +150,24 @@ function mapPurchases(rows, storeMap) {
       continue;
     }
 
+    // seq is RetailPilot's running number per store and invoice type
+    // (Warehouse purchases 6372, 6373, ...). It is both the MRC number and
+    // the reference - which the Tally export sends as the voucher number and
+    // Tally's responses are matched back on.
+    const seq = h.mrc_no == null || h.mrc_no === "" ? NaN : Number(h.mrc_no);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      skip("no seq (MRC number) in RetailPilot");
+      continue;
+    }
+    const key = `${outletId}|${seq}`;
+    if (seen.has(key)) {
+      skip(`seq ${seq} is used by another invoice (${seen.get(key)}) in the same store`);
+      continue;
+    }
+    seen.set(key, slug);
+
     const fields = {
-      MRC_REF: slug,
+      MRC_REF: String(seq),
       SUPPLIER_ID: str(h.supplier_id),
       SUPPLIER_GSTN: str(h.supplier_gstn),
       DIST_BILL_NO: str(h.supplier_invoice_id),
@@ -189,22 +206,20 @@ function mapPurchases(rows, storeMap) {
     }
     [sgst, cgst, igst, cess].forEach((l) => l.sort(byPerc));
 
-    const seq = h.mrc_no == null || h.mrc_no === "" ? NaN : Number(h.mrc_no);
-    const mrcNo = Number.isInteger(seq) ? seq : null;
-
     const payload = {
       STORE_ID: outletId,
       SUPPLIER_ID: fields.SUPPLIER_ID,
       SUPPLIER_NAME: str(h.supplier_name).slice(0, LIMITS.SUPPLIER_NAME),
       SUPPLIER_GSTN: fields.SUPPLIER_GSTN,
-      // RetailPilot's per-store, per-type running number (Warehouse
-      // purchases 6372, 6373, ...), the same continuous series as the MRC no.
-      MRC_NO: mrcNo,
+      MRC_NO: seq,
       MRC_DATE: mrcDate,
       MRC_AMT: round2(h.invoice_amount),
       DIST_BILL_DT: billDate,
       DIST_BILL_NO: fields.DIST_BILL_NO,
-      MRC_REF: slug,
+      MRC_REF: fields.MRC_REF,
+      // Not a purchase column (bulkCreate ignores it); kept so a skipped or
+      // reported bill can be found in RetailPilot.
+      RP_INVOICE_SLUG: slug,
       MANUAL_DISC: 0,
       TOT_SGST_AMT: sumValues(sgst),
       TOT_CGST_AMT: sumValues(cgst),

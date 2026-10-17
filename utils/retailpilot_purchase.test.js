@@ -65,7 +65,8 @@ describe("mapPurchases", () => {
     assert.equal(purchases.length, 1);
     const p = purchases[0];
     assert.equal(p.STORE_ID, 2);
-    assert.equal(p.MRC_REF, "INV-1001");
+    assert.equal(p.MRC_REF, "6372", "the reference (Tally voucher number) is seq");
+    assert.equal(p.RP_INVOICE_SLUG, "INV-1001");
     assert.equal(p.MRC_DATE, "2026-10-15");
     assert.equal(p.DIST_BILL_DT, "2026-10-14");
     assert.equal(p.DIST_BILL_NO, "B-1");
@@ -113,22 +114,31 @@ describe("mapPurchases", () => {
   it("skips, with a reason, what would not fit or has no outlet", () => {
     const { purchases, skipped } = mapPurchases(
       [
-        row({ invoice_slug: "A", store_id: "unknown" }),
-        row({ invoice_slug: "x".repeat(51) }),
-        row({ invoice_slug: "B", received_date: null, invoice_date: null }),
+        row({ invoice_slug: "A", store_id: "unknown", mrc_no: 1 }),
+        row({ invoice_slug: "C", supplier_invoice_id: "x".repeat(51), mrc_no: 2 }),
+        row({ invoice_slug: "B", received_date: null, invoice_date: null, mrc_no: 3 }),
+        row({ invoice_slug: "D", mrc_no: null }),
       ],
       STORE_MAP
     );
     assert.equal(purchases.length, 0);
-    assert.equal(skipped.length, 3);
+    assert.deepEqual(skipped.map((s) => s.invoice_slug), ["A", "C", "B", "D"]);
     assert.match(skipped[0].reason, /RETAILPILOT_STORE_MAP/);
-    assert.match(skipped[1].reason, /MRC_REF/);
+    assert.match(skipped[1].reason, /DIST_BILL_NO/);
     assert.match(skipped[2].reason, /date/);
+    assert.match(skipped[3].reason, /no seq/);
   });
 
-  it("leaves MRC_NO empty when RetailPilot has no seq", () => {
-    assert.equal(mapPurchases([row({ mrc_no: null })], STORE_MAP).purchases[0].MRC_NO, null);
-    assert.equal(mapPurchases([row({ mrc_no: "6400" })], STORE_MAP).purchases[0].MRC_NO, 6400);
+  it("takes MRC_NO and the reference from seq, and refuses a seq used twice in a store", () => {
+    const one = mapPurchases([row({ mrc_no: "6400" })], STORE_MAP).purchases[0];
+    assert.equal(one.MRC_NO, 6400);
+    assert.equal(one.MRC_REF, "6400");
+    const { purchases, skipped } = mapPurchases(
+      [row({ invoice_slug: "P" }), row({ invoice_slug: "Q" })],
+      STORE_MAP
+    );
+    assert.equal(purchases.length, 1);
+    assert.match(skipped[0].reason, /seq 6372 is used by another invoice \(P\)/);
   });
 
   it("keeps the date part of a timestamp without shifting it", () => {
@@ -203,7 +213,7 @@ describe("the sync", () => {
       },
     };
     const result = await syncFactory(
-      spectra([row(), row({ invoice_slug: "Z", store_id: "nope" })]),
+      spectra([row(), row({ invoice_slug: "Z", store_id: "nope", mrc_no: 9 })]),
       purchaseUsecase,
       config
     ).run();
@@ -211,6 +221,33 @@ describe("the sync", () => {
     assert.equal(result.inserted, 1);
     assert.equal(result.skipped.length, 1);
     assert.equal(result.warnings.length, 1);
+  });
+
+  it("skips a seq whose reference already belongs to a different bill at the outlet", async () => {
+    let saved;
+    const existing = [
+      { purchase_id: 77, retail_outlet_id: 2, mmh_mrc_refno: "6372", supplier_gstn: "33OTHER", mmh_dist_bill_no: "OLD-9" },
+      { purchase_id: 78, retail_outlet_id: 2, mmh_mrc_refno: "6373", supplier_gstn: "34AAAAA0000A1Z5", mmh_dist_bill_no: "B-2" },
+    ];
+    const purchaseUsecase = {
+      findByOutletRefnos: async (pairs) => {
+        assert.deepEqual(pairs, [[2, "6372"], [2, "6373"]]);
+        return existing;
+      },
+      bulkCreatePurchase: async (list) => {
+        saved = list;
+        return { code: 200, insertedCount: 0, updatedCount: 1, unchangedCount: 0 };
+      },
+    };
+    const result = await syncFactory(
+      spectra([row({ invoice_slug: "OLD" }), row({ invoice_slug: "SAME", mrc_no: 6373, supplier_invoice_id: "B-2" })]),
+      purchaseUsecase,
+      config
+    ).run();
+    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6373"], "the same bill coming back still updates");
+    assert.equal(result.skipped.length, 1);
+    assert.equal(result.skipped[0].invoice_slug, "OLD");
+    assert.match(result.skipped[0].reason, /already belongs to purchase 77/);
   });
 
   it("dry run saves nothing", async () => {

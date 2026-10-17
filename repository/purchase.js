@@ -1052,6 +1052,38 @@ class PurchaseRepository {
     });
   }
 
+  /**
+   * Existing rows for (retail_outlet_id, mmh_mrc_refno) pairs, with the
+   * fields that tell whether they are the same bill.
+   */
+  findByOutletRefnos(pairs) {
+    if (!pairs || pairs.length === 0) return Promise.resolve([]);
+    const where = pairs.map(() => "(retail_outlet_id = ? AND mmh_mrc_refno = ?)").join(" OR ");
+    const values = pairs.flatMap(([outletId, refno]) => [outletId, refno]);
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT purchase_id, retail_outlet_id, mmh_mrc_refno, supplier_gstn, mmh_dist_bill_no
+         FROM purchase WHERE ${where}`,
+        values,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.FIND-BY-OUTLET-REFNOS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   async deleteTallyResponse(VoucherNo) {
     return new Promise((resolve, reject) => {
       try {
