@@ -1,4 +1,9 @@
 const { parseAllowList, toBoolean, validateIpPolicy } = require("../utils/ip");
+const {
+  buildRetailPilotBranchMap,
+  resolveOutletForStore,
+  toStoreIdObject,
+} = require("../utils/retailpilot_branch_map");
 
 /**
  * Columns that must never leave through the token-less outlet reads.
@@ -107,10 +112,53 @@ class OutletUsecase {
   getOutletsByGofrugalIds(gofrugal_ids) {
     return this.outletRepo.getOutletsByGofrugalIds(gofrugal_ids);
   }
+  /**
+   * RetailPilot store ID -> outlet_id, read from Branch Master each call (so
+   * an edit there applies at once). Slugs are compared exactly - they are
+   * case-sensitive (FuUGY). Throws RetailPilotBranchMappingError if two
+   * branches share an ID.
+   */
+  async getRetailPilotStoreMap() {
+    return toStoreIdObject(buildRetailPilotBranchMap(await this.outletRepo.getRetailPilotIds()));
+  }
+
+  /**
+   * The branch for one RetailPilot store ID: { outlet_id, outlet_name }.
+   * A blank, unknown or unmapped ID throws RetailPilotBranchMappingError
+   * with a code and a message naming the ID - never a fallback outlet.
+   */
+  async resolveRetailPilotStore(storeId) {
+    const map = buildRetailPilotBranchMap(await this.outletRepo.getRetailPilotIds());
+    return resolveOutletForStore(map, storeId);
+  }
+
+  /**
+   * Blank -> null (the column is unique, and '' would collide), trimmed
+   * otherwise. Returns an error response when another branch already holds
+   * the ID, else null.
+   */
+  async _checkRetailPilotId(details, outletId = null) {
+    if (!details || !("retailpilot_id" in details)) return null;
+    const value = details.retailpilot_id == null ? "" : String(details.retailpilot_id).trim();
+    details.retailpilot_id = value === "" ? null : value;
+    if (details.retailpilot_id === null) return null;
+    const owner = (await this.outletRepo.getRetailPilotIds()).find(
+      (row) => String(row.retailpilot_id).trim() === value && Number(row.outlet_id) !== Number(outletId)
+    );
+    return owner
+      ? { code: 409, msg: `RetailPilot ID ${value} is already set on ${owner.outlet_name} (outlet ${owner.outlet_id})` }
+      : null;
+  }
+
   updateOutletDetails(outlet) {
     return new Promise(async (resolve, reject) => {
       try {
         const outlet_id = outlet.outlet_id;
+        const clash = await this._checkRetailPilotId(outlet.outlet_details, outlet_id);
+        if (clash) {
+          resolve(clash);
+          return;
+        }
         const res = await this.outletRepo.updateOutletDetails(
           outlet.outlet_details,
           outlet_id
@@ -151,6 +199,11 @@ class OutletUsecase {
   create(outlet) {
     return new Promise(async (resolve, reject) => {
       try {
+        const clash = await this._checkRetailPilotId(outlet.outlet_details);
+        if (clash) {
+          resolve(clash);
+          return;
+        }
         const id = await this.outletRepo.create(outlet.outlet_details);
 
         if (outlet.budget) {
