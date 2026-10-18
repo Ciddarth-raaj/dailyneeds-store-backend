@@ -329,8 +329,9 @@ class OutletRepository {
    * lowest outlet_id wins. The outlet master is small, so no chunking.
    */
   /**
-   * Branches carrying a RetailPilot ID, for the purchase sync's store map
-   * and for the uniqueness check on the Branch Master form.
+   * Branches carrying a RetailPilot ID: the RetailPilot store -> outlet map
+   * (utils/retailpilot_branch_map.js) and the uniqueness check on the
+   * Branch Master form.
    */
   getRetailPilotIds() {
     return new Promise((resolve, reject) => {

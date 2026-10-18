@@ -1,5 +1,5 @@
 /**
- * Branch Master's RetailPilot ID: the store map the purchase sync reads, and
+ * Branch Master's RetailPilot ID: the store map read from it, and
  * the one-branch-per-ID rule.
  *
  *   node --test usecase/outlet_retailpilot_id.test.js
@@ -120,10 +120,10 @@ describe("migration 20261203120000-outlet-retailpilot-id", () => {
   const up = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8"));
   const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8"));
 
-  it("is unique, is the newest, and its runner reads its own files", () => {
+  it("is unique, is followed only by the migrations named here, and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js"));
     assert.deepEqual(all.filter((f) => f.startsWith(NAME.slice(0, 14))), [`${NAME}.js`]);
-    assert.deepEqual(all.filter((f) => f > `${NAME}.js`), []);
+    assert.deepEqual(all.filter((f) => f > `${NAME}.js`), ["20261204120000-purchase-retailpilot-columns.js"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });
@@ -133,17 +133,54 @@ describe("migration 20261203120000-outlet-retailpilot-id", () => {
     assert.match(up, /ADD UNIQUE KEY `uniq_outlets_retailpilot_id` \(`retailpilot_id`\)/);
   });
 
-  it("fills the six branches by outlet_id, not by name, and touches nothing else", () => {
+  const alterAt = up.indexOf("ALTER TABLE `outlets`");
+  const guard = up.slice(0, alterAt);
+  const changes = up.slice(alterAt);
+
+  it("guards first: outlets 2-7 must be the expected branches before anything changes", () => {
+    assert.ok(alterAt > 0 && /SELECT \(/.test(guard), "the guard runs before the ALTER");
+    const names = { 2: "warehouse", 3: "kathirkamam", 4: "vallalar", 5: "moolakulam", 6: "muthialpet", 7: "ecr" };
+    for (const [id, name] of Object.entries(names)) {
+      assert.match(guard, new RegExp("`outlet_id` = " + id + " AND \\(?LOWER\\(`outlet_name`\\) LIKE '%" + name + "%'"));
+    }
+    assert.match(guard, /\) <> 6\s*\) AS retailpilot_id_outlet_guard/, "fewer than all six matching fails");
+    // The failure is a scalar subquery returning two rows: error 1242 on any
+    // MySQL, whatever the sql_mode (5.7 ignores CHECK constraints).
+    assert.match(guard, /FROM \(SELECT 1 AS n UNION ALL SELECT 2\) AS fail_twice/);
+    assert.doesNotMatch(guard, /\b(UPDATE|ALTER|INSERT|DELETE|DROP)\b/i, "the guard only reads");
+  });
+
+  it("then fills the six branches by outlet_id and touches nothing else", () => {
     const expected = { 2: "9rJMC", 3: "huABy", 4: "FuUGY", 5: "sooWy", 6: "rnMT1", 7: "kKFom" };
     for (const [id, slug] of Object.entries(expected)) {
-      assert.match(up, new RegExp(`WHEN ${id} THEN '${slug}'`));
+      assert.match(changes, new RegExp(`WHEN ${id} THEN '${slug}'`));
     }
-    assert.match(up, /WHERE `outlet_id` IN \(2, 3, 4, 5, 6, 7\)/);
-    assert.doesNotMatch(up, /outlet_name|gofrugal_id`\s*=|DROP|DELETE|INSERT/i);
+    assert.match(changes, /WHERE `outlet_id` IN \(2, 3, 4, 5, 6, 7\)/);
+    assert.doesNotMatch(changes, /outlet_name|gofrugal_id`\s*=|DROP|DELETE|INSERT/i);
   });
 
   it("down drops exactly what up added", () => {
     assert.match(down, /DROP INDEX `uniq_outlets_retailpilot_id`/);
     assert.match(down, /DROP COLUMN `retailpilot_id`/);
+  });
+});
+
+describe("resolving a RetailPilot store through the outlet usecase", () => {
+  const { RETAILPILOT_BRANCH_MAP_ERRORS: E } = require("../utils/retailpilot_branch_map");
+
+  it("reads Branch Master on every call, so an edit applies at once", async () => {
+    const rows = [{ outlet_id: 2, outlet_name: "Warehouse", retailpilot_id: "9rJMC" }];
+    const usecase = outletFactory(fakeRepo(rows), {});
+    assert.deepEqual(await usecase.resolveRetailPilotStore("9rJMC"), { outlet_id: 2, outlet_name: "Warehouse" });
+    rows[0].retailpilot_id = "newId";
+    await assert.rejects(usecase.resolveRetailPilotStore("9rJMC"), (err) => err.code === E.STORE_UNMAPPED);
+    assert.equal((await usecase.resolveRetailPilotStore("newId")).outlet_id, 2);
+  });
+
+  it("an unmapped store is rejected with the store ID in the message", async () => {
+    await assert.rejects(
+      outletFactory(fakeRepo(BRANCHES), {}).resolveRetailPilotStore("kKFom"),
+      /RetailPilot store kKFom is not set as the RetailPilot ID of any branch/
+    );
   });
 });

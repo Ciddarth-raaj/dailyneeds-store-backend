@@ -1,4 +1,9 @@
 const { parseAllowList, toBoolean, validateIpPolicy } = require("../utils/ip");
+const {
+  buildRetailPilotBranchMap,
+  resolveOutletForStore,
+  toStoreIdObject,
+} = require("../utils/retailpilot_branch_map");
 
 /**
  * Columns that must never leave through the token-less outlet reads.
@@ -108,14 +113,23 @@ class OutletUsecase {
     return this.outletRepo.getOutletsByGofrugalIds(gofrugal_ids);
   }
   /**
-   * RetailPilot store slug -> outlet_id, from Branch Master. The slugs are
-   * case-sensitive (FuUGY), so they are compared exactly.
+   * RetailPilot store ID -> outlet_id, read from Branch Master each call (so
+   * an edit there applies at once). Slugs are compared exactly - they are
+   * case-sensitive (FuUGY). Throws RetailPilotBranchMappingError if two
+   * branches share an ID.
    */
   async getRetailPilotStoreMap() {
-    const rows = await this.outletRepo.getRetailPilotIds();
-    const map = {};
-    for (const row of rows) map[String(row.retailpilot_id).trim()] = Number(row.outlet_id);
-    return map;
+    return toStoreIdObject(buildRetailPilotBranchMap(await this.outletRepo.getRetailPilotIds()));
+  }
+
+  /**
+   * The branch for one RetailPilot store ID: { outlet_id, outlet_name }.
+   * A blank, unknown or unmapped ID throws RetailPilotBranchMappingError
+   * with a code and a message naming the ID - never a fallback outlet.
+   */
+  async resolveRetailPilotStore(storeId) {
+    const map = buildRetailPilotBranchMap(await this.outletRepo.getRetailPilotIds());
+    return resolveOutletForStore(map, storeId);
   }
 
   /**
