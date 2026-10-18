@@ -1425,3 +1425,38 @@ describe("POST /hr/employee/:id/joining-date - the historical-correction key", (
     assert.equal(r.status, 403);
   });
 });
+
+/* F&F review round 2 - the rehire gate's permission is the caller's real key. */
+describe("rejoin: approve_rehire_exception is read from the caller's permissions", () => {
+  it("HR without the key: the usecase is told it may NOT approve an exception; with it, it may", async () => {
+    calls.length = 0;
+    await call("POST", "/hr/employee/9/rejoin", tokenFor(), { date_of_joining: "2026-02-01", rehire_exception_reason: "x" });
+    const without = calls.find((c) => c[0] === "rejoin");
+    assert.equal(without[3].canApproveRehireException, false);
+    assert.equal(without[2].rehire_exception_reason, "x");
+
+    // An administrator holds every key through the user_type 2 bypass.
+    calls.length = 0;
+    await call("POST", "/hr/employee/9/rejoin", tokenFor({ userType: 2 }), { date_of_joining: "2026-02-01" });
+    assert.equal(calls.find((c) => c[0] === "rejoin")[3].canApproveRehireException, true);
+  });
+
+  it("the gate's refusal reaches the browser with its code and eligibility, and nothing more", async () => {
+    const original = usecase.rejoinEmployee;
+    usecase.rejoinEmployee = async () => {
+      const err = new Error("This employee was assessed as NOT fit for rehire ...");
+      err.httpCode = 403;
+      err.detail = { error: "REHIRE_APPROVAL_REQUIRED", rehire_eligibility: "NO", conditions: "secret" };
+      throw err;
+    };
+    try {
+      const res = await call("POST", "/hr/employee/9/rejoin", tokenFor(), { date_of_joining: "2026-02-01" });
+      assert.equal(res.body.code, 403);
+      assert.equal(res.body.error, "REHIRE_APPROVAL_REQUIRED");
+      assert.equal(res.body.rehire_eligibility, "NO");
+      assert.equal(res.body.conditions, undefined, "confidential detail is not passed through");
+    } finally {
+      usecase.rejoinEmployee = original;
+    }
+  });
+});

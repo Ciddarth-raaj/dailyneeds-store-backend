@@ -542,35 +542,22 @@ class EmployeeRoutes {
       res.end();
     });
 
+    /*
+     * RETIRED: it set `new_employee.status` directly - reactivating an exited
+     * employee without Rejoin's rehire assessment, or deactivating one without
+     * Resign recording the exit. No screen calls it. Employee status changes
+     * only through Employee Master -> Resign / Rejoin. Nothing is written.
+     */
     router.post(
       "/update-status",
       this.permissions.require(P.ADD_EMPLOYEES),
       this.branchScope.requireEmployeeInScope(),
-      async (req, res) => {
-      try {
-        const schema = {
-          employee_id: Joi.number().required(),
-          status: Joi.number().required(),
-        };
-
-        const employee = req.body;
-        const isValid = Joi.validate(employee, schema);
-        if (isValid.error !== null) {
-          throw isValid.error;
-        }
-
-        const code = await this.employeeUsecase.updateStatus(employee);
-        res.json({ code: code });
-      } catch (err) {
-        if (err.name === "ValidationError") {
-          res.json({ code: 422, msg: err.toString() });
-        } else {
-          console.log(err);
-          res.json({ code: 500, msg: "An error occurred !" });
-        }
-      }
-        res.end();
-      }
+      (req, res) =>
+      res.json({
+        code: 410,
+        error: "EMPLOYEE_STATUS_VIA_LIFECYCLE",
+        msg: "Employee status is changed only with Resign or Rejoin in Employee Master.",
+      })
     );
     router.post(
       "/updatedata",

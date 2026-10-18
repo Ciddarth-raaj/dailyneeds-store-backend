@@ -40,6 +40,17 @@ const {
   MONTH_SHORT,
   monthLabel,
 } = require("../constants/payslip");
+const {
+  DOCUMENT_TYPE,
+  FNF_TEMPLATE_VERSION,
+  FNF_DECLARATION_HEADING,
+  FNF_DECLARATION,
+  FNF_DECLARATION_SIGNING,
+  FNF_RECOVERABLE_HEADING,
+  FNF_RECOVERABLE_ACKNOWLEDGEMENT,
+  FNF_RECOVERABLE_SIGNING,
+} = require("../constants/fnf");
+const { isExitMonth, amountInWords, dateOnly } = require("./fnf");
 
 class SnapshotError extends Error {
   constructor(code, message) {
@@ -66,6 +77,18 @@ function money(paise) {
   const abs = Math.abs(paise);
   const text = `${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, "0")}`;
   return negative && abs !== 0 ? `-${text}` : text;
+}
+
+/**
+ * Integer paise (zero or above) as "₹3,238.00", Indian digit grouping - the
+ * way the statement prints amounts. Formatting only: the figure is the one
+ * passed in.
+ */
+function rupeeText(paise) {
+  const rupees = String(Math.floor(paise / 100));
+  const last3 = rupees.slice(-3);
+  const rest = rupees.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",");
+  return `₹${rest ? `${rest},${last3}` : last3}.${String(paise % 100).padStart(2, "0")}`;
 }
 
 const moneyOf = (value) => money(toPaise(value));
@@ -267,6 +290,52 @@ function employerContributionOf(c, employee, pfApplicable, esiApplicable) {
 }
 
 /**
+ * THE F&F BLOCK - what the Full & Final Settlement statement prints beyond a
+ * payslip. INFORMATIONAL COPIES of stored figures only:
+ *
+ *   last_working_day    the payrun snapshot's resignation date
+ *   lop_days            the stored NCP days (base days less salary days)
+ *   actual_working_days the stored salary days
+ *   lateness_amount     the stored missing-hours deduction
+ *   actual              the FULL-MONTH structure value of each salary
+ *                       component (the "Actual" column), beside the earned
+ *                       amount the earnings line carries
+ *   net_payable_words   the stored Net Pay in words; a negative Net Pay is an
+ *                       amount RECOVERABLE from the employee and says so
+ *   declaration         the Employee Declaration of receipt (payable) or the
+ *                       acknowledgement of the recoverable amount, with the
+ *                       snapshot's own Net Pay and words filled in, and the
+ *                       signing instruction - printed unsigned
+ */
+function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
+  const actual = {};
+  if (split) {
+    COMPONENTS.forEach(([key], i) => {
+      actual[key] = money(weights[i] === null ? null : weights[i]);
+    });
+  }
+  const recoverable = netPay < 0;
+  return {
+    last_working_day: dateOnly(employee.resignation_date),
+    date_of_joining: textOrNull(employee.date_of_joining),
+    lop_days: c.ncp_days === null || c.ncp_days === undefined ? null : Number(c.ncp_days),
+    actual_working_days: salaryDays === null || salaryDays === undefined ? null : Number(salaryDays),
+    lateness_amount: moneyOf(c.missing_hours_deduction),
+    actual_monthly_gross: moneyOf(employee.monthly_gross),
+    actual,
+    net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
+    recoverable,
+    net_payable_words: amountInWords(money(Math.abs(netPay))),
+    declaration_heading: recoverable ? FNF_RECOVERABLE_HEADING : FNF_DECLARATION_HEADING,
+    // The snapshot's own Net Pay (sign dropped: the heading says which way it goes) and its words.
+    declaration: (recoverable ? FNF_RECOVERABLE_ACKNOWLEDGEMENT : FNF_DECLARATION)
+      .replace("{amount}", rupeeText(Math.abs(netPay)))
+      .replace("{words}", amountInWords(money(Math.abs(netPay)))),
+    declaration_signing: recoverable ? FNF_RECOVERABLE_SIGNING : FNF_DECLARATION_SIGNING,
+  };
+}
+
+/**
  * @param {object} args
  * @param {object} args.period       { year, month }
  * @param {object} args.calculation  the stored `payrun_employee_calculation` row (APPROVED_LOCKED)
@@ -413,9 +482,24 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
     ? null
     : Number(c.effective_nrm_minutes);
 
+  /*
+   * WHICH DOCUMENT THIS IS. The employee's exit month publishes a FULL &
+   * FINAL SETTLEMENT statement instead of a Salary Payslip - decided by the
+   * payrun snapshot's last working day, the same date the calculation used.
+   * The figures are the same stored figures either way.
+   */
+  const documentType = isExitMonth({ year: period.year, month: period.month, resignation_date: employee.resignation_date })
+    ? DOCUMENT_TYPE.FNF
+    : DOCUMENT_TYPE.PAYSLIP;
+  const fnf = documentType === DOCUMENT_TYPE.FNF
+    ? fnfBlockOf({ c, employee, split, weights, netPay, salaryDays: c.salary_days })
+    : null;
+
   return {
     schema_version: SNAPSHOT_SCHEMA_VERSION,
-    template_version: TEMPLATE_VERSION,
+    template_version: documentType === DOCUMENT_TYPE.FNF ? FNF_TEMPLATE_VERSION : TEMPLATE_VERSION,
+    document_type: documentType,
+    fnf,
     // AS IT WAS AT PUBLISH: a later edit of the company record never
     // changes a payslip already released.
     company: {
@@ -583,7 +667,8 @@ function payslipFilename(snapshot) {
     .slice(0, 40);
   const mon = Number.isInteger(m) && m >= 1 && m <= 12 ? MONTH_SHORT[m - 1] : "Month";
   const year = Number.isInteger(y) ? y : "";
-  const parts = [`Payslip_${mon}-${year}`, Number.isInteger(id) && id > 0 ? String(id) : null, name || null];
+  const prefix = snapshot && snapshot.document_type === DOCUMENT_TYPE.FNF ? "FnF_Settlement" : "Payslip";
+  const parts = [`${prefix}_${mon}-${year}`, Number.isInteger(id) && id > 0 ? String(id) : null, name || null];
   return `${parts.filter(Boolean).join("_")}.pdf`;
 }
 

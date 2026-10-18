@@ -106,7 +106,12 @@ module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), 
         payslip_ref: r.payslip_ref,
         period_year: Number(r.period_year),
         period_month: Number(r.period_month),
-        label: monthLabel(r.period_year, r.period_month),
+        // An exit month's document is the Full & Final Settlement statement.
+        document_type: r.document_type === "FNF" ? "FNF" : "PAYSLIP",
+        label:
+          r.document_type === "FNF"
+            ? `Full & Final Settlement — ${monthLabel(r.period_year, r.period_month)}`
+            : monthLabel(r.period_year, r.period_month),
         status: "Published",
         published_at: r.published_at,
       })),
@@ -122,7 +127,11 @@ module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), 
       code: 200,
       payslip: {
         payslip_ref: row.payslip_ref,
-        label: monthLabel(row.period_year, row.period_month),
+        document_type: snapshot.document_type === "FNF" ? "FNF" : "PAYSLIP",
+        label:
+          snapshot.document_type === "FNF"
+            ? `Full & Final Settlement — ${monthLabel(row.period_year, row.period_month)}`
+            : monthLabel(row.period_year, row.period_month),
         published_at: row.published_at,
         filename: payslipFilename(snapshot),
         snapshot: employeeView(snapshot),

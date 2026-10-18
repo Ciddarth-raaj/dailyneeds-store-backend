@@ -149,16 +149,6 @@ class EmployeeUsecase {
       }
     });
   }
-  updateStatus(file) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        await this.employeeRepo.updateStatus(file);
-        resolve(200);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  }
   getBankDetails(storeIds = null) {
     return new Promise(async (resolve, reject) => {
       try {

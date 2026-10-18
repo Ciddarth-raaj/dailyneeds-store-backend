@@ -49,7 +49,9 @@ describe(NAME, () => {
       "20261127120000-attendance-ot-correction-priority.js",
       "20261128120000-attendance-ot-historical-review.js",
       "20261129120000-lr-followup-manual.js",
-      "20261130120000-purchase-refno-supplier-id-widen.js",
+      "20261130120000-account-sheet-wallet.js",
+      "20261201120000-fnf-settlement.js",
+      "20261202120000-purchase-refno-supplier-id-widen.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

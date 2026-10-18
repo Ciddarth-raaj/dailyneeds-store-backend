@@ -83,7 +83,7 @@ class PayrunPayslipRepository {
   async listPublishedForEmployee(employeeId) {
     return this._read(
       "LIST-FOR-EMPLOYEE",
-      `SELECT p.payslip_ref, p.period_year, p.period_month, p.payslip_version,
+      `SELECT p.payslip_ref, p.period_year, p.period_month, p.payslip_version, p.document_type,
               DATE_FORMAT(p.published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
               DATE_FORMAT(p.first_viewed_at, '%Y-%m-%d %H:%i:%s') AS first_viewed_at
          FROM payrun_payslip p ${PUBLISHED_JOIN}
@@ -98,7 +98,7 @@ class PayrunPayslipRepository {
     const rows = await this._read(
       "GET-FOR-EMPLOYEE",
       `SELECT p.payslip_id, p.payslip_ref, p.employee_id, p.period_year, p.period_month,
-              p.payslip_version, p.template_version, p.snapshot_json, p.snapshot_sha256,
+              p.payslip_version, p.template_version, p.document_type, p.snapshot_json, p.snapshot_sha256,
               DATE_FORMAT(p.published_at, '%Y-%m-%d %H:%i:%s') AS published_at
          FROM payrun_payslip p ${PUBLISHED_JOIN}
         WHERE p.employee_id = ? AND p.payslip_ref = ? AND p.status = 'ACTIVE'`,
@@ -141,7 +141,7 @@ class PayrunPayslipRepository {
     }
     return this._read(
       "LIST-MONTH-STATUS",
-      `SELECT p.payslip_id, p.employee_id, p.payslip_version,
+      `SELECT p.payslip_id, p.employee_id, p.payslip_version, p.document_type,
               DATE_FORMAT(p.published_at, '%Y-%m-%d %H:%i:%s') AS payslip_published_at,
               DATE_FORMAT(p.first_viewed_at, '%Y-%m-%d %H:%i:%s') AS first_viewed_at,
               DATE_FORMAT(p.last_viewed_at, '%Y-%m-%d %H:%i:%s') AS last_viewed_at,
@@ -164,7 +164,7 @@ class PayrunPayslipRepository {
     const rows = await this._read(
       "GET-ACTIVE-FOR-MONTH",
       `SELECT payslip_id, payslip_ref, employee_id, period_year, period_month, payslip_version,
-              template_version, snapshot_schema_version, snapshot_json, snapshot_sha256,
+              template_version, document_type, snapshot_schema_version, snapshot_json, snapshot_sha256,
               calculation_version, calculation_revision, calculation_hash,
               published_by, DATE_FORMAT(published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
               DATE_FORMAT(first_viewed_at, '%Y-%m-%d %H:%i:%s') AS first_viewed_at,
@@ -182,7 +182,7 @@ class PayrunPayslipRepository {
     return this._read(
       "LIST-VERSIONS",
       `SELECT payslip_id, payslip_version, status, calculation_revision, calculation_hash,
-              template_version, snapshot_sha256,
+              template_version, document_type, snapshot_sha256,
               published_by, DATE_FORMAT(published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
               archived_by, DATE_FORMAT(archived_at, '%Y-%m-%d %H:%i:%s') AS archived_at, archive_reason,
               DATE_FORMAT(first_viewed_at, '%Y-%m-%d %H:%i:%s') AS first_viewed_at
@@ -285,7 +285,7 @@ class PayrunPayslipRepository {
     return this._read(
       "READ-CLAIMED",
       `SELECT n.notification_id, n.payslip_id, n.employee_id, n.attempt_no, n.trigger_type,
-              p.period_year, p.period_month,
+              p.period_year, p.period_month, p.document_type,
               (p.status = 'ACTIVE' AND c.payrun_calculation_id IS NOT NULL) AS deliverable
          FROM payrun_payslip_notification n
          JOIN payrun_payslip p ON p.payslip_id = n.payslip_id

@@ -779,4 +779,36 @@ module.exports = {
   // Approving the OT is still the employee's ordinary chain. GRANTED TO
   // NOBODY: administrators hold it through the user_type 2 bypass.
   ATTENDANCE_OT_HISTORICAL_REVIEW: "attendance_ot_historical_review",
+
+  // ================================ FULL & FINAL SETTLEMENT / EXIT ========
+  //
+  // Migration 20261201120000-fnf-settlement. ALL FIVE ARE GRANTED TO NOBODY:
+  // administrators hold them through the user_type 2 bypass, anybody else
+  // only by a deliberate grant on the Designation screen.
+  //
+  //   VIEW_FNF_SETTLEMENT          the F&F list and one employee's F&F items
+  //                                (needs view_employees + view_salary too:
+  //                                it shows net pay)
+  //   CONFIRM_FNF_PAYMENT          ACCOUNTS: confirm that a PUBLISHED F&F was
+  //                                actually paid (mode, reference, date), or
+  //                                reopen that confirmation with a reason.
+  //                                Publishing is NOT payment.
+  //   VIEW_EXIT_INTERVIEW          CONFIDENTIAL: the exit interview answers
+  //                                and the rehire assessment. Never reaches a
+  //                                payslip, the Mini App or Telegram.
+  //   MANAGE_EXIT_INTERVIEW        record the exit interview and the FIRST
+  //                                rehire assessment of an exit
+  //   OVERRIDE_REHIRE_ELIGIBILITY  change a rehire assessment already given
+  //                                (a new history row with a reason; the old
+  //                                one is kept)
+  VIEW_FNF_SETTLEMENT: "view_fnf_settlement",
+  CONFIRM_FNF_PAYMENT: "confirm_fnf_payment",
+  VIEW_EXIT_INTERVIEW: "view_exit_interview",
+  MANAGE_EXIT_INTERVIEW: "manage_exit_interview",
+  OVERRIDE_REHIRE_ELIGIBILITY: "override_rehire_eligibility",
+  //   APPROVE_REHIRE_EXCEPTION     MANAGEMENT: rejoin somebody whose previous
+  //                                exit was assessed NO or CONDITIONAL, with a
+  //                                mandatory reason (audited). Checked inside
+  //                                the rejoin transaction.
+  APPROVE_REHIRE_EXCEPTION: "approve_rehire_exception",
 };

@@ -181,6 +181,7 @@ const G = {
   BANK: "Bank (current master)",
   RECORD: "Payrun Record",
   MASTER: "Employee Master (current)",
+  FNF: "Full & Final Settlement",
 };
 
 const PAYROLL_FIELDS = [
@@ -200,6 +201,14 @@ const PAYROLL_FIELDS = [
   f("date_of_joining", "Date of Joining", G.EMPLOYEE, {
     select: "DATE_FORMAT(pe.date_of_joining, '%Y-%m-%d')", sort: "pe.date_of_joining",
     type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
+  }),
+  // ACTIVE AND EXITED EMPLOYEES ARE ONE REPORT: an employee whose last working
+  // day falls in the payroll month is that month's F&F (Exited Employee).
+  f("employee_classification", "Employee Classification", G.EMPLOYEE, {
+    select:
+      "CASE WHEN pe.resignation_date IS NOT NULL AND YEAR(pe.resignation_date) = pe.period_year " +
+      "AND MONTH(pe.resignation_date) = pe.period_month THEN 'Exited Employee' ELSE 'Active Employee' END",
+    source: SOURCE.PAYRUN_SNAPSHOT,
   }),
   f("last_working_day", "Last Working Day", G.EMPLOYEE, {
     select: "DATE_FORMAT(pe.resignation_date, '%Y-%m-%d')", sort: "pe.resignation_date",
@@ -364,6 +373,34 @@ const PAYROLL_FIELDS = [
   }),
 
   /* --------------------------------------------------------- the record */
+  /* ------------------------------------------------ full & final settlement */
+  // The exit month and its settlement completion. Settlement facts are read
+  // from `employee_fnf_settlement` by the month's own payrun row, so only the
+  // month that settled an exit shows them.
+  f("fnf_settlement_status", "F&F Settlement Status", G.FNF, {
+    select:
+      "CASE WHEN pe.resignation_date IS NULL OR YEAR(pe.resignation_date) <> pe.period_year " +
+      "OR MONTH(pe.resignation_date) <> pe.period_month THEN NULL " +
+      "WHEN EXISTS (SELECT 1 FROM employee_fnf_settlement s WHERE s.payrun_employee_id = pe.payrun_employee_id " +
+      "AND s.status = 'SETTLED') THEN 'Settled' ELSE 'Pending' END",
+  }),
+  f("fnf_paid_on", "F&F Paid On", G.FNF, {
+    select:
+      "(SELECT DATE_FORMAT(s.paid_on, '%Y-%m-%d') FROM employee_fnf_settlement s " +
+      "WHERE s.payrun_employee_id = pe.payrun_employee_id AND s.status = 'SETTLED')",
+    type: TYPE.DATE,
+  }),
+  f("fnf_payment_mode", "F&F Payment Mode", G.FNF, {
+    select:
+      "(SELECT s.payment_mode FROM employee_fnf_settlement s " +
+      "WHERE s.payrun_employee_id = pe.payrun_employee_id AND s.status = 'SETTLED')",
+  }),
+  f("fnf_payment_reference", "F&F Payment Reference", G.FNF, {
+    select:
+      "(SELECT s.payment_reference FROM employee_fnf_settlement s " +
+      "WHERE s.payrun_employee_id = pe.payrun_employee_id AND s.status = 'SETTLED')",
+  }),
+
   f("payrun_status", "Payrun Status", G.RECORD, { select: PAYRUN_STATUS, always: true, transform: (v) => PAYRUN_STATUS_LABEL[v] || v }),
   f("approved_at", "Approved At", G.RECORD, { select: "DATE_FORMAT(c.approved_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE, always: true }),
   f("published_at", "Published At", G.RECORD, { select: "DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i')", type: TYPE.DATE, always: true }),
@@ -455,7 +492,7 @@ for (const [name, sql] of Object.entries(employeeCatalogue.JOINS)) {
   JOINS[`em:${name}`] = { sql, requires: ["new_employee"] };
 }
 
-const GROUP_ORDER = [G.EMPLOYEE, G.EARNINGS, G.DEDUCTIONS, G.NET, G.EMPLOYER, G.STATUTORY, G.ATTENDANCE, G.BANK, G.RECORD, G.MASTER];
+const GROUP_ORDER = [G.EMPLOYEE, G.EARNINGS, G.DEDUCTIONS, G.NET, G.EMPLOYER, G.STATUTORY, G.ATTENDANCE, G.BANK, G.FNF, G.RECORD, G.MASTER];
 
 const BY_KEY = new Map(FIELDS.map((x) => [x.key, x]));
 const getField = (key) => (typeof key === "string" ? BY_KEY.get(key) || null : null);

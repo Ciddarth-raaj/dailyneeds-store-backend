@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
+const { walletValues } = require("../utils/account_wallet");
 
 class AccountsRoutes {
   constructor(accountsUsecase, tallyUsecase) {
@@ -134,6 +135,9 @@ class AccountsRoutes {
           card_sales: Joi.number().required(),
           loyalty: Joi.number().required(),
           sales_return: Joi.number().required(),
+          // Optional; checked for range and decimals by walletValues().
+          wallet_receipt: Joi.number().allow("", null).optional(),
+          wallet_payment: Joi.number().allow("", null).optional(),
           cashier_id: Joi.number().required(),
           sales: Joi.array().items(
             Joi.object({
@@ -154,6 +158,8 @@ class AccountsRoutes {
         }
 
         req.body.user_id = req.decoded.id;
+        // Omitted wallet amounts are stored as 0 on a new sheet.
+        Object.assign(req.body, walletValues(req.body));
 
         const result = await this.accountsUsecase.createAccount(req.body);
         res.json(result);
@@ -186,6 +192,9 @@ class AccountsRoutes {
           card_sales: Joi.number().required(),
           loyalty: Joi.number().required(),
           sales_return: Joi.number().required(),
+          // Optional; checked for range and decimals by walletValues().
+          wallet_receipt: Joi.number().allow("", null).optional(),
+          wallet_payment: Joi.number().allow("", null).optional(),
           cashier_id: Joi.number().required(),
           user_id: Joi.number().required(),
           sales: Joi.array().items(
@@ -206,6 +215,9 @@ class AccountsRoutes {
         if (isValid.error !== null) {
           throw isValid.error;
         }
+        // An omitted wallet amount stays null, which the update leaves as
+        // it is - it is never reset to 0.
+        Object.assign(account, walletValues(account));
 
         const result = await this.accountsUsecase.updateAccount(account);
         res.json(result);

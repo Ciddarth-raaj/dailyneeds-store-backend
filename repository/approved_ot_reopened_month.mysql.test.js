@@ -112,15 +112,8 @@ describe("Approved OT of a reopened month over real SQL", { skip: !URL && "ATTEN
     await q(pool, "SET FOREIGN_KEY_CHECKS = 1");
     for (const ddl of STAND_INS.filter((d) => !/CREATE TABLE new_employee/.test(d))) await q(pool, ddl);
     await q(pool, EMPLOYEE_DDL);
-    await q(pool, `ALTER TABLE employee_salary
-      ADD COLUMN pf_status VARCHAR(32) NULL, ADD COLUMN employee_pf DECIMAL(12,2) NULL,
-      ADD COLUMN employer_pf_total DECIMAL(12,2) NULL, ADD COLUMN edli DECIMAL(12,2) NULL,
-      ADD COLUMN pf_admin_charge DECIMAL(12,2) NULL, ADD COLUMN esi_status VARCHAR(32) NULL,
-      ADD COLUMN esi_wage DECIMAL(12,2) NULL, ADD COLUMN employee_esi DECIMAL(12,2) NULL,
-      ADD COLUMN employer_esi DECIMAL(12,2) NULL, ADD COLUMN monthly_ctc DECIMAL(12,2) NULL,
-      ADD COLUMN ctc_status VARCHAR(32) NULL, ADD COLUMN unresolved_notes TEXT NULL,
-      ADD COLUMN statutory_snapshot JSON NULL`);
-    const files = [...MIGRATIONS.filter((f) => f !== CARRY), EPFO, CARRY];
+    // employee_salary's statutory columns come from the shared stand-in.
+    const files = [...MIGRATIONS.filter((f) => f !== CARRY && f !== EPFO), EPFO, CARRY];
     for (const file of files) await q(pool, fs.readFileSync(path.join(SQLS, file), "utf8"));
 
     for (const id of [OT, CONTROL, WITHDRAWN]) {

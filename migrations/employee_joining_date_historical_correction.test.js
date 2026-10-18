@@ -38,7 +38,9 @@ describe("the migration", () => {
       "20261127120000-attendance-ot-correction-priority",
       "20261128120000-attendance-ot-historical-review",
       "20261129120000-lr-followup-manual",
-      "20261130120000-purchase-refno-supplier-id-widen",
+      "20261130120000-account-sheet-wallet",
+      "20261201120000-fnf-settlement",
+      "20261202120000-purchase-refno-supplier-id-widen",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");

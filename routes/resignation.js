@@ -3,6 +3,27 @@ const P = require("../constants/hr_permissions");
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http")
 
+/**
+ * THE LEGACY RESIGNATION MODULE IS READ-ONLY.
+ *
+ * Employee Master -> Resign / Rejoin is the official workflow: Resign records
+ * the exit (resignation date, closed employment period, F&F month) and Rejoin
+ * applies the rehire assessment (CONDITIONAL / NO need management approval
+ * with a reason). The old create / delete changed `new_employee.status` and the
+ * login directly - outside both - so they are refused here, on the server,
+ * whatever the caller's permissions; edit is refused so historical records
+ * stay as they are. Nothing is written by a refused request. The list and the
+ * single-record reads stay available.
+ */
+const LEGACY_READ_ONLY = {
+  code: 410,
+  error: "LEGACY_RESIGNATION_READ_ONLY",
+  msg:
+    "Legacy resignation records are read-only. Record an exit with Resign, and a return with Rejoin, " +
+    "in Employee Master.",
+};
+const legacyReadOnly = (req, res) => res.json(LEGACY_READ_ONLY);
+
 class ResignationRoutes {
   constructor(resignationUsecase, permissions) {
     this.permissions = permissions;
@@ -27,29 +48,8 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.post("/resignation_id", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
-        try {
-          const schema = {
-            resignation_id: Joi.string().required(),
-          }
-          const resignation = req.query;
-          const isValid = Joi.validate(resignation, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-          const response = await this.resignationUsecase.deleteResignation(resignation.resignation_id);
-          res.json(response);
-        } catch (err) {
-            console.log(err);
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
-        }
-  
-        res.end();
-      });
+      // RETIRED WRITE (see LEGACY_READ_ONLY below): it reactivated the employee and their login.
+      router.post("/resignation_id", this.permissions.require(P.VIEW_RESIGNATION), legacyReadOnly);
       router.get("/get/resignation_id", this.permissions.require(P.VIEW_RESIGNATION), async (req, res) => {
         try {
           const schema = {
@@ -96,69 +96,10 @@ class ResignationRoutes {
   
         res.end();
       });
-      router.post("/update-resignation", this.permissions.require(P.ADD_RESIGNATION), async (req, res) => {
-        try {
-          const schema = {
-            resignation_id: Joi.number().required(),
-
-            resignation_details: Joi.object({
-              employee_name: Joi.string().optional(),
-              reason_type: Joi.string().optional(),
-              reason: Joi.string().optional(),
-              resignation_date: Joi.string().optional(),
-            }).optional(),
-          };
-
-          const resignation = req.body;
-          const isValid = Joi.validate(resignation, schema);
-          if (isValid.error !== null) {
-            throw isValid.error;
-          }
-  
-          const code = await this.resignationUsecase.updateResignationDetails(resignation);
-          res.json({ code: code });
-        } catch (err) {
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            console.log(err);
-            res.json({ code: 500, msg: "An error occurred !" });
-          }
-        }
-        res.end();
-      });
-    router.post("/create", this.permissions.require(P.ADD_RESIGNATION), async (req, res) => {
-        try {
-          const schema = {
-            employee_name: Joi.string().required(),
-            reason_type: Joi.string().required(),
-            reason: Joi.string().required(),
-            resignation_date: Joi.string().required(),
-          };
-  
-          const resignation = req.body;
-
-          const isValid = Joi.validate(resignation, schema);
-  
-          if (isValid.error !== null) {
-            console.log(isValid.error);
-            throw isValid.error;
-          }
-          const response = await this.resignationUsecase.create(resignation);
-  
-          res.json(response);
-        } catch (err) {
-
-          if (err.name === "ValidationError") {
-            res.json({ code: 422, msg: err.toString() });
-          } else {
-            console.log(err);
-            res.json({ code: 500, msg: err.message });
-          }
-        }
-  
-        res.end();
-      });
+      // RETIRED WRITE: edited a historical resignation record.
+      router.post("/update-resignation", this.permissions.require(P.ADD_RESIGNATION), legacyReadOnly);
+    // RETIRED WRITE: it deactivated the employee and their login outside the lifecycle.
+    router.post("/create", this.permissions.require(P.ADD_RESIGNATION), legacyReadOnly);
   }
   getRouter() {
     return router;
@@ -168,3 +109,4 @@ class ResignationRoutes {
 module.exports = (resignationUsecase, permissions) => {
   return new ResignationRoutes(resignationUsecase, permissions);
 };
+module.exports.LEGACY_READ_ONLY = LEGACY_READ_ONLY;
