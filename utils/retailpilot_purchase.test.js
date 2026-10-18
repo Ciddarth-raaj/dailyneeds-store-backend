@@ -280,6 +280,8 @@ describe("the sync", () => {
         const a = actions[p.MRC_NO] || { action: "inserted", purchase_id: saved.length, kept: [] };
         return a;
       },
+      // A dry run's read-only look: what the upsert would do, nothing saved.
+      previewRetailPilotPurchase: async (p) => ({ action: (actions[p.MRC_NO] || { action: "inserted" }).action }),
     };
   };
 
@@ -390,10 +392,15 @@ describe("the sync", () => {
   });
 
   it("dry run saves nothing", async () => {
-    const uc = { upsertRetailPilotPurchase: async () => assert.fail("must not save") };
+    const uc = {
+      upsertRetailPilotPurchase: async () => assert.fail("must not save"),
+      previewRetailPilotPurchase: async () => ({ action: "updated", purchase_id: 5 }),
+    };
     const result = await syncFactory(spectra([row()]), uc, config, branchMaster).run({ dryRun: true });
     assert.equal(result.dry_run, true);
     assert.equal(result.purchases.length, 1);
+    assert.deepEqual([result.inserted, result.updated, result.unchanged, result.approved_untouched], [0, 1, 0, 0], "what a real run would do");
+    assert.deepEqual(result.bills.map((b) => b.action), ["updated"]);
     assert.equal(result.purchases[0].ROUND_OFF, 590, "the full difference is shown: 1640 - 1050");
   });
 
@@ -457,7 +464,7 @@ describe("the sync", () => {
     );
     const result = await syncFactory(
       spectra([row(), row({ invoice_slug: "OTHER", store_id: "store-z", mrc_no: 7 })]),
-      {},
+      recorder(),
       config,
       () => outletUsecase.getRetailPilotStoreMap()
     ).run({ dryRun: true });

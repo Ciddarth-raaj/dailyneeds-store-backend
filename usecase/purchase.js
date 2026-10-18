@@ -181,6 +181,10 @@ class PurchaseUsecase {
     return this.purchaseRepo.upsertRetailPilotPurchase(payload);
   }
 
+  previewRetailPilotPurchase(payload) {
+    return this.purchaseRepo.previewRetailPilotPurchase(payload);
+  }
+
   async bulkCreatePurchase(purchaseList) {
     try {
       const result = await this.purchaseRepo.bulkCreate(purchaseList);

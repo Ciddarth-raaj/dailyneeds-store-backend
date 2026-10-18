@@ -1185,6 +1185,25 @@ class PurchaseRepository {
   }
 
   /**
+   * What upsertRetailPilotPurchase WOULD do with this bill, for a dry run:
+   * the same lookup and the same decision, and no write of any kind.
+   *
+   * @returns {{ action: "inserted"|"updated"|"unchanged"|"approved", purchase_id?: number }}
+   */
+  async previewRetailPilotPurchase(payload) {
+    const row = retailPilotRow(payload);
+    const [existing] = await this._q(
+      `SELECT purchase_id, is_approved, ts FROM purchase
+        WHERE mmh_mrc_no = ? AND retail_outlet_id = ? ORDER BY purchase_id DESC`,
+      [row.mmh_mrc_no, row.retail_outlet_id]
+    );
+    if (!existing) return { action: "inserted" };
+    if (Number(existing.is_approved)) return { action: "approved", purchase_id: existing.purchase_id };
+    if (String(existing.ts) === String(row.ts)) return { action: "unchanged", purchase_id: existing.purchase_id };
+    return { action: "updated", purchase_id: existing.purchase_id };
+  }
+
+  /**
    * Saves one RetailPilot bill (the uppercase sync payload), found by outlet
    * + mmh_mrc_no (the invoice slug - unique and stable, unlike the refno,
    * which restarts every financial year). Every write is by purchase_id.
