@@ -2278,8 +2278,10 @@ class Server {
     // (medishopdb_med_mrc_memo) no longer updates. The manual
     // POST /purchase-acknowledgement/sync is kept.
 
-    // EVERY 15 MINUTES - pull purchase invoices from RetailPilot (replaces
-    // the GoFrugal push to POST /purchase/bulk). Off until
+    // 9:00 AM, 2:00 PM AND 5:00 PM (Asia/Kolkata, the cron service's zone) -
+    // pull purchase invoices from RetailPilot (replaces the GoFrugal push to
+    // POST /purchase/bulk). Each run re-reads the look-back window
+    // (RETAILPILOT_PURCHASE_LOOKBACK_DAYS, default 3). Off until
     // RETAILPILOT_PURCHASE_SYNC_ENABLED=true; POST /purchase/retailpilot-sync
     // runs it by hand either way.
     if (require("./config/retailpilot").purchaseSyncEnabled) {
@@ -2287,7 +2289,7 @@ class Server {
         await this.retailPilotPurchaseSyncUsecase.run();
       this.cronService.register(
         "retailpilot_purchase_sync",
-        "*/15 * * * *",
+        "0 9,14,17 * * *",
         this.apiSyncLogger
           ? this.apiSyncLogger.wrapCron(
               "retailpilot_purchase_sync",

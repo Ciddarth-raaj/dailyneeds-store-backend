@@ -6,7 +6,8 @@ require("dotenv").config();
  *   RETAILPILOT_SPECTRA_URL      base URL; requests go to <url>/spectra/query
  *   RETAILPILOT_SPECTRA_KEY      X-Authentication token
  *   RETAILPILOT_PRODUCT          X-Product header (default "runway")
- *   RETAILPILOT_PURCHASE_SYNC_ENABLED  "true" schedules the cron
+ *   RETAILPILOT_PURCHASE_SYNC_ENABLED  "true" schedules the cron at 9:00,
+ *                                14:00 and 17:00 Asia/Kolkata
  *   RETAILPILOT_PURCHASE_LOOKBACK_DAYS days re-read on every cron run (default 3)
  *
  * There are no defaults for the URL or key: without them the sync refuses

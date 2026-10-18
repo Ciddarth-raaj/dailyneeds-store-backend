@@ -418,6 +418,18 @@ describe("the sync", () => {
     );
   });
 
+  it("is scheduled three times a day - 9:00, 14:00 and 17:00 IST - and only when enabled", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+    const at = server.indexOf('"retailpilot_purchase_sync",');
+    assert.ok(at > 0);
+    assert.match(server.slice(at, at + 80), /"retailpilot_purchase_sync",\s*"0 9,14,17 \* \* \*"/);
+    assert.match(server.slice(at - 700, at), /if \(require\("\.\/config\/retailpilot"\)\.purchaseSyncEnabled\)/);
+    const cron = fs.readFileSync(path.join(__dirname, "..", "services", "cron_service.js"), "utf8");
+    assert.match(cron, /const CRON_TIMEZONE = "Asia\/Kolkata";/, "the hours are IST");
+  });
+
   it("the config carries no store map of its own", () => {
     const cfg = require("../config/retailpilot");
     assert.ok(!("storeMapOverride" in cfg) && !("storeMap" in cfg) && !("parseStoreMap" in cfg));
