@@ -116,7 +116,7 @@ class OutletRepository {
   create(outlet) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username, opening_cash, gofrugal_id, outlet_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO outlets (outlet_name, outlet_address, outlet_phone, phone, outlet_nickname, telegram_username, opening_cash, gofrugal_id, retailpilot_id, outlet_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         [
           outlet.outlet_name,
           outlet.outlet_address,
@@ -126,6 +126,7 @@ class OutletRepository {
           outlet.telegram_username,
           outlet.opening_cash,
           outlet.gofrugal_id ?? null,
+          outlet.retailpilot_id ?? null,
           outlet.outlet_code ?? null,
         ],
         (err, res) => {
@@ -327,6 +328,36 @@ class OutletRepository {
    * `{ [String(gofrugal_id)]: outlet }`; where two outlets share an id the
    * lowest outlet_id wins. The outlet master is small, so no chunking.
    */
+  /**
+   * Branches carrying a RetailPilot ID: the RetailPilot store -> outlet map
+   * (utils/retailpilot_branch_map.js) and the uniqueness check on the
+   * Branch Master form.
+   */
+  getRetailPilotIds() {
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT outlet_id, outlet_name, retailpilot_id FROM outlets
+         WHERE retailpilot_id IS NOT NULL AND retailpilot_id <> ''`,
+        [],
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.OUTLET",
+              code: "REPOSITORY.OUTLET.GET-RETAILPILOT-IDS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
   getOutletsByGofrugalIds(gofrugal_ids) {
     return new Promise((resolve, reject) => {
       const ids = [
