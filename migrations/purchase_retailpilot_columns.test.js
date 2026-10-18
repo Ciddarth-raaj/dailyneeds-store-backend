@@ -16,7 +16,7 @@ describe("migration 20261204120000-purchase-retailpilot-columns", () => {
   it("is unique, is followed only by the migrations named here, runs after the deployed outlet migration, and reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js"));
     assert.deepEqual(all.filter((f) => f.startsWith(NAME.slice(0, 14))), [`${NAME}.js`]);
-    assert.deepEqual(all.filter((f) => f > `${NAME}.js`), ["20261205120000-purchase-retailpilot-source.js", "20261205130000-retailpilot-purchase-sync-permission.js"]);
+    assert.deepEqual(all.filter((f) => f > `${NAME}.js`), ["20261205120000-purchase-retailpilot-source.js", "20261205130000-retailpilot-purchase-sync-permission.js", "20261206120000-purchase-audit-log.js"]);
     assert.ok("20261203120000-outlet-retailpilot-id.js" < `${NAME}.js`);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));

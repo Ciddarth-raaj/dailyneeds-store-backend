@@ -26,12 +26,13 @@ const MIGRATIONS = [
   "20261204120000-purchase-retailpilot-columns",
   "20261205120000-purchase-retailpilot-source",
   "20261205130000-retailpilot-purchase-sync-permission",
+  "20261206120000-purchase-audit-log",
 ];
 
 const BASE_SCHEMA = `
   SET FOREIGN_KEY_CHECKS = 0;
   DROP TABLE IF EXISTS purchase, purchase_internal, purchase_tally_response, gst_tally_purchase,
-    gst_tally_purchase_internal, outlets, all_permissions, permissions;
+    gst_tally_purchase_internal, outlets, all_permissions, permissions, purchase_audit_log;
   SET FOREIGN_KEY_CHECKS = 1;
   CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(100), retailpilot_id VARCHAR(50) NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8;
   CREATE TABLE purchase (
@@ -272,10 +273,12 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
       total_amount: p.total_amount, invoice_amount: p.mmh_mrc_amt,
       ...internalEdit,
     };
-    return a.purchaseUsecase.updatePurchaseWithInternal(purchase, purchaseInternal, false);
+    return a.purchaseUsecase.updatePurchaseWithInternal(purchase, purchaseInternal, false, ACCOUNTS);
   };
-  const approve = (id) => a.purchaseUsecase.updatePurchaseFlags(id, { is_approved: true, has_updated: false });
-  const unlock = (id) => a.purchaseUsecase.updatePurchaseFlags(id, { is_approved: false, has_updated: false });
+  const ACCOUNTS = { user_id: 41, employee_id: 501 };
+  const approve = (id) => a.purchaseUsecase.updatePurchaseFlags(id, { is_approved: true, has_updated: false }, ACCOUNTS);
+  const unlock = (id) => a.purchaseUsecase.updatePurchaseFlags(id, { is_approved: false, has_updated: false }, ACCOUNTS);
+  const audit = (id) => q("SELECT action, actor_user_id, actor_employee_id, detail FROM purchase_audit_log WHERE purchase_id = ? ORDER BY purchase_audit_log_id", [id]);
 
   before(async () => {
     const mysql = require("mysql");
@@ -344,7 +347,7 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.deepEqual(r.skipped.map((s) => s.invoice_slug).sort(), ["INV-CLASH", "INV-UNKNOWN"]);
     assert.deepEqual(
       r.discrepancies.map((d) => `${d.invoice_slug}:${d.code}`).sort(),
-      ["INV-KRC:TAX_TYPE_MISMATCH", "INV-ouL0uNb0VjxP:MRC_DATE_OUTSIDE_SERIES_FY"]
+      ["INV-KRC:UNREGISTERED_SUPPLIER_TAX", "INV-ouL0uNb0VjxP:MRC_DATE_OUTSIDE_SERIES_FY"]
     );
     assert.ok(await byslug("INV-ouL0uNb0VjxP"), "bill 271 imported, not skipped against last year's DN1 952");
 
@@ -364,6 +367,11 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     const krc = await byslug("INV-KRC");
     assert.equal(krc.mmh_mrc_refno, "6392");
     assert.equal(krc.retail_outlet_id, 2);
+    assert.equal(krc.supplier_gstn, "", "unregistered: GSTIN stays blank");
+    assert.deepEqual(JSON.parse(krc.igst), [{ PERC: 5, TAXABLE: 4271.43, VALUE: 213.57 }], "RetailPilot's IGST imported as it is");
+    const shown = (await a.purchaseRepo.getById(krc.purchase_id)).data;
+    assert.equal(shown.retailpilot, true);
+    assert.ok(shown.discrepancies.some((d) => d.code === "ROUND_OFF_PREFILLED" && d.severity === "info"), "pre-filled round-off is shown as not confirmed");
     assert.deepEqual(await q(FINGERPRINT), a.historyBefore, "GoFrugal history untouched (6372 of FY 2025-26 included)");
   });
 
@@ -384,6 +392,18 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.deepEqual([Number((await internal(p.purchase_id)).round_off)], [1]);
   });
 
+  it("a round-off Accounts saved unchanged is confirmed: the sync stops refreshing it", async () => {
+    const p = await byslug("INV-ZERO");
+    setRows({ ...ROWS.zero, invoice_amount: "1050.50" });
+    await run();
+    assert.equal(Number((await internal(p.purchase_id)).round_off), 0.5, "still the sync's: refreshed");
+    assert.equal((await screenSave(p.purchase_id)).code, 200);
+    assert.ok(!(await a.purchaseRepo.getById(p.purchase_id)).data.discrepancies.some((d) => d.code === "ROUND_OFF_PREFILLED"));
+    setRows({ ...ROWS.zero, invoice_amount: "1051.00" });
+    await run();
+    assert.equal(Number((await internal(p.purchase_id)).round_off), 0.5, "confirmed by Accounts: kept");
+  });
+
   it("manual override: Accounts' round-off is never overwritten by a later sync", async () => {
     const p = await byslug("INV-A");
     assert.equal((await screenSave(p.purchase_id, {}, { round_off: 0.75, total_amount: 1050.75 })).code, 200);
@@ -396,34 +416,52 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
   });
 
   // ------------------------------------------------- Accounts' corrections
-  it("k.r.candles: approval is refused until the GST discrepancy is corrected", async () => {
+  it("k.r.candles (unregistered, IGST 5%): approval refused until Accounts review the tax - not because the GSTIN is blank", async () => {
     const p = await byslug("INV-KRC");
     const refused = await approve(p.purchase_id);
     assert.equal(refused.code, 409);
-    assert.match(refused.msg, /IGST charged .* has no GSTIN/);
+    assert.match(refused.msg, /Unregistered supplier \(no GSTIN\) with GST on the bill: IGST 5%/);
     assert.equal((await byslug("INV-KRC")).is_approved, 0);
   });
 
-  it("Accounts correct the GSTIN and the round-off on the Purchase screen; the flag clears and approval goes through", async () => {
+  it("Accounts enter it as an unregistered purchase without input tax (nil-rated); GSTIN stays blank; approval goes through", async () => {
     const p = await byslug("INV-KRC");
-    const saved = await screenSave(p.purchase_id, { supplier_gstn: "33KRCAN0000K1Z5" }, { round_off: 0, total_amount: 4485 });
+    const nil = [{ PERC: 0, TAXABLE: 4485, VALUE: "0.00" }];
+    const saved = await screenSave(
+      p.purchase_id,
+      { supplier_gstn: "", sgst: nil, cgst: nil, igst: [], tot_sgst_amt: 0, tot_cgst_amt: 0, tot_igst_amt: 0 },
+      { round_off: 0, total_amount: 4485 }
+    );
     assert.equal(saved.code, 200);
-    const now = (await a.purchaseRepo.getById(p.purchase_id)).data;
-    assert.deepEqual(now.discrepancies, []);
+    assert.deepEqual((await a.purchaseRepo.getById(p.purchase_id)).data.discrepancies, []);
     assert.equal((await approve(p.purchase_id)).code, 200);
+
+    const log = await audit(p.purchase_id);
+    assert.deepEqual(log.map((l) => l.action), ["accounts_correction", "approved"]);
+    assert.equal(log[0].actor_employee_id, 501);
+    const changes = JSON.parse(log[0].detail).changes;
+    assert.ok(changes.tax && changes.round_off, Object.keys(changes).join(","));
+    assert.equal(changes.round_off.from, 4485);
+    assert.equal(changes.round_off.to, 0);
+    assert.ok(!changes.supplier_gstn, "GSTIN not changed");
+    const source = JSON.parse((await byslug("INV-KRC")).retailpilot_source);
+    assert.match(source.fields.tax, /"igst":\[\[5,4271\.43,213\.57\]\]/, "RetailPilot's original tax is still on record");
   });
 
-  it("Tally export of the corrected bill: voucher number, branch voucher type, dates, IGST ledgers and total", async () => {
+  it("Tally export of the reviewed bill: no GSTIN, nil-rated local purchase, no input tax, bill date as ReferenceDate", async () => {
     const out = (await a.tallyExport.getPurchase("10-01-2026", "10-31-2026")).data;
     const v = out.find((e) => e.VoucherNumber === "6392" && /purchase-entry/.test(e.MasterID));
     assert.ok(v, "the approved bill is exported");
-    assert.equal(v.BuyerGSTIN, "33KRCAN0000K1Z5");
+    assert.equal(v.BuyerGSTIN, "");
+    assert.equal(v.BuyerGSTRegistrationType, "", "not presented as registered");
     assert.equal(v.VoucherType, "Purchase", "Warehouse voucher type");
-    assert.equal(v.VoucherDate, "20261016");
+    assert.equal(v.VoucherDate, "20261016", "voucher date = MRC date");
+    assert.equal(v.Reference, "SUP-1", "supplier bill number");
+    assert.equal(v.ReferenceDate, "20261015", "supplier bill date");
     assert.equal(Number(v.Voucher_Total), 4485);
-    const ledgers = v.ledgerentries.map((l) => l.LedgerName);
-    assert.ok(ledgers.includes("IGST PURCHASE 5%"), ledgers.join(", "));
-    assert.ok(!ledgers.some((n) => /CGST|SGST/.test(n)));
+    const ledgers = v.ledgerentries.map((l) => `${l.LedgerName}=${l.LedgerAmount}`);
+    assert.ok(ledgers.includes("Local GST Purchase Nil Rated=4485.00"), ledgers.join(", "));
+    assert.ok(!ledgers.some((n) => /INPUT|IGST/.test(n)), "no input tax claimed");
     assert.ok(!out.some((e) => e.VoucherNumber === "6372" && e.BuyerGSTIN === "34AAAAA0000A1Z5" && /101-/.test(e.MasterID)), "pushed GoFrugal bill not re-exported");
   });
 
@@ -436,26 +474,23 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.deepEqual(after, before);
   });
 
-  it("unlocked again, a re-sync keeps the corrected GSTIN, applies the rest, and flags a tax change it did not apply", async () => {
+  it("unlocked again, a re-sync keeps Accounts' tax although RetailPilot still holds the IGST, and flags RetailPilot's own changes", async () => {
     const p = await byslug("INV-KRC");
     await unlock(p.purchase_id);
     setRows({ ...ROWS.krc, invoice_amount: "4500.00" });
     let r = await run();
     assert.equal(r.updated, 1);
     let now = await byslug("INV-KRC");
-    assert.equal(now.supplier_gstn, "33KRCAN0000K1Z5", "Accounts' GSTIN kept");
     assert.equal(Number(now.mmh_mrc_amt), 4500, "RetailPilot's new amount applied");
+    assert.deepEqual(JSON.parse(now.igst), [], "RetailPilot's unchanged IGST does not come back over Accounts' correction");
+    assert.equal(JSON.parse(now.sgst)[0].TAXABLE, 4485);
     assert.equal(Number((await internal(p.purchase_id)).round_off), 0, "Accounts saved the round-off: kept");
 
-    // Accounts re-enter the tax; RetailPilot then changes its tax too.
-    await screenSave(p.purchase_id, {
-      igst: [{ PERC: 5, TAXABLE: 4285.71, VALUE: "214.29" }], tot_igst_amt: 214.29,
-    }, { round_off: 0, total_amount: 4500 });
     setRows({ ...ROWS.krc, invoice_amount: "4500.00", taxable: "4290.00" });
     r = await run();
     assert.deepEqual(r.corrections_kept.map((c) => [c.invoice_slug, c.fields]), [["INV-KRC", ["tax"]]]);
     now = await byslug("INV-KRC");
-    assert.equal(JSON.parse(now.igst)[0].TAXABLE, 4285.71, "Accounts' tax kept");
+    assert.equal(JSON.parse(now.sgst)[0].TAXABLE, 4485, "Accounts' tax kept");
     const shown = (await a.purchaseRepo.getById(p.purchase_id)).data.discrepancies;
     assert.deepEqual(shown.map((d) => d.code), ["RETAILPILOT_CHANGE_NOT_APPLIED"]);
     assert.match(shown[0].message, /changed the tax after Accounts corrected it/);
@@ -492,6 +527,7 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.ok(v, "exported with DN1's voucher type");
     assert.equal(v.VoucherDate, "20261016", "Tally gets the corrected voucher date");
     assert.equal(v.Reference, "271");
+    assert.equal(v.ReferenceDate, "20261015", "and the corrected supplier bill date, separately");
     assert.deepEqual(await q(FINGERPRINT), a.historyBefore, "last year's DN1 952 untouched");
   });
 
@@ -510,6 +546,34 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.equal(r.updated, 1);
     assert.equal((await q("SELECT COUNT(*) n FROM purchase WHERE mmh_mrc_no = 'INV-DN2'"))[0].n, 1);
     assert.deepEqual(await q(FINGERPRINT), a.historyBefore);
+  });
+
+  it("approval refuses an unresolved duplicate MRC ref no in the same branch and year", async () => {
+    const p = await byslug("INV-ZERO"); // ref 6374, Warehouse, FY 2026-27
+    await q(`INSERT INTO purchase (purchase_id, retail_outlet_id, supplier_id, supplier_name, supplier_gstn, mmh_mrc_no, mmh_mrc_dt, mmh_mrc_amt,
+      mmh_dist_bill_dt, mmh_dist_bill_no, mmh_mrc_refno, mmh_manual_disc, tot_sgst_amt, tot_cgst_amt, tot_igst_amt, tot_gst_cess_amt,
+      mmd_goods_tcs_amt, ts, sgst, cgst, igst, cess, is_approved, is_new)
+      VALUES (900, 2, '9', 'Duplicate', '34AAAAA0000A1Z5', '900', '2026-09-01', 1, '2026-09-01', 'D', '6374', 0, 0, 0, 0, 0, 0, 9, '[]', '[]', '[]', '[]', 0, 1)`);
+    const refused = await approve(p.purchase_id);
+    assert.equal(refused.code, 409);
+    assert.match(refused.msg, /6374 is also used by purchase 900/);
+    await q("DELETE FROM purchase WHERE purchase_id = 900");
+    assert.equal((await approve(p.purchase_id)).code, 200);
+    await unlock(p.purchase_id);
+  });
+
+  it("a GoFrugal bill's approval is unchanged: the same tax finding shows for review but does not block", async () => {
+    await q(`INSERT INTO purchase (purchase_id, retail_outlet_id, supplier_id, supplier_name, supplier_gstn, mmh_mrc_no, mmh_mrc_dt, mmh_mrc_amt,
+      mmh_dist_bill_dt, mmh_dist_bill_no, mmh_mrc_refno, mmh_manual_disc, tot_sgst_amt, tot_cgst_amt, tot_igst_amt, tot_gst_cess_amt,
+      mmd_goods_tcs_amt, ts, sgst, cgst, igst, cess, is_approved, is_new)
+      VALUES (901, 5, '9', 'GoFrugal unregistered', '', '122600', '2026-10-05', 105, '2026-10-05', 'G', '800', 0, 0, 0, 5, 0, 0, 9,
+      '[]', '[]', '[{"PERC":5,"TAXABLE":100,"VALUE":5}]', '[]', 0, 1)`);
+    const shown = (await a.purchaseRepo.getById(901)).data;
+    assert.equal(shown.retailpilot, false);
+    assert.deepEqual(shown.discrepancies.map((d) => `${d.code}:${d.severity}`), ["UNREGISTERED_SUPPLIER_TAX:review"]);
+    assert.equal((await approve(901)).code, 200);
+    await q("DELETE FROM purchase_audit_log WHERE purchase_id = 901");
+    await q("DELETE FROM purchase WHERE purchase_id = 901");
   });
 
   // ------------------------------------------------------------------ Tally
@@ -550,8 +614,12 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     assert.equal(old.code, 409);
     assert.deepEqual(await q("SELECT purchase_id FROM purchase_tally_response ORDER BY purchase_id"), before, "nothing deleted");
 
-    const one = await a.purchaseUsecase.deleteTallyResponseForPurchase(104);
+    const one = await a.purchaseUsecase.deleteTallyResponseForPurchase(104, ACCOUNTS);
     assert.equal(one.code, 200);
+    const log = await audit(104);
+    assert.deepEqual(log.map((l) => l.action), ["tally_response_deleted"]);
+    assert.equal(JSON.parse(log[0].detail).MasterID, "104-purchase-entry", "what was removed is on record");
+    assert.equal((await q("SELECT COUNT(*) n FROM purchase WHERE purchase_id = 104"))[0].n, 1, "the purchase itself is not deleted");
     const left = (await q("SELECT purchase_id FROM purchase_tally_response ORDER BY purchase_id")).map((r) => String(r.purchase_id));
     assert.deepEqual(left, before.map((r) => String(r.purchase_id)).filter((id) => id !== "104"));
     assert.equal((await a.purchaseUsecase.deleteTallyResponseForPurchase(104)).code, 404);
@@ -564,6 +632,7 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
   // -------------------------------------------------------------- rollback
   it("rolling the column migration back after RetailPilot bills exist is refused by MySQL, and loses nothing", async () => {
     const before = await q("SELECT purchase_id, mmh_mrc_no, mmh_mrc_refno FROM purchase ORDER BY purchase_id");
+    await q(sqlFile("20261206120000-purchase-audit-log-down.sql"));
     await q(sqlFile("20261205120000-purchase-retailpilot-source-down.sql"));
     await assert.rejects(q(sqlFile("20261204120000-purchase-retailpilot-columns-down.sql")), /Incorrect integer value|Truncated|Data truncated/);
     assert.deepEqual(await q("SELECT purchase_id, mmh_mrc_no, mmh_mrc_refno FROM purchase ORDER BY purchase_id"), before);

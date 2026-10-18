@@ -14,8 +14,9 @@ const {
   roundOffIsSyncs,
   keptFields,
   seriesOf,
+  parseSource,
 } = require("../utils/retailpilot_merge");
-const { purchaseDiscrepancies } = require("../utils/purchase_discrepancy");
+const { purchaseDiscrepancies, asLegacy } = require("../utils/purchase_discrepancy");
 
 const parseTaxList = (v) => {
   if (Array.isArray(v)) return v;
@@ -54,16 +55,27 @@ const FIELD_LABELS = {
 };
 
 /**
- * utils/purchase_discrepancy.js for a stored row, plus the RetailPilot
- * changes not applied because Accounts had corrected those fields.
+ * utils/purchase_discrepancy.js for a stored row, plus, for a RetailPilot
+ * bill, the RetailPilot changes not applied because Accounts had corrected
+ * those fields and a round-off Accounts have not confirmed yet. A GoFrugal
+ * bill (no retailpilot_source) gets the same findings as review only, so
+ * its approval behaviour is what it was.
  */
 function discrepanciesFor(doc, retailpilotSource) {
+  if (!retailpilotSource) return asLegacy(purchaseDiscrepancies(parsedRow(doc)));
   const series = seriesOf(retailpilotSource);
   const list = purchaseDiscrepancies({
     ...parsedRow(doc),
     voucher_fy: series.fy,
     entered_at: series.entered_at,
   });
+  if (!Number(doc.is_approved) && roundOffIsSyncs(doc, retailpilotSource) && Number(doc.round_off)) {
+    list.push({
+      code: "ROUND_OFF_PREFILLED",
+      severity: "info",
+      message: `Round-off ${Number(doc.round_off).toFixed(2)} was pre-filled from RetailPilot's bill amount and is not confirmed yet: check it before approving.`,
+    });
+  }
   const kept = keptFields(retailpilotSource);
   if (kept.length) {
     list.push({
@@ -81,7 +93,11 @@ function discrepanciesFor(doc, retailpilotSource) {
  */
 function retailPilotSeries(retailpilotSource) {
   const series = seriesOf(retailpilotSource);
-  return { voucher_fy: series.fy || null, entered_at: series.entered_at || null };
+  return {
+    retailpilot: !!retailpilotSource,
+    voucher_fy: series.fy || null,
+    entered_at: series.entered_at || null,
+  };
 }
 
 /** The RetailPilot sync payload (uppercase keys) as purchase columns. */
@@ -1274,6 +1290,57 @@ class PurchaseRepository {
   }
 
   /**
+   * One audit entry for a purchase. actor: { user_id, employee_id } of the
+   * session (null for the sync or an integration). Never throws: a failed
+   * audit write is logged and the action it records stands.
+   */
+  async addAuditLog(purchaseId, action, actor, detail) {
+    try {
+      await this._q(
+        `INSERT INTO purchase_audit_log (purchase_id, action, actor_user_id, actor_employee_id, detail)
+         VALUES (?, ?, ?, ?, ?)`,
+        [purchaseId, action, actor?.user_id ?? null, actor?.employee_id ?? null, detail == null ? null : JSON.stringify(detail)]
+      );
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.PURCHASE",
+        code: "REPOSITORY.PURCHASE.AUDIT-LOG",
+        description: err.toString(),
+        category: "",
+        ref: { purchaseId, action },
+      });
+    }
+  }
+
+  /** A purchase's own row and its purchase_internal values, unmerged. */
+  async getForAudit(purchaseId) {
+    const [row] = await this._q(
+      `SELECT p.*, pi.round_off, pi.total_amount, pi.cash_discount, pi.scheme_difference,
+              pi.cost_difference, pi.due, pi.freight_charges, pi.supplier_credit_note
+       FROM purchase p LEFT JOIN purchase_internal pi ON pi.purchase_id = p.purchase_id
+       WHERE p.purchase_id = ?`,
+      [purchaseId]
+    );
+    return row || null;
+  }
+
+  /**
+   * Accounts saved a RetailPilot bill on the Purchase screen: its round-off
+   * is theirs from now on, and the sync stops refreshing it.
+   */
+  async confirmRetailPilotRoundOff(purchaseId) {
+    const [row] = await this._q(`SELECT retailpilot_source FROM purchase WHERE purchase_id = ?`, [purchaseId]);
+    const source = row && parseSource(row.retailpilot_source);
+    if (!source || source.round_off == null) return false;
+    await this._q(`UPDATE purchase SET retailpilot_source = ? WHERE purchase_id = ?`, [
+      JSON.stringify({ ...source, round_off: null }),
+      purchaseId,
+    ]);
+    return true;
+  }
+
+  /**
    * Round-off into purchase_internal for an unapproved bill that has none.
    * invoice_amount (NOT NULL, no default) is 0, as an untouched Purchase
    * screen would save it - Accounts enter it.
@@ -1330,10 +1397,19 @@ class PurchaseRepository {
    * Removes the Tally response of ONE purchase, by its id - the only key
    * that cannot reach another branch's or another year's bill.
    */
-  async deleteTallyResponseForPurchase(purchaseId) {
+  async deleteTallyResponseForPurchase(purchaseId, actor = null) {
     try {
+      const [existing] = await this._q(`SELECT * FROM purchase_tally_response WHERE purchase_id = ?`, [purchaseId]);
+      if (!existing) return { code: 404, msg: "This purchase has no Tally response" };
       const result = await this._q(`DELETE FROM purchase_tally_response WHERE purchase_id = ?`, [purchaseId]);
       if (!result.affectedRows) return { code: 404, msg: "This purchase has no Tally response" };
+      await this.addAuditLog(purchaseId, "tally_response_deleted", actor, {
+        MasterID: existing.MasterID,
+        VoucherNo: existing.VoucherNo,
+        InvoiceValue: existing.InvoiceValue,
+        CostCentre: existing.CostCentre,
+        GSTIN: existing.GSTIN,
+      });
       return { code: 200, msg: "Tally response deleted!", purchase_id: Number(purchaseId) };
     } catch (err) {
       logger.Log({
@@ -1355,7 +1431,7 @@ class PurchaseRepository {
    * only when exactly one purchase with that number has a response, and
    * otherwise refuses and points to the delete by purchase id.
    */
-  async deleteTallyResponse(VoucherNo) {
+  async deleteTallyResponse(VoucherNo, actor = null) {
     const rows = await this._q(
       `SELECT p.purchase_id
        FROM purchase_tally_response tr
@@ -1372,7 +1448,7 @@ class PurchaseRepository {
         purchase_ids: ids,
       };
     }
-    return this.deleteTallyResponseForPurchase(ids[0]);
+    return this.deleteTallyResponseForPurchase(ids[0], actor);
   }
 }
 

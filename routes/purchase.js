@@ -4,6 +4,10 @@ const Joi = require("@hapi/joi");
 /** Who may run the RetailPilot purchase sync by hand (admins always may). */
 const RETAILPILOT_SYNC_PERMISSION = "sync_retailpilot_purchases";
 
+/** The session making a request, for the purchase audit trail. */
+const actorOf = (req) =>
+  req.decoded ? { user_id: req.decoded.id ?? null, employee_id: req.decoded.employee_id ?? null } : null;
+
 class PurchaseRoutes {
   constructor(purchaseUsecase, retailPilotPurchaseSync, permissions) {
     this.purchaseUsecase = purchaseUsecase;
@@ -172,7 +176,8 @@ class PurchaseRoutes {
 
         const result = await this.purchaseUsecase.updatePurchaseFlags(
           req.params.id,
-          req.body
+          req.body,
+          actorOf(req)
         );
         res.json(result);
       } catch (err) {
@@ -224,7 +229,8 @@ class PurchaseRoutes {
         const result = await this.purchaseUsecase.updatePurchaseWithInternal(
           purchase,
           purchase_internal,
-          send_not_matched_notification
+          send_not_matched_notification,
+          actorOf(req)
         );
         res.json(result);
       } catch (err) {
@@ -341,7 +347,7 @@ class PurchaseRoutes {
         if (error) {
           return res.json({ code: 422, msg: error.toString() });
         }
-        const result = await this.purchaseUsecase.deleteTallyResponseForPurchase(value.id);
+        const result = await this.purchaseUsecase.deleteTallyResponseForPurchase(value.id, actorOf(req));
         res.json(result);
       } catch (err) {
         console.log(err);
@@ -363,7 +369,8 @@ class PurchaseRoutes {
         }
 
         const result = await this.purchaseUsecase.deleteTallyResponse(
-          req.params.id
+          req.params.id,
+          actorOf(req)
         );
         res.json(result);
       } catch (err) {

@@ -7,8 +7,13 @@
  *
  * severity
  *   "block"  - Tally would receive a wrong voucher; the bill cannot be
- *              approved until Accounts corrects it.
+ *              approved until Accounts corrects it. Enforced for RetailPilot
+ *              bills only: on a GoFrugal bill the same finding is shown as
+ *              "review", so historical approval behaviour does not change
+ *              (see asLegacy).
  *   "review" - may be right, may be a data-entry slip; shown, not blocking.
+ *   "info"   - shown on the bill only (e.g. a round-off the sync pre-filled
+ *              that Accounts have not confirmed yet).
  *
  * Plain CommonJS with no dependencies, so the backend, the Next.js app and
  * `node --test` all load it as is.
@@ -84,17 +89,51 @@ function purchaseDiscrepancies(p) {
   if (!p) return out;
 
   const gstn = str(p.supplier_gstn);
+  // A blank GSTIN is an UNREGISTERED supplier - valid, and never flagged by
+  // itself. Registration is not inferred from anything else: there is no
+  // registered/unregistered field on the purchase or the supplier.
+  const unregistered = gstn === "" || gstn === "0";
   const interstate = isInterstateSupplier(gstn);
   const charged = (l) => toNumber(l.TAXABLE) !== 0 || toNumber(l.VALUE) !== 0;
+  const taxed = (l) => toNumber(l.VALUE) !== 0;
+  const cgst = parseList(p.cgst);
+  const sgst = parseList(p.sgst);
+  const igst = parseList(p.igst);
 
-  // Tax of the kind this supplier's GSTIN does not show. The screen and the
-  // Tally export read IGST for an other-state supplier and CGST/SGST for a
-  // local or unregistered one, so these lines would silently drop out.
-  if (interstate) {
-    const cgst = parseList(p.cgst).filter(charged);
-    const sgst = parseList(p.sgst).filter(charged);
-    if (cgst.length || sgst.length) {
-      const lines = [describeLines(cgst, "CGST"), describeLines(sgst, "SGST")].filter(Boolean).join(", ");
+  if (unregistered) {
+    // GST on a bill from an unregistered supplier: Accounts decide the
+    // treatment. Exported as it stands, CGST/SGST would go to Tally as INPUT
+    // tax (input tax credit claimed) and IGST would be left out entirely.
+    const taxLines = [
+      describeLines(igst.filter(taxed), "IGST"),
+      describeLines(cgst.filter(taxed), "CGST"),
+      describeLines(sgst.filter(taxed), "SGST"),
+    ].filter(Boolean);
+    if (taxLines.length) {
+      out.push({
+        code: "UNREGISTERED_SUPPLIER_TAX",
+        severity: "block",
+        message:
+          `Unregistered supplier (no GSTIN) with GST on the bill: ${taxLines.join(", ")}. ` +
+          "Review the tax treatment before approval: if the supplier is registered, enter its GSTIN; " +
+          "if not, enter the bill without input tax (e.g. the amount as nil-rated). " +
+          "As it stands Tally would get CGST/SGST as input tax and no IGST.",
+      });
+    } else if (igst.some(charged)) {
+      out.push({
+        code: "TAX_TYPE_MISMATCH",
+        severity: "block",
+        message:
+          `IGST lines (${describeLines(igst.filter(charged), "IGST")}) on an unregistered supplier: ` +
+          "the screen and Tally take CGST/SGST lines only for a supplier with no GSTIN, so this value would drop out. " +
+          "Re-enter it below.",
+      });
+    }
+  } else if (interstate) {
+    // Registered, other state: the screen and Tally read IGST only.
+    const local = [...cgst, ...sgst].filter(charged);
+    if (local.length) {
+      const lines = [describeLines(cgst.filter(charged), "CGST"), describeLines(sgst.filter(charged), "SGST")].filter(Boolean).join(", ");
       out.push({
         code: "TAX_TYPE_MISMATCH",
         severity: "block",
@@ -103,17 +142,15 @@ function purchaseDiscrepancies(p) {
           "so the screen and Tally take IGST only. Correct the GSTIN or the tax.",
       });
     }
-  } else {
-    const igst = parseList(p.igst).filter(charged);
-    if (igst.length) {
-      out.push({
-        code: "TAX_TYPE_MISMATCH",
-        severity: "block",
-        message:
-          `IGST charged (${describeLines(igst, "IGST")}) but the supplier ${gstn ? `GSTIN ${gstn} is local` : "has no GSTIN"}, ` +
-          "so the screen and Tally take CGST/SGST only. Correct the GSTIN or the tax.",
-      });
-    }
+  } else if (igst.some(charged)) {
+    // Registered, Puducherry: the screen and Tally read CGST/SGST only.
+    out.push({
+      code: "TAX_TYPE_MISMATCH",
+      severity: "block",
+      message:
+        `IGST charged (${describeLines(igst.filter(charged), "IGST")}) but GSTIN ${gstn} is local, ` +
+        "so the screen and Tally take CGST/SGST only. Correct the GSTIN or the tax.",
+    });
   }
 
   if (gstn && gstn !== "0" && !GSTIN_PATTERN.test(gstn.toUpperCase())) {
@@ -165,9 +202,13 @@ function purchaseDiscrepancies(p) {
 
 const hasBlockingDiscrepancy = (list) => (list || []).some((d) => d.severity === "block");
 
+/** A GoFrugal bill's findings: shown for review, never blocking approval. */
+const asLegacy = (list) => (list || []).map((d) => (d.severity === "block" ? { ...d, severity: "review" } : d));
+
 module.exports = {
   purchaseDiscrepancies,
   hasBlockingDiscrepancy,
+  asLegacy,
   isInterstateSupplier,
   dayOf,
   financialYearOf,

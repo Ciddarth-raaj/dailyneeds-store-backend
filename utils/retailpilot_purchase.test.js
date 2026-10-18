@@ -384,7 +384,7 @@ describe("the sync", () => {
     assert.equal(uc.saved.length, 3, "every bill is imported, the large difference and the discrepancies included");
     assert.deepEqual(
       result.discrepancies.map((d) => [d.invoice_slug, d.code, d.severity]),
-      [["KRC", "TAX_TYPE_MISMATCH", "block"], ["OLDBILL", "BILL_DATE_OTHER_FY", "review"]]
+      [["KRC", "UNREGISTERED_SUPPLIER_TAX", "block"], ["OLDBILL", "BILL_DATE_OTHER_FY", "review"]]
     );
     assert.deepEqual(result.warnings, []);
   });

@@ -44,6 +44,7 @@ describe("the migration", () => {
       "20261204120000-purchase-retailpilot-columns",
       "20261205120000-purchase-retailpilot-source",
       "20261205130000-retailpilot-purchase-sync-permission",
+      "20261206120000-purchase-audit-log",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");

@@ -27,24 +27,59 @@ describe("purchase discrepancies", () => {
     );
   });
 
-  it("Warehouse MRC 6392 (k.r.candles): no GSTIN but IGST 5% - blocks approval, says why", () => {
+  it("an unregistered supplier (blank GSTIN) is valid: zero tax raises nothing", () => {
+    const nil = { PERC: 0, TAXABLE: 1000, VALUE: 0 };
+    assert.deepEqual(codes(local({ supplier_gstn: "", sgst: [nil], cgst: [nil] })), []);
+    assert.deepEqual(codes(local({ supplier_gstn: "0", sgst: [nil], cgst: [nil] })), []);
+    assert.deepEqual(codes(local({ supplier_gstn: "", sgst: [], cgst: [] })), [], "nothing about the blank GSTIN itself");
+  });
+
+  it("Warehouse MRC 6392 (k.r.candles), unregistered, IGST 5% on the bill: Accounts must review the tax treatment", () => {
     const p = local({ supplier_gstn: "", sgst: [], cgst: [], igst: [{ PERC: 5, TAXABLE: 4271.49, VALUE: 213.57 }] });
     const list = purchaseDiscrepancies(p);
-    assert.deepEqual(list.map((d) => d.code), ["TAX_TYPE_MISMATCH"]);
-    assert.equal(list[0].severity, "block");
-    assert.match(list[0].message, /IGST 5% on 4271\.49 \(213\.57\)/);
-    assert.match(list[0].message, /has no GSTIN/);
-    assert.ok(hasBlockingDiscrepancy(list));
+    assert.deepEqual(list.map((d) => `${d.code}:${d.severity}`), ["UNREGISTERED_SUPPLIER_TAX:block"]);
+    assert.match(list[0].message, /Unregistered supplier \(no GSTIN\) with GST on the bill: IGST 5% on 4271\.49 \(213\.57\)/);
+    assert.match(list[0].message, /if the supplier is registered, enter its GSTIN; if not, enter the bill without input tax/);
+    assert.doesNotMatch(list[0].message, /invalid|missing GSTIN/i, "the blank GSTIN is not the finding");
   });
 
-  it("the correction clears it: a real other-state GSTIN, or the tax re-entered as local", () => {
+  it("an unregistered supplier with CGST/SGST: flagged too - exported as is it would claim input tax", () => {
+    assert.deepEqual(codes(local({ supplier_gstn: "" })), ["UNREGISTERED_SUPPLIER_TAX:block"]);
+  });
+
+  it("an unregistered supplier's IGST nil-rated line would drop out of Tally: flagged as a classification issue", () => {
+    assert.deepEqual(
+      codes(local({ supplier_gstn: "", sgst: [], cgst: [], igst: [{ PERC: 0, TAXABLE: 500, VALUE: 0 }] })),
+      ["TAX_TYPE_MISMATCH:block"]
+    );
+  });
+
+  it("Accounts' corrections clear it: the bill as nil-rated (no input tax), or the supplier's GSTIN if registered", () => {
     const igst = [{ PERC: 5, TAXABLE: 4271.49, VALUE: 213.57 }];
-    assert.deepEqual(codes(local({ supplier_gstn: "33KRCAN0000K1Z5", sgst: [], cgst: [], igst })), []);
-    assert.deepEqual(codes(local({ supplier_gstn: "", igst: [] })), []);
+    const nil = [{ PERC: 0, TAXABLE: 4485, VALUE: 0 }];
+    assert.deepEqual(codes(local({ supplier_gstn: "", igst: [], sgst: nil, cgst: nil })), [], "unregistered, tax as cost");
+    assert.deepEqual(codes(local({ supplier_gstn: "33KRCAN0000K1Z5", sgst: [], cgst: [], igst })), [], "registered other-state");
   });
 
-  it("CGST/SGST from an other-state supplier blocks too", () => {
-    assert.deepEqual(codes(local({ supplier_gstn: "29CCCCC0000C1Z5" })), ["TAX_TYPE_MISMATCH:block"]);
+  it("a registered supplier: tax of the kind its GSTIN does not show is a mismatch", () => {
+    assert.deepEqual(codes(local({ supplier_gstn: "29CCCCC0000C1Z5" })), ["TAX_TYPE_MISMATCH:block"], "CGST/SGST from another state");
+    assert.deepEqual(
+      codes(local({ igst: [{ PERC: 18, TAXABLE: 100, VALUE: 18 }] })),
+      ["TAX_TYPE_MISMATCH:block"],
+      "IGST from a Puducherry GSTIN"
+    );
+    assert.deepEqual(codes(local({ supplier_gstn: "33BBBBB0000B1Z5", sgst: [], cgst: [], igst: [{ PERC: 18, TAXABLE: 100, VALUE: 18 }] })), []);
+  });
+
+  it("a malformed GSTIN is flagged for review, not blocked", () => {
+    assert.deepEqual(codes(local({ supplier_gstn: "34ABC" })), ["GSTIN_INVALID:review"]);
+  });
+
+  it("GoFrugal bills keep their old approval behaviour: the same findings, as review only", () => {
+    const { asLegacy } = require("./purchase_discrepancy");
+    const legacy = asLegacy(purchaseDiscrepancies(local({ supplier_gstn: "", igst: [{ PERC: 5, TAXABLE: 100, VALUE: 5 }], sgst: [], cgst: [] })));
+    assert.deepEqual(legacy.map((d) => `${d.code}:${d.severity}`), ["UNREGISTERED_SUPPLIER_TAX:review"]);
+    assert.equal(hasBlockingDiscrepancy(legacy), false);
   });
 
   it("an empty 0% line of the other kind is not tax", () => {
@@ -52,7 +87,7 @@ describe("purchase discrepancies", () => {
   });
 
   it("reads tax stored as JSON text", () => {
-    assert.deepEqual(codes(local({ supplier_gstn: "", sgst: "[]", cgst: "[]", igst: '[{"PERC":5,"TAXABLE":100,"VALUE":5}]' })), ["TAX_TYPE_MISMATCH:block"]);
+    assert.deepEqual(codes(local({ supplier_gstn: "", sgst: "[]", cgst: "[]", igst: '[{"PERC":5,"TAXABLE":100,"VALUE":5}]' })), ["UNREGISTERED_SUPPLIER_TAX:block"]);
   });
 
   it("DN1 bill 271 as RetailPilot holds it: both dates 16-01-2026, ref no 961 of the FY 2026-27 series - blocks", () => {
@@ -83,10 +118,6 @@ describe("purchase discrepancies", () => {
     assert.equal(dayOf("2026-04-01"), "2026-04-01");
     assert.equal(financialYearOf("2026-03-31"), 2025);
     assert.equal(financialYearOf("2026-04-01"), 2026);
-  });
-
-  it("a GSTIN that is not 15 characters is flagged for review", () => {
-    assert.deepEqual(codes(local({ supplier_gstn: "34ABC" })), ["GSTIN_INVALID:review"]);
   });
 
   it("is the same file as the frontend's util/purchaseDiscrepancy.js", () => {

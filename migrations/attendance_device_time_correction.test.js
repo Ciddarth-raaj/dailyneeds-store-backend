@@ -55,6 +55,7 @@ describe(NAME, () => {
       "20261204120000-purchase-retailpilot-columns.js",
       "20261205120000-purchase-retailpilot-source.js",
       "20261205130000-retailpilot-purchase-sync-permission.js",
+      "20261206120000-purchase-audit-log.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

@@ -24,7 +24,7 @@ describe("the payroll export payslips permission migration", () => {
     assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
     // Migrations added since, named so a new one is a deliberate addition
     // (the convention of attendance_device_time_correction.test.js).
-    assert.deepEqual(all.filter((f) => f > NAME).sort(), ["20261123120000-payroll-reports", "20261124120000-employee-payroll-eligible", "20261125120000-attendance-ot-auto-pending", "20261126120000-attendance-ot-late-settlement", "20261127120000-attendance-ot-correction-priority", "20261128120000-attendance-ot-historical-review", "20261129120000-lr-followup-manual", "20261130120000-account-sheet-wallet", "20261201120000-fnf-settlement", "20261203120000-outlet-retailpilot-id", "20261204120000-purchase-retailpilot-columns", "20261205120000-purchase-retailpilot-source", "20261205130000-retailpilot-purchase-sync-permission"]);
+    assert.deepEqual(all.filter((f) => f > NAME).sort(), ["20261123120000-payroll-reports", "20261124120000-employee-payroll-eligible", "20261125120000-attendance-ot-auto-pending", "20261126120000-attendance-ot-late-settlement", "20261127120000-attendance-ot-correction-priority", "20261128120000-attendance-ot-historical-review", "20261129120000-lr-followup-manual", "20261130120000-account-sheet-wallet", "20261201120000-fnf-settlement", "20261203120000-outlet-retailpilot-id", "20261204120000-purchase-retailpilot-columns", "20261205120000-purchase-retailpilot-source", "20261205130000-retailpilot-purchase-sync-permission", "20261206120000-purchase-audit-log"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });
