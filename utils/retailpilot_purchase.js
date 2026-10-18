@@ -118,6 +118,9 @@ const sumValues = (list) => round2(list.reduce((s, e) => s + e.VALUE, 0));
  * to paise. Cess is not part of that total on the screen, so not here
  * either. total_amount is then the bill amount, as the screen would save it.
  */
+/** Largest difference treated as rounding; anything bigger is for accounts. */
+const ROUND_OFF_PREFILL_LIMIT = 10;
+
 function roundOffFor(p) {
   const interstate = isInterstateSupplier(p.SUPPLIER_GSTN);
   const lines = interstate ? p.IGST : p.SGST;
@@ -125,6 +128,31 @@ function roundOffFor(p) {
   const tax = interstate ? p.TOT_IGST_AMT : p.TOT_SGST_AMT + p.TOT_CGST_AMT;
   const roundOff = round2(p.MRC_AMT - (taxable + tax + p.GOODS_TCS_AMT));
   return { round_off: roundOff, total_amount: round2(taxable + tax + p.GOODS_TCS_AMT + roundOff) };
+}
+
+/**
+ * Whether the round-off is ordinary rounding the sync may pre-fill, or
+ * something accounts must look at: tax lines of the kind the screen and
+ * Tally will not show for this supplier (e.g. IGST on a supplier with no
+ * GSTIN, treated as local), or a difference above the limit.
+ * @returns { prefill: boolean, reason: string|null }
+ */
+function roundOffPrefillCheck(p) {
+  const interstate = isInterstateSupplier(p.SUPPLIER_GSTN);
+  const hidden = interstate ? [...p.SGST, ...p.CGST] : p.IGST;
+  if (hidden.some((e) => e.TAXABLE || e.VALUE)) {
+    return {
+      prefill: false,
+      reason: interstate
+        ? "CGST/SGST charged by an other-state supplier - the screen and Tally show IGST only"
+        : `IGST charged by a ${p.SUPPLIER_GSTN ? "local" : "no-GSTIN"} supplier - the screen and Tally show CGST/SGST only`,
+    };
+  }
+  const { round_off } = roundOffFor(p);
+  if (Math.abs(round_off) > ROUND_OFF_PREFILL_LIMIT) {
+    return { prefill: false, reason: `difference of ${round_off} is more than rounding (limit ${ROUND_OFF_PREFILL_LIMIT})` };
+  }
+  return { prefill: true, reason: null };
 }
 
 /** Numeric content hash, so TS changes exactly when the purchase does. */
@@ -248,9 +276,12 @@ function mapPurchases(rows, storeMap) {
       IGST: igst,
       CESS: cess,
     };
-    // Not a purchase column (bulkCreate ignores it): the round-off the sync
-    // pre-fills into purchase_internal for a new, unapproved bill.
+    // Not purchase columns (bulkCreate ignores them): the round-off, and
+    // whether the sync may pre-fill it into purchase_internal.
     payload.ROUND_OFF = roundOffFor(payload).round_off;
+    const check = roundOffPrefillCheck(payload);
+    payload.ROUND_OFF_PREFILL = check.prefill;
+    if (!check.prefill) payload.ROUND_OFF_NOTE = check.reason;
     payload.TS = contentTs(payload);
     purchases.push(payload);
   }
@@ -263,5 +294,7 @@ module.exports = {
   mapPurchases,
   isInterstateSupplier,
   roundOffFor,
+  roundOffPrefillCheck,
+  ROUND_OFF_PREFILL_LIMIT,
   contentTs,
 };

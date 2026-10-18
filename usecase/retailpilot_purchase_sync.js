@@ -102,8 +102,21 @@ class RetailPilotPurchaseSync {
         ? [`${skipped.length} invoice(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.invoice_slug} (${s.reason})`).join("; ")}`]
         : [];
 
+      const roundOffForAccounts = purchases
+        .filter((p) => !p.ROUND_OFF_PREFILL)
+        .map((p) => ({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, round_off: p.ROUND_OFF, reason: p.ROUND_OFF_NOTE }));
+      if (roundOffForAccounts.length) {
+        warnings.push(
+          `${roundOffForAccounts.length} bill(s) need accounts to check the round-off: ` +
+            roundOffForAccounts.slice(0, 5).map((r) => `${r.mrc_ref} (${r.reason})`).join("; ")
+        );
+      }
+
       if (dryRun) {
-        return { code: 200, dry_run: true, days: lookback, row_count: purchases.length, purchases, skipped, warnings };
+        return {
+          code: 200, dry_run: true, days: lookback, row_count: purchases.length,
+          purchases, skipped, round_off_for_accounts: roundOffForAccounts, warnings,
+        };
       }
 
       const saved = purchases.length
@@ -115,7 +128,7 @@ class RetailPilotPurchaseSync {
       const roundOffPrefilled =
         purchases.length && typeof this.purchaseUsecase.prefillPurchaseInternal === "function"
           ? await this.purchaseUsecase.prefillPurchaseInternal(
-              purchases.map((p) => ({
+              purchases.filter((p) => p.ROUND_OFF_PREFILL).map((p) => ({
                 retail_outlet_id: p.STORE_ID,
                 mmh_mrc_no: p.MRC_NO,
                 ...roundOffFor(p),
@@ -131,6 +144,7 @@ class RetailPilotPurchaseSync {
         updated: saved.updatedCount,
         unchanged: saved.unchangedCount,
         round_off_prefilled: roundOffPrefilled,
+        round_off_for_accounts: roundOffForAccounts,
         skipped,
         warnings,
       };

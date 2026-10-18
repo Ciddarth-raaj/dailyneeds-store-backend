@@ -3,7 +3,7 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { buildPurchaseQuery, mapPurchases, contentTs, roundOffFor } = require("./retailpilot_purchase");
+const { buildPurchaseQuery, mapPurchases, contentTs, roundOffFor, roundOffPrefillCheck } = require("./retailpilot_purchase");
 const spectraFactory = require("../services/retailpilot_spectra");
 const syncFactory = require("../usecase/retailpilot_purchase_sync");
 
@@ -183,6 +183,25 @@ describe("round-off, as the Purchase screen adds it up", () => {
     assert.deepEqual(roundOffFor(p), { round_off: 0.82, total_amount: 1182 });
   });
 
+  it("IGST on a supplier with no GSTIN is not rounding: left for accounts, with the reason", () => {
+    // the live k.r.candles bill: no GSTIN, IGST 5% - the screen shows CGST/SGST only
+    const p = mapPurchases(
+      [row({ supplier_gstn: "", cgst_rate: 0, sgst_rate: 0, igst_rate: 5, taxable: 4271.49, invoice_amount: 4485 })],
+      STORE_MAP
+    ).purchases[0];
+    assert.equal(roundOffFor(p).round_off, 4485, "the screen would see no tax at all");
+    assert.equal(p.ROUND_OFF_PREFILL, false);
+    assert.match(p.ROUND_OFF_NOTE, /IGST charged by a no-GSTIN supplier/);
+  });
+
+  it("a difference above Rs 10 is left for accounts; within Rs 10 is pre-filled", () => {
+    const big = mapPurchases([row({ invoice_amount: 1050 - 300.2, taxable: 1000 })], STORE_MAP).purchases[0];
+    assert.equal(big.ROUND_OFF, -300.2);
+    assert.deepEqual(roundOffPrefillCheck(big), { prefill: false, reason: "difference of -300.2 is more than rounding (limit 10)" });
+    const small = mapPurchases([row({ invoice_amount: 1059, taxable: 1000 })], STORE_MAP).purchases[0];
+    assert.deepEqual(roundOffPrefillCheck(small), { prefill: true, reason: null });
+  });
+
   it("nothing to round when the bill already adds up", () => {
     const p = mapPurchases([row({ invoice_amount: 1050, taxable: 1000 })], STORE_MAP).purchases[0];
     assert.equal(roundOffFor(p).round_off, 0);
@@ -230,7 +249,7 @@ describe("the sync", () => {
       },
     };
     const result = await syncFactory(
-      spectra([row(), row({ invoice_slug: "Z", store_id: "nope", mrc_no: 9 })]),
+      spectra([row({ invoice_amount: 1050 }), row({ invoice_slug: "Z", store_id: "nope", mrc_no: 9 })]),
       purchaseUsecase,
       config, branchMaster
     ).run();
@@ -301,6 +320,27 @@ describe("the sync", () => {
     const result = await syncFactory(spectra([row({ invoice_amount: 1051, taxable: 1000 })]), purchaseUsecase, config, branchMaster).run();
     assert.deepEqual(entries, [{ retail_outlet_id: 2, mmh_mrc_no: "INV-1001", round_off: 1, total_amount: 1051 }]);
     assert.equal(result.round_off_prefilled, 1);
+    assert.deepEqual(result.round_off_for_accounts, []);
+  });
+
+  it("bills that are not ordinary rounding are not pre-filled, and are listed for accounts", async () => {
+    let entries;
+    const purchaseUsecase = {
+      bulkCreatePurchase: async () => ({ insertedCount: 2, updatedCount: 0, unchangedCount: 0 }),
+      prefillPurchaseInternal: async (e) => { entries = e; return e.length; },
+    };
+    const result = await syncFactory(
+      spectra([
+        row({ invoice_slug: "OK", invoice_amount: 1050.4, taxable: 1000 }),
+        row({ invoice_slug: "BIG", mrc_no: 6373, invoice_amount: 2000, taxable: 1000 }),
+      ]),
+      purchaseUsecase,
+      config,
+      branchMaster
+    ).run();
+    assert.deepEqual(entries.map((e) => e.mmh_mrc_no), ["OK"]);
+    assert.deepEqual(result.round_off_for_accounts.map((r) => r.invoice_slug), ["BIG"]);
+    assert.ok(result.warnings.some((w) => /need accounts to check the round-off/.test(w)));
   });
 
   it("dry run saves nothing", async () => {
