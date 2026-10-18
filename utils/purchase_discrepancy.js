@@ -93,8 +93,6 @@ function purchaseDiscrepancies(p) {
   // itself. Registration is not inferred from anything else: there is no
   // registered/unregistered field on the purchase or the supplier.
   const unregistered = gstn === "" || gstn === "0";
-  const interstate = isInterstateSupplier(gstn);
-  const charged = (l) => toNumber(l.TAXABLE) !== 0 || toNumber(l.VALUE) !== 0;
   const taxed = (l) => toNumber(l.VALUE) !== 0;
   const cgst = parseList(p.cgst);
   const sgst = parseList(p.sgst);
@@ -119,39 +117,10 @@ function purchaseDiscrepancies(p) {
           "if not, enter the bill without input tax (e.g. the amount as nil-rated). " +
           "As it stands Tally would get CGST/SGST as input tax and no IGST.",
       });
-    } else if (igst.some(charged)) {
-      out.push({
-        code: "TAX_TYPE_MISMATCH",
-        severity: "block",
-        message:
-          `IGST lines (${describeLines(igst.filter(charged), "IGST")}) on an unregistered supplier: ` +
-          "the screen and Tally take CGST/SGST lines only for a supplier with no GSTIN, so this value would drop out. " +
-          "Re-enter it below.",
-      });
     }
-  } else if (interstate) {
-    // Registered, other state: the screen and Tally read IGST only.
-    const local = [...cgst, ...sgst].filter(charged);
-    if (local.length) {
-      const lines = [describeLines(cgst.filter(charged), "CGST"), describeLines(sgst.filter(charged), "SGST")].filter(Boolean).join(", ");
-      out.push({
-        code: "TAX_TYPE_MISMATCH",
-        severity: "block",
-        message:
-          `CGST/SGST charged (${lines}) but GSTIN ${gstn} is another state's, ` +
-          "so the screen and Tally take IGST only. Correct the GSTIN or the tax.",
-      });
-    }
-  } else if (igst.some(charged)) {
-    // Registered, Puducherry: the screen and Tally read CGST/SGST only.
-    out.push({
-      code: "TAX_TYPE_MISMATCH",
-      severity: "block",
-      message:
-        `IGST charged (${describeLines(igst.filter(charged), "IGST")}) but GSTIN ${gstn} is local, ` +
-        "so the screen and Tally take CGST/SGST only. Correct the GSTIN or the tax.",
-    });
   }
+  // No CGST/SGST-versus-IGST check (TAX_TYPE_MISMATCH): removed at the
+  // owner's request. Bills are kept exactly as the supplier issued them.
 
   if (gstn && gstn !== "0" && !GSTIN_PATTERN.test(gstn.toUpperCase())) {
     out.push({

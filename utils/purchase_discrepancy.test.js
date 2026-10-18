@@ -47,10 +47,10 @@ describe("purchase discrepancies", () => {
     assert.deepEqual(codes(local({ supplier_gstn: "" })), ["UNREGISTERED_SUPPLIER_TAX:block"]);
   });
 
-  it("an unregistered supplier's IGST nil-rated line would drop out of Tally: flagged as a classification issue", () => {
+  it("an unregistered supplier's IGST nil-rated line carries no tax: nothing flagged", () => {
     assert.deepEqual(
       codes(local({ supplier_gstn: "", sgst: [], cgst: [], igst: [{ PERC: 0, TAXABLE: 500, VALUE: 0 }] })),
-      ["TAX_TYPE_MISMATCH:block"]
+      []
     );
   });
 
@@ -61,14 +61,22 @@ describe("purchase discrepancies", () => {
     assert.deepEqual(codes(local({ supplier_gstn: "33KRCAN0000K1Z5", sgst: [], cgst: [], igst })), [], "registered other-state");
   });
 
-  it("a registered supplier: tax of the kind its GSTIN does not show is a mismatch", () => {
-    assert.deepEqual(codes(local({ supplier_gstn: "29CCCCC0000C1Z5" })), ["TAX_TYPE_MISMATCH:block"], "CGST/SGST from another state");
-    assert.deepEqual(
-      codes(local({ igst: [{ PERC: 18, TAXABLE: 100, VALUE: 18 }] })),
-      ["TAX_TYPE_MISMATCH:block"],
-      "IGST from a Puducherry GSTIN"
-    );
+  it("a registered supplier: CGST/SGST versus IGST is never flagged - the bill stays as the supplier issued it", () => {
+    assert.deepEqual(codes(local({ supplier_gstn: "29CCCCC0000C1Z5" })), [], "CGST/SGST from another state");
+    assert.deepEqual(codes(local({ igst: [{ PERC: 18, TAXABLE: 100, VALUE: 18 }] })), [], "IGST from a Puducherry GSTIN");
     assert.deepEqual(codes(local({ supplier_gstn: "33BBBBB0000B1Z5", sgst: [], cgst: [], igst: [{ PERC: 18, TAXABLE: 100, VALUE: 18 }] })), []);
+  });
+
+  it("bill 811 (ID Fresh Food, 33AAICM3930G1ZO): GoFrugal's 0% CGST/SGST lines beside the IGST - no warning", () => {
+    const bill = {
+      supplier_gstn: "33AAICM3930G1ZO",
+      cgst: [{ PERC: 0, TAXABLE: 2911.22, VALUE: 0 }],
+      sgst: [{ PERC: 0, TAXABLE: 2911.22, VALUE: 0 }],
+      igst: [{ PERC: 0, TAXABLE: 2340.04, VALUE: 0 }, { PERC: 5, TAXABLE: 571.18, VALUE: 28.56 }],
+      mmh_mrc_dt: "2026-10-10",
+      mmh_dist_bill_dt: "2026-10-10",
+    };
+    assert.deepEqual(purchaseDiscrepancies(bill), []);
   });
 
   it("a malformed GSTIN is flagged for review, not blocked", () => {
