@@ -9,9 +9,10 @@ const MAX_DAYS = 90;
  */
 class RetailPilotPurchaseSync {
   /**
-   * @param loadStoreMap async () => { [retailpilot store slug]: outlet_id },
-   *   normally Branch Master (outlets.retailpilot_id), read on every run so
-   *   an edit there applies to the next sync.
+   * @param loadStoreMap async () => { [retailpilot store slug]: outlet_id }
+   *   from Branch Master (outletUsecase.getRetailPilotStoreMap), read on
+   *   every run so an edit there applies to the next sync. It is the only
+   *   source of the mapping.
    */
   constructor(spectra, purchaseUsecase, config, loadStoreMap) {
     this.spectra = spectra;
@@ -22,7 +23,6 @@ class RetailPilotPurchaseSync {
   }
 
   async _storeMap() {
-    if (this.config.storeMapOverride) return this.config.storeMapOverride;
     return this.loadStoreMap ? (await this.loadStoreMap()) || {} : {};
   }
 

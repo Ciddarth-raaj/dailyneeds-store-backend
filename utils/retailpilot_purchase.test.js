@@ -156,21 +156,6 @@ describe("mapPurchases", () => {
   });
 });
 
-describe("the store map override", () => {
-  const { parseStoreMap } = require("../config/retailpilot");
-
-  it("is off unless RETAILPILOT_STORE_MAP is set, so Branch Master is used", () => {
-    assert.equal(parseStoreMap(""), null);
-    assert.equal(parseStoreMap(undefined), null);
-  });
-
-  it("keeps only whole positive outlet ids, and a broken value falls back to Branch Master", () => {
-    assert.deepEqual(parseStoreMap('{"abc": 9, "bad": "x"}'), { abc: 9 });
-    assert.equal(parseStoreMap("not json"), null);
-    assert.equal(parseStoreMap("[1,2]"), null);
-  });
-});
-
 describe("the SPECTRA client", () => {
   const config = { baseUrl: "https://rp.example", apiKey: "k", product: "runway", pageSize: 2, timeoutMs: 1000 };
 
@@ -200,7 +185,7 @@ describe("the SPECTRA client", () => {
 
 describe("the sync", () => {
   const spectra = (rows) => ({ isConfigured: () => true, queryAll: async () => rows });
-  const config = { storeMapOverride: null, purchaseLookbackDays: 3 };
+  const config = { purchaseLookbackDays: 3 };
   const branchMaster = async () => STORE_MAP;
 
   it("saves through bulkCreatePurchase and reports counts and skips", async () => {
@@ -285,14 +270,45 @@ describe("the sync", () => {
     assert.match(result.skipped[0].reason, /RetailPilot store zzNew is not set as the RetailPilot ID of any branch in Branch Master/);
   });
 
-  it("RETAILPILOT_STORE_MAP, when set, wins over Branch Master", async () => {
+  it("maps through the real outlet usecase, so Branch Master is the only source", async () => {
+    const outletUsecase = require("../usecase/outlet")(
+      {
+        getRetailPilotIds: async () => [
+          { outlet_id: 2, outlet_name: "Warehouse", retailpilot_id: "store-a" },
+          { outlet_id: 9, outlet_name: "No ID", retailpilot_id: null },
+        ],
+      },
+      {}
+    );
     const result = await syncFactory(
-      spectra([row({ store_id: "x1" })]),
+      spectra([row(), row({ invoice_slug: "OTHER", store_id: "store-z", mrc_no: 7 })]),
       {},
-      { ...config, storeMapOverride: { x1: 5 } },
-      async () => assert.fail("Branch Master must not be read when the override is set")
+      config,
+      () => outletUsecase.getRetailPilotStoreMap()
     ).run({ dryRun: true });
-    assert.equal(result.purchases[0].STORE_ID, 5);
+    assert.deepEqual(result.purchases.map((p) => p.STORE_ID), [2]);
+    assert.match(result.skipped[0].reason, /RetailPilot store store-z is not set as the RetailPilot ID of any branch in Branch Master/);
+  });
+
+  it("a RetailPilot ID on two branches stops the sync instead of picking one", async () => {
+    const outletUsecase = require("../usecase/outlet")(
+      {
+        getRetailPilotIds: async () => [
+          { outlet_id: 2, outlet_name: "Warehouse", retailpilot_id: "store-a" },
+          { outlet_id: 3, outlet_name: "Copy", retailpilot_id: "store-a" },
+        ],
+      },
+      {}
+    );
+    await assert.rejects(
+      syncFactory(spectra([row()]), {}, config, () => outletUsecase.getRetailPilotStoreMap()).run({ dryRun: true }),
+      (err) => err.code === "RETAILPILOT_BRANCH_MAP_DUPLICATE"
+    );
+  });
+
+  it("the config carries no store map of its own", () => {
+    const cfg = require("../config/retailpilot");
+    assert.ok(!("storeMapOverride" in cfg) && !("storeMap" in cfg) && !("parseStoreMap" in cfg));
   });
 
   it("rejects a bad look-back and an unconfigured client", async () => {
