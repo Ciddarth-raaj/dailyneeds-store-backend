@@ -16,6 +16,7 @@ describe("widening purchase refno and supplier_id", () => {
   it("is unique and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js"));
     assert.deepEqual(all.filter((f) => f.startsWith(NAME.slice(0, 14))), [`${NAME}.js`]);
+    assert.deepEqual(all.filter((f) => f > `${NAME}.js`), ["20261203120000-outlet-retailpilot-id.js"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });

@@ -107,10 +107,44 @@ class OutletUsecase {
   getOutletsByGofrugalIds(gofrugal_ids) {
     return this.outletRepo.getOutletsByGofrugalIds(gofrugal_ids);
   }
+  /**
+   * RetailPilot store slug -> outlet_id, from Branch Master. The slugs are
+   * case-sensitive (FuUGY), so they are compared exactly.
+   */
+  async getRetailPilotStoreMap() {
+    const rows = await this.outletRepo.getRetailPilotIds();
+    const map = {};
+    for (const row of rows) map[String(row.retailpilot_id).trim()] = Number(row.outlet_id);
+    return map;
+  }
+
+  /**
+   * Blank -> null (the column is unique, and '' would collide), trimmed
+   * otherwise. Returns an error response when another branch already holds
+   * the ID, else null.
+   */
+  async _checkRetailPilotId(details, outletId = null) {
+    if (!details || !("retailpilot_id" in details)) return null;
+    const value = details.retailpilot_id == null ? "" : String(details.retailpilot_id).trim();
+    details.retailpilot_id = value === "" ? null : value;
+    if (details.retailpilot_id === null) return null;
+    const owner = (await this.outletRepo.getRetailPilotIds()).find(
+      (row) => String(row.retailpilot_id).trim() === value && Number(row.outlet_id) !== Number(outletId)
+    );
+    return owner
+      ? { code: 409, msg: `RetailPilot ID ${value} is already set on ${owner.outlet_name} (outlet ${owner.outlet_id})` }
+      : null;
+  }
+
   updateOutletDetails(outlet) {
     return new Promise(async (resolve, reject) => {
       try {
         const outlet_id = outlet.outlet_id;
+        const clash = await this._checkRetailPilotId(outlet.outlet_details, outlet_id);
+        if (clash) {
+          resolve(clash);
+          return;
+        }
         const res = await this.outletRepo.updateOutletDetails(
           outlet.outlet_details,
           outlet_id
@@ -151,6 +185,11 @@ class OutletUsecase {
   create(outlet) {
     return new Promise(async (resolve, reject) => {
       try {
+        const clash = await this._checkRetailPilotId(outlet.outlet_details);
+        if (clash) {
+          resolve(clash);
+          return;
+        }
         const id = await this.outletRepo.create(outlet.outlet_details);
 
         if (outlet.budget) {

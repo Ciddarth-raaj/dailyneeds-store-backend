@@ -41,6 +41,7 @@ describe("the migration", () => {
       "20261130120000-account-sheet-wallet",
       "20261201120000-fnf-settlement",
       "20261202120000-purchase-refno-supplier-id-widen",
+      "20261203120000-outlet-retailpilot-id",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");

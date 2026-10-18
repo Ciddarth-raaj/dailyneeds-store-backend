@@ -8,11 +8,22 @@ const MAX_DAYS = 90;
  * purchaseUsecase.bulkCreatePurchase the old GoFrugal push used.
  */
 class RetailPilotPurchaseSync {
-  constructor(spectra, purchaseUsecase, config) {
+  /**
+   * @param loadStoreMap async () => { [retailpilot store slug]: outlet_id },
+   *   normally Branch Master (outlets.retailpilot_id), read on every run so
+   *   an edit there applies to the next sync.
+   */
+  constructor(spectra, purchaseUsecase, config, loadStoreMap) {
     this.spectra = spectra;
     this.purchaseUsecase = purchaseUsecase;
     this.config = config;
+    this.loadStoreMap = loadStoreMap;
     this.running = false;
+  }
+
+  async _storeMap() {
+    if (this.config.storeMapOverride) return this.config.storeMapOverride;
+    return this.loadStoreMap ? (await this.loadStoreMap()) || {} : {};
   }
 
   /**
@@ -58,8 +69,15 @@ class RetailPilotPurchaseSync {
 
     this.running = true;
     try {
+      const storeMap = await this._storeMap();
+      if (Object.keys(storeMap).length === 0) {
+        return {
+          code: 400,
+          message: "No branch has a RetailPilot ID. Set it in Branch Master before syncing.",
+        };
+      }
       const rows = await this.spectra.queryAll(buildPurchaseQuery(lookback));
-      const mapped = mapPurchases(rows, this.config.storeMap);
+      const mapped = mapPurchases(rows, storeMap);
       const skipped = mapped.skipped;
       const purchases = await this._withoutRefnoClashes(mapped.purchases, skipped);
       const warnings = skipped.length
@@ -100,5 +118,5 @@ class RetailPilotPurchaseSync {
   }
 }
 
-module.exports = (spectra, purchaseUsecase, config) =>
-  new RetailPilotPurchaseSync(spectra, purchaseUsecase, config);
+module.exports = (spectra, purchaseUsecase, config, loadStoreMap) =>
+  new RetailPilotPurchaseSync(spectra, purchaseUsecase, config, loadStoreMap);

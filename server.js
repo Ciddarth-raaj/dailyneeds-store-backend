@@ -1303,7 +1303,8 @@ class Server {
     this.retailPilotPurchaseSyncUsecase = require("./usecase/retailpilot_purchase_sync")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       this.purchaseUsecase,
-      retailPilotConfig
+      retailPilotConfig,
+      () => this.outletUsecase.getRetailPilotStoreMap()
     );
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo,

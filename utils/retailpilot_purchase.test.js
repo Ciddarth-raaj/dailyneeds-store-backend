@@ -123,7 +123,7 @@ describe("mapPurchases", () => {
     );
     assert.equal(purchases.length, 0);
     assert.deepEqual(skipped.map((s) => s.invoice_slug), ["A", "C", "B", "D"]);
-    assert.match(skipped[0].reason, /RETAILPILOT_STORE_MAP/);
+    assert.match(skipped[0].reason, /not set as the RetailPilot ID of any branch/);
     assert.match(skipped[1].reason, /DIST_BILL_NO/);
     assert.match(skipped[2].reason, /date/);
     assert.match(skipped[3].reason, /no seq/);
@@ -156,20 +156,18 @@ describe("mapPurchases", () => {
   });
 });
 
-describe("the store map", () => {
-  const { parseStoreMap, DEFAULT_STORE_MAP } = require("../config/retailpilot");
-  const { WAREHOUSE_OUTLET_ID } = require("../constants/outlets");
+describe("the store map override", () => {
+  const { parseStoreMap } = require("../config/retailpilot");
 
-  it("defaults to the six RetailPilot stores", () => {
-    assert.deepEqual(parseStoreMap(""), {
-      "9rJMC": WAREHOUSE_OUTLET_ID, FuUGY: 4, huABy: 3, sooWy: 5, rnMT1: 6, kKFom: 7,
-    });
-    assert.deepEqual(parseStoreMap(undefined), DEFAULT_STORE_MAP);
+  it("is off unless RETAILPILOT_STORE_MAP is set, so Branch Master is used", () => {
+    assert.equal(parseStoreMap(""), null);
+    assert.equal(parseStoreMap(undefined), null);
   });
 
-  it("is replaced by RETAILPILOT_STORE_MAP, and a broken value falls back", () => {
+  it("keeps only whole positive outlet ids, and a broken value falls back to Branch Master", () => {
     assert.deepEqual(parseStoreMap('{"abc": 9, "bad": "x"}'), { abc: 9 });
-    assert.deepEqual(parseStoreMap("not json"), DEFAULT_STORE_MAP);
+    assert.equal(parseStoreMap("not json"), null);
+    assert.equal(parseStoreMap("[1,2]"), null);
   });
 });
 
@@ -202,7 +200,8 @@ describe("the SPECTRA client", () => {
 
 describe("the sync", () => {
   const spectra = (rows) => ({ isConfigured: () => true, queryAll: async () => rows });
-  const config = { storeMap: STORE_MAP, purchaseLookbackDays: 3 };
+  const config = { storeMapOverride: null, purchaseLookbackDays: 3 };
+  const branchMaster = async () => STORE_MAP;
 
   it("saves through bulkCreatePurchase and reports counts and skips", async () => {
     let saved;
@@ -215,7 +214,7 @@ describe("the sync", () => {
     const result = await syncFactory(
       spectra([row(), row({ invoice_slug: "Z", store_id: "nope", mrc_no: 9 })]),
       purchaseUsecase,
-      config
+      config, branchMaster
     ).run();
     assert.equal(saved.length, 1);
     assert.equal(result.inserted, 1);
@@ -242,7 +241,7 @@ describe("the sync", () => {
     const result = await syncFactory(
       spectra([row({ invoice_slug: "OLD" }), row({ invoice_slug: "SAME", mrc_no: 6373, supplier_invoice_id: "B-2" })]),
       purchaseUsecase,
-      config
+      config, branchMaster
     ).run();
     assert.deepEqual(saved.map((p) => p.MRC_REF), ["6373"], "the same bill coming back still updates");
     assert.equal(result.skipped.length, 1);
@@ -252,15 +251,54 @@ describe("the sync", () => {
 
   it("dry run saves nothing", async () => {
     const purchaseUsecase = { bulkCreatePurchase: async () => assert.fail("must not save") };
-    const result = await syncFactory(spectra([row()]), purchaseUsecase, config).run({ dryRun: true });
+    const result = await syncFactory(spectra([row()]), purchaseUsecase, config, branchMaster).run({ dryRun: true });
     assert.equal(result.dry_run, true);
     assert.equal(result.purchases.length, 1);
   });
 
+  it("reads the store map from Branch Master on every run", async () => {
+    let calls = 0;
+    const loader = async () => {
+      calls += 1;
+      return calls === 1 ? STORE_MAP : {};
+    };
+    const purchaseUsecase = { bulkCreatePurchase: async () => ({ insertedCount: 1 }) };
+    const s = syncFactory(spectra([row()]), purchaseUsecase, config, loader);
+    assert.equal((await s.run({ dryRun: true })).purchases.length, 1);
+    const second = await s.run({ dryRun: true });
+    assert.equal(second.code, 400, "an emptied Branch Master stops the sync instead of guessing");
+    assert.match(second.message, /Branch Master/);
+    assert.equal(calls, 2);
+  });
+
+  it("a store missing from Branch Master is skipped, never put on another outlet", async () => {
+    let saved = [];
+    const purchaseUsecase = { bulkCreatePurchase: async (list) => { saved = list; return { insertedCount: list.length }; } };
+    const result = await syncFactory(
+      spectra([row(), row({ invoice_slug: "NEW", store_id: "zzNew", mrc_no: 9 })]),
+      purchaseUsecase,
+      config,
+      async () => ({ "store-a": 2 })
+    ).run();
+    assert.deepEqual(saved.map((p) => p.STORE_ID), [2]);
+    assert.equal(result.skipped.length, 1);
+    assert.match(result.skipped[0].reason, /RetailPilot store zzNew is not set as the RetailPilot ID of any branch in Branch Master/);
+  });
+
+  it("RETAILPILOT_STORE_MAP, when set, wins over Branch Master", async () => {
+    const result = await syncFactory(
+      spectra([row({ store_id: "x1" })]),
+      {},
+      { ...config, storeMapOverride: { x1: 5 } },
+      async () => assert.fail("Branch Master must not be read when the override is set")
+    ).run({ dryRun: true });
+    assert.equal(result.purchases[0].STORE_ID, 5);
+  });
+
   it("rejects a bad look-back and an unconfigured client", async () => {
-    const s = syncFactory(spectra([]), {}, config);
+    const s = syncFactory(spectra([]), {}, config, branchMaster);
     assert.equal((await s.run({ days: 365 })).code, 400);
-    const u = syncFactory({ isConfigured: () => false }, {}, config);
+    const u = syncFactory({ isConfigured: () => false }, {}, config, branchMaster);
     assert.equal((await u.run()).code, 400);
   });
 });

@@ -140,7 +140,7 @@ function mapPurchases(rows, storeMap) {
 
     const outletId = storeMap[str(h.store_id)];
     if (!outletId) {
-      skip(`store_id ${str(h.store_id) || "(blank)"} is not in RETAILPILOT_STORE_MAP`);
+      skip(`RetailPilot store ${str(h.store_id) || "(blank)"} is not set as the RetailPilot ID of any branch in Branch Master`);
       continue;
     }
     const mrcDate = dateOnly(h.received_date);
