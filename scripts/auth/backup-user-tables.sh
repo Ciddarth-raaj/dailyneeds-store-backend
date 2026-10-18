@@ -50,7 +50,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 [ "$(stat -c %a "$DEFAULTS")" = "600" ] || fail "$DEFAULTS must be mode 600"
 [ -x "$MYSQL" ] && [ -x "$MYSQLDUMP" ] || fail "mysql/mysqldump not found in $BIN (set MYSQL_BIN_DIR). Install the MySQL 8.4 client tarball first — readiness §5.2."
 
-CLIENT_VER="$("$MYSQLDUMP" --version)"
+# mysqldump reads ONLY the defaults file it is given (--no-defaults /
+# --defaults-file): a server-wide ~/.my.cnf or /etc/my.cnf [client] group can
+# carry options the mysql client accepts but mysqldump rejects (database=...).
+CLIENT_VER="$("$MYSQLDUMP" --no-defaults --version)"
 case "$CLIENT_VER" in
   *MariaDB*)
     if [ "${ALLOW_MARIADB_CLIENT:-0}" != "1" ]; then
@@ -166,8 +169,8 @@ FULL_FILE="$OUT/${DB}-full-${STAMP}.sql.gz"
 #  NO --databases        the dump carries no CREATE DATABASE / USE, so it restores into
 #                        whatever schema the client selects — this is what makes the
 #                        isolated restore possible and a restore over dnds_prod hard.
-COMMON=(--defaults-extra-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date)
-case "$CLIENT_VER" in *MariaDB*) COMMON=(--defaults-extra-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date);; esac
+COMMON=(--defaults-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --set-gtid-purged=OFF --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date)
+case "$CLIENT_VER" in *MariaDB*) COMMON=(--defaults-file="$DUMP_DEFAULTS" --single-transaction --quick --skip-lock-tables --no-tablespaces --add-drop-table --hex-blob --default-character-set=utf8mb4 --dump-date);; esac
 
 echo "== auth tables ($AUTH_TABLES) -> $AUTH_FILE =="
 # shellcheck disable=SC2086

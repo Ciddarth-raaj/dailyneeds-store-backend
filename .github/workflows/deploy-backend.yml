@@ -102,9 +102,14 @@ jobs:
              echo "Migrations this deploy will run:"; echo "$NEW"
              BIN="$HOME/mysql84/bin"
              [ -x "$BIN/mysqldump" ] || { echo "FAIL: MySQL 8.4 client not found at $BIN - no backup taken; deploy stopped before any change"; exit 1; }
-             node scripts/auth/db-defaults-file.js app > /dev/null
+             # The backup tooling comes from the commit being deployed, not
+             # from the server checkout this step runs before pulling.
+             TOOLS="$(mktemp -d)"; trap "rm -rf \"$TOOLS\"" EXIT
+             git archive origin/main-autodeploy scripts/auth | tar -x -C "$TOOLS"
+             ln -s "$PWD/config.json" "$TOOLS/config.json"
+             node "$TOOLS/scripts/auth/db-defaults-file.js" app > /dev/null
              OUT="$HOME/db-backups/pre-deploy"
-             SKIP_ROUTINES=1 MYSQL_BIN_DIR="$BIN" scripts/auth/backup-user-tables.sh "$OUT" 2>&1 \
+             SKIP_ROUTINES=1 MYSQL_BIN_DIR="$BIN" "$TOOLS/scripts/auth/backup-user-tables.sh" "$OUT" 2>&1 \
                | sed -E -e "s/^(host|user)=.*/\1=<hidden>/" \
                         -e "s/\x27[^\x27 ]+\x27@\x27[^\x27 ]*\x27/<user>@<host>/g" \
                         -e "s/\`[^\` ]+\`@\`[^\` ]*\`/<user>@<host>/g" \
