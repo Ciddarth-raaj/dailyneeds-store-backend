@@ -3,7 +3,7 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { buildPurchaseQuery, mapPurchases, contentTs } = require("./retailpilot_purchase");
+const { buildPurchaseQuery, mapPurchases, contentTs, roundOffFor } = require("./retailpilot_purchase");
 const spectraFactory = require("../services/retailpilot_spectra");
 const syncFactory = require("../usecase/retailpilot_purchase_sync");
 
@@ -161,6 +161,34 @@ describe("mapPurchases", () => {
   });
 });
 
+describe("round-off, as the Purchase screen adds it up", () => {
+  it("a local bill: the live dinesh agency bill rounds off by -0.20 to Rs 4544", () => {
+    const p = mapPurchases(
+      [
+        row({ supplier_gstn: "34AHVPV0618F1Z2", invoice_amount: 4544, taxable: 3884.26 }),
+        row({ supplier_gstn: "34AHVPV0618F1Z2", invoice_amount: 4544, cgst_rate: 9, sgst_rate: 9, taxable: 394.68 }),
+      ],
+      STORE_MAP
+    ).purchases[0];
+    assert.deepEqual(roundOffFor(p), { round_off: -0.2, total_amount: 4544 });
+    assert.equal(p.ROUND_OFF, -0.2, "carried on the mapped bill for the dry run");
+  });
+
+  it("an other-state bill counts IGST, and TCS", () => {
+    const p = mapPurchases(
+      [row({ supplier_gstn: "29BBBBB0000B1Z5", cgst_rate: 0, sgst_rate: 0, igst_rate: 18, taxable: 1000, tcs: 1.18, invoice_amount: 1182 })],
+      STORE_MAP
+    ).purchases[0];
+    // 1000 + 180 + 1.18 = 1181.18 -> round-off 0.82
+    assert.deepEqual(roundOffFor(p), { round_off: 0.82, total_amount: 1182 });
+  });
+
+  it("nothing to round when the bill already adds up", () => {
+    const p = mapPurchases([row({ invoice_amount: 1050, taxable: 1000 })], STORE_MAP).purchases[0];
+    assert.equal(roundOffFor(p).round_off, 0);
+  });
+});
+
 describe("the SPECTRA client", () => {
   const config = { baseUrl: "https://rp.example", apiKey: "k", product: "runway", pageSize: 2, timeoutMs: 1000 };
 
@@ -264,8 +292,22 @@ describe("the sync", () => {
     assert.deepEqual(saved.map((p) => p.MRC_REF), ["6372"]);
   });
 
+  it("pre-fills round-off for every saved bill, keyed by outlet and slug", async () => {
+    let entries;
+    const purchaseUsecase = {
+      bulkCreatePurchase: async () => ({ insertedCount: 1, updatedCount: 0, unchangedCount: 0 }),
+      prefillPurchaseInternal: async (e) => { entries = e; return 1; },
+    };
+    const result = await syncFactory(spectra([row({ invoice_amount: 1051, taxable: 1000 })]), purchaseUsecase, config, branchMaster).run();
+    assert.deepEqual(entries, [{ retail_outlet_id: 2, mmh_mrc_no: "INV-1001", round_off: 1, total_amount: 1051 }]);
+    assert.equal(result.round_off_prefilled, 1);
+  });
+
   it("dry run saves nothing", async () => {
-    const purchaseUsecase = { bulkCreatePurchase: async () => assert.fail("must not save") };
+    const purchaseUsecase = {
+      bulkCreatePurchase: async () => assert.fail("must not save"),
+      prefillPurchaseInternal: async () => assert.fail("must not pre-fill"),
+    };
     const result = await syncFactory(spectra([row()]), purchaseUsecase, config, branchMaster).run({ dryRun: true });
     assert.equal(result.dry_run, true);
     assert.equal(result.purchases.length, 1);

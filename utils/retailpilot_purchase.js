@@ -110,6 +110,23 @@ function addTax(list, perc, taxable, value) {
 const byPerc = (a, b) => a.PERC - b.PERC;
 const sumValues = (list) => round2(list.reduce((s, e) => s + e.VALUE, 0));
 
+/**
+ * Round-off for the Purchase screen: bill amount minus what the screen adds
+ * up (components/Purchase/PurchaseModal, util/purchase.js
+ * calculateTotalAmount) - taxable + GST + TCS, where GST is IGST for an
+ * other-state supplier and SGST + CGST otherwise, each line already rounded
+ * to paise. Cess is not part of that total on the screen, so not here
+ * either. total_amount is then the bill amount, as the screen would save it.
+ */
+function roundOffFor(p) {
+  const interstate = isInterstateSupplier(p.SUPPLIER_GSTN);
+  const lines = interstate ? p.IGST : p.SGST;
+  const taxable = lines.reduce((s, e) => s + e.TAXABLE, 0);
+  const tax = interstate ? p.TOT_IGST_AMT : p.TOT_SGST_AMT + p.TOT_CGST_AMT;
+  const roundOff = round2(p.MRC_AMT - (taxable + tax + p.GOODS_TCS_AMT));
+  return { round_off: roundOff, total_amount: round2(taxable + tax + p.GOODS_TCS_AMT + roundOff) };
+}
+
 /** Numeric content hash, so TS changes exactly when the purchase does. */
 function contentTs(payload) {
   const hex = crypto.createHash("sha1").update(JSON.stringify(payload)).digest("hex");
@@ -231,6 +248,9 @@ function mapPurchases(rows, storeMap) {
       IGST: igst,
       CESS: cess,
     };
+    // Not a purchase column (bulkCreate ignores it): the round-off the sync
+    // pre-fills into purchase_internal for a new, unapproved bill.
+    payload.ROUND_OFF = roundOffFor(payload).round_off;
     payload.TS = contentTs(payload);
     purchases.push(payload);
   }
@@ -242,5 +262,6 @@ module.exports = {
   buildPurchaseQuery,
   mapPurchases,
   isInterstateSupplier,
+  roundOffFor,
   contentTs,
 };

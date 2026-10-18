@@ -89,8 +89,12 @@ class PurchaseUsecase {
     }
   }
 
-  findByOutletRefnos(pairs) {
-    return this.purchaseRepo.findByOutletRefnos(pairs);
+  findByOutletRefnos(keys) {
+    return this.purchaseRepo.findByOutletRefnos(keys);
+  }
+
+  prefillPurchaseInternal(entries) {
+    return this.purchaseRepo.prefillPurchaseInternal(entries);
   }
 
   async bulkCreatePurchase(purchaseList, options) {

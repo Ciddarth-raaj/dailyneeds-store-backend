@@ -279,3 +279,27 @@ describe("matching a RetailPilot bill by its slug (matchOn: mmh_mrc_no)", () => 
     await assert.rejects(buildRepo(makeDb([]).db).bulkCreate([payload()], { matchOn: "supplier_id" }), /cannot match on supplier_id/);
   });
 });
+
+/* ============================================ round-off pre-fill ===== */
+describe("pre-filling purchase_internal for RetailPilot bills", () => {
+  const src = fs.readFileSync(path.join(__dirname, "purchase.js"), "utf8");
+  const fn = src.slice(src.indexOf("async prefillPurchaseInternal("), src.indexOf("findByOutletRefnos(keys)"));
+
+  it("writes only for an unapproved bill with no purchase_internal row, found by outlet and slug", () => {
+    assert.match(fn, /INSERT INTO purchase_internal \(purchase_id, round_off, total_amount, supplier_credit_note\)/);
+    assert.match(fn, /WHERE p\.retail_outlet_id = \? AND p\.mmh_mrc_no = \? AND p\.is_approved = 0/);
+    assert.match(fn, /AND NOT EXISTS \(SELECT 1 FROM purchase_internal pi WHERE pi\.purchase_id = p\.purchase_id\)/);
+    assert.doesNotMatch(fn, /UPDATE purchase_internal|ON DUPLICATE KEY|INSERT IGNORE/, "never overwrites accounts' entry");
+  });
+
+  it("counts what it wrote", async () => {
+    const calls = [];
+    const db = { query: (sql, params, cb) => { calls.push(params); cb(null, { affectedRows: params[3] === "INV-NEW" ? 1 : 0 }); } };
+    const n = await buildRepo(db).prefillPurchaseInternal([
+      { retail_outlet_id: 2, mmh_mrc_no: "INV-NEW", round_off: -0.2, total_amount: 4544 },
+      { retail_outlet_id: 2, mmh_mrc_no: "INV-STARTED", round_off: 1, total_amount: 10 },
+    ]);
+    assert.equal(n, 1);
+    assert.deepEqual(calls[0], [-0.2, 4544, 2, "INV-NEW"]);
+  });
+});

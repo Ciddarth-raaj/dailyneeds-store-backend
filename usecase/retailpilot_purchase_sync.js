@@ -9,7 +9,7 @@ function dateOnlyString(value) {
   }
   return String(value || "").slice(0, 10);
 }
-const { buildPurchaseQuery, mapPurchases } = require("../utils/retailpilot_purchase");
+const { buildPurchaseQuery, mapPurchases, roundOffFor } = require("../utils/retailpilot_purchase");
 
 const MAX_DAYS = 90;
 
@@ -110,6 +110,19 @@ class RetailPilotPurchaseSync {
         ? await this.purchaseUsecase.bulkCreatePurchase(purchases, { matchOn: "mmh_mrc_no" })
         : { insertedCount: 0, updatedCount: 0, unchangedCount: 0 };
 
+      // Round-off into purchase_internal - only where accounts have not
+      // started the bill yet (no internal row) and it is unapproved.
+      const roundOffPrefilled =
+        purchases.length && typeof this.purchaseUsecase.prefillPurchaseInternal === "function"
+          ? await this.purchaseUsecase.prefillPurchaseInternal(
+              purchases.map((p) => ({
+                retail_outlet_id: p.STORE_ID,
+                mmh_mrc_no: p.MRC_NO,
+                ...roundOffFor(p),
+              }))
+            )
+          : 0;
+
       return {
         code: 200,
         days: lookback,
@@ -117,6 +130,7 @@ class RetailPilotPurchaseSync {
         inserted: saved.insertedCount,
         updated: saved.updatedCount,
         unchanged: saved.unchangedCount,
+        round_off_prefilled: roundOffPrefilled,
         skipped,
         warnings,
       };
