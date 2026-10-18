@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { purchaseIdFromMasterId } = require("../utils/tally_master_id");
 const {
   mergedCol,
   mergedDateExpr,
@@ -10,43 +11,71 @@ class PurchaseTallyRepository {
     this.db = db;
   }
 
-  /**
-   * Resolve purchase_id from tally response fields against purchase + outlet.
-   */
-  findPurchaseIdForTallyResponse({
-    VoucherNo,
-    SupplierName,
-    GSTIN,
-    CostCentre,
-  }) {
+  _q(sql, params) {
     return new Promise((resolve, reject) => {
-      this.db.query(
-        `SELECT p.purchase_id
+      this.db.query(sql, params, (err, rows) => (err ? reject(err) : resolve(rows)));
+    });
+  }
+
+  /**
+   * The purchase a Tally response belongs to.
+   *
+   * The voucher number (mmh_mrc_refno) repeats across branches and restarts
+   * every financial year, so it is never trusted alone:
+   *  1. the MasterID the export sent carries the purchase id - used when it
+   *     decodes AND that purchase has the response's voucher number, branch
+   *     (cost centre) and GSTIN;
+   *  2. otherwise voucher number + branch + GSTIN, narrowed to approved bills
+   *     (only those are exported) and to bills without a response yet. If
+   *     more than one remains it is ambiguous and nothing is linked.
+   *
+   * @returns {Promise<{ purchaseId: number|null, ambiguous?: number[] }>}
+   */
+  async resolvePurchaseForTallyResponse({ MasterID, VoucherNo, GSTIN, CostCentre }) {
+    try {
+      const match = `TRIM(p.mmh_mrc_refno) = TRIM(?)
+           AND TRIM(o.outlet_name) = TRIM(?)
+           AND UPPER(TRIM(p.supplier_gstn)) = UPPER(TRIM(?))`;
+
+      const fromMaster = purchaseIdFromMasterId(MasterID);
+      if (fromMaster) {
+        const rows = await this._q(
+          `SELECT p.purchase_id FROM purchase p
+           INNER JOIN outlets o ON o.outlet_id = p.retail_outlet_id
+           WHERE p.purchase_id = ? AND ${match}`,
+          [fromMaster, VoucherNo, CostCentre, GSTIN]
+        );
+        if (rows.length) return { purchaseId: rows[0].purchase_id };
+      }
+
+      const rows = await this._q(
+        `SELECT p.purchase_id, p.is_approved, tr.purchase_id AS has_response
          FROM purchase p
          INNER JOIN outlets o ON o.outlet_id = p.retail_outlet_id
-         WHERE TRIM(p.mmh_mrc_refno) = TRIM(?)
-           AND TRIM(o.outlet_name) = TRIM(?)
-           AND UPPER(TRIM(p.supplier_gstn)) = UPPER(TRIM(?))
-         ORDER BY p.purchase_id DESC
-         LIMIT 1`,
-        [VoucherNo, CostCentre, GSTIN, SupplierName],
-        (err, rows) => {
-          if (err) {
-            logger.Log({
-              level: logger.LEVEL.ERROR,
-              component: "REPOSITORY.PURCHASE_TALLY",
-              code: "REPOSITORY.PURCHASE_TALLY.FIND-PURCHASE-ID",
-              description: err.toString(),
-              category: "",
-              ref: {},
-            });
-            reject(err);
-            return;
-          }
-          resolve(rows && rows[0] ? rows[0].purchase_id : null);
-        }
+         LEFT JOIN purchase_tally_response tr ON tr.purchase_id = p.purchase_id
+         WHERE ${match}
+         ORDER BY p.purchase_id DESC`,
+        [VoucherNo, CostCentre, GSTIN]
       );
-    });
+      if (!rows.length) return { purchaseId: null };
+
+      const approved = rows.filter((r) => Number(r.is_approved) === 1);
+      const pool = approved.length ? approved : rows;
+      const open = pool.filter((r) => r.has_response == null);
+      const pick = open.length ? open : pool;
+      if (pick.length === 1) return { purchaseId: pick[0].purchase_id };
+      return { purchaseId: null, ambiguous: pick.map((r) => r.purchase_id) };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.PURCHASE_TALLY",
+        code: "REPOSITORY.PURCHASE_TALLY.FIND-PURCHASE-ID",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      throw err;
+    }
   }
 
   findByPurchaseId(purchaseId) {

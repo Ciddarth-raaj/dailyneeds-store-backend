@@ -584,6 +584,13 @@ class TallyUsecase {
           );
           purchaseEntry.VoucherNumber = purchase.mmh_mrc_refno;
           purchaseEntry.Reference = purchase.mmh_dist_bill_no;
+          // Supplier invoice no. and date: Reference / ReferenceDate, as the
+          // debit-note export already sends them. VoucherDate stays the MRC
+          // date; a bill without a supplier date keeps the voucher date here,
+          // as before.
+          purchaseEntry.ReferenceDate = purchase.mmh_dist_bill_dt
+            ? moment(purchase.mmh_dist_bill_dt).format("YYYYMMDD")
+            : purchaseEntry.VoucherDate;
           purchaseEntry.PartyName = purchase.supplier_name;
           purchaseEntry.PartyCode = purchase.supplier_id;
           purchaseEntry.BuyerName = purchase.supplier_name;

@@ -6,6 +6,126 @@ const {
   mergedDateExpr,
 } = require("../utils/purchase_overlay_sql");
 const { normalizePurchaseTaxArrays } = require("../utils/purchase_tax");
+const { roundOffForRow } = require("../utils/retailpilot_purchase");
+const {
+  sourceOf,
+  buildSource,
+  mergeRetailPilotUpdate,
+  roundOffIsSyncs,
+  keptFields,
+  seriesOf,
+  parseSource,
+} = require("../utils/retailpilot_merge");
+const { purchaseDiscrepancies, asLegacy } = require("../utils/purchase_discrepancy");
+
+const parseTaxList = (v) => {
+  if (Array.isArray(v)) return v;
+  if (v == null || v === "") return [];
+  try {
+    const parsed = JSON.parse(v);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const seriesFor = (payload) => ({ fy: payload.FY || null, entered_at: payload.ENTERED_AT || null });
+
+/** A stored purchase row with its tax columns parsed. */
+const parsedRow = (row) => ({
+  ...row,
+  sgst: parseTaxList(row.sgst),
+  cgst: parseTaxList(row.cgst),
+  igst: parseTaxList(row.igst),
+  cess: parseTaxList(row.cess),
+});
+
+const FIELD_LABELS = {
+  supplier_id: "supplier id",
+  supplier_name: "supplier name",
+  supplier_gstn: "GSTIN",
+  mmh_mrc_dt: "MRC date",
+  mmh_mrc_amt: "bill amount",
+  mmh_dist_bill_dt: "supplier bill date",
+  mmh_dist_bill_no: "supplier bill no",
+  mmh_manual_disc: "discount",
+  mmd_goods_tcs_amt: "TCS",
+  tax: "tax",
+  mmh_mrc_refno: "MRC ref no",
+};
+
+/**
+ * utils/purchase_discrepancy.js for a stored row, plus, for a RetailPilot
+ * bill, the RetailPilot changes not applied because Accounts had corrected
+ * those fields and a round-off Accounts have not confirmed yet. A GoFrugal
+ * bill (no retailpilot_source) gets the same findings as review only, so
+ * its approval behaviour is what it was.
+ */
+function discrepanciesFor(doc, retailpilotSource) {
+  if (!retailpilotSource) return asLegacy(purchaseDiscrepancies(parsedRow(doc)));
+  const series = seriesOf(retailpilotSource);
+  const list = purchaseDiscrepancies({
+    ...parsedRow(doc),
+    voucher_fy: series.fy,
+    entered_at: series.entered_at,
+  });
+  if (!Number(doc.is_approved) && roundOffIsSyncs(doc, retailpilotSource) && Number(doc.round_off)) {
+    list.push({
+      code: "ROUND_OFF_PREFILLED",
+      severity: "info",
+      message: `Round-off ${Number(doc.round_off).toFixed(2)} was pre-filled from RetailPilot's bill amount and is not confirmed yet: check it before approving.`,
+    });
+  }
+  const kept = keptFields(retailpilotSource);
+  if (kept.length) {
+    list.push({
+      code: "RETAILPILOT_CHANGE_NOT_APPLIED",
+      severity: "review",
+      message: `RetailPilot changed the ${kept.map((k) => FIELD_LABELS[k] || k).join(", ")} after Accounts corrected it; Accounts' value is kept. Check which is right.`,
+    });
+  }
+  return list;
+}
+
+/**
+ * For the Purchase screen's live check: the financial year a RetailPilot
+ * bill's ref no is numbered in, and when it was entered (null for GoFrugal).
+ */
+function retailPilotSeries(retailpilotSource) {
+  const series = seriesOf(retailpilotSource);
+  return {
+    retailpilot: !!retailpilotSource,
+    voucher_fy: series.fy || null,
+    entered_at: series.entered_at || null,
+  };
+}
+
+/** The RetailPilot sync payload (uppercase keys) as purchase columns. */
+function retailPilotRow(p) {
+  return normalizePurchaseTaxArrays({
+    retail_outlet_id: p.STORE_ID,
+    supplier_id: p.SUPPLIER_ID,
+    supplier_name: p.SUPPLIER_NAME,
+    supplier_gstn: p.SUPPLIER_GSTN,
+    mmh_mrc_no: String(p.MRC_NO),
+    mmh_mrc_dt: moment(p.MRC_DATE).format("YYYY-MM-DD"),
+    mmh_mrc_amt: p.MRC_AMT,
+    mmh_dist_bill_dt: moment(p.DIST_BILL_DT).format("YYYY-MM-DD"),
+    mmh_dist_bill_no: p.DIST_BILL_NO,
+    mmh_mrc_refno: String(p.MRC_REF).trim(),
+    mmh_manual_disc: p.MANUAL_DISC,
+    tot_sgst_amt: p.TOT_SGST_AMT,
+    tot_cgst_amt: p.TOT_CGST_AMT,
+    tot_igst_amt: p.TOT_IGST_AMT,
+    tot_gst_cess_amt: p.TOT_GST_CESS_AMT,
+    mmd_goods_tcs_amt: p.GOODS_TCS_AMT,
+    ts: p.TS,
+    sgst: p.SGST,
+    cgst: p.CGST,
+    igst: p.IGST,
+    cess: p.CESS,
+  });
+}
 
 class PurchaseRepository {
   constructor(db) {
@@ -246,6 +366,7 @@ class PurchaseRepository {
         `SELECT
           ${purchaseOverlaySelectList()},
           p.is_new,
+          p.retailpilot_source,
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
@@ -272,8 +393,10 @@ class PurchaseRepository {
             return;
           }
 
-          const parsedDocs = docs.map((doc) => ({
+          const parsedDocs = docs.map(({ retailpilot_source, ...doc }) => ({
             ...this._parsePurchaseDoc(doc),
+            ...retailPilotSeries(retailpilot_source),
+            discrepancies: discrepanciesFor(doc, retailpilot_source),
             tally_response: {
               voucher_no: doc.VoucherNo || null,
               invoice_value: doc.InvoiceValue || null,
@@ -293,6 +416,7 @@ class PurchaseRepository {
       this.db.query(
         `SELECT
           ${purchaseOverlaySelectList()},
+          p.retailpilot_source,
           tr.VoucherNo,
           tr.InvoiceValue,
           tr.SupplierName,
@@ -321,9 +445,11 @@ class PurchaseRepository {
             return;
           }
 
-          const doc = docs[0];
+          const { retailpilot_source, ...doc } = docs[0];
           const parsedDoc = {
             ...this._parsePurchaseDoc(doc),
+            ...retailPilotSeries(retailpilot_source),
+            discrepancies: discrepanciesFor(doc, retailpilot_source),
             voucher_no: doc.VoucherNo || null,
             invoice_value: doc.InvoiceValue || null,
             supplier_name: doc.SupplierName || null,
@@ -1052,46 +1178,277 @@ class PurchaseRepository {
     });
   }
 
-  async deleteTallyResponse(VoucherNo) {
+  _q(sql, params) {
     return new Promise((resolve, reject) => {
-      try {
-        this.db.query(
-          `DELETE tr FROM purchase_tally_response tr
-           INNER JOIN purchase p ON p.purchase_id = tr.purchase_id
-           WHERE p.mmh_mrc_refno = ?`,
-          [VoucherNo],
-          (err, result) => {
-            if (err) {
-              logger.Log({
-                level: logger.LEVEL.ERROR,
-                component: "REPOSITORY.PURCHASE",
-                code: "REPOSITORY.PURCHASE.DELETE-TALLY",
-                description: err.toString(),
-                category: "",
-                ref: {},
-              });
-              reject(err);
-              return;
-            }
-
-            resolve({
-              code: 200,
-              msg: "Tally response deleted!",
-            });
-          }
-        );
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "REPOSITORY.PURCHASE",
-          code: "REPOSITORY.PURCHASE.DELETE-TALLY",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
+      this.db.query(sql, params, (err, result) => (err ? reject(err) : resolve(result)));
     });
+  }
+
+  /**
+   * Saves one RetailPilot bill (the uppercase sync payload), found by outlet
+   * + mmh_mrc_no (the invoice slug - unique and stable, unlike the refno,
+   * which restarts every financial year). Every write is by purchase_id.
+   *
+   * - new bill: inserted, with the round-off pre-filled into purchase_internal
+   * - approved bill: never touched
+   * - unapproved bill RetailPilot changed: merged field by field with
+   *   Accounts' corrections (utils/retailpilot_merge.js) - a corrected field
+   *   keeps Accounts' value; the pre-filled round-off is refreshed only while
+   *   it is still the sync's own
+   *
+   * @returns {{ action: "inserted"|"updated"|"unchanged"|"approved",
+   *   purchase_id, round_off?: number, kept: string[] }}
+   */
+  async upsertRetailPilotPurchase(payload) {
+    const row = retailPilotRow(payload);
+    const [existing] = await this._q(
+      `SELECT * FROM purchase WHERE mmh_mrc_no = ? AND retail_outlet_id = ? ORDER BY purchase_id DESC`,
+      [row.mmh_mrc_no, row.retail_outlet_id]
+    );
+
+    if (!existing) {
+      const ro = roundOffForRow(row);
+      const res = await this._q(
+        `INSERT INTO purchase (
+          retail_outlet_id, supplier_id, supplier_name, supplier_gstn,
+          mmh_mrc_no, mmh_mrc_dt, mmh_mrc_amt, mmh_dist_bill_dt,
+          mmh_dist_bill_no, mmh_mrc_refno, mmh_manual_disc,
+          tot_sgst_amt, tot_cgst_amt, tot_igst_amt, tot_gst_cess_amt,
+          mmd_goods_tcs_amt, ts, sgst, cgst, igst, cess, retailpilot_source
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          row.retail_outlet_id, row.supplier_id, row.supplier_name, row.supplier_gstn,
+          row.mmh_mrc_no, row.mmh_mrc_dt, row.mmh_mrc_amt, row.mmh_dist_bill_dt,
+          row.mmh_dist_bill_no, row.mmh_mrc_refno, row.mmh_manual_disc,
+          row.tot_sgst_amt, row.tot_cgst_amt, row.tot_igst_amt, row.tot_gst_cess_amt,
+          row.mmd_goods_tcs_amt, row.ts,
+          JSON.stringify(row.sgst), JSON.stringify(row.cgst), JSON.stringify(row.igst), JSON.stringify(row.cess),
+          buildSource(sourceOf(row), ro, [], seriesFor(payload)),
+        ]
+      );
+      await this._insertRoundOff(res.insertId, ro);
+      return { action: "inserted", purchase_id: res.insertId, round_off: ro.round_off, kept: [] };
+    }
+
+    if (Number(existing.is_approved)) {
+      return { action: "approved", purchase_id: existing.purchase_id, kept: keptFields(existing.retailpilot_source) };
+    }
+
+    const [internal] = await this._q(`SELECT * FROM purchase_internal WHERE purchase_id = ?`, [existing.purchase_id]);
+
+    if (String(existing.ts) === String(row.ts)) {
+      // Nothing new from RetailPilot. A run that stopped between the two
+      // writes left no round-off: add it now.
+      if (!internal) {
+        const ro = roundOffForRow(parsedRow(existing));
+        await this._insertRoundOff(existing.purchase_id, ro);
+      }
+      return { action: "unchanged", purchase_id: existing.purchase_id, kept: keptFields(existing.retailpilot_source) };
+    }
+
+    const { changes, kept, fields } = mergeRetailPilotUpdate(existing, row);
+    if (String(existing.mmh_mrc_refno).trim() !== row.mmh_mrc_refno) kept.push("mmh_mrc_refno");
+
+    const ro = roundOffForRow({ ...parsedRow(existing), ...changes });
+    const syncOwnsRoundOff = !internal || roundOffIsSyncs(internal, existing.retailpilot_source);
+
+    const columns = Object.keys(changes);
+    const values = columns.map((c) =>
+      Array.isArray(changes[c]) ? JSON.stringify(changes[c]) : changes[c]
+    );
+    const res = await this._q(
+      `UPDATE purchase SET ${columns.map((c) => `${c} = ?, `).join("")}ts = ?, retailpilot_source = ?
+       WHERE purchase_id = ? AND is_approved = 0`,
+      [...values, row.ts, buildSource(fields, syncOwnsRoundOff ? ro : null, kept, seriesFor(payload)), existing.purchase_id]
+    );
+    if (!res.affectedRows) {
+      // Approved between the read and the write: frozen.
+      return { action: "approved", purchase_id: existing.purchase_id, kept };
+    }
+
+    if (!internal) {
+      await this._insertRoundOff(existing.purchase_id, ro);
+    } else if (syncOwnsRoundOff) {
+      // Compare-and-set on the values the sync wrote, so an Accounts save
+      // landing in between is not overwritten.
+      await this._q(
+        `UPDATE purchase_internal pi
+         INNER JOIN purchase p ON p.purchase_id = pi.purchase_id
+         SET pi.round_off = ?, pi.total_amount = ?
+         WHERE pi.purchase_id = ? AND p.is_approved = 0
+           AND pi.round_off = ? AND pi.total_amount = ?`,
+        [ro.round_off, ro.total_amount, existing.purchase_id, internal.round_off, internal.total_amount]
+      );
+    }
+
+    return {
+      action: "updated",
+      purchase_id: existing.purchase_id,
+      round_off: syncOwnsRoundOff ? ro.round_off : undefined,
+      kept,
+    };
+  }
+
+  /**
+   * One audit entry for a purchase. actor: { user_id, employee_id } of the
+   * session (null for the sync or an integration). Never throws: a failed
+   * audit write is logged and the action it records stands.
+   */
+  async addAuditLog(purchaseId, action, actor, detail) {
+    try {
+      await this._q(
+        `INSERT INTO purchase_audit_log (purchase_id, action, actor_user_id, actor_employee_id, detail)
+         VALUES (?, ?, ?, ?, ?)`,
+        [purchaseId, action, actor?.user_id ?? null, actor?.employee_id ?? null, detail == null ? null : JSON.stringify(detail)]
+      );
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.PURCHASE",
+        code: "REPOSITORY.PURCHASE.AUDIT-LOG",
+        description: err.toString(),
+        category: "",
+        ref: { purchaseId, action },
+      });
+    }
+  }
+
+  /** A purchase's own row and its purchase_internal values, unmerged. */
+  async getForAudit(purchaseId) {
+    const [row] = await this._q(
+      `SELECT p.*, pi.round_off, pi.total_amount, pi.cash_discount, pi.scheme_difference,
+              pi.cost_difference, pi.due, pi.freight_charges, pi.supplier_credit_note
+       FROM purchase p LEFT JOIN purchase_internal pi ON pi.purchase_id = p.purchase_id
+       WHERE p.purchase_id = ?`,
+      [purchaseId]
+    );
+    return row || null;
+  }
+
+  /**
+   * Accounts saved a RetailPilot bill on the Purchase screen: its round-off
+   * is theirs from now on, and the sync stops refreshing it.
+   */
+  async confirmRetailPilotRoundOff(purchaseId) {
+    const [row] = await this._q(`SELECT retailpilot_source FROM purchase WHERE purchase_id = ?`, [purchaseId]);
+    const source = row && parseSource(row.retailpilot_source);
+    if (!source || source.round_off == null) return false;
+    await this._q(`UPDATE purchase SET retailpilot_source = ? WHERE purchase_id = ?`, [
+      JSON.stringify({ ...source, round_off: null }),
+      purchaseId,
+    ]);
+    return true;
+  }
+
+  /**
+   * Round-off into purchase_internal for an unapproved bill that has none.
+   * invoice_amount (NOT NULL, no default) is 0, as an untouched Purchase
+   * screen would save it - Accounts enter it.
+   */
+  _insertRoundOff(purchaseId, ro) {
+    return this._q(
+      `INSERT INTO purchase_internal (purchase_id, round_off, total_amount, supplier_credit_note, invoice_amount)
+       SELECT p.purchase_id, ?, ?, 0, 0
+       FROM purchase p
+       WHERE p.purchase_id = ? AND p.is_approved = 0
+         AND NOT EXISTS (SELECT 1 FROM purchase_internal pi WHERE pi.purchase_id = p.purchase_id)`,
+      [ro.round_off, ro.total_amount, purchaseId]
+    );
+  }
+
+  /**
+   * Existing rows holding a reference at an outlet within one financial
+   * year: keys are [retail_outlet_id, mmh_mrc_refno, fy_start, fy_end].
+   * The refno restarts every April, so the same number in another year is
+   * a different bill and is not returned.
+   */
+  findByOutletRefnos(keys) {
+    if (!keys || keys.length === 0) return Promise.resolve([]);
+    const where = keys
+      .map(() => "(retail_outlet_id = ? AND mmh_mrc_refno = ? AND mmh_mrc_dt BETWEEN ? AND ?)")
+      .join(" OR ");
+    const values = keys.flatMap(([outletId, refno, start, end]) => [outletId, refno, start, end]);
+    return new Promise((resolve, reject) => {
+      this.db.query(
+        `SELECT purchase_id, retail_outlet_id, mmh_mrc_refno, mmh_mrc_no, mmh_mrc_dt,
+                supplier_gstn, mmh_dist_bill_no
+         FROM purchase WHERE ${where}`,
+        values,
+        (err, rows) => {
+          if (err) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "REPOSITORY.PURCHASE",
+              code: "REPOSITORY.PURCHASE.FIND-BY-OUTLET-REFNOS",
+              description: err.toString(),
+              category: "",
+              ref: {},
+            });
+            reject(err);
+            return;
+          }
+          resolve(rows || []);
+        }
+      );
+    });
+  }
+
+  /**
+   * Removes the Tally response of ONE purchase, by its id - the only key
+   * that cannot reach another branch's or another year's bill.
+   */
+  async deleteTallyResponseForPurchase(purchaseId, actor = null) {
+    try {
+      const [existing] = await this._q(`SELECT * FROM purchase_tally_response WHERE purchase_id = ?`, [purchaseId]);
+      if (!existing) return { code: 404, msg: "This purchase has no Tally response" };
+      const result = await this._q(`DELETE FROM purchase_tally_response WHERE purchase_id = ?`, [purchaseId]);
+      if (!result.affectedRows) return { code: 404, msg: "This purchase has no Tally response" };
+      await this.addAuditLog(purchaseId, "tally_response_deleted", actor, {
+        MasterID: existing.MasterID,
+        VoucherNo: existing.VoucherNo,
+        InvoiceValue: existing.InvoiceValue,
+        CostCentre: existing.CostCentre,
+        GSTIN: existing.GSTIN,
+      });
+      return { code: 200, msg: "Tally response deleted!", purchase_id: Number(purchaseId) };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.PURCHASE",
+        code: "REPOSITORY.PURCHASE.DELETE-TALLY",
+        description: err.toString(),
+        category: "",
+        ref: { purchaseId },
+      });
+      throw err;
+    }
+  }
+
+  /**
+   * The old delete-by-voucher-number. The voucher number (mmh_mrc_refno)
+   * repeats across branches and restarts every financial year, so this used
+   * to delete the responses of every purchase carrying it. Now it deletes
+   * only when exactly one purchase with that number has a response, and
+   * otherwise refuses and points to the delete by purchase id.
+   */
+  async deleteTallyResponse(VoucherNo, actor = null) {
+    const rows = await this._q(
+      `SELECT p.purchase_id
+       FROM purchase_tally_response tr
+       INNER JOIN purchase p ON p.purchase_id = tr.purchase_id
+       WHERE p.mmh_mrc_refno = ?`,
+      [VoucherNo]
+    );
+    const ids = [...new Set(rows.map((r) => r.purchase_id))];
+    if (ids.length === 0) return { code: 404, msg: "No Tally response for this voucher number" };
+    if (ids.length > 1) {
+      return {
+        code: 409,
+        msg: `Voucher number ${VoucherNo} has Tally responses on ${ids.length} purchases (different branches or years). Delete it from the purchase instead.`,
+        purchase_ids: ids,
+      };
+    }
+    return this.deleteTallyResponseForPurchase(ids[0], actor);
   }
 }
 

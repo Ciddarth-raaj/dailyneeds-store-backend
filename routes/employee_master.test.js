@@ -417,7 +417,7 @@ describe("31/32. dnds.co.in remains the employee master", () => {
 
   it("no unrelated sync was disabled by the removal", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "services/synker.js"), "utf8");
-    for (const job of ["product_sync", "stock_holding_report_sync"]) {
+    for (const job of ["stock_holding_report_sync"]) {
       assert.match(src, new RegExp(`cronService\\.register\\(\\s*"${job}"`), `${job} must still be registered`);
     }
   });

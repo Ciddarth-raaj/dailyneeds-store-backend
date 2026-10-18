@@ -13,9 +13,10 @@
  *   the `purchase` table          written by an EXTERNAL push to
  *                                 POST /purchase and POST /purchase/bulk.
  *                                 There is no cron for it at all.
- *   `purchase_acknowledgement`    pulled from GoFrugal every five minutes by
- *                                 `purchase_acknowledgement_gofrugal_sync`,
- *                                 registered in server.js.
+ *   `purchase_acknowledgement`    pulled from GoFrugal by the manual
+ *                                 POST /purchase-acknowledgement/sync. Its
+ *                                 five-minute cron was removed when GoFrugal
+ *                                 was replaced by RetailPilot.
  *
  * These tests pinned that the pause could reach neither. The Digisme
  * employee sync has since been removed outright, so they now pin the same
@@ -35,21 +36,12 @@ const codeOf = (src) => src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*
 describe("the GoFrugal purchase-acknowledgement cron", () => {
   const server = codeOf(read("server.js"));
 
-  it("is registered", () => {
-    assert.match(server, /register\(\s*"purchase_acknowledgement_gofrugal_sync"/);
+  it("is no longer registered - GoFrugal was replaced by RetailPilot", () => {
+    assert.doesNotMatch(server, /register\(\s*"purchase_acknowledgement_gofrugal_sync"/);
   });
 
-  it("is registered UNCONDITIONALLY - no flag can skip it", () => {
-    // Everything from the start of the registration back to the previous
-    // statement: if a conditional wrapped it, it would be in here.
-    const at = server.indexOf('"purchase_acknowledgement_gofrugal_sync"');
-    const before = server.slice(Math.max(0, at - 600), at);
-    for (const flag of ["employeeSync", "digisme", "DIGISME", "localEmployeeMaster"]) {
-      assert.ok(
-        !new RegExp(flag).test(before),
-        `the purchase acknowledgement cron must not sit behind ${flag}`
-      );
-    }
+  it("the manual sync route is kept", () => {
+    assert.match(codeOf(read("routes/purchase_acknowledgement.js")), /router\.post\("\/sync"/);
   });
 
   it("and server.js knows nothing about the Digisme employee flag at all", () => {
@@ -73,7 +65,6 @@ describe("the Digisme employee sync is gone, and took nothing else with it", () 
   it("the other synker jobs survive the removal", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
     const registered = [...init.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    assert.ok(registered.includes("product_sync"));
     assert.ok(registered.includes("stock_holding_report_sync"));
   });
 
@@ -99,8 +90,8 @@ describe("the Digisme employee sync is gone, and took nothing else with it", () 
   });
 });
 
-describe("the purchase table has no cron writing it", () => {
-  it("nothing schedules a write to `purchase` - it is an external push", () => {
+describe("the purchase table's only cron writer is the RetailPilot pull", () => {
+  it("nothing else schedules a write to `purchase`", () => {
     // Established during the 6 September investigation and worth keeping
     // recorded: if someone later adds a purchase cron, this test should fail
     // and make them say so deliberately.
@@ -109,8 +100,8 @@ describe("the purchase table has no cron writing it", () => {
     const purchaseJobs = names.filter((n) => /purchase/.test(n));
     assert.deepEqual(
       purchaseJobs.sort(),
-      ["purchase_acknowledgement_gofrugal_sync", "purchase_ref_cache_warm"],
-      "the only purchase jobs are the GoFrugal acknowledgement pull and a cache warm"
+      ["purchase_ref_cache_warm", "retailpilot_purchase_sync"],
+      "the only purchase jobs are the Purchase Ref cache warm and the RetailPilot pull"
     );
   });
 

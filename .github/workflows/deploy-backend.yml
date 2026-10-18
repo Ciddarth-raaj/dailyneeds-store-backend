@@ -76,6 +76,44 @@ jobs:
              chmod 600 .env
              echo "ANTHROPIC_API_KEY written to .env"'
 
+      # PRE-DEPLOY BACKUP. Only when the commit being deployed brings new
+      # migrations. Runs BEFORE the pull, with the repository's own
+      # scripts/auth/backup-user-tables.sh (mysqldump --single-transaction
+      # --skip-lock-tables: no locks, no writes; it verifies gzip, the dump
+      # trailer and the table count, and writes a sha256 manifest). Anything
+      # failing here fails the job before the server's code or database is
+      # touched. Host and user names are masked in this log; no password is
+      # ever printed (credentials stay in a mode-600 file on the server).
+      - name: Pre-deploy database backup (when migrations are pending)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'set -euo pipefail
+             cd ~/dailyneeds-store-backend
+             git fetch origin
+             NEW="$(git diff --name-only HEAD origin/main-autodeploy -- migrations/mysql/migrations/ | grep -E "^migrations/mysql/migrations/[0-9]+-[^/]+[.]js$" || true)"
+             if [ -z "$NEW" ]; then echo "No new migrations in this deploy - no backup needed."; exit 0; fi
+             echo "Migrations this deploy will run:"; echo "$NEW"
+             BIN="$HOME/mysql84/bin"
+             [ -x "$BIN/mysqldump" ] || { echo "FAIL: MySQL 8.4 client not found at $BIN - no backup taken; deploy stopped before any change"; exit 1; }
+             node scripts/auth/db-defaults-file.js app > /dev/null
+             OUT="$HOME/db-backups/pre-deploy"
+             SKIP_ROUTINES=1 MYSQL_BIN_DIR="$BIN" scripts/auth/backup-user-tables.sh "$OUT" 2>&1 \
+               | sed -E -e "s/^(host|user)=.*/\1=<hidden>/" \
+                        -e "s/\x27[^\x27 ]+\x27@\x27[^\x27 ]*\x27/<user>@<host>/g" \
+                        -e "s/\`[^\` ]+\`@\`[^\` ]*\`/<user>@<host>/g" \
+                        -e "s/(dump_identity=|dump identity: )[^ (]+/\1<hidden> /" \
+                        -e "s/(MySQL server on )\x27[^\x27]*\x27/\1<host>/"
+             MANIFEST="$(ls -t "$OUT"/*-manifest-*.txt | head -1)"
+             grep -E "^[0-9a-f]{64}  " "$MANIFEST" | sha256sum -c -
+             echo "PRE-DEPLOY BACKUP OK: $MANIFEST"'
+
       - name: Deploy on server
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}

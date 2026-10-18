@@ -7,8 +7,16 @@ class PurchaseTallyUsecase {
   }
 
   async create(data) {
-    const purchaseId =
-      await this.purchaseTallyRepo.findPurchaseIdForTallyResponse(data);
+    const { purchaseId, ambiguous } =
+      await this.purchaseTallyRepo.resolvePurchaseForTallyResponse(data);
+
+    if (ambiguous) {
+      return {
+        code: 409,
+        msg: "More than one purchase matches this voucher number, supplier GSTIN and cost centre; not linked",
+        purchase_ids: ambiguous,
+      };
+    }
 
     if (purchaseId == null || purchaseId === "") {
       return {
