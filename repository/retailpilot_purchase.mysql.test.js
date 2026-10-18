@@ -9,7 +9,7 @@
  *
  * SKIPPED unless `RP_TEST_MYSQL` names a SCRATCH database: the suite drops
  * and creates its tables. BASE_SCHEMA is `SHOW CREATE TABLE` of the
- * deployed tables (main-autodeploy ac1119d) on MySQL 5.7; the migration
+ * deployed tables (main-autodeploy ac1119d); the migration
  * FILES are run on top, so what is tested is what production runs. The
  * pool is opened as drivers/mysql.js opens it (bigNumberStrings).
  */
@@ -284,7 +284,9 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
     const mysql = require("mysql");
     admin = mysql.createConnection(`${URL}${URL.includes("?") ? "&" : "?"}multipleStatements=true`);
     q = (sql, params = []) => new Promise((resolve, reject) => admin.query(sql, params, (err, res) => (err ? reject(err) : resolve(res))));
-    await q("SET SESSION sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_AUTO_CREATE_USER,NO_ENGINE_SUBSTITUTION'");
+    // The strict modes MySQL 5.7 and 8.x both default to (8.0 dropped
+    // NO_AUTO_CREATE_USER, so it is left out).
+    await q("SET SESSION sql_mode = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION'");
     await q(BASE_SCHEMA);
     await q(OUTLETS);
     await q(HISTORY);
