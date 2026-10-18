@@ -212,31 +212,56 @@ describe("the sync", () => {
     assert.equal(result.warnings.length, 1);
   });
 
-  it("skips a seq whose reference already belongs to a different bill at the outlet", async () => {
+  it("skips a seq whose reference another bill holds at the outlet in the same financial year", async () => {
     let saved;
+    let savedOptions;
+    // row() is dated 2026-10-15, i.e. financial year 2026-27.
     const existing = [
-      { purchase_id: 77, retail_outlet_id: 2, mmh_mrc_refno: "6372", supplier_gstn: "33OTHER", mmh_dist_bill_no: "OLD-9" },
-      { purchase_id: 78, retail_outlet_id: 2, mmh_mrc_refno: "6373", supplier_gstn: "34AAAAA0000A1Z5", mmh_dist_bill_no: "B-2" },
+      // a GoFrugal bill already holding 6372 this year - a real clash
+      { purchase_id: 77, retail_outlet_id: 2, mmh_mrc_refno: "6372", mmh_mrc_no: "118000", mmh_mrc_dt: "2026-09-30", supplier_gstn: "33OTHER", mmh_dist_bill_no: "OLD-9" },
+      // the same RetailPilot bill saved earlier - not a clash
+      { purchase_id: 78, retail_outlet_id: 2, mmh_mrc_refno: "6373", mmh_mrc_no: "SAME", mmh_mrc_dt: new Date(2026, 9, 15), supplier_gstn: "34AAAAA0000A1Z5", mmh_dist_bill_no: "B-2" },
     ];
     const purchaseUsecase = {
-      findByOutletRefnos: async (pairs) => {
-        assert.deepEqual(pairs, [[2, "6372"], [2, "6373"]]);
+      findByOutletRefnos: async (keys) => {
+        assert.deepEqual(keys, [
+          [2, "6372", "2026-04-01", "2027-03-31"],
+          [2, "6373", "2026-04-01", "2027-03-31"],
+          [2, "6374", "2026-04-01", "2027-03-31"],
+        ]);
         return existing;
       },
-      bulkCreatePurchase: async (list) => {
+      bulkCreatePurchase: async (list, options) => {
         saved = list;
-        return { code: 200, insertedCount: 0, updatedCount: 1, unchangedCount: 0 };
+        savedOptions = options;
+        return { code: 200, insertedCount: 1, updatedCount: 1, unchangedCount: 0 };
       },
     };
     const result = await syncFactory(
-      spectra([row({ invoice_slug: "OLD" }), row({ invoice_slug: "SAME", mrc_no: 6373, supplier_invoice_id: "B-2" })]),
+      spectra([
+        row({ invoice_slug: "OLD" }),
+        row({ invoice_slug: "SAME", mrc_no: 6373 }),
+        row({ invoice_slug: "NEW", mrc_no: 6374 }),
+      ]),
       purchaseUsecase,
       config, branchMaster
     ).run();
-    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6373"], "the same bill coming back still updates");
+    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6373", "6374"]);
+    assert.deepEqual(savedOptions, { matchOn: "mmh_mrc_no" }, "RetailPilot bills are matched by their slug");
     assert.equal(result.skipped.length, 1);
     assert.equal(result.skipped[0].invoice_slug, "OLD");
-    assert.match(result.skipped[0].reason, /already belongs to purchase 77/);
+    assert.match(result.skipped[0].reason, /already belongs to purchase 77 .* in the same financial year/);
+  });
+
+  it("the same number in an earlier financial year is not a clash", async () => {
+    let saved = [];
+    const purchaseUsecase = {
+      // the repository filters by year; it returns nothing for 2026-27
+      findByOutletRefnos: async () => [],
+      bulkCreatePurchase: async (list) => { saved = list; return { insertedCount: list.length }; },
+    };
+    await syncFactory(spectra([row({ invoice_slug: "NEW" })]), purchaseUsecase, config, branchMaster).run();
+    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6372"]);
   });
 
   it("dry run saves nothing", async () => {

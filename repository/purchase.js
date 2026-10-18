@@ -417,7 +417,17 @@ class PurchaseRepository {
     });
   };
 
-  async bulkCreate(purchaseList) {
+  /**
+   * @param options.matchOn the column that identifies an existing purchase
+   *   at the outlet: "mmh_mrc_refno" (default - the GoFrugal push) or
+   *   "mmh_mrc_no" (the RetailPilot sync, where it is the invoice slug -
+   *   unique and stable, unlike the refno, which restarts every financial
+   *   year). The matched row is updated by its purchase_id only.
+   */
+  async bulkCreate(purchaseList, { matchOn = "mmh_mrc_refno" } = {}) {
+    if (!["mmh_mrc_refno", "mmh_mrc_no"].includes(matchOn)) {
+      throw new Error(`bulkCreate cannot match on ${matchOn}`);
+    }
     return new Promise(async (resolve, reject) => {
       try {
         let insertedCount = 0;
@@ -469,9 +479,9 @@ class PurchaseRepository {
           // Check if record exists
           const [existingRows] = await new Promise((resolve, reject) => {
             this.db.query(
-              `SELECT * FROM purchase WHERE mmh_mrc_refno = ? AND retail_outlet_id = ?`,
+              `SELECT * FROM purchase WHERE ${matchOn} = ? AND retail_outlet_id = ? ORDER BY purchase_id DESC`,
               [
-                formattedPurchase.mmh_mrc_refno,
+                formattedPurchase[matchOn],
                 formattedPurchase.retail_outlet_id,
               ],
               (err, result) => {
@@ -514,7 +524,7 @@ class PurchaseRepository {
                     cess = ?,
                     has_updated = ?,
                     is_approved = ?
-                  WHERE mmh_mrc_refno = ? AND retail_outlet_id = ?`,
+                  WHERE purchase_id = ?`,
                   [
                     formattedPurchase.supplier_id,
                     formattedPurchase.supplier_name,
@@ -537,8 +547,7 @@ class PurchaseRepository {
                     JSON.stringify(formattedPurchase.cess),
                     has_updated,
                     is_approved,
-                    formattedPurchase.mmh_mrc_refno,
-                    formattedPurchase.retail_outlet_id,
+                    existing.purchase_id,
                   ],
                   (err, result) => {
                     if (err) {
@@ -1053,16 +1062,21 @@ class PurchaseRepository {
   }
 
   /**
-   * Existing rows for (retail_outlet_id, mmh_mrc_refno) pairs, with the
-   * fields that tell whether they are the same bill.
+   * Existing rows holding a reference at an outlet within one financial
+   * year: keys are [retail_outlet_id, mmh_mrc_refno, fy_start, fy_end].
+   * The refno restarts every April, so the same number in another year is
+   * a different bill and is not returned.
    */
-  findByOutletRefnos(pairs) {
-    if (!pairs || pairs.length === 0) return Promise.resolve([]);
-    const where = pairs.map(() => "(retail_outlet_id = ? AND mmh_mrc_refno = ?)").join(" OR ");
-    const values = pairs.flatMap(([outletId, refno]) => [outletId, refno]);
+  findByOutletRefnos(keys) {
+    if (!keys || keys.length === 0) return Promise.resolve([]);
+    const where = keys
+      .map(() => "(retail_outlet_id = ? AND mmh_mrc_refno = ? AND mmh_mrc_dt BETWEEN ? AND ?)")
+      .join(" OR ");
+    const values = keys.flatMap(([outletId, refno, start, end]) => [outletId, refno, start, end]);
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT purchase_id, retail_outlet_id, mmh_mrc_refno, supplier_gstn, mmh_dist_bill_no
+        `SELECT purchase_id, retail_outlet_id, mmh_mrc_refno, mmh_mrc_no, mmh_mrc_dt,
+                supplier_gstn, mmh_dist_bill_no
          FROM purchase WHERE ${where}`,
         values,
         (err, rows) => {

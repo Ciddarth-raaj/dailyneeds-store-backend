@@ -1,4 +1,14 @@
 const logger = require("../utils/logger");
+const { financialYearBounds } = require("../utils/financial_year");
+
+/** YYYY-MM-DD from a DATE column (a Date object or a string). */
+function dateOnlyString(value) {
+  if (value instanceof Date) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  return String(value || "").slice(0, 10);
+}
 const { buildPurchaseQuery, mapPurchases } = require("../utils/retailpilot_purchase");
 
 const MAX_DAYS = 90;
@@ -27,29 +37,37 @@ class RetailPilotPurchaseSync {
   }
 
   /**
-   * The reference is RetailPilot's seq, so it can coincide with an older
-   * (GoFrugal) purchase's mmh_mrc_refno at the same outlet. Saving would then
-   * overwrite that bill; a clash is skipped and reported instead. The same
-   * bill coming back (same GSTIN and bill number) is not a clash.
+   * The reference (mmh_mrc_refno) is RetailPilot's seq, the Tally voucher
+   * number, and it restarts every financial year. Two bills with the same
+   * reference at an outlet in the SAME financial year would confuse Tally's
+   * voucher matching, so such a clash is skipped and reported. The same
+   * RetailPilot bill coming back (same slug in mmh_mrc_no) is not a clash,
+   * and a bill from another year with the same number is not either.
    */
   async _withoutRefnoClashes(purchases, skipped) {
     if (!purchases.length || typeof this.purchaseUsecase.findByOutletRefnos !== "function") {
       return purchases;
     }
-    const existing = await this.purchaseUsecase.findByOutletRefnos(
-      purchases.map((p) => [p.STORE_ID, p.MRC_REF])
-    );
-    const norm = (v) => String(v == null ? "" : v).trim().toUpperCase();
-    const byKey = new Map(existing.map((r) => [`${r.retail_outlet_id}|${norm(r.mmh_mrc_refno)}`, r]));
+    const keyOf = (outletId, refno, fyStart) => `${outletId}|${String(refno).trim()}|${fyStart}`;
+    const keys = purchases.map((p) => {
+      const fy = financialYearBounds(p.MRC_DATE);
+      return [p.STORE_ID, p.MRC_REF, fy.start, fy.end];
+    });
+    const existing = await this.purchaseUsecase.findByOutletRefnos(keys);
+    const byKey = new Map();
+    for (const r of existing) {
+      const fy = financialYearBounds(dateOnlyString(r.mmh_mrc_dt));
+      const k = keyOf(r.retail_outlet_id, r.mmh_mrc_refno, fy.start);
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(r);
+    }
     return purchases.filter((p) => {
-      const row = byKey.get(`${p.STORE_ID}|${norm(p.MRC_REF)}`);
-      if (!row) return true;
-      if (norm(row.supplier_gstn) === norm(p.SUPPLIER_GSTN) && norm(row.mmh_dist_bill_no) === norm(p.DIST_BILL_NO)) {
-        return true;
-      }
+      const rows = byKey.get(keyOf(p.STORE_ID, p.MRC_REF, financialYearBounds(p.MRC_DATE).start)) || [];
+      const other = rows.find((r) => String(r.mmh_mrc_no == null ? "" : r.mmh_mrc_no).trim() !== p.MRC_NO);
+      if (!other) return true;
       skipped.push({
         invoice_slug: p.MRC_NO,
-        reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${row.purchase_id} (bill ${row.mmh_dist_bill_no}, GSTIN ${row.supplier_gstn || "-"}) at this outlet`,
+        reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${other.purchase_id} (bill ${other.mmh_dist_bill_no}, GSTIN ${other.supplier_gstn || "-"}) at this outlet in the same financial year`,
       });
       return false;
     });
@@ -89,7 +107,7 @@ class RetailPilotPurchaseSync {
       }
 
       const saved = purchases.length
-        ? await this.purchaseUsecase.bulkCreatePurchase(purchases)
+        ? await this.purchaseUsecase.bulkCreatePurchase(purchases, { matchOn: "mmh_mrc_no" })
         : { insertedCount: 0, updatedCount: 0, unchangedCount: 0 };
 
       return {

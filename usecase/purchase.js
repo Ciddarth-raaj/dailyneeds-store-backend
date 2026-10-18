@@ -93,9 +93,9 @@ class PurchaseUsecase {
     return this.purchaseRepo.findByOutletRefnos(pairs);
   }
 
-  async bulkCreatePurchase(purchaseList) {
+  async bulkCreatePurchase(purchaseList, options) {
     try {
-      const result = await this.purchaseRepo.bulkCreate(purchaseList);
+      const result = await this.purchaseRepo.bulkCreate(purchaseList, options);
       return result;
     } catch (error) {
       throw error;

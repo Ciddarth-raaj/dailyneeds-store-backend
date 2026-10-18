@@ -45,29 +45,29 @@ function makeDb(initialRows = []) {
     query(sql, params, cb) {
       const text = String(sql).replace(/\s+/g, " ").trim();
 
-      if (/^SELECT \* FROM purchase WHERE mmh_mrc_refno = \? AND retail_outlet_id = \?/.test(text)) {
+      const select = text.match(/^SELECT \* FROM purchase WHERE (mmh_mrc_refno|mmh_mrc_no) = \? AND retail_outlet_id = \? ORDER BY purchase_id DESC/);
+      if (select) {
         state.selects += 1;
-        const [refno, outlet] = params;
-        const found = state.rows.filter(
-          (r) => r.mmh_mrc_refno === refno && Number(r.retail_outlet_id) === Number(outlet)
-        );
+        state.matchedOn = select[1];
+        const [value, outlet] = params;
+        const found = state.rows
+          .filter((r) => r[select[1]] === value && Number(r.retail_outlet_id) === Number(outlet))
+          .sort((a, b) => b.purchase_id - a.purchase_id);
         cb(null, found.map((r) => ({ ...r })));
         return;
       }
 
       if (/^UPDATE purchase SET/.test(text)) {
         state.updates += 1;
-        // The refno and outlet are the last two bound parameters.
-        const outlet = params[params.length - 1];
-        const refno = params[params.length - 2];
-        const row = state.rows.find(
-          (r) => r.mmh_mrc_refno === refno && Number(r.retail_outlet_id) === Number(outlet)
-        );
+        assert.match(text, /WHERE purchase_id = \?$/, "an update touches exactly one row, by id");
+        // The purchase_id is the last bound parameter.
+        const id = params[params.length - 1];
+        const row = state.rows.find((r) => r.purchase_id === id);
         if (row) {
           row.ts = params[8];
           row.mmh_mrc_amt = params[5];
-          row.has_updated = params[params.length - 4];
-          row.is_approved = params[params.length - 3];
+          row.has_updated = params[params.length - 3];
+          row.is_approved = params[params.length - 2];
         }
         cb(null, { affectedRows: row ? 1 : 0 });
         return;
@@ -144,9 +144,10 @@ describe("the natural key", () => {
     const fn = src.slice(src.indexOf("async bulkCreate("));
     assert.match(
       fn,
-      /SELECT \* FROM purchase WHERE mmh_mrc_refno = \? AND retail_outlet_id = \?/,
+      /SELECT \* FROM purchase WHERE \$\{matchOn\} = \? AND retail_outlet_id = \? ORDER BY purchase_id DESC/,
       "the existence check must be on the natural key"
     );
+    assert.match(fn, /async bulkCreate\(purchaseList, \{ matchOn = "mmh_mrc_refno" \} = \{\}\)/, "the GoFrugal push keeps refno");
     // The MRC reference is only unique WITHIN an outlet: two branches issue
     // their own sequences, so the outlet has to be part of the key.
     const check = fn.slice(fn.indexOf("SELECT * FROM purchase"), fn.indexOf("SELECT * FROM purchase") + 400);
@@ -240,5 +241,41 @@ describe("a replay does not disturb the history already in the table", () => {
     assert.equal(state.rows.length, 8, "five kept, three added");
     assert.equal(state.inserts, 3);
     assert.equal(state.updates, 0, "and the five untouched rows were not rewritten");
+  });
+});
+
+/* ======================================= matching RetailPilot bills ===== */
+describe("matching a RetailPilot bill by its slug (matchOn: mmh_mrc_no)", () => {
+  const rp = (over = {}) => payload({ MRC_NO: "INV-AAA", MRC_REF: "6372", TS: 1, ...over });
+
+  it("finds the bill by slug, so a changed date or reference still updates the same row", async () => {
+    const { db, state } = makeDb([
+      existingRow({ purchase_id: 5, mmh_mrc_refno: "6372", mmh_mrc_no: "INV-AAA", ts: 1 }),
+    ]);
+    await buildRepo(db).bulkCreate([rp({ TS: 2, MRC_DATE: "2026-10-20" })], { matchOn: "mmh_mrc_no" });
+    assert.equal(state.matchedOn, "mmh_mrc_no");
+    assert.equal(state.inserts, 0);
+    assert.equal(state.updates, 1);
+    assert.equal(state.rows.length, 1);
+  });
+
+  it("an older year's bill with the same reference is a different bill: inserted, old row untouched", async () => {
+    const { db, state } = makeDb([
+      existingRow({ purchase_id: 5, mmh_mrc_refno: "6372", mmh_mrc_no: "118000", mmh_mrc_dt: "2025-07-01", ts: 1 }),
+    ]);
+    await buildRepo(db).bulkCreate([rp()], { matchOn: "mmh_mrc_no" });
+    assert.equal(state.inserts, 1);
+    assert.equal(state.updates, 0);
+    assert.equal(state.rows.find((r) => r.purchase_id === 5).ts, 1, "the 2025 bill is not rewritten");
+  });
+
+  it("the GoFrugal push still matches on the refno by default", async () => {
+    const { db, state } = makeDb([]);
+    await buildRepo(db).bulkCreate([payload()]);
+    assert.equal(state.matchedOn, "mmh_mrc_refno");
+  });
+
+  it("refuses any other match column", async () => {
+    await assert.rejects(buildRepo(makeDb([]).db).bulkCreate([payload()], { matchOn: "supplier_id" }), /cannot match on supplier_id/);
   });
 });
