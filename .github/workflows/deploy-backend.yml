@@ -10,6 +10,11 @@
 #     server's .env on every deploy, so rotating it means updating the secret
 #     and re-running this workflow - no SSH session needed. Leave it unset and
 #     the sync step is skipped, leaving any hand-set value on the server alone.
+#   RETAILPILOT_SPECTRA_URL, RETAILPILOT_SPECTRA_KEY - the RetailPilot SPECTRA
+#     API the purchase sync reads (config/retailpilot.js). Synced into .env the
+#     same way; each one left unset is left alone on the server. These do NOT
+#     switch the scheduled sync on - RETAILPILOT_PURCHASE_SYNC_ENABLED does,
+#     and it is never written here.
 #
 # One-time setup:
 #   1. Install the matching public key in ec2-user's authorized_keys on dnds-be.
@@ -80,6 +85,45 @@ jobs:
              mv .env.tmp .env
              chmod 600 .env
              echo "ANTHROPIC_API_KEY written to .env"'
+
+      # Same mechanism as above, for the RetailPilot purchase sync's API.
+      # Values go over stdin, never as arguments, and are never printed.
+      - name: Sync RetailPilot SPECTRA settings to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          RETAILPILOT_SPECTRA_URL: ${{ secrets.RETAILPILOT_SPECTRA_URL }}
+          RETAILPILOT_SPECTRA_KEY: ${{ secrets.RETAILPILOT_SPECTRA_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RETAILPILOT_SPECTRA_URL}" ] && [ -z "${RETAILPILOT_SPECTRA_KEY}" ]; then
+            echo "RetailPilot secrets not set - leaving the server's .env as it is."
+            exit 0
+          fi
+          printf '%s\n%s\n' "$RETAILPILOT_SPECTRA_URL" "$RETAILPILOT_SPECTRA_KEY" | ssh -i ~/.ssh/dnds_gha_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            'set -euo pipefail
+             IFS= read -r NEW_URL || true
+             IFS= read -r NEW_KEY || true
+             cd ~/dailyneeds-store-backend
+             touch .env
+             cp .env .env.tmp
+             if [ -n "$NEW_URL" ]; then
+               grep -v "^RETAILPILOT_SPECTRA_URL=" .env.tmp > .env.tmp2 || true
+               printf "RETAILPILOT_SPECTRA_URL=%s\n" "$NEW_URL" >> .env.tmp2
+               mv .env.tmp2 .env.tmp
+               echo "RETAILPILOT_SPECTRA_URL written to .env"
+             fi
+             if [ -n "$NEW_KEY" ]; then
+               grep -v "^RETAILPILOT_SPECTRA_KEY=" .env.tmp > .env.tmp2 || true
+               printf "RETAILPILOT_SPECTRA_KEY=%s\n" "$NEW_KEY" >> .env.tmp2
+               mv .env.tmp2 .env.tmp
+               echo "RETAILPILOT_SPECTRA_KEY written to .env"
+             fi
+             mv .env.tmp .env
+             chmod 600 .env'
 
       # PRE-DEPLOY BACKUP. Only when the commit being deployed brings new
       # migrations. Runs BEFORE the pull, with the repository's own
