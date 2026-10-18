@@ -48,7 +48,7 @@ class RetailPilotPurchaseSync {
         return true;
       }
       skipped.push({
-        invoice_slug: p.RP_INVOICE_SLUG,
+        invoice_slug: p.MRC_NO,
         reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${row.purchase_id} (bill ${row.mmh_dist_bill_no}, GSTIN ${row.supplier_gstn || "-"}) at this outlet`,
       });
       return false;

@@ -22,7 +22,8 @@ class PurchaseRoutes {
       supplier_id: Joi.string().max(50).required(),
       supplier_name: Joi.string().max(100).required(),
       supplier_gstn: Joi.string().max(20).required(),
-      mmh_mrc_no: Joi.number().required(),
+      // A number for GoFrugal purchases, RetailPilot's invoice slug for new ones.
+      mmh_mrc_no: Joi.alternatives().try(Joi.number(), Joi.string().max(50)).required(),
       mmh_mrc_dt: Joi.date().required(),
       mmh_mrc_amt: Joi.number().precision(2).required(),
       mmh_dist_bill_dt: Joi.date().required(),
@@ -48,7 +49,7 @@ class PurchaseRoutes {
         SUPPLIER_ID: Joi.string().max(50).required(),
         SUPPLIER_NAME: Joi.string().max(100).required(),
         SUPPLIER_GSTN: Joi.string().max(20).required(),
-        MRC_NO: Joi.number().required(),
+        MRC_NO: Joi.alternatives().try(Joi.number(), Joi.string().max(50)).required(),
         MRC_DATE: Joi.date().required(),
         MRC_AMT: Joi.number().precision(2).required(),
         DIST_BILL_DT: Joi.date().required(),

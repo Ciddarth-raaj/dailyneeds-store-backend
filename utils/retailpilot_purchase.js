@@ -11,6 +11,7 @@ const crypto = require("crypto");
 
 // Column limits of the `purchase` table.
 const LIMITS = {
+  MRC_NO: 50,
   MRC_REF: 50,
   SUPPLIER_ID: 50,
   SUPPLIER_GSTN: 20,
@@ -150,10 +151,11 @@ function mapPurchases(rows, storeMap) {
       continue;
     }
 
-    // seq is RetailPilot's running number per store and invoice type
-    // (Warehouse purchases 6372, 6373, ...). It is both the MRC number and
-    // the reference - which the Tally export sends as the voucher number and
-    // Tally's responses are matched back on.
+    // seq is RetailPilot's running number per store, invoice type and
+    // financial year (Warehouse 2026-27: 6372, 6373, ... - continuing
+    // GoFrugal's refno). It is the reference, mmh_mrc_refno, which the Tally
+    // export sends as the voucher number and Tally's responses are matched
+    // back on. The invoice slug is the MRC no, mmh_mrc_no.
     const seq = h.mrc_no == null || h.mrc_no === "" ? NaN : Number(h.mrc_no);
     if (!Number.isInteger(seq) || seq <= 0) {
       skip("no seq (MRC number) in RetailPilot");
@@ -167,6 +169,7 @@ function mapPurchases(rows, storeMap) {
     seen.set(key, slug);
 
     const fields = {
+      MRC_NO: slug,
       MRC_REF: String(seq),
       SUPPLIER_ID: str(h.supplier_id),
       SUPPLIER_GSTN: str(h.supplier_gstn),
@@ -211,15 +214,12 @@ function mapPurchases(rows, storeMap) {
       SUPPLIER_ID: fields.SUPPLIER_ID,
       SUPPLIER_NAME: str(h.supplier_name).slice(0, LIMITS.SUPPLIER_NAME),
       SUPPLIER_GSTN: fields.SUPPLIER_GSTN,
-      MRC_NO: seq,
+      MRC_NO: slug,
       MRC_DATE: mrcDate,
       MRC_AMT: round2(h.invoice_amount),
       DIST_BILL_DT: billDate,
       DIST_BILL_NO: fields.DIST_BILL_NO,
       MRC_REF: fields.MRC_REF,
-      // Not a purchase column (bulkCreate ignores it); kept so a skipped or
-      // reported bill can be found in RetailPilot.
-      RP_INVOICE_SLUG: slug,
       MANUAL_DISC: 0,
       TOT_SGST_AMT: sumValues(sgst),
       TOT_CGST_AMT: sumValues(cgst),

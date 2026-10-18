@@ -66,11 +66,10 @@ describe("mapPurchases", () => {
     const p = purchases[0];
     assert.equal(p.STORE_ID, 2);
     assert.equal(p.MRC_REF, "6372", "the reference (Tally voucher number) is seq");
-    assert.equal(p.RP_INVOICE_SLUG, "INV-1001");
+    assert.equal(p.MRC_NO, "INV-1001", "the MRC no is the RetailPilot invoice slug");
     assert.equal(p.MRC_DATE, "2026-10-15");
     assert.equal(p.DIST_BILL_DT, "2026-10-14");
     assert.equal(p.DIST_BILL_NO, "B-1");
-    assert.equal(p.MRC_NO, 6372);
     assert.equal(p.MRC_AMT, 1640);
     assert.deepEqual(p.SGST, [
       { PERC: 2.5, TAXABLE: 1000, VALUE: 25 },
@@ -111,6 +110,11 @@ describe("mapPurchases", () => {
     assert.equal(purchases[0].TOT_SGST_AMT, 25);
   });
 
+  it("refuses a slug longer than the MRC no column", () => {
+    const { skipped } = mapPurchases([row({ invoice_slug: "x".repeat(51) })], STORE_MAP);
+    assert.match(skipped[0].reason, /MRC_NO .* is longer than 50/);
+  });
+
   it("skips, with a reason, what would not fit or has no outlet", () => {
     const { purchases, skipped } = mapPurchases(
       [
@@ -129,10 +133,11 @@ describe("mapPurchases", () => {
     assert.match(skipped[3].reason, /no seq/);
   });
 
-  it("takes MRC_NO and the reference from seq, and refuses a seq used twice in a store", () => {
-    const one = mapPurchases([row({ mrc_no: "6400" })], STORE_MAP).purchases[0];
-    assert.equal(one.MRC_NO, 6400);
-    assert.equal(one.MRC_REF, "6400");
+  it("takes the reference from seq and the MRC no from the slug, and refuses a seq used twice in a store", () => {
+    const one = mapPurchases([row({ invoice_slug: "INV-0EevA9mzmHYx", mrc_no: "6400" })], STORE_MAP).purchases[0];
+    assert.equal(one.MRC_REF, "6400", "seq is the reference / Tally voucher number");
+    assert.equal(one.MRC_NO, "INV-0EevA9mzmHYx", "the slug is the MRC no");
+    assert.ok(!("RP_INVOICE_SLUG" in one));
     const { purchases, skipped } = mapPurchases(
       [row({ invoice_slug: "P" }), row({ invoice_slug: "Q" })],
       STORE_MAP
