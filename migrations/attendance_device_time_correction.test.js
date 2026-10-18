@@ -52,6 +52,7 @@ describe(NAME, () => {
       "20261130120000-account-sheet-wallet.js",
       "20261201120000-fnf-settlement.js",
       "20261203120000-outlet-retailpilot-id.js",
+      "20261204120000-purchase-retailpilot-columns.js",
     ];
     assert.deepEqual(others.filter((f) => f > `${NAME}.js`).sort(), LATER);
   });

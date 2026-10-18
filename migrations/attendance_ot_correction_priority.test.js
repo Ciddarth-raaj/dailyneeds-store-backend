@@ -24,7 +24,7 @@ describe(`migration ${NAME}`, () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, "")).sort();
     // Sorts after every OT migration before it; only the Historical OT Review
     // and the LR Follow-up manual migration follow.
-    assert.deepEqual(all.filter((f) => f > NAME), ["20261128120000-attendance-ot-historical-review", "20261129120000-lr-followup-manual", "20261130120000-account-sheet-wallet", "20261201120000-fnf-settlement", "20261203120000-outlet-retailpilot-id"]);
+    assert.deepEqual(all.filter((f) => f > NAME), ["20261128120000-attendance-ot-historical-review", "20261129120000-lr-followup-manual", "20261130120000-account-sheet-wallet", "20261201120000-fnf-settlement", "20261203120000-outlet-retailpilot-id", "20261204120000-purchase-retailpilot-columns"]);
   });
 
   it("a SYSTEM OT gets its own open-request group; manual requests keep theirs", () => {

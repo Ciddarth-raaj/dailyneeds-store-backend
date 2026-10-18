@@ -2,8 +2,9 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
 class PurchaseRoutes {
-  constructor(purchaseUsecase) {
+  constructor(purchaseUsecase, retailPilotPurchaseSync) {
     this.purchaseUsecase = purchaseUsecase;
+    this.retailPilotPurchaseSync = retailPilotPurchaseSync;
     this.init();
   }
 
@@ -18,15 +19,16 @@ class PurchaseRoutes {
     // Define purchase schema with tax arrays
     const purchaseSchema = Joi.object({
       retail_outlet_id: Joi.number().required(),
-      supplier_id: Joi.string().max(20).required(),
+      supplier_id: Joi.string().max(50).required(),
       supplier_name: Joi.string().max(100).required(),
       supplier_gstn: Joi.string().max(20).required(),
-      mmh_mrc_no: Joi.number().required(),
+      // A number for GoFrugal purchases, RetailPilot's invoice slug for new ones.
+      mmh_mrc_no: Joi.alternatives().try(Joi.number(), Joi.string().max(50)).required(),
       mmh_mrc_dt: Joi.date().required(),
       mmh_mrc_amt: Joi.number().precision(2).required(),
       mmh_dist_bill_dt: Joi.date().required(),
       mmh_dist_bill_no: Joi.string().max(50).required(),
-      mmh_mrc_refno: Joi.string().max(20).required(),
+      mmh_mrc_refno: Joi.string().max(50).required(),
       mmh_manual_disc: Joi.number().precision(2).required(),
       tot_sgst_amt: Joi.number().precision(2).required(),
       tot_cgst_amt: Joi.number().precision(2).required(),
@@ -44,15 +46,15 @@ class PurchaseRoutes {
     const bulkPurchaseSchema = Joi.array().items(
       Joi.object({
         STORE_ID: Joi.number().required(),
-        SUPPLIER_ID: Joi.string().max(20).required(),
+        SUPPLIER_ID: Joi.string().max(50).required(),
         SUPPLIER_NAME: Joi.string().max(100).required(),
         SUPPLIER_GSTN: Joi.string().max(20).required(),
-        MRC_NO: Joi.number().required(),
+        MRC_NO: Joi.alternatives().try(Joi.number(), Joi.string().max(50)).required(),
         MRC_DATE: Joi.date().required(),
         MRC_AMT: Joi.number().precision(2).required(),
         DIST_BILL_DT: Joi.date().required(),
         DIST_BILL_NO: Joi.string().max(50).required(),
-        MRC_REF: Joi.string().max(20).required(),
+        MRC_REF: Joi.string().max(50).required(),
         MANUAL_DISC: Joi.number().precision(2).required(),
         TOT_SGST_AMT: Joi.number().precision(2).required(),
         TOT_CGST_AMT: Joi.number().precision(2).required(),
@@ -92,6 +94,32 @@ class PurchaseRoutes {
         }
 
         const result = await this.purchaseUsecase.bulkCreatePurchase(value);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Pull purchase invoices from RetailPilot now. Body (all optional):
+    // { days: 0-90 look-back, dry_run: true to return the mapped rows
+    // without saving them }.
+    router.post("/retailpilot-sync", async (req, res) => {
+      try {
+        if (!this.retailPilotPurchaseSync) {
+          return res.json({ code: 503, msg: "RetailPilot sync is not available" });
+        }
+        const { error, value } = Joi.object({
+          days: Joi.number().integer().min(0).max(90).optional(),
+          dry_run: Joi.boolean().default(false),
+        }).validate(req.body || {});
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+        const result = await this.retailPilotPurchaseSync.run({
+          days: value.days,
+          dryRun: value.dry_run,
+        });
         res.json(result);
       } catch (err) {
         console.log(err);
@@ -247,7 +275,7 @@ class PurchaseRoutes {
     router.get("/refno/:mmh_mrc_refno", async (req, res) => {
       try {
         const schema = Joi.object({
-          mmh_mrc_refno: Joi.string().max(20).required(),
+          mmh_mrc_refno: Joi.string().max(50).required(),
           retail_outlet_id: Joi.number().integer().optional(),
         });
 
@@ -322,6 +350,6 @@ class PurchaseRoutes {
   }
 }
 
-module.exports = (purchaseUsecase) => {
-  return new PurchaseRoutes(purchaseUsecase);
+module.exports = (purchaseUsecase, retailPilotPurchaseSync) => {
+  return new PurchaseRoutes(purchaseUsecase, retailPilotPurchaseSync);
 };

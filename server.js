@@ -1299,6 +1299,13 @@ class Server {
       this.purchaseRepo,
       this.outletUsecase
     );
+    const retailPilotConfig = require("./config/retailpilot");
+    this.retailPilotPurchaseSyncUsecase = require("./usecase/retailpilot_purchase_sync")(
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      this.purchaseUsecase,
+      retailPilotConfig,
+      () => this.outletUsecase.getRetailPilotStoreMap()
+    );
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo,
       this.gstTallyPurchaseRepo
@@ -1899,7 +1906,10 @@ class Server {
     const digitalPaymentsRouter = require("./routes/digital_payments")(
       this.digitalPaymentsUsecase
     );
-    const purchaseRouter = require("./routes/purchase")(this.purchaseUsecase);
+    const purchaseRouter = require("./routes/purchase")(
+      this.purchaseUsecase,
+      this.retailPilotPurchaseSyncUsecase
+    );
     const purchaseGstRouter = require("./routes/purchase_gst")(
       this.purchaseGstUsecase,
       this.permissions
@@ -2263,15 +2273,32 @@ class Server {
         });
       });
     }
-    // Edit schedule here if needed (node-cron: minute hour day month weekday)
-    const PURCHASE_ACK_GOFRUGAL_CRON = "*/5 * * * *";
-    this.cronService.register(
-      "purchase_acknowledgement_gofrugal_sync",
-      PURCHASE_ACK_GOFRUGAL_CRON,
-      async () => {
-        await this.purchaseAcknowledgementUsecase.syncFromGofrugal(null);
-      }
-    );
+    // The 5-minute purchase_acknowledgement_gofrugal_sync cron was removed:
+    // GoFrugal has been replaced by RetailPilot, so the GoFrugal copy it read
+    // (medishopdb_med_mrc_memo) no longer updates. The manual
+    // POST /purchase-acknowledgement/sync is kept.
+
+    // 9:00 AM, 2:00 PM AND 5:00 PM (Asia/Kolkata, the cron service's zone) -
+    // pull purchase invoices from RetailPilot (replaces the GoFrugal push to
+    // POST /purchase/bulk). Each run re-reads the look-back window
+    // (RETAILPILOT_PURCHASE_LOOKBACK_DAYS, default 3). Off until
+    // RETAILPILOT_PURCHASE_SYNC_ENABLED=true; POST /purchase/retailpilot-sync
+    // runs it by hand either way.
+    if (require("./config/retailpilot").purchaseSyncEnabled) {
+      const runRetailPilotPurchaseSync = async () =>
+        await this.retailPilotPurchaseSyncUsecase.run();
+      this.cronService.register(
+        "retailpilot_purchase_sync",
+        "0 9,14,17 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron(
+              "retailpilot_purchase_sync",
+              "/purchase/retailpilot-sync",
+              runRetailPilotPurchaseSync
+            )
+          : runRetailPilotPurchaseSync
+      );
+    }
 
     // 11PM everyday. preventOverlap: a run still going at the next tick is
     // skipped rather than started twice (it launches Chrome). The use case
