@@ -127,10 +127,30 @@ class RetailPilotPurchaseSync {
         }).map((d) => ({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, ...d }))
       );
 
+      // One line per bill for the Purchase screen's sync summary.
+      const bills = [];
+      const bill = (p, action) =>
+        bills.push({
+          invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID,
+          supplier_name: p.SUPPLIER_NAME, mrc_date: p.MRC_DATE, mrc_amt: p.MRC_AMT, action,
+        });
+
       if (dryRun) {
+        // The counts a real run would report, from a read-only look at each
+        // bill (the same lookup and decision as the upsert, no write).
+        const counts = { inserted: 0, updated: 0, unchanged: 0, approved: 0 };
+        for (const p of purchases) {
+          const r = await this.purchaseUsecase.previewRetailPilotPurchase(p);
+          counts[r.action] += 1;
+          bill(p, r.action);
+        }
         return {
           code: 200, dry_run: true, days: lookback, row_count: purchases.length,
-          purchases, skipped, discrepancies, warnings,
+          inserted: counts.inserted,
+          updated: counts.updated,
+          unchanged: counts.unchanged,
+          approved_untouched: counts.approved,
+          bills, purchases, skipped, discrepancies, warnings,
         };
       }
 
@@ -139,6 +159,7 @@ class RetailPilotPurchaseSync {
       for (const p of purchases) {
         const r = await this.purchaseUsecase.upsertRetailPilotPurchase(p);
         counts[r.action] += 1;
+        bill(p, r.action);
         if (r.action === "updated" && r.kept && r.kept.length) {
           correctionsKept.push({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, purchase_id: r.purchase_id, fields: r.kept });
         }
@@ -153,6 +174,7 @@ class RetailPilotPurchaseSync {
         unchanged: counts.unchanged,
         approved_untouched: counts.approved,
         corrections_kept: correctionsKept,
+        bills,
         discrepancies,
         skipped,
         warnings,

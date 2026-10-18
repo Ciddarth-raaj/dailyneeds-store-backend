@@ -341,6 +341,25 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
   });
 
   // ---------------------------------------------------------- initial import
+  const snapshot = async () => [
+    await q("SELECT purchase_id, updated_at, ts, retailpilot_source FROM purchase ORDER BY purchase_id"),
+    await q("SELECT * FROM purchase_internal ORDER BY purchase_id"),
+    await q("SELECT COUNT(*) AS n FROM purchase_audit_log"),
+  ];
+
+  it("dry run before the first import: the counts the real run then reports, and nothing written", async () => {
+    setRows(ROWS.a, ROWS.krc, ROWS.dn1, ROWS.neg, ROWS.zero, ROWS.dn2, ROWS.clash, ROWS.unknown);
+    const before = await snapshot();
+    const r = await run({ dryRun: true });
+    assert.equal(r.code, 200);
+    assert.equal(r.dry_run, true);
+    assert.deepEqual([r.inserted, r.updated, r.unchanged, r.approved_untouched], [6, 0, 0, 0]);
+    assert.equal(r.bills.length, 6);
+    assert.ok(r.bills.every((b) => b.action === "inserted" && b.mrc_ref && b.invoice_slug));
+    assert.deepEqual(r.skipped.map((s) => s.invoice_slug).sort(), ["INV-CLASH", "INV-UNKNOWN"]);
+    assert.deepEqual(await snapshot(), before, "a dry run writes nothing");
+  });
+
   it("initial import: new bills inserted with the full round-off; clash and unknown branch skipped", async () => {
     setRows(ROWS.a, ROWS.krc, ROWS.dn1, ROWS.neg, ROWS.zero, ROWS.dn2, ROWS.clash, ROWS.unknown);
     const r = await run();
@@ -387,8 +406,13 @@ describe("RetailPilot purchase sync, as SQL", { skip: !URL && "RP_TEST_MYSQL is 
   // ----------------------------------------------------------- round-off
   it("RetailPilot changes an untouched bill: values and the sync's own round-off follow", async () => {
     setRows({ ...ROWS.a, invoice_amount: "1051.00" });
+    const before = await snapshot();
+    const dry = await run({ dryRun: true });
+    assert.deepEqual([dry.inserted, dry.updated, dry.unchanged], [0, 1, 0], "dry run sees the change");
+    assert.deepEqual(await snapshot(), before, "and writes nothing");
     const r = await run();
     assert.equal(r.updated, 1);
+    assert.deepEqual(r.bills.map((b) => `${b.invoice_slug}:${b.action}`), ["INV-A:updated"]);
     const p = await byslug("INV-A");
     assert.equal(Number(p.mmh_mrc_amt), 1051);
     assert.deepEqual([Number((await internal(p.purchase_id)).round_off)], [1]);
