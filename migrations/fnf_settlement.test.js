@@ -30,7 +30,7 @@ describe("the F&F settlement migration", () => {
   it("is unique, is followed only by the migrations named here, and its runner reads its own files", () => {
     const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => f.replace(/\.js$/, ""));
     assert.deepEqual(all.filter((f) => f.slice(0, 14) === NAME.slice(0, 14)), [NAME]);
-    assert.deepEqual(all.filter((f) => f > NAME), ["20261203120000-outlet-retailpilot-id", "20261204120000-purchase-retailpilot-columns"]);
+    assert.deepEqual(all.filter((f) => f > NAME), ["20261203120000-outlet-retailpilot-id", "20261204120000-purchase-retailpilot-columns", "20261205120000-purchase-retailpilot-source", "20261205130000-retailpilot-purchase-sync-permission"]);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });

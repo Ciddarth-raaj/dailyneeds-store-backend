@@ -1,10 +1,14 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
+/** Who may run the RetailPilot purchase sync by hand (admins always may). */
+const RETAILPILOT_SYNC_PERMISSION = "sync_retailpilot_purchases";
+
 class PurchaseRoutes {
-  constructor(purchaseUsecase, retailPilotPurchaseSync) {
+  constructor(purchaseUsecase, retailPilotPurchaseSync, permissions) {
     this.purchaseUsecase = purchaseUsecase;
     this.retailPilotPurchaseSync = retailPilotPurchaseSync;
+    this.permissions = permissions;
     this.init();
   }
 
@@ -103,8 +107,13 @@ class PurchaseRoutes {
 
     // Pull purchase invoices from RetailPilot now. Body (all optional):
     // { days: 0-90 look-back, dry_run: true to return the mapped rows
-    // without saving them }.
-    router.post("/retailpilot-sync", async (req, res) => {
+    // without saving them }. Admins, and designations granted
+    // sync_retailpilot_purchases; 401 without a session, 403 without it.
+    // Each call is recorded in the API Sync Log with the employee who made it.
+    const requireSyncPermission = this.permissions
+      ? this.permissions.require(RETAILPILOT_SYNC_PERMISSION)
+      : (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    router.post("/retailpilot-sync", requireSyncPermission, async (req, res) => {
       try {
         if (!this.retailPilotPurchaseSync) {
           return res.json({ code: 503, msg: "RetailPilot sync is not available" });
@@ -323,6 +332,25 @@ class PurchaseRoutes {
       }
     });
 
+    // Remove the Tally response of one purchase, by purchase id.
+    router.delete("/:id/tally-response", async (req, res) => {
+      try {
+        const { error, value } = Joi.object({
+          id: Joi.number().integer().positive().required(),
+        }).validate({ id: Number(req.params.id) });
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+        const result = await this.purchaseUsecase.deleteTallyResponseForPurchase(value.id);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Old delete by voucher number: deletes only when the number belongs to
+    // one purchase with a Tally response, 409 otherwise (see the repository).
     router.delete("/delete-tally/:id", async (req, res) => {
       try {
         const schema = Joi.object({
@@ -350,6 +378,7 @@ class PurchaseRoutes {
   }
 }
 
-module.exports = (purchaseUsecase, retailPilotPurchaseSync) => {
-  return new PurchaseRoutes(purchaseUsecase, retailPilotPurchaseSync);
+module.exports = (purchaseUsecase, retailPilotPurchaseSync, permissions) => {
+  return new PurchaseRoutes(purchaseUsecase, retailPilotPurchaseSync, permissions);
 };
+module.exports.RETAILPILOT_SYNC_PERMISSION = RETAILPILOT_SYNC_PERMISSION;

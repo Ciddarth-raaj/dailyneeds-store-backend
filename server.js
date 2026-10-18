@@ -1908,7 +1908,8 @@ class Server {
     );
     const purchaseRouter = require("./routes/purchase")(
       this.purchaseUsecase,
-      this.retailPilotPurchaseSyncUsecase
+      this.retailPilotPurchaseSyncUsecase,
+      this.permissions
     );
     const purchaseGstRouter = require("./routes/purchase_gst")(
       this.purchaseGstUsecase,
@@ -2296,7 +2297,8 @@ class Server {
               "/purchase/retailpilot-sync",
               runRetailPilotPurchaseSync
             )
-          : runRetailPilotPurchaseSync
+          : runRetailPilotPurchaseSync,
+        { preventOverlap: true }
       );
     }
 

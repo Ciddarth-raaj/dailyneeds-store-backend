@@ -9,13 +9,15 @@ function dateOnlyString(value) {
   }
   return String(value || "").slice(0, 10);
 }
-const { buildPurchaseQuery, mapPurchases, roundOffFor } = require("../utils/retailpilot_purchase");
+const { buildPurchaseQuery, mapPurchases } = require("../utils/retailpilot_purchase");
+const { purchaseDiscrepancies } = require("../utils/purchase_discrepancy");
 
 const MAX_DAYS = 90;
 
 /**
- * Pulls purchase invoices from RetailPilot and saves them through the same
- * purchaseUsecase.bulkCreatePurchase the old GoFrugal push used.
+ * Pulls purchase invoices from RetailPilot and saves them one by one with
+ * purchaseUsecase.upsertRetailPilotPurchase: new bills inserted, approved
+ * bills frozen, Accounts' corrections kept on re-sync.
  */
 class RetailPilotPurchaseSync {
   /**
@@ -43,14 +45,20 @@ class RetailPilotPurchaseSync {
    * voucher matching, so such a clash is skipped and reported. The same
    * RetailPilot bill coming back (same slug in mmh_mrc_no) is not a clash,
    * and a bill from another year with the same number is not either.
+   *
+   * The year is the one the seq is numbered in (RetailPilot's fy), not the
+   * bill's date: a bill dated in an earlier year by mistake still belongs
+   * to this year's series - it is imported and flagged for Accounts
+   * (MRC_DATE_OUTSIDE_SERIES_FY), not skipped against last year's bills.
    */
   async _withoutRefnoClashes(purchases, skipped) {
     if (!purchases.length || typeof this.purchaseUsecase.findByOutletRefnos !== "function") {
       return purchases;
     }
     const keyOf = (outletId, refno, fyStart) => `${outletId}|${String(refno).trim()}|${fyStart}`;
+    const seriesYear = (p) => (p.FY ? financialYearBounds(`${p.FY}-04-01`) : financialYearBounds(p.MRC_DATE));
     const keys = purchases.map((p) => {
-      const fy = financialYearBounds(p.MRC_DATE);
+      const fy = seriesYear(p);
       return [p.STORE_ID, p.MRC_REF, fy.start, fy.end];
     });
     const existing = await this.purchaseUsecase.findByOutletRefnos(keys);
@@ -62,12 +70,12 @@ class RetailPilotPurchaseSync {
       byKey.get(k).push(r);
     }
     return purchases.filter((p) => {
-      const rows = byKey.get(keyOf(p.STORE_ID, p.MRC_REF, financialYearBounds(p.MRC_DATE).start)) || [];
+      const rows = byKey.get(keyOf(p.STORE_ID, p.MRC_REF, seriesYear(p).start)) || [];
       const other = rows.find((r) => String(r.mmh_mrc_no == null ? "" : r.mmh_mrc_no).trim() !== p.MRC_NO);
       if (!other) return true;
       skipped.push({
         invoice_slug: p.MRC_NO,
-        reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${other.purchase_id} (bill ${other.mmh_dist_bill_no}, GSTIN ${other.supplier_gstn || "-"}) at this outlet in the same financial year`,
+        reason: `MRC ref ${p.MRC_REF} already belongs to purchase ${other.purchase_id} at this outlet in the same financial year`,
       });
       return false;
     });
@@ -102,49 +110,50 @@ class RetailPilotPurchaseSync {
         ? [`${skipped.length} invoice(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.invoice_slug} (${s.reason})`).join("; ")}`]
         : [];
 
-      const roundOffForAccounts = purchases
-        .filter((p) => !p.ROUND_OFF_PREFILL)
-        .map((p) => ({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, round_off: p.ROUND_OFF, reason: p.ROUND_OFF_NOTE }));
-      if (roundOffForAccounts.length) {
-        warnings.push(
-          `${roundOffForAccounts.length} bill(s) need accounts to check the round-off: ` +
-            roundOffForAccounts.slice(0, 5).map((r) => `${r.mrc_ref} (${r.reason})`).join("; ")
-        );
-      }
+      // Bills Accounts must look at (utils/purchase_discrepancy.js), as
+      // RetailPilot sent them. Reported separately from `warnings`: a
+      // discrepancy is work for Accounts, not a failed sync.
+      const discrepancies = purchases.flatMap((p) =>
+        purchaseDiscrepancies({
+          supplier_gstn: p.SUPPLIER_GSTN,
+          sgst: p.SGST,
+          cgst: p.CGST,
+          igst: p.IGST,
+          mmh_mrc_dt: p.MRC_DATE,
+          mmh_dist_bill_dt: p.DIST_BILL_DT,
+          mmh_mrc_refno: p.MRC_REF,
+          voucher_fy: p.FY,
+          entered_at: p.ENTERED_AT,
+        }).map((d) => ({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, ...d }))
+      );
 
       if (dryRun) {
         return {
           code: 200, dry_run: true, days: lookback, row_count: purchases.length,
-          purchases, skipped, round_off_for_accounts: roundOffForAccounts, warnings,
+          purchases, skipped, discrepancies, warnings,
         };
       }
 
-      const saved = purchases.length
-        ? await this.purchaseUsecase.bulkCreatePurchase(purchases, { matchOn: "mmh_mrc_no" })
-        : { insertedCount: 0, updatedCount: 0, unchangedCount: 0 };
-
-      // Round-off into purchase_internal - only where accounts have not
-      // started the bill yet (no internal row) and it is unapproved.
-      const roundOffPrefilled =
-        purchases.length && typeof this.purchaseUsecase.prefillPurchaseInternal === "function"
-          ? await this.purchaseUsecase.prefillPurchaseInternal(
-              purchases.filter((p) => p.ROUND_OFF_PREFILL).map((p) => ({
-                retail_outlet_id: p.STORE_ID,
-                mmh_mrc_no: p.MRC_NO,
-                ...roundOffFor(p),
-              }))
-            )
-          : 0;
+      const counts = { inserted: 0, updated: 0, unchanged: 0, approved: 0 };
+      const correctionsKept = [];
+      for (const p of purchases) {
+        const r = await this.purchaseUsecase.upsertRetailPilotPurchase(p);
+        counts[r.action] += 1;
+        if (r.action === "updated" && r.kept && r.kept.length) {
+          correctionsKept.push({ invoice_slug: p.MRC_NO, mrc_ref: p.MRC_REF, outlet: p.STORE_ID, purchase_id: r.purchase_id, fields: r.kept });
+        }
+      }
 
       return {
         code: 200,
         days: lookback,
         row_count: purchases.length,
-        inserted: saved.insertedCount,
-        updated: saved.updatedCount,
-        unchanged: saved.unchangedCount,
-        round_off_prefilled: roundOffPrefilled,
-        round_off_for_accounts: roundOffForAccounts,
+        inserted: counts.inserted,
+        updated: counts.updated,
+        unchanged: counts.unchanged,
+        approved_untouched: counts.approved,
+        corrections_kept: correctionsKept,
+        discrepancies,
         skipped,
         warnings,
       };

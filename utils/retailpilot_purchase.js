@@ -24,7 +24,9 @@ const LIMITS = {
  * {days} days. The created/updated test catches a back-dated entry or an
  * edit to an older bill, which a window on the bill date alone would miss.
  * FREIGHT and any other invoice_type are left out. The supplier name is the
- * vendor's trade name, falling back to its registered name.
+ * vendor's trade name, falling back to its registered name. fy is the
+ * financial year (its first calendar year) of the seq series the bill is
+ * numbered in, and entered_at when it was entered in RetailPilot.
  *
  * {days} must be a non-negative integer. `CURRENT_DATE - <int>`, not
  * `INTERVAL '<n> days'`: SPECTRA parameterises the literal and Postgres
@@ -51,6 +53,8 @@ SELECT
   h.slug                                    AS invoice_slug,
   h.invoice_id                              AS supplier_invoice_id,
   h.seq                                     AS mrc_no,
+  h.fy                                      AS fy,
+  h.created_at                              AS entered_at,
   h.store_id,
   h.supplier_id,
   COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS supplier_name,
@@ -67,7 +71,7 @@ LEFT JOIN masterhub.vendors v ON v.id = h.supplier_id
 WHERE h.invoice_type = 'PURCHASE'
   AND (COALESCE(h.received_date, h.invoice_date) >= CURRENT_DATE - ${n}
        OR COALESCE(h.updated_at, h.created_at) >= CURRENT_DATE - ${n})
-GROUP BY h.slug, h.invoice_id, h.seq, h.store_id, h.supplier_id, v.name, v.trade_name,
+GROUP BY h.slug, h.invoice_id, h.seq, h.fy, h.created_at, h.store_id, h.supplier_id, v.name, v.trade_name,
          h.supplier_gstin, h.received_date, h.invoice_date, h.total_net,
          h.total_tcs, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
 ORDER BY h.slug, l.cgst_rate, l.sgst_rate, l.igst_rate, l.cess_rate
@@ -88,14 +92,9 @@ function dateOnly(v) {
   return m ? m[1] : null;
 }
 
-/**
- * Same rule as usecase/tally.js shouldShowIGST: a Puducherry (34) or missing
- * GSTIN is local. Only used for 0% lines, which carry no rate to tell.
- */
-function isInterstateSupplier(gstn) {
-  const g = str(gstn);
-  return !(g === "" || g === "0" || g.startsWith("34"));
-}
+// Same rule as usecase/tally.js shouldShowIGST: a Puducherry (34) or
+// missing GSTIN is local.
+const { isInterstateSupplier } = require("./purchase_discrepancy");
 
 function addTax(list, perc, taxable, value) {
   const existing = list.find((e) => e.PERC === perc);
@@ -113,46 +112,45 @@ const sumValues = (list) => round2(list.reduce((s, e) => s + e.VALUE, 0));
 /**
  * Round-off for the Purchase screen: bill amount minus what the screen adds
  * up (components/Purchase/PurchaseModal, util/purchase.js
- * calculateTotalAmount) - taxable + GST + TCS, where GST is IGST for an
- * other-state supplier and SGST + CGST otherwise, each line already rounded
- * to paise. Cess is not part of that total on the screen, so not here
- * either. total_amount is then the bill amount, as the screen would save it.
+ * calculateTotalAmount) - taxable + GST + TCS - discount on purchase, where
+ * GST is IGST for an other-state supplier and SGST + CGST otherwise, each
+ * line already rounded to paise. Cess is not part of that total on the
+ * screen, so not here either. total_amount is then the bill amount, as the
+ * screen would save it.
+ *
+ * The whole difference, positive or negative and of any size: Accounts sees
+ * it on the screen and corrects the bill where it is not rounding. Tax the
+ * screen does not show for this supplier (e.g. IGST on a supplier with no
+ * GSTIN) is not added, so such a bill's difference carries that tax - and
+ * utils/purchase_discrepancy.js blocks its approval until it is corrected.
+ *
+ * @param p a purchase row (lowercase columns, tax arrays parsed)
  */
-/** Largest difference treated as rounding; anything bigger is for accounts. */
-const ROUND_OFF_PREFILL_LIMIT = 10;
-
-function roundOffFor(p) {
-  const interstate = isInterstateSupplier(p.SUPPLIER_GSTN);
-  const lines = interstate ? p.IGST : p.SGST;
-  const taxable = lines.reduce((s, e) => s + e.TAXABLE, 0);
-  const tax = interstate ? p.TOT_IGST_AMT : p.TOT_SGST_AMT + p.TOT_CGST_AMT;
-  const roundOff = round2(p.MRC_AMT - (taxable + tax + p.GOODS_TCS_AMT));
-  return { round_off: roundOff, total_amount: round2(taxable + tax + p.GOODS_TCS_AMT + roundOff) };
+function roundOffForRow(p) {
+  const interstate = isInterstateSupplier(p.supplier_gstn);
+  const lines = (interstate ? p.igst : p.sgst) || [];
+  const taxable = lines.reduce((s, e) => s + (Number(e.TAXABLE) || 0), 0);
+  const tax = interstate
+    ? Number(p.tot_igst_amt) || 0
+    : (Number(p.tot_sgst_amt) || 0) + (Number(p.tot_cgst_amt) || 0);
+  const added = taxable + tax + (Number(p.mmd_goods_tcs_amt) || 0) - (Number(p.mmh_manual_disc) || 0);
+  const roundOff = round2((Number(p.mmh_mrc_amt) || 0) - added);
+  return { round_off: roundOff, total_amount: round2(added + roundOff) };
 }
 
-/**
- * Whether the round-off is ordinary rounding the sync may pre-fill, or
- * something accounts must look at: tax lines of the kind the screen and
- * Tally will not show for this supplier (e.g. IGST on a supplier with no
- * GSTIN, treated as local), or a difference above the limit.
- * @returns { prefill: boolean, reason: string|null }
- */
-function roundOffPrefillCheck(p) {
-  const interstate = isInterstateSupplier(p.SUPPLIER_GSTN);
-  const hidden = interstate ? [...p.SGST, ...p.CGST] : p.IGST;
-  if (hidden.some((e) => e.TAXABLE || e.VALUE)) {
-    return {
-      prefill: false,
-      reason: interstate
-        ? "CGST/SGST charged by an other-state supplier - the screen and Tally show IGST only"
-        : `IGST charged by a ${p.SUPPLIER_GSTN ? "local" : "no-GSTIN"} supplier - the screen and Tally show CGST/SGST only`,
-    };
-  }
-  const { round_off } = roundOffFor(p);
-  if (Math.abs(round_off) > ROUND_OFF_PREFILL_LIMIT) {
-    return { prefill: false, reason: `difference of ${round_off} is more than rounding (limit ${ROUND_OFF_PREFILL_LIMIT})` };
-  }
-  return { prefill: true, reason: null };
+/** roundOffForRow for the uppercase sync payload. */
+function roundOffFor(p) {
+  return roundOffForRow({
+    supplier_gstn: p.SUPPLIER_GSTN,
+    igst: p.IGST,
+    sgst: p.SGST,
+    tot_igst_amt: p.TOT_IGST_AMT,
+    tot_sgst_amt: p.TOT_SGST_AMT,
+    tot_cgst_amt: p.TOT_CGST_AMT,
+    mmd_goods_tcs_amt: p.GOODS_TCS_AMT,
+    mmh_manual_disc: p.MANUAL_DISC,
+    mmh_mrc_amt: p.MRC_AMT,
+  });
 }
 
 /** Numeric content hash, so TS changes exactly when the purchase does. */
@@ -276,12 +274,14 @@ function mapPurchases(rows, storeMap) {
       IGST: igst,
       CESS: cess,
     };
-    // Not purchase columns (bulkCreate ignores them): the round-off, and
-    // whether the sync may pre-fill it into purchase_internal.
+    // Not purchase columns: the round-off the sync pre-fills into
+    // purchase_internal, shown in a dry run; the financial year of the seq
+    // series (the voucher number's year, whatever the bill's dates say) and
+    // the day the bill was entered in RetailPilot.
     payload.ROUND_OFF = roundOffFor(payload).round_off;
-    const check = roundOffPrefillCheck(payload);
-    payload.ROUND_OFF_PREFILL = check.prefill;
-    if (!check.prefill) payload.ROUND_OFF_NOTE = check.reason;
+    const fy = Number(h.fy);
+    payload.FY = Number.isInteger(fy) && fy > 2000 ? fy : null;
+    payload.ENTERED_AT = dateOnly(h.entered_at);
     payload.TS = contentTs(payload);
     purchases.push(payload);
   }
@@ -294,7 +294,6 @@ module.exports = {
   mapPurchases,
   isInterstateSupplier,
   roundOffFor,
-  roundOffPrefillCheck,
-  ROUND_OFF_PREFILL_LIMIT,
+  roundOffForRow,
   contentTs,
 };

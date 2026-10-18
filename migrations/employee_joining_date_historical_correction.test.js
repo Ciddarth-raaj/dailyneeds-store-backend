@@ -42,6 +42,8 @@ describe("the migration", () => {
       "20261201120000-fnf-settlement",
       "20261203120000-outlet-retailpilot-id",
       "20261204120000-purchase-retailpilot-columns",
+      "20261205120000-purchase-retailpilot-source",
+      "20261205130000-retailpilot-purchase-sync-permission",
     ];
     assert.deepEqual(all.filter((f) => f > NAME).sort(), LATER);
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");

@@ -3,7 +3,8 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { buildPurchaseQuery, mapPurchases, contentTs, roundOffFor, roundOffPrefillCheck } = require("./retailpilot_purchase");
+const { buildPurchaseQuery, mapPurchases, contentTs, roundOffFor } = require("./retailpilot_purchase");
+const RP = require("./retailpilot_purchase");
 const spectraFactory = require("../services/retailpilot_spectra");
 const syncFactory = require("../usecase/retailpilot_purchase_sync");
 
@@ -42,6 +43,13 @@ describe("buildPurchaseQuery", () => {
     assert.match(q, /h\.seq\s+AS mrc_no/);
     assert.match(q, /COALESCE\(h\.received_date, h\.invoice_date\) >= CURRENT_DATE - 3/);
     assert.match(q, /COALESCE\(h\.updated_at, h\.created_at\) >= CURRENT_DATE - 3/);
+  });
+
+  it("reads the seq's financial year and the entry time, and groups by them", () => {
+    const sql = buildPurchaseQuery(3);
+    assert.match(sql, /h\.fy\s+AS fy,/);
+    assert.match(sql, /h\.created_at\s+AS entered_at,/);
+    assert.match(sql, /GROUP BY h\.slug, h\.invoice_id, h\.seq, h\.fy, h\.created_at,/);
   });
 
   it("names the supplier by trade name, falling back to the vendor name", () => {
@@ -146,6 +154,13 @@ describe("mapPurchases", () => {
     assert.match(skipped[0].reason, /seq 6372 is used by another invoice \(P\)/);
   });
 
+  it("carries the seq's financial year and the entry day on the bill", () => {
+    const p = mapPurchases([row({ fy: 2026, entered_at: "2026-10-16T16:09:20.413334+05:30" })], STORE_MAP).purchases[0];
+    assert.equal(p.FY, 2026);
+    assert.equal(p.ENTERED_AT, "2026-10-16");
+    assert.equal(mapPurchases([row({ fy: null })], STORE_MAP).purchases[0].FY, null);
+  });
+
   it("keeps the date part of a timestamp without shifting it", () => {
     const p = mapPurchases([row({ received_date: "2026-10-15T23:30:00+05:30" })], STORE_MAP).purchases[0];
     assert.equal(p.MRC_DATE, "2026-10-15");
@@ -183,23 +198,38 @@ describe("round-off, as the Purchase screen adds it up", () => {
     assert.deepEqual(roundOffFor(p), { round_off: 0.82, total_amount: 1182 });
   });
 
-  it("IGST on a supplier with no GSTIN is not rounding: left for accounts, with the reason", () => {
+  it("IGST on a supplier with no GSTIN: the whole difference is still pre-filled (approval is blocked elsewhere)", () => {
     // the live k.r.candles bill: no GSTIN, IGST 5% - the screen shows CGST/SGST only
     const p = mapPurchases(
       [row({ supplier_gstn: "", cgst_rate: 0, sgst_rate: 0, igst_rate: 5, taxable: 4271.49, invoice_amount: 4485 })],
       STORE_MAP
     ).purchases[0];
-    assert.equal(roundOffFor(p).round_off, 4485, "the screen would see no tax at all");
-    assert.equal(p.ROUND_OFF_PREFILL, false);
-    assert.match(p.ROUND_OFF_NOTE, /IGST charged by a no-GSTIN supplier/);
+    assert.deepEqual(roundOffFor(p), { round_off: 4485, total_amount: 4485 }, "the screen would see no tax at all");
+    assert.equal(p.ROUND_OFF, 4485);
+    assert.ok(!("ROUND_OFF_PREFILL" in p) && !("ROUND_OFF_NOTE" in p), "no pre-fill gate on the bill");
   });
 
-  it("a difference above Rs 10 is left for accounts; within Rs 10 is pre-filled", () => {
-    const big = mapPurchases([row({ invoice_amount: 1050 - 300.2, taxable: 1000 })], STORE_MAP).purchases[0];
-    assert.equal(big.ROUND_OFF, -300.2);
-    assert.deepEqual(roundOffPrefillCheck(big), { prefill: false, reason: "difference of -300.2 is more than rounding (limit 10)" });
-    const small = mapPurchases([row({ invoice_amount: 1059, taxable: 1000 })], STORE_MAP).purchases[0];
-    assert.deepEqual(roundOffPrefillCheck(small), { prefill: true, reason: null });
+  it("no Rs 10 limit: small, large, positive, negative and zero differences are all the full difference", () => {
+    const ro = (amount) => mapPurchases([row({ invoice_amount: amount, taxable: 1000 })], STORE_MAP).purchases[0].ROUND_OFF;
+    // taxable 1000 at 5% local = 1050
+    assert.equal(ro(1050.4), 0.4, "small positive");
+    assert.equal(ro(1049.75), -0.25, "small negative");
+    assert.equal(ro(1060.01), 10.01, "just over Rs 10");
+    assert.equal(ro(1059.99), 9.99, "just under Rs 10");
+    assert.equal(ro(2050), 1000, "large positive");
+    assert.equal(ro(1050 - 300.2), -300.2, "large negative");
+    assert.equal(ro(1050), 0, "zero");
+    assert.ok(!("ROUND_OFF_PREFILL_LIMIT" in RP) && !("roundOffPrefillCheck" in RP), "the limit and its check are gone");
+    const src = require("fs").readFileSync(require("path").join(__dirname, "retailpilot_purchase.js"), "utf8");
+    assert.doesNotMatch(src, /LIMIT\s*=\s*10|> ?10\b|Math\.abs\(round/, "no amount threshold left in the mapping");
+  });
+
+  it("the total it gives is the bill amount, as the screen would save it, also with a discount on purchase", () => {
+    const r = RP.roundOffForRow({
+      supplier_gstn: "34AAAAA0000A1Z5", sgst: [{ PERC: 2.5, TAXABLE: 1000, VALUE: 25 }], igst: [],
+      tot_sgst_amt: 25, tot_cgst_amt: 25, tot_igst_amt: 0, mmd_goods_tcs_amt: 0, mmh_manual_disc: 10, mmh_mrc_amt: 1040,
+    });
+    assert.deepEqual(r, { round_off: 0, total_amount: 1040 });
   });
 
   it("nothing to round when the bill already adds up", () => {
@@ -240,28 +270,52 @@ describe("the sync", () => {
   const config = { purchaseLookbackDays: 3 };
   const branchMaster = async () => STORE_MAP;
 
-  it("saves through bulkCreatePurchase and reports counts and skips", async () => {
-    let saved;
-    const purchaseUsecase = {
-      bulkCreatePurchase: async (list) => {
-        saved = list;
-        return { code: 200, insertedCount: 1, updatedCount: 0, unchangedCount: 0 };
+  // A purchase usecase that records what the sync saved.
+  const recorder = (actions = {}) => {
+    const saved = [];
+    return {
+      saved,
+      upsertRetailPilotPurchase: async (p) => {
+        saved.push(p);
+        const a = actions[p.MRC_NO] || { action: "inserted", purchase_id: saved.length, kept: [] };
+        return a;
       },
     };
+  };
+
+  it("saves each bill through upsertRetailPilotPurchase and reports counts and skips", async () => {
+    const uc = recorder();
     const result = await syncFactory(
       spectra([row({ invoice_amount: 1050 }), row({ invoice_slug: "Z", store_id: "nope", mrc_no: 9 })]),
-      purchaseUsecase,
+      uc,
       config, branchMaster
     ).run();
-    assert.equal(saved.length, 1);
+    assert.equal(uc.saved.length, 1);
     assert.equal(result.inserted, 1);
     assert.equal(result.skipped.length, 1);
     assert.equal(result.warnings.length, 1);
   });
 
+  it("counts inserted, updated, unchanged and approved bills, and lists Accounts' corrections it kept", async () => {
+    const uc = recorder({
+      A: { action: "inserted", purchase_id: 1, kept: [] },
+      B: { action: "updated", purchase_id: 2, kept: ["supplier_gstn"] },
+      C: { action: "unchanged", purchase_id: 3, kept: [] },
+      D: { action: "approved", purchase_id: 4, kept: [] },
+    });
+    const result = await syncFactory(
+      spectra(["A", "B", "C", "D"].map((slug, i) => row({ invoice_slug: slug, mrc_no: 6372 + i }))),
+      uc, config, branchMaster
+    ).run();
+    assert.deepEqual(
+      [result.inserted, result.updated, result.unchanged, result.approved_untouched],
+      [1, 1, 1, 1]
+    );
+    assert.deepEqual(result.corrections_kept, [{ invoice_slug: "B", mrc_ref: "6373", outlet: 2, purchase_id: 2, fields: ["supplier_gstn"] }]);
+    assert.deepEqual(result.warnings, [], "kept corrections are Accounts' work, not a failed sync");
+  });
+
   it("skips a seq whose reference another bill holds at the outlet in the same financial year", async () => {
-    let saved;
-    let savedOptions;
     // row() is dated 2026-10-15, i.e. financial year 2026-27.
     const existing = [
       // a GoFrugal bill already holding 6372 this year - a real clash
@@ -269,20 +323,14 @@ describe("the sync", () => {
       // the same RetailPilot bill saved earlier - not a clash
       { purchase_id: 78, retail_outlet_id: 2, mmh_mrc_refno: "6373", mmh_mrc_no: "SAME", mmh_mrc_dt: new Date(2026, 9, 15), supplier_gstn: "34AAAAA0000A1Z5", mmh_dist_bill_no: "B-2" },
     ];
-    const purchaseUsecase = {
-      findByOutletRefnos: async (keys) => {
-        assert.deepEqual(keys, [
-          [2, "6372", "2026-04-01", "2027-03-31"],
-          [2, "6373", "2026-04-01", "2027-03-31"],
-          [2, "6374", "2026-04-01", "2027-03-31"],
-        ]);
-        return existing;
-      },
-      bulkCreatePurchase: async (list, options) => {
-        saved = list;
-        savedOptions = options;
-        return { code: 200, insertedCount: 1, updatedCount: 1, unchangedCount: 0 };
-      },
+    const uc = recorder();
+    uc.findByOutletRefnos = async (keys) => {
+      assert.deepEqual(keys, [
+        [2, "6372", "2026-04-01", "2027-03-31"],
+        [2, "6373", "2026-04-01", "2027-03-31"],
+        [2, "6374", "2026-04-01", "2027-03-31"],
+      ]);
+      return existing;
     };
     const result = await syncFactory(
       spectra([
@@ -290,67 +338,84 @@ describe("the sync", () => {
         row({ invoice_slug: "SAME", mrc_no: 6373 }),
         row({ invoice_slug: "NEW", mrc_no: 6374 }),
       ]),
-      purchaseUsecase,
+      uc,
       config, branchMaster
     ).run();
-    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6373", "6374"]);
-    assert.deepEqual(savedOptions, { matchOn: "mmh_mrc_no" }, "RetailPilot bills are matched by their slug");
+    assert.deepEqual(uc.saved.map((p) => p.MRC_REF), ["6373", "6374"]);
     assert.equal(result.skipped.length, 1);
     assert.equal(result.skipped[0].invoice_slug, "OLD");
-    assert.match(result.skipped[0].reason, /already belongs to purchase 77 .* in the same financial year/);
+    assert.match(result.skipped[0].reason, /already belongs to purchase 77 at this outlet in the same financial year/);
+    assert.doesNotMatch(result.warnings.join(" "), /33OTHER|GSTIN/, "no supplier GSTIN in what the API Sync Log keeps");
+  });
+
+  it("a bill dated in last year by mistake is checked against its seq's year, not its date's", async () => {
+    // DN1 bill 271: both dates 16-01-2026, seq 961 of the FY 2026-27 series.
+    let keys;
+    const uc = recorder();
+    uc.findByOutletRefnos = async (k) => { keys = k; return []; };
+    const result = await syncFactory(
+      // the query has already put invoice_date in received_date (COALESCE)
+      spectra([row({ invoice_slug: "INV-ouL0uNb0VjxP", mrc_no: 961, received_date: "2026-01-16", invoice_date: "2026-01-16", fy: 2026, entered_at: "2026-10-16T16:09:20+05:30" })]),
+      uc, config, branchMaster
+    ).run();
+    assert.deepEqual(keys, [[2, "961", "2026-04-01", "2027-03-31"]]);
+    assert.equal(uc.saved.length, 1, "imported, not skipped against FY 2025-26's 961");
+    assert.deepEqual(result.discrepancies.map((d) => `${d.code}:${d.severity}`), ["MRC_DATE_OUTSIDE_SERIES_FY:block"]);
   });
 
   it("the same number in an earlier financial year is not a clash", async () => {
-    let saved = [];
-    const purchaseUsecase = {
-      // the repository filters by year; it returns nothing for 2026-27
-      findByOutletRefnos: async () => [],
-      bulkCreatePurchase: async (list) => { saved = list; return { insertedCount: list.length }; },
-    };
-    await syncFactory(spectra([row({ invoice_slug: "NEW" })]), purchaseUsecase, config, branchMaster).run();
-    assert.deepEqual(saved.map((p) => p.MRC_REF), ["6372"]);
+    const uc = recorder();
+    // the repository filters by year; it returns nothing for 2026-27
+    uc.findByOutletRefnos = async () => [];
+    await syncFactory(spectra([row({ invoice_slug: "NEW" })]), uc, config, branchMaster).run();
+    assert.deepEqual(uc.saved.map((p) => p.MRC_REF), ["6372"]);
   });
 
-  it("pre-fills round-off for every saved bill, keyed by outlet and slug", async () => {
-    let entries;
-    const purchaseUsecase = {
-      bulkCreatePurchase: async () => ({ insertedCount: 1, updatedCount: 0, unchangedCount: 0 }),
-      prefillPurchaseInternal: async (e) => { entries = e; return 1; },
-    };
-    const result = await syncFactory(spectra([row({ invoice_amount: 1051, taxable: 1000 })]), purchaseUsecase, config, branchMaster).run();
-    assert.deepEqual(entries, [{ retail_outlet_id: 2, mmh_mrc_no: "INV-1001", round_off: 1, total_amount: 1051 }]);
-    assert.equal(result.round_off_prefilled, 1);
-    assert.deepEqual(result.round_off_for_accounts, []);
-  });
-
-  it("bills that are not ordinary rounding are not pre-filled, and are listed for accounts", async () => {
-    let entries;
-    const purchaseUsecase = {
-      bulkCreatePurchase: async () => ({ insertedCount: 2, updatedCount: 0, unchangedCount: 0 }),
-      prefillPurchaseInternal: async (e) => { entries = e; return e.length; },
-    };
+  it("reports discrepancies for Accounts without failing the run, whatever the round-off", async () => {
+    const uc = recorder();
     const result = await syncFactory(
       spectra([
-        row({ invoice_slug: "OK", invoice_amount: 1050.4, taxable: 1000 }),
-        row({ invoice_slug: "BIG", mrc_no: 6373, invoice_amount: 2000, taxable: 1000 }),
+        row({ invoice_slug: "BIG", invoice_amount: 2000, taxable: 1000 }),
+        row({ invoice_slug: "KRC", mrc_no: 6373, supplier_gstn: "", cgst_rate: 0, sgst_rate: 0, igst_rate: 5, taxable: 4271.49, invoice_amount: 4485 }),
+        row({ invoice_slug: "OLDBILL", mrc_no: 6374, invoice_date: "2026-01-16" }),
       ]),
-      purchaseUsecase,
-      config,
-      branchMaster
+      uc, config, branchMaster
     ).run();
-    assert.deepEqual(entries.map((e) => e.mmh_mrc_no), ["OK"]);
-    assert.deepEqual(result.round_off_for_accounts.map((r) => r.invoice_slug), ["BIG"]);
-    assert.ok(result.warnings.some((w) => /need accounts to check the round-off/.test(w)));
+    assert.equal(uc.saved.length, 3, "every bill is imported, the large difference and the discrepancies included");
+    assert.deepEqual(
+      result.discrepancies.map((d) => [d.invoice_slug, d.code, d.severity]),
+      [["KRC", "TAX_TYPE_MISMATCH", "block"], ["OLDBILL", "BILL_DATE_OTHER_FY", "review"]]
+    );
+    assert.deepEqual(result.warnings, []);
   });
 
   it("dry run saves nothing", async () => {
-    const purchaseUsecase = {
-      bulkCreatePurchase: async () => assert.fail("must not save"),
-      prefillPurchaseInternal: async () => assert.fail("must not pre-fill"),
-    };
-    const result = await syncFactory(spectra([row()]), purchaseUsecase, config, branchMaster).run({ dryRun: true });
+    const uc = { upsertRetailPilotPurchase: async () => assert.fail("must not save") };
+    const result = await syncFactory(spectra([row()]), uc, config, branchMaster).run({ dryRun: true });
     assert.equal(result.dry_run, true);
     assert.equal(result.purchases.length, 1);
+    assert.equal(result.purchases[0].ROUND_OFF, 590, "the full difference is shown: 1640 - 1050");
+  });
+
+  it("one sync at a time: a second run while one is going is refused", async () => {
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    const uc = { upsertRetailPilotPurchase: async () => { await gate; return { action: "inserted", kept: [] }; } };
+    const s = syncFactory(spectra([row()]), uc, config, branchMaster);
+    const first = s.run();
+    await new Promise((r) => setImmediate(r));
+    const second = await s.run();
+    assert.equal(second.code, 409);
+    release();
+    assert.equal((await first).code, 200);
+    assert.equal((await s.run()).code, 200, "free again once the first finished");
+  });
+
+  it("a failed save stops the run, is thrown for the log, and frees the lock", async () => {
+    const uc = { upsertRetailPilotPurchase: async () => { throw new Error("db down"); } };
+    const s = syncFactory(spectra([row()]), uc, config, branchMaster);
+    await assert.rejects(s.run(), /db down/);
+    assert.equal(s.running, false);
   });
 
   it("reads the store map from Branch Master on every run", async () => {
@@ -359,8 +424,7 @@ describe("the sync", () => {
       calls += 1;
       return calls === 1 ? STORE_MAP : {};
     };
-    const purchaseUsecase = { bulkCreatePurchase: async () => ({ insertedCount: 1 }) };
-    const s = syncFactory(spectra([row()]), purchaseUsecase, config, loader);
+    const s = syncFactory(spectra([row()]), recorder(), config, loader);
     assert.equal((await s.run({ dryRun: true })).purchases.length, 1);
     const second = await s.run({ dryRun: true });
     assert.equal(second.code, 400, "an emptied Branch Master stops the sync instead of guessing");
@@ -369,15 +433,14 @@ describe("the sync", () => {
   });
 
   it("a store missing from Branch Master is skipped, never put on another outlet", async () => {
-    let saved = [];
-    const purchaseUsecase = { bulkCreatePurchase: async (list) => { saved = list; return { insertedCount: list.length }; } };
+    const uc = recorder();
     const result = await syncFactory(
       spectra([row(), row({ invoice_slug: "NEW", store_id: "zzNew", mrc_no: 9 })]),
-      purchaseUsecase,
+      uc,
       config,
       async () => ({ "store-a": 2 })
     ).run();
-    assert.deepEqual(saved.map((p) => p.STORE_ID), [2]);
+    assert.deepEqual(uc.saved.map((p) => p.STORE_ID), [2]);
     assert.equal(result.skipped.length, 1);
     assert.match(result.skipped[0].reason, /RetailPilot store zzNew is not set as the RetailPilot ID of any branch in Branch Master/);
   });
@@ -425,6 +488,7 @@ describe("the sync", () => {
     const at = server.indexOf('"retailpilot_purchase_sync",');
     assert.ok(at > 0);
     assert.match(server.slice(at, at + 80), /"retailpilot_purchase_sync",\s*"0 9,14,17 \* \* \*"/);
+    assert.match(server.slice(at, at + 600), /\{ preventOverlap: true \}/, "a run still going at the next tick is skipped");
     assert.match(server.slice(at - 700, at), /if \(require\("\.\/config\/retailpilot"\)\.purchaseSyncEnabled\)/);
     const cron = fs.readFileSync(path.join(__dirname, "..", "services", "cron_service.js"), "utf8");
     assert.match(cron, /const CRON_TIMEZONE = "Asia\/Kolkata";/, "the hours are IST");
