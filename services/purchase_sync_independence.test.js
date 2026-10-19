@@ -13,10 +13,10 @@
  *   the `purchase` table          written by an EXTERNAL push to
  *                                 POST /purchase and POST /purchase/bulk.
  *                                 There is no cron for it at all.
- *   `purchase_acknowledgement`    pulled from GoFrugal by the manual
- *                                 POST /purchase-acknowledgement/sync. Its
- *                                 five-minute cron was removed when GoFrugal
- *                                 was replaced by RetailPilot.
+ *   `purchase_acknowledgement`    pulled from GoFrugal. Its cron, and then
+ *                                 the whole Purchase Acknowledgement feature,
+ *                                 were removed when GoFrugal was replaced by
+ *                                 RetailPilot.
  *
  * These tests pinned that the pause could reach neither. The Digisme
  * employee sync has since been removed outright, so they now pin the same
@@ -40,8 +40,9 @@ describe("the GoFrugal purchase-acknowledgement cron", () => {
     assert.doesNotMatch(server, /register\(\s*"purchase_acknowledgement_gofrugal_sync"/);
   });
 
-  it("the manual sync route is kept", () => {
-    assert.match(codeOf(read("routes/purchase_acknowledgement.js")), /router\.post\("\/sync"/);
+  it("and the Purchase Acknowledgement routes are gone with it", () => {
+    assert.ok(!fs.existsSync(path.join(ROOT, "routes/purchase_acknowledgement.js")));
+    assert.doesNotMatch(server, /purchase_acknowledgement"\)/);
   });
 
   it("and server.js knows nothing about the Digisme employee flag at all", () => {

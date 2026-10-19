@@ -513,11 +513,6 @@ class Server {
       this.mysqlGofrugal.connection,
       this.mysql.connection
     );
-    this.purchaseAcknowledgementRepo =
-      require("./repository/purchase_acknowledgement")(
-        this.mysql.connection,
-        this.mysqlGofrugal.connection
-      );
     this.remarksMasterRepo = require("./repository/remarks_master")(
       this.mysql.connection
     );
@@ -1421,10 +1416,6 @@ class Server {
     this.productDistributorsUsecase = require("./usecase/product_distributors")(
       this.productDistributorsRepo
     );
-    this.purchaseAcknowledgementUsecase =
-      require("./usecase/purchase_acknowledgement")(
-        this.purchaseAcknowledgementRepo
-      );
     this.remarksMasterUsecase = require("./usecase/remarks_master")(
       this.remarksMasterRepo
     );
@@ -2008,10 +1999,6 @@ class Server {
     const productDistributorsRouter = require("./routes/product_distributors")(
       this.productDistributorsUsecase
     );
-    const purchaseAcknowledgementRouter =
-      require("./routes/purchase_acknowledgement")(
-        this.purchaseAcknowledgementUsecase
-      );
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
     );
@@ -2250,10 +2237,6 @@ class Server {
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
     app.use("/purchase-return", purchaseReturnRouter.getRouter());
     app.use("/product-distributors", productDistributorsRouter.getRouter());
-    app.use(
-      "/purchase-acknowledgement",
-      purchaseAcknowledgementRouter.getRouter()
-    );
     app.use("/remarks-master", remarksMasterRouter.getRouter());
     app.use("/telegram-groups", telegramGroupRegistryRouter.getRouter());
     app.use("/pick-pack-remarks", pickPackRemarksRouter.getRouter());
@@ -2304,10 +2287,8 @@ class Server {
         });
       });
     }
-    // The 5-minute purchase_acknowledgement_gofrugal_sync cron was removed:
-    // GoFrugal has been replaced by RetailPilot, so the GoFrugal copy it read
-    // (medishopdb_med_mrc_memo) no longer updates. The manual
-    // POST /purchase-acknowledgement/sync is kept.
+    // Purchase Acknowledgement (and its GoFrugal sync) was removed:
+    // GoFrugal has been replaced by RetailPilot.
 
     // 9:00 AM, 2:00 PM AND 5:00 PM (Asia/Kolkata, the cron service's zone) -
     // pull purchase invoices from RetailPilot (replaces the GoFrugal push to
