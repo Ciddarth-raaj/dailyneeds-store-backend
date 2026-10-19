@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const { rewriteLegacyCodes, productIdsToLegacy, legacyToProductIds } = require("../utils/legacy_item_codes");
+const RPG = require("../utils/retailpilot_grn");
 const { mapWithConcurrency } = require("../utils/concurrency");
 const {
   LATEST_GRN_LINE_EXPR,
@@ -271,13 +272,157 @@ function grnVerificationRow(row) {
   };
 }
 
+/** RetailPilot and GoFrugal GRN headers as one list: a GRN No in both is
+ * RetailPilot's; newest date first, then highest GRN No. */
+function mergeHeaders(rp, gf) {
+  const rpRefnos = new Set(rp.map((h) => String(h.mmh_mrc_refno)));
+  const all = [...rp, ...gf.filter((h) => !rpRefnos.has(String(h.mmh_mrc_refno)))];
+  const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : -1);
+  return all.sort((a, b) =>
+    String(b.mmh_mrc_dt || "").localeCompare(String(a.mmh_mrc_dt || "")) || num(b.mmh_mrc_refno) - num(a.mmh_mrc_refno)
+  );
+}
+
 class StockReceivedRepository {
-  constructor(mainDb, gofrugalDb) {
+  /**
+   * @param retailPilot optional { spectra, getStoreId: async () => store slug }
+   *   - the warehouse's RetailPilot purchases are GRNs too (utils/retailpilot_grn.js).
+   *   GRNs from before RetailPilot stay in the frozen GoFrugal copy; the GRN
+   *   lists show both, and a GRN No is looked up in RetailPilot first.
+   */
+  constructor(mainDb, gofrugalDb, retailPilot = null) {
     this.db = mainDb;
     this.gofrugalDb = gofrugalDb;
+    this.retailPilot = retailPilot;
   }
 
-  listGrnHeaders(filters = {}) {
+  // ---------------------------------------------------------------------
+  // RetailPilot GRNs
+  // ---------------------------------------------------------------------
+
+  async _rpStore() {
+    if (!this.retailPilot || !this.retailPilot.spectra || !this.retailPilot.spectra.isConfigured()) return null;
+    return (await this.retailPilot.getStoreId()) || null;
+  }
+
+  _logRp(code, err, ref = {}) {
+    logger.Log({
+      level: logger.LEVEL.ERROR,
+      component: "REPOSITORY.STOCK_RECEIVED",
+      code: `REPOSITORY.STOCK_RECEIVED.RP_${code}`,
+      description: err.toString(),
+      category: "",
+      ref,
+    });
+  }
+
+  async _rpHeaders(fromDate, toDate) {
+    const store = await this._rpStore();
+    if (!store) return [];
+    const rows = await this.retailPilot.spectra.queryAll(RPG.buildHeadersQuery(store, fromDate, toDate));
+    return rows.map(grnHeaderRow);
+  }
+
+  async _rpSearch(term) {
+    const store = await this._rpStore();
+    const sql = store ? RPG.buildSearchQuery(store, term) : null;
+    if (!sql) return [];
+    const rows = await this.retailPilot.spectra.queryAll(sql);
+    return rows.map(grnHeaderRow);
+  }
+
+  async _rpDetail(refno) {
+    const store = await this._rpStore();
+    const sql = store ? RPG.buildHeaderByRefnoQuery(store, refno) : null;
+    if (!sql) return null;
+    const [headerRaw] = await this.retailPilot.spectra.queryAll(sql, 1);
+    if (!headerRaw) return null;
+    const lines = await this.retailPilot.spectra.queryAll(RPG.buildLinesQuery(store, headerRaw.mmh_mrc_no));
+    const prevSql = RPG.buildPreviousLinesQuery(
+      store,
+      lines.map((l) => l.MMD_ITEM_CODE),
+      RPG.isoOf(headerRaw.entered_at)
+    );
+    const prev = RPG.previousByArticle(prevSql ? await this.retailPilot.spectra.queryAll(prevSql) : []);
+    const raw = lines.map((l) => ({ ...l, ...(prev.get(Number(l.MMD_ITEM_CODE)) || {}) }));
+    const productMap = await this._fetchProductsMap(raw.map((r) => normalizeItemCode(r.MMD_ITEM_CODE)).filter((id) => id != null));
+    const items = raw.map((r, i) => ({ ...grnDetailItemRow(r, productMap), line_no: i + 1 }));
+    const header = grnHeaderRow({ ...headerRaw, product_count: items.length });
+    return { header, items };
+  }
+
+  async _rpLinesByRange(fromDate, toDate) {
+    const store = await this._rpStore();
+    if (!store) return [];
+    const rows = await this.retailPilot.spectra.queryAll(RPG.buildLinesByRangeQuery(store, fromDate, toDate));
+    const productMap = await this._fetchProductsMap(rows.map((r) => normalizeItemCode(r.MMD_ITEM_CODE)).filter((id) => id != null));
+    return rows.map((row) => ({
+      mmh_mrc_refno: row.mmh_mrc_refno,
+      mmh_mrc_dt: normalizeCalendarDate(row.mmh_mrc_dt),
+      supplier_name: row.supplier_name,
+      ...grnDetailItemRow(row, productMap),
+    }));
+  }
+
+  // ---------------------------------------------------------------------
+  // GRN pages: RetailPilot and GoFrugal together
+  // ---------------------------------------------------------------------
+
+  /** Both sources; a GRN No in both is RetailPilot's. Newest first. */
+  async listGrnHeaders(filters = {}) {
+    const fromDate = filters.from_date != null && String(filters.from_date).trim() !== "" ? String(filters.from_date).trim() : null;
+    const toDate = filters.to_date != null && String(filters.to_date).trim() !== "" ? String(filters.to_date).trim() : null;
+    const [rp, gf] = await Promise.all([
+      this._rpHeaders(fromDate, toDate).catch((err) => {
+        this._logRp("LIST_GRN_HEADERS", err, { fromDate, toDate });
+        throw err;
+      }),
+      this._gfListGrnHeaders(filters),
+    ]);
+    return mergeHeaders(rp, gf);
+  }
+
+  async searchGrnHeaders(term, limit = 50) {
+    const cap = Math.max(1, Math.min(Number(limit) || 50, 200));
+    const key = term != null ? String(term).trim() : "";
+    const [rp, gf] = await Promise.all([
+      this._rpSearch(key).catch((err) => {
+        this._logRp("SEARCH_GRN_HEADERS", err, { term: key });
+        throw err;
+      }),
+      this._gfSearchGrnHeaders(term, limit),
+    ]);
+    const merged = mergeHeaders(rp, gf);
+    // An exact GRN No first, as the GoFrugal search did.
+    merged.sort((a, b) => (String(b.mmh_mrc_refno) === key) - (String(a.mmh_mrc_refno) === key));
+    return merged.slice(0, cap);
+  }
+
+  async listGrnDetailByRefno(refno) {
+    const rp = await this._rpDetail(refno != null ? String(refno).trim() : "").catch((err) => {
+      this._logRp("GRN_DETAIL", err, { refno });
+      throw err;
+    });
+    return rp || this._gfListGrnDetailByRefno(refno);
+  }
+
+  async listGrnDetailItemsByDateRange(fromDate, toDate) {
+    const [rp, gf] = await Promise.all([
+      this._rpLinesByRange(fromDate, toDate).catch((err) => {
+        this._logRp("GRN_ISSUES_RANGE", err, { fromDate, toDate });
+        throw err;
+      }),
+      this._gfListGrnDetailItemsByDateRange(fromDate, toDate),
+    ]);
+    const rpRefnos = new Set(rp.map((r) => String(r.mmh_mrc_refno)));
+    return [...rp, ...gf.filter((r) => !rpRefnos.has(String(r.mmh_mrc_refno)))];
+  }
+
+  // ---------------------------------------------------------------------
+  // GoFrugal GRNs (frozen copy, before RetailPilot)
+  // ---------------------------------------------------------------------
+
+  _gfListGrnHeaders(filters = {}) {
     const fromDate =
       filters.from_date != null && String(filters.from_date).trim() !== ""
         ? String(filters.from_date).trim()
@@ -352,7 +497,7 @@ class StockReceivedRepository {
    * Same columns and row shape as listGrnHeaders, so the list screen renders
    * a search result with its existing grid.
    */
-  searchGrnHeaders(term, limit = 50) {
+  _gfSearchGrnHeaders(term, limit = 50) {
     const key = term != null ? String(term).trim() : "";
     if (!key) return Promise.resolve([]);
     const cap = Math.max(1, Math.min(Number(limit) || 50, 200));
@@ -409,7 +554,7 @@ class StockReceivedRepository {
     });
   }
 
-  listGrnDetailByRefno(refno) {
+  _gfListGrnDetailByRefno(refno) {
     const refnoKey =
       refno != null && String(refno).trim() !== "" ? String(refno).trim() : null;
     if (!refnoKey) {
@@ -532,7 +677,7 @@ class StockReceivedRepository {
    * GRN page so it doesn't fire one /grn/detail request per GRN in the
    * range.
    */
-  listGrnDetailItemsByDateRange(fromDate, toDate) {
+  _gfListGrnDetailItemsByDateRange(fromDate, toDate) {
     return new Promise((resolve, reject) => {
       if (!this.gofrugalDb) {
         return reject(new Error("Gofrugal DB connection is not configured"));
@@ -1461,6 +1606,6 @@ class StockReceivedRepository {
   }
 }
 
-module.exports = (mainDb, gofrugalDb) => {
-  return new StockReceivedRepository(mainDb, gofrugalDb);
+module.exports = (mainDb, gofrugalDb, retailPilot) => {
+  return new StockReceivedRepository(mainDb, gofrugalDb, retailPilot);
 };
