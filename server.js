@@ -426,9 +426,6 @@ class Server {
     this.repackItemRepo = require("./repository/repack_item")(
       this.mysql.connection
     );
-    this.cleaningPackingRepo = require("./repository/cleaning_packing")(
-      this.mysql.connection
-    );
     this.ebConsumptionRepo = require("./repository/eb_consumption")(
       this.mysql.connection
     );
@@ -1361,9 +1358,6 @@ class Server {
     this.repackItemUsecase = require("./usecase/repack_item")(
       this.repackItemRepo
     );
-    this.cleaningPackingUsecase = require("./usecase/cleaning_packing")(
-      this.cleaningPackingRepo
-    );
     this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
       this.ebConsumptionRepo
     );
@@ -1539,7 +1533,6 @@ class Server {
       this.subcategoryUsecase,
       this.departmentUsecase,
       this.brandUsecase,
-      this.cleaningPackingUsecase,
       this.productRepo,
       this.stockHoldingReportUsecase
     );
@@ -1978,9 +1971,6 @@ class Server {
     const repackItemRouter = require("./routes/repack_item")(
       this.repackItemUsecase
     );
-    const cleaningPackingRouter = require("./routes/cleaning_packing")(
-      this.cleaningPackingUsecase
-    );
     const ebConsumptionRouter = require("./routes/eb_consumption")(
       this.ebConsumptionUsecase
     );
@@ -2273,7 +2263,6 @@ class Server {
     app.use("/purchase-order", purchaseOrderRouter.getRouter());
     app.use("/invoice", invoiceRouter.getRouter());
     app.use("/repack-item", repackItemRouter.getRouter());
-    app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
@@ -2850,11 +2839,6 @@ class Server {
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
-
-    // Wire synker back into cleaningPackingUsecase after service creation
-    if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
-      this.cleaningPackingUsecase.setSynker(this.synker);
-    }
 
     // Stage 0C / C1c: wired so the reconciler is callable. It has no caller
     // since the Digisme employee sync was removed - see
