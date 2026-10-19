@@ -37,14 +37,16 @@ const PRODUCT_IMAGE_SUBQUERY = `(SELECT pi.image_url
   ORDER BY pi.priority ASC, pi.image_id ASC
   LIMIT 1)`;
 
+// product_sales is history from before RetailPilot and keeps the old item
+// code; it reaches a product through product_table.legacy_code.
 const SALES_DAILY_TOTALS_JOINS = `
 FROM product_sales ps
-JOIN product_table p ON p.product_id = ps.product_id
+JOIN product_table p ON p.legacy_code = ps.product_id
 LEFT JOIN product_distributor_master pdm ON p.distributor_id = pdm.cid`;
 
 const SALES_LIGHT_JOINS = `
 FROM product_sales ps
-JOIN product_table p ON p.product_id = ps.product_id
+JOIN product_table p ON p.legacy_code = ps.product_id
 JOIN outlets o ON o.outlet_id = ps.retail_outlet_id
 LEFT JOIN categories cat ON p.category_id = cat.category_id
 LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
@@ -80,12 +82,12 @@ LEFT JOIN (
    AND latest.outlet_id = shi.outlet_id
    AND shr.date = latest.max_date
 ) shi_latest
-  ON shi_latest.product_id = ps.product_id
+  ON shi_latest.product_id = p.product_id
  AND shi_latest.outlet_id = ps.retail_outlet_id`;
 
 const SALES_ITEMS_JOINS = `
 FROM product_sales ps
-JOIN product_table p ON p.product_id = ps.product_id
+JOIN product_table p ON p.legacy_code = ps.product_id
 JOIN outlets o ON o.outlet_id = ps.retail_outlet_id
 LEFT JOIN categories cat ON p.category_id = cat.category_id
 LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
@@ -97,7 +99,7 @@ ${SALES_STOCK_JOIN}`;
 
 const SALES_ITEMS_LIGHT_SELECT = `
 SELECT DATE(ps.tran_date) AS report_date,
-       ps.product_id,
+       p.product_id,
        ps.retail_outlet_id AS branch_id,
        ${sqlMaxText("o.outlet_name")} AS branch_name,
        ${sqlMaxText("p.de_name")} AS product_name,
@@ -134,7 +136,7 @@ ${SALES_ITEMS_JOINS}`;
 
 const SALES_ITEMS_LIGHT_NO_STOCK_SELECT = `
 SELECT DATE(ps.tran_date) AS report_date,
-       ps.product_id,
+       p.product_id,
        ps.retail_outlet_id AS branch_id,
        ${sqlMaxText("o.outlet_name")} AS branch_name,
        ${sqlMaxText("p.de_name")} AS product_name,
@@ -680,8 +682,8 @@ class SalesDashboardRepository {
       ${SALES_ITEMS_LIGHT_NO_STOCK_SELECT}
       WHERE ps.tran_date = DATE(?)
       ${whereExtra}
-      GROUP BY ps.product_id, ps.retail_outlet_id
-      ORDER BY ps.product_id ASC, ps.retail_outlet_id ASC
+      GROUP BY p.product_id, ps.retail_outlet_id
+      ORDER BY p.product_id ASC, ps.retail_outlet_id ASC
       LIMIT ? OFFSET ?`;
 
     return new Promise((resolve, reject) => {
@@ -721,8 +723,8 @@ class SalesDashboardRepository {
       ${SALES_ITEMS_LIGHT_SELECT}
       WHERE ps.tran_date = DATE(?)
       ${whereExtra}
-      GROUP BY ps.product_id, ps.retail_outlet_id
-      ORDER BY ps.product_id ASC, ps.retail_outlet_id ASC
+      GROUP BY p.product_id, ps.retail_outlet_id
+      ORDER BY p.product_id ASC, ps.retail_outlet_id ASC
       LIMIT ? OFFSET ?`;
 
     return new Promise((resolve, reject) => {
@@ -760,11 +762,11 @@ class SalesDashboardRepository {
     const sql = `
       SELECT COUNT(*) AS total
       FROM (
-        SELECT ps.product_id, ps.retail_outlet_id
+        SELECT p.product_id, ps.retail_outlet_id
         ${SALES_LIGHT_JOINS}
         WHERE ps.tran_date = DATE(?)
         ${whereExtra}
-        GROUP BY ps.product_id, ps.retail_outlet_id
+        GROUP BY p.product_id, ps.retail_outlet_id
       ) grouped`;
 
     return new Promise((resolve, reject) => {
@@ -792,11 +794,11 @@ class SalesDashboardRepository {
     const sql = `
       SELECT COUNT(*) AS total
       FROM (
-        SELECT ps.product_id, ps.retail_outlet_id
+        SELECT p.product_id, ps.retail_outlet_id
         ${SALES_ITEMS_JOINS}
         WHERE ps.tran_date = DATE(?)
         ${whereExtra}
-        GROUP BY ps.product_id, ps.retail_outlet_id
+        GROUP BY p.product_id, ps.retail_outlet_id
       ) grouped`;
 
     return new Promise((resolve, reject) => {
@@ -826,8 +828,9 @@ class SalesDashboardRepository {
         shi.purchase_type,
         shi.chain_bill_count_level
       FROM product_sales ps
+      INNER JOIN product_table p ON p.legacy_code = ps.product_id
       INNER JOIN stock_holding_items shi
-        ON shi.product_id = ps.product_id
+        ON shi.product_id = p.product_id
        AND shi.outlet_id = ps.retail_outlet_id
       INNER JOIN stock_holding_report shr
         ON shr.stock_holding_report_id = shi.stock_holding_report_id
@@ -847,7 +850,7 @@ class SalesDashboardRepository {
     const rangeParams = [range.fromDate, range.toDate];
     const salesFrom = `
       FROM product_sales ps
-      INNER JOIN product_table p ON p.product_id = ps.product_id`;
+      INNER JOIN product_table p ON p.legacy_code = ps.product_id`;
 
     return Promise.all([
       this.queryRows(

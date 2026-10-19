@@ -46,15 +46,17 @@ class ProductSalesRepository {
   /**
    * Total quantity sold per product over the trailing 3 calendar months,
    * divided by 3. Only products with at least one sale in the window are
-   * returned.
+   * returned. product_sales keeps the old item code (it is history from
+   * before RetailPilot); the result is keyed by today's product id.
    */
   listAvgSalesLast3Months() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT product_id, SUM(tran_qty) AS total_qty
-         FROM \`${TABLE}\`
-         WHERE tran_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
-         GROUP BY product_id`,
+        `SELECT p.product_id, SUM(ps.tran_qty) AS total_qty
+         FROM \`${TABLE}\` ps
+         JOIN product_table p ON p.legacy_code = ps.product_id
+         WHERE ps.tran_date >= DATE_SUB(CURDATE(), INTERVAL 3 MONTH)
+         GROUP BY p.product_id`,
         [],
         (err, rows) => {
           if (err) {
@@ -179,7 +181,8 @@ class ProductSalesRepository {
             const ph = productIds.map(() => "?").join(", ");
             const prodRows = await new Promise((res, rej) => {
               conn.query(
-                `SELECT product_id FROM product_table WHERE product_id IN (${ph})`,
+                // Sales rows carry the old item code, as product_sales keeps.
+                `SELECT legacy_code FROM product_table WHERE legacy_code IN (${ph})`,
                 productIds,
                 (errSel, rowsOut) => {
                   if (errSel) rej(errSel);
@@ -188,7 +191,7 @@ class ProductSalesRepository {
               );
             });
 
-            const found = new Set(prodRows.map((row) => row.product_id));
+            const found = new Set(prodRows.map((row) => row.legacy_code));
             const missing = productIds.filter((id) => !found.has(id));
             if (missing.length) {
               return conn.rollback(() => {

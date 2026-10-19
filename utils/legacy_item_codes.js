@@ -32,7 +32,10 @@ async function lookup(db, values, fromCol, toCol) {
         WHERE ${fromCol} IN (${part.map(() => "?").join(",")})`,
       part
     );
-    rows.forEach((r) => map.set(Number(r.f), Number(r.t)));
+    // A product with no old code (new in RetailPilot) has none to give.
+    rows.forEach((r) => {
+      if (r.t != null) map.set(Number(r.f), Number(r.t));
+    });
   }
   return map;
 }
