@@ -48,7 +48,6 @@ const ALLOWED_FOLDERS = {
   employee_image: true,
   tickets: true,
   "expiry-checker": true,
-  offer_talkers: true,
 };
 
 class AssetUsecase {
