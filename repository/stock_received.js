@@ -272,6 +272,16 @@ function grnVerificationRow(row) {
   };
 }
 
+/**
+ * RetailPilot (Postgres) returns column names lower-cased; GRN line fields
+ * are read as MMD_*, so put those back in upper case.
+ */
+function upperMmdKeys(row) {
+  const out = {};
+  for (const [k, v] of Object.entries(row || {})) out[/^mmd_/.test(k) ? k.toUpperCase() : k] = v;
+  return out;
+}
+
 /** RetailPilot and GoFrugal GRN headers as one list: a GRN No in both is
  * RetailPilot's; newest date first, then highest GRN No. */
 function mergeHeaders(rp, gf) {
@@ -337,7 +347,7 @@ class StockReceivedRepository {
     if (!sql) return null;
     const [headerRaw] = await this.retailPilot.spectra.queryAll(sql, 1);
     if (!headerRaw) return null;
-    const lines = await this.retailPilot.spectra.queryAll(RPG.buildLinesQuery(store, headerRaw.mmh_mrc_no));
+    const lines = (await this.retailPilot.spectra.queryAll(RPG.buildLinesQuery(store, headerRaw.mmh_mrc_no))).map(upperMmdKeys);
     const prevSql = RPG.buildPreviousLinesQuery(
       store,
       lines.map((l) => l.MMD_ITEM_CODE),
@@ -354,7 +364,7 @@ class StockReceivedRepository {
   async _rpLinesByRange(fromDate, toDate) {
     const store = await this._rpStore();
     if (!store) return [];
-    const rows = await this.retailPilot.spectra.queryAll(RPG.buildLinesByRangeQuery(store, fromDate, toDate));
+    const rows = (await this.retailPilot.spectra.queryAll(RPG.buildLinesByRangeQuery(store, fromDate, toDate))).map(upperMmdKeys);
     const productMap = await this._fetchProductsMap(rows.map((r) => normalizeItemCode(r.MMD_ITEM_CODE)).filter((id) => id != null));
     return rows.map((row) => ({
       mmh_mrc_refno: row.mmh_mrc_refno,
