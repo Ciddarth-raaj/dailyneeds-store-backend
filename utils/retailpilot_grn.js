@@ -172,6 +172,91 @@ function previousByArticle(rows) {
   return out;
 }
 
+// ---------------------------------------------------------------------
+// The 15-minute GRN copy (usecase/retailpilot_grn_sync.js)
+// ---------------------------------------------------------------------
+
+/** GRNs entered or changed in the last `days` days; every GRN when days is null. */
+function syncWindow(days) {
+  if (days == null) return "";
+  if (!Number.isInteger(days) || days < 0 || days > 3650) throw new Error("Invalid sync window");
+  return ` AND COALESCE(h.updated_at, h.created_at) >= CURRENT_DATE - ${days}`;
+}
+
+function buildSyncHeadersQuery(store, days) {
+  return `
+SELECT h.slug AS invoice_slug, CAST(h.seq AS TEXT) AS refno, h.fy, h.store_id,
+       CAST(${LOCAL_DAY} AS TEXT) AS grn_date, h.created_at AS entered_at,
+       h.supplier_id, COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS supplier_name,
+       h.total_net AS amount
+FROM public.invoice_headers h
+LEFT JOIN masterhub.vendors v ON v.id = h.supplier_id
+WHERE ${PURCHASES(store)}${syncWindow(days)}
+ORDER BY h.slug`;
+}
+
+function buildSyncLinesQuery(store, days) {
+  return `
+SELECT d.invoice_slug, ${LINE_SELECT(store)}
+FROM public.invoice_details d
+JOIN public.invoice_headers h ON h.slug = d.invoice_slug
+${LINE_JOINS(store)}
+WHERE ${PURCHASES(store)}${syncWindow(days)}
+ORDER BY d.invoice_slug, d.slug`;
+}
+
+const toNum = (v) => (v == null || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+const pick = (r, k) => (r[k] !== undefined ? r[k] : r[k.toLowerCase()]);
+
+/** RetailPilot header row -> retailpilot_grn_headers row. */
+function headerRow(r) {
+  return {
+    invoice_slug: r.invoice_slug,
+    refno: String(r.refno),
+    fy: toNum(r.fy),
+    store_id: r.store_id,
+    grn_date: String(r.grn_date).slice(0, 10),
+    entered_at: localDateTime(r.entered_at),
+    supplier_id: r.supplier_id != null ? String(r.supplier_id) : null,
+    supplier_name: r.supplier_name ? String(r.supplier_name).slice(0, 255) : null,
+    amount: toNum(r.amount),
+  };
+}
+
+/** RetailPilot line rows -> retailpilot_grn_lines rows, numbered within each GRN. */
+function lineRows(rows) {
+  const seen = new Map();
+  return (rows || []).map((r) => {
+    const n = (seen.get(r.invoice_slug) || 0) + 1;
+    seen.set(r.invoice_slug, n);
+    return {
+      line_id: pick(r, "MMD_MRC_SL_NO"),
+      invoice_slug: r.invoice_slug,
+      line_no: n,
+      product_id: toNum(pick(r, "MMD_ITEM_CODE")),
+      recd_qty: toNum(pick(r, "MMD_RECD_QTY")),
+      free_qty: toNum(pick(r, "MMD_FREE_QTY")),
+      mrp: toNum(pick(r, "MMD_MAX_RATE")),
+      pur_rate: toNum(pick(r, "MMD_PUR_RATE")),
+      tax_per: toNum(pick(r, "MMD_PUR_TAX_PER")),
+      tax_amt: toNum(pick(r, "MMD_PUR_TAX_AMT")),
+      pur_price: toNum(pick(r, "MMD_PUR_PRICE")),
+      sale_rate: toNum(pick(r, "MMD_SALE_RATE")),
+      pur_amount: toNum(pick(r, "MMD_PUR_AMOUNT")),
+      disc_per: toNum(pick(r, "MMD_DISC_PER")),
+      disc_amt: toNum(pick(r, "MMD_DISC_AMT")),
+    };
+  });
+}
+
+/** RetailPilot timestamptz (India time) -> 'YYYY-MM-DD HH:MM:SS' wall-clock, IST. */
+function localDateTime(v) {
+  const d = v instanceof Date ? v : new Date(String(v));
+  if (Number.isNaN(d.getTime())) return null;
+  const ist = new Date(d.getTime() + 330 * 60000);
+  return ist.toISOString().slice(0, 19).replace("T", " ");
+}
+
 /** RetailPilot timestamptz -> ISO string usable in a later query. */
 function isoOf(v) {
   if (v instanceof Date) return v.toISOString();
@@ -188,4 +273,9 @@ module.exports = {
   buildPreviousLinesQuery,
   previousByArticle,
   isoOf,
+  buildSyncHeadersQuery,
+  buildSyncLinesQuery,
+  headerRow,
+  lineRows,
+  localDateTime,
 };

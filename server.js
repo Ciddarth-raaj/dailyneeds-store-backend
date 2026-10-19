@@ -426,9 +426,6 @@ class Server {
     this.repackItemRepo = require("./repository/repack_item")(
       this.mysql.connection
     );
-    this.cleaningPackingRepo = require("./repository/cleaning_packing")(
-      this.mysql.connection
-    );
     this.ebConsumptionRepo = require("./repository/eb_consumption")(
       this.mysql.connection
     );
@@ -544,9 +541,6 @@ class Server {
     this.offersV3Repo = require("./repository/offers_v3")(
       this.mysql.connection
     );
-    this.offersV3TalkerRepo = require("./repository/offers_v3_talker")(
-      this.mysql.connection
-    );
     this.salesDashboardRepo = require("./repository/sales_dashboard")(
       this.mysql.connection
     );
@@ -559,17 +553,16 @@ class Server {
     // GRNs: the warehouse's RetailPilot purchases, plus the frozen GoFrugal
     // copy for the ones before RetailPilot. The warehouse's RetailPilot store
     // id comes from Branch Master on every call.
+    this.retailPilotGrnRepo = require("./repository/retailpilot_grn")(this.mysql.connection);
+    this.getRetailPilotGrnStoreId = async () => {
+      const map = await this.outletUsecase.getRetailPilotStoreMap();
+      const outletId = require("./config/retailpilot").grnOutletId;
+      return Object.keys(map).find((slug) => Number(map[slug]) === outletId) || null;
+    };
     this.stockReceivedRepo = require("./repository/stock_received")(
       this.mysql.connection,
       this.mysqlGofrugal.connection,
-      {
-        spectra: require("./services/retailpilot_spectra")(require("./config/retailpilot")),
-        getStoreId: async () => {
-          const map = await this.outletUsecase.getRetailPilotStoreMap();
-          const outletId = require("./config/retailpilot").grnOutletId;
-          return Object.keys(map).find((slug) => Number(map[slug]) === outletId) || null;
-        },
-      }
+      { grnRepo: this.retailPilotGrnRepo, getStoreId: this.getRetailPilotGrnStoreId }
     );
     this.purchaseRefRepo = require("./repository/purchase_ref")(
       this.mysql.connection
@@ -1311,6 +1304,11 @@ class Server {
       retailPilotConfig,
       () => this.outletUsecase.getRetailPilotStoreMap()
     );
+    this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      this.retailPilotGrnRepo,
+      this.getRetailPilotGrnStoreId
+    );
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo,
       this.gstTallyPurchaseRepo
@@ -1350,9 +1348,6 @@ class Server {
     this.invoiceUsecase = require("./usecase/invoice")(this.invoiceRepo);
     this.repackItemUsecase = require("./usecase/repack_item")(
       this.repackItemRepo
-    );
-    this.cleaningPackingUsecase = require("./usecase/cleaning_packing")(
-      this.cleaningPackingRepo
     );
     this.ebConsumptionUsecase = require("./usecase/eb_consumption")(
       this.ebConsumptionRepo
@@ -1458,10 +1453,6 @@ class Server {
       this.outletRepo,
       this.priceCheckerRepo
     );
-    this.offersV3TalkerUsecase = require("./usecase/offers_v3_talker")(
-      this.offersV3TalkerRepo,
-      this.outletRepo
-    );
     this.productSalesUsecase = require("./usecase/product_sales")(
       this.productSalesRepo
     );
@@ -1522,7 +1513,6 @@ class Server {
       this.subcategoryUsecase,
       this.departmentUsecase,
       this.brandUsecase,
-      this.cleaningPackingUsecase,
       this.productRepo,
       this.stockHoldingReportUsecase
     );
@@ -1961,9 +1951,6 @@ class Server {
     const repackItemRouter = require("./routes/repack_item")(
       this.repackItemUsecase
     );
-    const cleaningPackingRouter = require("./routes/cleaning_packing")(
-      this.cleaningPackingUsecase
-    );
     const ebConsumptionRouter = require("./routes/eb_consumption")(
       this.ebConsumptionUsecase
     );
@@ -2060,14 +2047,51 @@ class Server {
       require("./routes/products_expiry_checker")(
         this.productsExpiryCheckerUsecase
       );
+    // A manual stock & price sync runs past its request, so it is logged in
+    // the API Sync Log when it finishes (source "manual"), like the cron.
+    this.retailPilotStockSyncUsecase.startManual = (employeeId) => {
+      if (this.retailPilotStockSyncUsecase.running) {
+        return { started: false, msg: "A RetailPilot sync is already running" };
+      }
+      const run = () => this.retailPilotStockSyncUsecase.run();
+      const logged = this.apiSyncLogger
+        ? this.apiSyncLogger.wrapCron("retailpilot_stock_sync", "/retailpilot/stock-sync", run, {
+            source: "manual",
+            employee_id: employeeId,
+          })
+        : run;
+      logged().catch(() => {});
+      return { started: true, msg: "RetailPilot sync started - it takes a few minutes" };
+    };
     const offersV3Router = require("./routes/offers_v3")(
       this.offersV3Usecase,
       this.retailPilotStockSyncUsecase,
       this.permissions
     );
-    const offersV3TalkerRouter = require("./routes/offers_v3_talker")(
-      this.offersV3TalkerUsecase
-    );
+    const retailPilotRouter = require("./routes/retailpilot")({
+      apiSyncLogRepo: this.apiSyncLogRepo,
+      config: require("./config/retailpilot"),
+      isRunning: {
+        stock: () => this.retailPilotStockSyncUsecase.running,
+        products: () => this.retailPilotArticleSyncUsecase.running,
+        purchases: () => this.retailPilotPurchaseSyncUsecase.running,
+        grn: () => this.retailPilotGrnSyncUsecase.running,
+      },
+      startStockSync: (employeeId) => this.retailPilotStockSyncUsecase.startManual(employeeId),
+      startGrnSync: (employeeId) => {
+        if (this.retailPilotGrnSyncUsecase.running) return { started: false, msg: "The GRN sync is already running" };
+        const run = () => this.retailPilotGrnSyncUsecase.run();
+        const logged = this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_grn_sync", "/retailpilot/grn-sync", run, {
+              source: "manual",
+              employee_id: employeeId,
+            })
+          : run;
+        logged().catch(() => {});
+        return { started: true, msg: "GRN sync started" };
+      },
+      permissions: this.permissions,
+    });
     const productSalesRouter = require("./routes/product_sales")(
       this.productSalesUsecase
     );
@@ -2212,7 +2236,6 @@ class Server {
     app.use("/purchase-order", purchaseOrderRouter.getRouter());
     app.use("/invoice", invoiceRouter.getRouter());
     app.use("/repack-item", repackItemRouter.getRouter());
-    app.use("/cleaning-packing", cleaningPackingRouter.getRouter());
     app.use("/eb-consumption", ebConsumptionRouter.getRouter());
     app.use("/eb-master-list", ebMasterListRouter.getRouter());
     app.use("/ticket", ticketRouter.getRouter());
@@ -2243,7 +2266,7 @@ class Server {
       productsExpiryCheckerRouter.getRouter()
     );
     app.use("/offers-v3", offersV3Router.getRouter());
-    app.use("/offers-v3-talker", offersV3TalkerRouter.getRouter());
+    app.use("/retailpilot", retailPilotRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
@@ -2305,6 +2328,22 @@ class Server {
               runRetailPilotPurchaseSync
             )
           : runRetailPilotPurchaseSync,
+        { preventOverlap: true }
+      );
+    }
+
+    // Every 15 minutes - copy the warehouse's RetailPilot GRNs into
+    // retailpilot_grn_headers / retailpilot_grn_lines, which the GRN pages
+    // read. On unless RETAILPILOT_GRN_SYNC_ENABLED=false; the RetailPilot Sync
+    // page (POST /retailpilot/grn-sync) runs it by hand either way.
+    if (require("./config/retailpilot").grnSyncEnabled) {
+      const runRetailPilotGrnSync = async () => await this.retailPilotGrnSyncUsecase.run();
+      this.cronService.register(
+        "retailpilot_grn_sync",
+        "*/15 * * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_grn_sync", "/retailpilot/grn-sync", runRetailPilotGrnSync)
+          : runRetailPilotGrnSync,
         { preventOverlap: true }
       );
     }
@@ -2770,11 +2809,6 @@ class Server {
 
     this.synker.initCronJobs(this.cronService, this.apiSyncLogger);
     this.cronService.start();
-
-    // Wire synker back into cleaningPackingUsecase after service creation
-    if (this.cleaningPackingUsecase && this.cleaningPackingUsecase.setSynker) {
-      this.cleaningPackingUsecase.setSynker(this.synker);
-    }
 
     // Stage 0C / C1c: wired so the reconciler is callable. It has no caller
     // since the Digisme employee sync was removed - see

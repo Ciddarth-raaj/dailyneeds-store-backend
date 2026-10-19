@@ -112,7 +112,14 @@ class ApiSyncLogger {
     };
   }
 
-  wrapCron(logType, path, fn) {
+  /**
+   * @param options.source "cron" (default), or "manual" for a run someone
+   *   started that finishes after its request has answered.
+   * @param options.employee_id who started a manual run.
+   */
+  wrapCron(logType, path, fn, options = {}) {
+    const source = options.source || "cron";
+    const employeeId = options.employee_id ?? null;
     return async () => {
       const startedAt = Date.now();
       try {
@@ -152,8 +159,8 @@ class ApiSyncLogger {
           status_code: Number.isFinite(code) && code > 0 ? code : failed || error_message ? 500 : 200,
           duration_ms: Date.now() - startedAt,
           row_count,
-          source: "cron",
-          employee_id: null,
+          source,
+          employee_id: employeeId,
           metadata_json: extractMetadata(logType, { body: {} }, result),
           error_message,
         });
@@ -167,8 +174,8 @@ class ApiSyncLogger {
           status_code: err?.response?.status || 500,
           duration_ms: Date.now() - startedAt,
           row_count: null,
-          source: "cron",
-          employee_id: null,
+          source,
+          employee_id: employeeId,
           metadata_json: null,
           error_message: formatSyncError(err).slice(0, 512),
         });

@@ -116,7 +116,8 @@ class OffersV3Routes {
   init() {
     // Pull batch stock and prices from RetailPilot now (what the 6:00 cron
     // does): Offers V3 price, then stock, then the Price Checker. Body
-    // { dry_run: true } returns the counts without writing. Admins, and
+    // { dry_run: true } returns the counts without writing; a real run is
+    // started in the background. Admins, and
     // designations granted sync_retailpilot_stock.
     const requireStockSyncPermission = this.permissions
       ? this.permissions.require(RETAILPILOT_STOCK_SYNC_PERMISSION)
@@ -130,8 +131,16 @@ class OffersV3Routes {
         if (error) {
           return res.json({ code: 422, msg: error.toString() });
         }
-        const result = await this.retailPilotStockSync.run({ dryRun: value.dry_run });
-        res.json(result);
+        if (value.dry_run) {
+          const result = await this.retailPilotStockSync.run({ dryRun: true });
+          return res.json(result);
+        }
+        // A real run takes minutes (products, then Offers V3 price and stock,
+        // then the Price Checker): start it and answer at once rather than
+        // hold the request open past the proxy's timeout. The result lands in
+        // the upload summaries and the API sync log.
+        const started = this.retailPilotStockSync.startManual(req.decoded?.employee_id ?? null);
+        res.json(started.started ? { code: 200, ...started } : { code: 409, ...started });
       } catch (err) {
         respondError(res, err);
       }

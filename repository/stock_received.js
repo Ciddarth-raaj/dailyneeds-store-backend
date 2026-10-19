@@ -272,16 +272,6 @@ function grnVerificationRow(row) {
   };
 }
 
-/**
- * RetailPilot (Postgres) returns column names lower-cased; GRN line fields
- * are read as MMD_*, so put those back in upper case.
- */
-function upperMmdKeys(row) {
-  const out = {};
-  for (const [k, v] of Object.entries(row || {})) out[/^mmd_/.test(k) ? k.toUpperCase() : k] = v;
-  return out;
-}
-
 /** RetailPilot and GoFrugal GRN headers as one list: a GRN No in both is
  * RetailPilot's; newest date first, then highest GRN No. */
 function mergeHeaders(rp, gf) {
@@ -295,8 +285,9 @@ function mergeHeaders(rp, gf) {
 
 class StockReceivedRepository {
   /**
-   * @param retailPilot optional { spectra, getStoreId: async () => store slug }
-   *   - the warehouse's RetailPilot purchases are GRNs too (utils/retailpilot_grn.js).
+   * @param retailPilot optional { grnRepo, getStoreId: async () => store slug }
+   *   - the warehouse's RetailPilot purchases are GRNs too, read from the local
+   *   copy the 15-minute RetailPilot GRN sync keeps (repository/retailpilot_grn.js).
    *   GRNs from before RetailPilot stay in the frozen GoFrugal copy; the GRN
    *   lists show both, and a GRN No is looked up in RetailPilot first.
    */
@@ -311,7 +302,7 @@ class StockReceivedRepository {
   // ---------------------------------------------------------------------
 
   async _rpStore() {
-    if (!this.retailPilot || !this.retailPilot.spectra || !this.retailPilot.spectra.isConfigured()) return null;
+    if (!this.retailPilot || !this.retailPilot.grnRepo) return null;
     return (await this.retailPilot.getStoreId()) || null;
   }
 
@@ -329,31 +320,25 @@ class StockReceivedRepository {
   async _rpHeaders(fromDate, toDate) {
     const store = await this._rpStore();
     if (!store) return [];
-    const rows = await this.retailPilot.spectra.queryAll(RPG.buildHeadersQuery(store, fromDate, toDate));
-    return rows.map(grnHeaderRow);
+    return (await this.retailPilot.grnRepo.listHeaders(store, fromDate, toDate)).map(grnHeaderRow);
   }
 
   async _rpSearch(term) {
     const store = await this._rpStore();
-    const sql = store ? RPG.buildSearchQuery(store, term) : null;
-    if (!sql) return [];
-    const rows = await this.retailPilot.spectra.queryAll(sql);
-    return rows.map(grnHeaderRow);
+    if (!store) return [];
+    return (await this.retailPilot.grnRepo.searchHeaders(store, term)).map(grnHeaderRow);
   }
 
   async _rpDetail(refno) {
     const store = await this._rpStore();
-    const sql = store ? RPG.buildHeaderByRefnoQuery(store, refno) : null;
-    if (!sql) return null;
-    const [headerRaw] = await this.retailPilot.spectra.queryAll(sql, 1);
+    if (!store) return null;
+    const grnRepo = this.retailPilot.grnRepo;
+    const headerRaw = await grnRepo.headerByRefno(store, refno);
     if (!headerRaw) return null;
-    const lines = (await this.retailPilot.spectra.queryAll(RPG.buildLinesQuery(store, headerRaw.mmh_mrc_no))).map(upperMmdKeys);
-    const prevSql = RPG.buildPreviousLinesQuery(
-      store,
-      lines.map((l) => l.MMD_ITEM_CODE),
-      RPG.isoOf(headerRaw.entered_at)
+    const lines = await grnRepo.linesOf(headerRaw.mmh_mrc_no);
+    const prev = RPG.previousByArticle(
+      await grnRepo.previousLines(store, lines.map((l) => l.MMD_ITEM_CODE), headerRaw.entered_at)
     );
-    const prev = RPG.previousByArticle(prevSql ? await this.retailPilot.spectra.queryAll(prevSql) : []);
     const raw = lines.map((l) => ({ ...l, ...(prev.get(Number(l.MMD_ITEM_CODE)) || {}) }));
     const productMap = await this._fetchProductsMap(raw.map((r) => normalizeItemCode(r.MMD_ITEM_CODE)).filter((id) => id != null));
     const items = raw.map((r, i) => ({ ...grnDetailItemRow(r, productMap), line_no: i + 1 }));
@@ -364,7 +349,7 @@ class StockReceivedRepository {
   async _rpLinesByRange(fromDate, toDate) {
     const store = await this._rpStore();
     if (!store) return [];
-    const rows = (await this.retailPilot.spectra.queryAll(RPG.buildLinesByRangeQuery(store, fromDate, toDate))).map(upperMmdKeys);
+    const rows = await this.retailPilot.grnRepo.linesByRange(store, fromDate, toDate);
     const productMap = await this._fetchProductsMap(rows.map((r) => normalizeItemCode(r.MMD_ITEM_CODE)).filter((id) => id != null));
     return rows.map((row) => ({
       mmh_mrc_refno: row.mmh_mrc_refno,

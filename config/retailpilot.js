@@ -30,6 +30,8 @@ module.exports = {
     String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
   stockSyncEnabled:
     String(process.env.RETAILPILOT_STOCK_SYNC_ENABLED || "").toLowerCase() !== "false",
+  grnSyncEnabled:
+    String(process.env.RETAILPILOT_GRN_SYNC_ENABLED || "").toLowerCase() !== "false",
   grnOutletId: parseInt(process.env.RETAILPILOT_GRN_OUTLET_ID, 10) || 2,
   purchaseLookbackDays: Number.isInteger(lookback) && lookback >= 0 ? lookback : 3,
   pageSize: 2000,

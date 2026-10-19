@@ -8,7 +8,6 @@ const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
 
 const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
-const CRON_SYNTAX_CLEANING_PACKING = "0 9 * * *";
 
 class Synker {
   constructor(
@@ -17,7 +16,6 @@ class Synker {
     subcategoryUsecase,
     departmentUsecase,
     brandUsecase,
-    cleaningPackingUsecase,
     productRepo,
     stockHoldingReportUsecase
   ) {
@@ -26,7 +24,6 @@ class Synker {
     this.departmentUsecase = departmentUsecase;
     this.subcategoryUsecase = subcategoryUsecase;
     this.brandUsecase = brandUsecase;
-    this.cleaningPackingUsecase = cleaningPackingUsecase;
     this.productRepo = productRepo;
     this.stockHoldingReportUsecase = stockHoldingReportUsecase;
     // Stage 0C / C1c. Set by setEmployeeLifecycleUsecase after construction.
@@ -222,36 +219,6 @@ class Synker {
       fs.appendFileSync(logFile, logLine);
     } catch (error) {
       console.error("Failed to write to log file:", error.message);
-    }
-  }
-
-  async syncCleaningPacking() {
-    try {
-      await this.cleaningPackingUsecase.deleteAll();
-      const deliumCleaningPacking = await this._fetchDeliumCleaningPacking();
-      for (const item of deliumCleaningPacking) {
-        await this.cleaningPackingUsecase.create({
-          purchase_item: item.purchase_item,
-          purchase_item_name: item.purchase_item_name,
-          article_id: item.article_id,
-          article_name: item.article_name,
-          priority_score: item.priority_score,
-          repackage_conversion: item.repackage_conversion,
-          planner: item.planner,
-          repack_quantity: item.repack_quantity,
-          forecast_quantity: item.forecast_quantity,
-          order_date: moment(item.order_date).format("YYYY-MM-DD"),
-          child_stock_in_hand: item.child_stock_in_hand,
-          parent_stock: item.parent_stock,
-          store_uom: item.store_uom,
-          num_stores_oos: item.num_stores_oos,
-          chain_bill_count_level: item.chain_bill_count_level,
-        });
-      }
-      console.log("INSERTING CLEANING PACKING Done");
-    } catch (err) {
-      console.log(err);
-      throw err;
     }
   }
 
@@ -496,45 +463,6 @@ class Synker {
     });
   }
 
-  _fetchDeliumCleaningPacking(forDate = moment().format("YYYY-MM-DD")) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const response = await axios({
-          method: "GET",
-          url: deliumConfig.apiUrl(
-            `${deliumConfig.paths.repackaging}?for_date=${forDate}`
-          ),
-          headers: {
-            "X-DELIUM-KEY": deliumConfig.apiKey,
-          },
-        });
-        if (response.status !== 200) {
-          logger.Log({
-            level: logger.LEVEL.ERROR,
-            component: "SERVICE.SYNKER",
-            code: "SERVICE.SYNKER.DELIUM-CLEANING-PACKING-FETCH",
-            description: err.toString(),
-            category: "",
-            ref: {},
-          });
-          reject();
-          return;
-        }
-        resolve(response.data);
-      } catch (err) {
-        logger.Log({
-          level: logger.LEVEL.ERROR,
-          component: "SERVICE.SYNKER",
-          code: "SERVICE.SYNKER.DELIUM-CLEANING-PACKING-FETCH",
-          description: err.toString(),
-          category: "",
-          ref: {},
-        });
-        reject(err);
-      }
-    });
-  }
-
   formatProducts(products) {
     const brands = {};
     const categories = {};
@@ -655,7 +583,6 @@ module.exports = (
   subcategoryUsecase,
   departmentUsecase,
   brandUsecase,
-  cleaningPackingUsecase,
   productRepo,
   stockHoldingReportUsecase
 ) => {
@@ -665,7 +592,6 @@ module.exports = (
     subcategoryUsecase,
     departmentUsecase,
     brandUsecase,
-    cleaningPackingUsecase,
     productRepo,
     stockHoldingReportUsecase
   );
