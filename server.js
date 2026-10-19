@@ -565,17 +565,16 @@ class Server {
     // GRNs: the warehouse's RetailPilot purchases, plus the frozen GoFrugal
     // copy for the ones before RetailPilot. The warehouse's RetailPilot store
     // id comes from Branch Master on every call.
+    this.retailPilotGrnRepo = require("./repository/retailpilot_grn")(this.mysql.connection);
+    this.getRetailPilotGrnStoreId = async () => {
+      const map = await this.outletUsecase.getRetailPilotStoreMap();
+      const outletId = require("./config/retailpilot").grnOutletId;
+      return Object.keys(map).find((slug) => Number(map[slug]) === outletId) || null;
+    };
     this.stockReceivedRepo = require("./repository/stock_received")(
       this.mysql.connection,
       this.mysqlGofrugal.connection,
-      {
-        spectra: require("./services/retailpilot_spectra")(require("./config/retailpilot")),
-        getStoreId: async () => {
-          const map = await this.outletUsecase.getRetailPilotStoreMap();
-          const outletId = require("./config/retailpilot").grnOutletId;
-          return Object.keys(map).find((slug) => Number(map[slug]) === outletId) || null;
-        },
-      }
+      { grnRepo: this.retailPilotGrnRepo, getStoreId: this.getRetailPilotGrnStoreId }
     );
     this.purchaseRefRepo = require("./repository/purchase_ref")(
       this.mysql.connection
@@ -1316,6 +1315,11 @@ class Server {
       this.purchaseUsecase,
       retailPilotConfig,
       () => this.outletUsecase.getRetailPilotStoreMap()
+    );
+    this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      this.retailPilotGrnRepo,
+      this.getRetailPilotGrnStoreId
     );
     this.purchaseTallyUsecase = require("./usecase/purchase_tally")(
       this.purchaseTallyRepo,
@@ -2077,11 +2081,51 @@ class Server {
       this.stockTransferOutUsecase
     );
     const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
+    // A manual stock & price sync runs past its request, so it is logged in
+    // the API Sync Log when it finishes (source "manual"), like the cron.
+    this.retailPilotStockSyncUsecase.startManual = (employeeId) => {
+      if (this.retailPilotStockSyncUsecase.running) {
+        return { started: false, msg: "A RetailPilot sync is already running" };
+      }
+      const run = () => this.retailPilotStockSyncUsecase.run();
+      const logged = this.apiSyncLogger
+        ? this.apiSyncLogger.wrapCron("retailpilot_stock_sync", "/retailpilot/stock-sync", run, {
+            source: "manual",
+            employee_id: employeeId,
+          })
+        : run;
+      logged().catch(() => {});
+      return { started: true, msg: "RetailPilot sync started - it takes a few minutes" };
+    };
     const offersV3Router = require("./routes/offers_v3")(
       this.offersV3Usecase,
       this.retailPilotStockSyncUsecase,
       this.permissions
     );
+    const retailPilotRouter = require("./routes/retailpilot")({
+      apiSyncLogRepo: this.apiSyncLogRepo,
+      config: require("./config/retailpilot"),
+      isRunning: {
+        stock: () => this.retailPilotStockSyncUsecase.running,
+        products: () => this.retailPilotArticleSyncUsecase.running,
+        purchases: () => this.retailPilotPurchaseSyncUsecase.running,
+        grn: () => this.retailPilotGrnSyncUsecase.running,
+      },
+      startStockSync: (employeeId) => this.retailPilotStockSyncUsecase.startManual(employeeId),
+      startGrnSync: (employeeId) => {
+        if (this.retailPilotGrnSyncUsecase.running) return { started: false, msg: "The GRN sync is already running" };
+        const run = () => this.retailPilotGrnSyncUsecase.run();
+        const logged = this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_grn_sync", "/retailpilot/grn-sync", run, {
+              source: "manual",
+              employee_id: employeeId,
+            })
+          : run;
+        logged().catch(() => {});
+        return { started: true, msg: "GRN sync started" };
+      },
+      permissions: this.permissions,
+    });
     const offersV3TalkerRouter = require("./routes/offers_v3_talker")(
       this.offersV3TalkerUsecase
     );
@@ -2262,6 +2306,7 @@ class Server {
     app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
     app.use("/sto-check", stoCheckRouter.getRouter());
     app.use("/offers-v3", offersV3Router.getRouter());
+    app.use("/retailpilot", retailPilotRouter.getRouter());
     app.use("/offers-v3-talker", offersV3TalkerRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
@@ -2324,6 +2369,22 @@ class Server {
               runRetailPilotPurchaseSync
             )
           : runRetailPilotPurchaseSync,
+        { preventOverlap: true }
+      );
+    }
+
+    // Every 15 minutes - copy the warehouse's RetailPilot GRNs into
+    // retailpilot_grn_headers / retailpilot_grn_lines, which the GRN pages
+    // read. On unless RETAILPILOT_GRN_SYNC_ENABLED=false; the RetailPilot Sync
+    // page (POST /retailpilot/grn-sync) runs it by hand either way.
+    if (require("./config/retailpilot").grnSyncEnabled) {
+      const runRetailPilotGrnSync = async () => await this.retailPilotGrnSyncUsecase.run();
+      this.cronService.register(
+        "retailpilot_grn_sync",
+        "*/15 * * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_grn_sync", "/retailpilot/grn-sync", runRetailPilotGrnSync)
+          : runRetailPilotGrnSync,
         { preventOverlap: true }
       );
     }

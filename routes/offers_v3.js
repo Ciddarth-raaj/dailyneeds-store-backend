@@ -139,11 +139,8 @@ class OffersV3Routes {
         // then the Price Checker): start it and answer at once rather than
         // hold the request open past the proxy's timeout. The result lands in
         // the upload summaries and the API sync log.
-        if (this.retailPilotStockSync.running) {
-          return res.json({ code: 409, msg: "A RetailPilot sync is already running" });
-        }
-        this.retailPilotStockSync.run({ dryRun: false }).catch(() => {});
-        res.json({ code: 200, started: true, msg: "RetailPilot sync started - it takes a few minutes" });
+        const started = this.retailPilotStockSync.startManual(req.decoded?.employee_id ?? null);
+        res.json(started.started ? { code: 200, ...started } : { code: 409, ...started });
       } catch (err) {
         respondError(res, err);
       }

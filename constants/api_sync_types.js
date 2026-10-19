@@ -7,7 +7,7 @@ const API_SYNC_TYPES = [
   {
     type: "product_sync",
     category: "sync",
-    label: "Product Sync",
+    label: "Product Sync (RetailPilot)",
     match: "/product/sync",
   },
   // KEPT ON PURPOSE after the Digisme employee sync was removed
@@ -65,6 +65,24 @@ const API_SYNC_TYPES = [
     label: "Purchase Bulk Import",
     match: "/purchase/bulk",
     server_script: "/home/delium/query_executor/query_exec.sh",
+  },
+  // Written by the 6:00 cron and by the RetailPilot Sync page's manual run,
+  // both through apiSyncLogger.wrapCron when the run finishes. `match` is a
+  // path no route serves on purpose: the manual endpoint answers before the
+  // run ends, so logging its response would record a run that has not
+  // happened yet.
+  {
+    type: "retailpilot_stock_sync",
+    category: "sync",
+    label: "RetailPilot Stock & Price Sync",
+    match: "/retailpilot/stock-sync-run",
+  },
+  // The 15-minute GRN copy and its manual run; logged the same way.
+  {
+    type: "retailpilot_grn_sync",
+    category: "sync",
+    label: "RetailPilot GRN Sync",
+    match: "/retailpilot/grn-sync-run",
   },
   {
     type: "retailpilot_purchase_sync",
