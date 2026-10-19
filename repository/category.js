@@ -8,8 +8,10 @@ class CategoryRepository {
   getAll(limit, offset) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT categories.category_id, categories.category_name, categories.image_url, department.department_name, categories.created_at FROM categories LEFT JOIN
-        department on department.department_id = categories.department_id LIMIT ${offset}, ${limit}`,
+        `SELECT categories.category_id, categories.category_name, categories.image_url, product_department.department_name, categories.created_at FROM categories LEFT JOIN
+        product_department on product_department.department_id = categories.department_id
+        WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.category_id = categories.category_id AND rp.retailpilot_article_id IS NOT NULL)
+        LIMIT ${offset}, ${limit}`,
         (err, docs) => {
           if (err) {
             logger.Log({
@@ -52,7 +54,7 @@ class CategoryRepository {
   getCategoryCount() {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT count(category_id) AS catcount FROM categories`,
+        `SELECT count(category_id) AS catcount FROM categories WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.category_id = categories.category_id AND rp.retailpilot_article_id IS NOT NULL)`,
         [],
         (err, docs) => {
           if (err) {

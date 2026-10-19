@@ -9,7 +9,9 @@ class SubCategoryRepository {
 		console.log(offset, limit);
 		return new Promise((resolve, reject) => {
 			this.db.query(`SELECT subcategories.subcategory_id, subcategories.subcategory_name, subcategories.image_url, categories.category_name, subcategories.created_at FROM subcategories LEFT JOIN
-			categories ON categories.category_id = subcategories.category_id LIMIT ${offset}, ${limit}`, (err, docs) => {
+			categories ON categories.category_id = subcategories.category_id
+			WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.subcategory_id = subcategories.subcategory_id AND rp.retailpilot_article_id IS NOT NULL)
+			LIMIT ${offset}, ${limit}`, (err, docs) => {
 				if (err) {
 					logger.Log({
 						level: logger.LEVEL.ERROR,
@@ -50,7 +52,7 @@ class SubCategoryRepository {
 	getSubCategoryCount() {
 		return new Promise((resolve, reject) => {
 		  this.db.query(
-			`SELECT count(subcategory_id) AS subcat_count FROM subcategories`,
+			`SELECT count(subcategory_id) AS subcat_count FROM subcategories WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.subcategory_id = subcategories.subcategory_id AND rp.retailpilot_article_id IS NOT NULL)`,
 			[],
 			(err, docs) => {
 			  if (err) {

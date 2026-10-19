@@ -27,7 +27,7 @@ class DepartmentRepository {
 
   getProductDepartment() {
     return new Promise((resolve, reject) => {
-      this.db.query("SELECT * FROM product_department", [], (err, docs) => {
+      this.db.query(`SELECT * FROM product_department WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.department_id = product_department.department_id AND rp.retailpilot_article_id IS NOT NULL)`, [], (err, docs) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,

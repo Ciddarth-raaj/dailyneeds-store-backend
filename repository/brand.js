@@ -8,7 +8,9 @@ class BrandRepository {
 	getAll(limit, offset) {
 		return new Promise((resolve, reject) => {
 			this.db.query(`SELECT brands.brand_id, brands.brand_name, categories.category_name, brands.created_at FROM brands LEFT JOIN
-			categories on categories.category_id = brands.category_id LIMIT ${offset}, ${limit}`, (err, docs) => {
+			categories on categories.category_id = brands.category_id
+			WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.brand_id = brands.brand_id AND rp.retailpilot_article_id IS NOT NULL)
+			LIMIT ${offset}, ${limit}`, (err, docs) => {
 				if (err) {
 					logger.Log({
 						level: logger.LEVEL.ERROR,
@@ -29,7 +31,7 @@ class BrandRepository {
 	getBrandCount() {
 		return new Promise((resolve, reject) => {
 		  this.db.query(
-			`SELECT count(brand_id) AS brand_count FROM brands`,
+			`SELECT count(brand_id) AS brand_count FROM brands WHERE EXISTS (SELECT 1 FROM product_table rp WHERE rp.brand_id = brands.brand_id AND rp.retailpilot_article_id IS NOT NULL)`,
 			[],
 			(err, docs) => {
 			  if (err) {

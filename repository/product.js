@@ -179,7 +179,7 @@ class ProductRepository {
   getById(limit, offset, product_id) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, department, brands
+        `SELECT product_table.product_id, categories.category_name, subcategories.subcategory_name, department.department_name, brands.brand_name FROM product_table, categories, subcategories, product_department department, brands
       WHERE categories.category_id = product_table.category_id
       AND subcategories.subcategory_id = product_table.subcategory_id
       AND department.department_id = product_table.department_id
@@ -290,7 +290,7 @@ class ProductRepository {
       FROM product_table
       LEFT JOIN categories ON product_table.category_id = categories.category_id
       LEFT JOIN subcategories ON subcategories.subcategory_id = product_table.subcategory_id
-      LEFT JOIN department ON department.department_id = product_table.department_id
+      LEFT JOIN product_department department ON department.department_id = product_table.department_id
       LEFT JOIN brands ON brands.brand_id = product_table.brand_id
       LEFT JOIN product_distributor_master pdm ON pdm.cid = product_table.distributor_id
       WHERE product_table.product_id = ?`,
