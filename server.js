@@ -1495,12 +1495,13 @@ class Server {
       this.offersV3Repo
     );
     const retailPilotSpectra = require("./services/retailpilot_spectra")(require("./config/retailpilot"));
+    this.retailPilotArticleSyncUsecase = require("./usecase/retailpilot_article_sync")(
+      retailPilotSpectra,
+      require("./repository/retailpilot_master")(this.mysql.connection)
+    );
     this.retailPilotStockSyncUsecase = require("./usecase/retailpilot_stock_sync")(
       retailPilotSpectra,
-      require("./usecase/retailpilot_article_sync")(
-        retailPilotSpectra,
-        require("./repository/retailpilot_master")(this.mysql.connection)
-      ),
+      this.retailPilotArticleSyncUsecase,
       this.offersV3Usecase,
       this.priceCheckerUsecase,
       () => this.outletUsecase.getRetailPilotStoreMap()
@@ -1884,7 +1885,7 @@ class Server {
     const imageRouter = require("./routes/image")(this.imageUsecase);
     const productRouter = require("./routes/product")(
       this.productUsecase,
-      this.synker
+      this.retailPilotArticleSyncUsecase
     );
     const categoryRouter = require("./routes/category")(this.categoryUsecase);
     const subcategoryRouter = require("./routes/subcategory")(

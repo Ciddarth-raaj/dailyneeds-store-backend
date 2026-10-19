@@ -3,9 +3,9 @@ const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
 class ProductRoutes {
-  constructor(productUsecase, synker) {
+  constructor(productUsecase, retailPilotArticleSync) {
     this.productUsecase = productUsecase;
-    this.synker = synker;
+    this.retailPilotArticleSync = retailPilotArticleSync;
     this.init();
   }
 
@@ -143,21 +143,25 @@ class ProductRoutes {
       res.end();
     });
 
+    // Product master sync, from RetailPilot (GoFrugal and Delium are gone):
+    // new items created, names, preparation type, manufacturer and the
+    // department / category / subcategory / brand hierarchy updated. The
+    // same step runs daily at 6:00 inside the RetailPilot sync. Body
+    // { dry_run: true } returns the counts without writing.
     router.post("/sync", async (req, res) => {
       try {
-        if (!this.synker || typeof this.synker.syncProducts !== "function") {
-          res.status(503).json({
-            code: 503,
-            msg: "Product sync is not available",
-          });
+        if (!this.retailPilotArticleSync) {
+          res.status(503).json({ code: 503, msg: "Product sync is not available" });
           res.end();
           return;
         }
-        const result = await this.synker.syncProducts();
-        res.json({
-          code: 200,
-          msg: "Sync completed",
+        const dryRun = req.body && (req.body.dry_run === true || req.body.dry_run === "true");
+        const { productIdOf, ...result } = await this.retailPilotArticleSync.run({ dryRun });
+        res.status(result.code === 200 ? 200 : result.code || 500).json({
           ...result,
+          msg: result.message || (dryRun ? "Dry run completed" : "Sync completed"),
+          productsProcessed: (result.products_existing || 0) + (result.products_new || 0),
+          categoriesProcessed: result.hierarchy && result.hierarchy.category ? result.hierarchy.category.retailpilot : 0,
         });
       } catch (err) {
         console.error(err);
@@ -425,6 +429,6 @@ class ProductRoutes {
   }
 }
 
-module.exports = (productUsecase, synker) => {
-  return new ProductRoutes(productUsecase, synker);
+module.exports = (productUsecase, retailPilotArticleSync) => {
+  return new ProductRoutes(productUsecase, retailPilotArticleSync);
 };
