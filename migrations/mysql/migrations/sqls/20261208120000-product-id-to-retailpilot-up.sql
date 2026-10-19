@@ -9,8 +9,9 @@
 --
 -- Left on the old code on purpose, and read through legacy_code
 -- (utils/legacy_item_codes.js):
---   - product_sales: sales history from before RetailPilot. Its foreign key
---     to product_table is dropped, since its codes are no longer product ids.
+--   - product_sales and stock_holding_items: sales and stock-holding history
+--     from before RetailPilot. Their foreign keys to product_table are
+--     dropped, since their codes are no longer product ids.
 --   - the frozen GoFrugal copy (medishopdb_*).
 --
 -- The two ranges never meet, so no row is ever briefly given another
@@ -60,11 +61,18 @@ ALTER TABLE `product_table`
   ADD COLUMN `legacy_code` INT NULL DEFAULT NULL,
   ADD KEY `idx_product_legacy_code` (`legacy_code`);
 
--- product_sales keeps the old code: it can no longer point at product_table.
+-- product_sales and stock_holding_items keep the old code: they can no longer
+-- point at product_table.
 SET @sql = IF((SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
   WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'product_sales'
     AND CONSTRAINT_NAME = 'fk_product_sales_product' AND CONSTRAINT_TYPE = 'FOREIGN KEY') = 1,
   'ALTER TABLE `product_sales` DROP FOREIGN KEY `fk_product_sales_product`', 'DO 0');
+PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_holding_items'
+    AND CONSTRAINT_NAME = 'fk_stock_holding_items_product' AND CONSTRAINT_TYPE = 'FOREIGN KEY') = 1,
+  'ALTER TABLE `stock_holding_items` DROP FOREIGN KEY `fk_stock_holding_items_product`', 'DO 0');
 PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
 
 CREATE TABLE `product_id_rekey_map` (
@@ -210,11 +218,6 @@ PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
 SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'dead_stock_items' AND COLUMN_NAME = 'product_id') = 1,
   'UPDATE `dead_stock_items` x JOIN `product_id_rekey_map` m ON x.`product_id` = m.`old_id` SET x.`product_id` = m.`new_id`', 'DO 0');
-PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
-
-SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS
-  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_holding_items' AND COLUMN_NAME = 'product_id') = 1,
-  'UPDATE `stock_holding_items` x JOIN `product_id_rekey_map` m ON x.`product_id` = m.`old_id` SET x.`product_id` = m.`new_id`', 'DO 0');
 PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
 
 SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS

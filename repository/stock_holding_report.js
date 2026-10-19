@@ -9,8 +9,10 @@ const {
   rollbackAsync,
 } = require("../utils/batchInsert");
 
+// stock_holding_items keeps the old item code (it is history from before
+// RetailPilot); it reaches a product through product_table.legacy_code.
 const ENRICH_SNAPSHOT_SQL = `UPDATE stock_holding_items shi
-INNER JOIN product_table p ON shi.product_id = p.product_id
+INNER JOIN product_table p ON shi.product_id = p.legacy_code
 LEFT JOIN product_department pd_dept ON p.department_id = pd_dept.department_id
 LEFT JOIN categories cat ON p.category_id = cat.category_id
 LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
@@ -26,10 +28,11 @@ LEFT JOIN (
     FROM product_images
     WHERE product_id IN (
       SELECT product_id FROM (
-        SELECT DISTINCT product_id
-        FROM stock_holding_items
-        WHERE stock_holding_report_id = ?
-          AND product_name IS NULL
+        SELECT DISTINCT p2.product_id
+        FROM stock_holding_items s2
+        INNER JOIN product_table p2 ON p2.legacy_code = s2.product_id
+        WHERE s2.stock_holding_report_id = ?
+          AND s2.product_name IS NULL
       ) pending_products
     )
     GROUP BY product_id
@@ -39,10 +42,11 @@ LEFT JOIN (
     FROM product_images
     WHERE product_id IN (
       SELECT product_id FROM (
-        SELECT DISTINCT product_id
-        FROM stock_holding_items
-        WHERE stock_holding_report_id = ?
-          AND product_name IS NULL
+        SELECT DISTINCT p2.product_id
+        FROM stock_holding_items s2
+        INNER JOIN product_table p2 ON p2.legacy_code = s2.product_id
+        WHERE s2.stock_holding_report_id = ?
+          AND s2.product_name IS NULL
       ) pending_products
     )
     GROUP BY product_id, priority
@@ -337,10 +341,12 @@ class StockHoldingReportRepository {
       }
       return new Promise((resolve, reject) => {
         this.db.query(
-          `SELECT product_id, SUM(current_stock) AS current_stock
-           FROM stock_holding_items
-           WHERE stock_holding_report_id = ?
-           GROUP BY product_id`,
+          // Keyed by today's product id; the snapshot holds the old code.
+          `SELECT p.product_id, SUM(shi.current_stock) AS current_stock
+           FROM stock_holding_items shi
+           INNER JOIN product_table p ON p.legacy_code = shi.product_id
+           WHERE shi.stock_holding_report_id = ?
+           GROUP BY p.product_id`,
           [reportId],
           (err, rows) => {
             if (err) {
@@ -755,7 +761,8 @@ class StockHoldingReportRepository {
 
       const phP = productIds.map(() => "?").join(", ");
       this.db.query(
-        `SELECT product_id FROM product_table WHERE product_id IN (${phP})`,
+        // Stock holding rows carry the old item code (see ENRICH_SNAPSHOT_SQL).
+        `SELECT legacy_code AS product_id FROM product_table WHERE legacy_code IN (${phP})`,
         productIds,
         (errP, prodRows) => {
           if (errP) {

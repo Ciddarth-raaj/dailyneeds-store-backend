@@ -1,5 +1,5 @@
 -- Undo of the up migration: every id back to its old code, using the map it
--- kept; product_sales' foreign key back; then the map and legacy_code go.
+-- kept; the product_sales and stock_holding_items foreign keys back; then the map and legacy_code go.
 -- Products created after the switch (not in the map) keep their ids.
 SET @rekey_fk_checks = @@FOREIGN_KEY_CHECKS;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -131,11 +131,6 @@ SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS
 PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
 
 SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS
-  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_holding_items' AND COLUMN_NAME = 'product_id') = 1,
-  'UPDATE `stock_holding_items` x JOIN `product_id_rekey_map` m ON x.`product_id` = m.`new_id` SET x.`product_id` = m.`old_id`', 'DO 0');
-PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
-
-SET @sql = IF((SELECT COUNT(*) FROM information_schema.COLUMNS
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'grn_issue_ignores' AND COLUMN_NAME = 'product_id') = 1,
   'UPDATE `grn_issue_ignores` x JOIN `product_id_rekey_map` m ON x.`product_id` = m.`new_id` SET x.`product_id` = m.`old_id`', 'DO 0');
 PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
@@ -150,6 +145,12 @@ SET @sql = IF((SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
   WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'product_sales'
     AND CONSTRAINT_NAME = 'fk_product_sales_product') = 0,
   'ALTER TABLE `product_sales` ADD CONSTRAINT `fk_product_sales_product` FOREIGN KEY (`product_id`) REFERENCES `product_table` (`product_id`) ON DELETE RESTRICT ON UPDATE CASCADE', 'DO 0');
+PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
+
+SET @sql = IF((SELECT COUNT(*) FROM information_schema.TABLE_CONSTRAINTS
+  WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'stock_holding_items'
+    AND CONSTRAINT_NAME = 'fk_stock_holding_items_product') = 0,
+  'ALTER TABLE `stock_holding_items` ADD CONSTRAINT `fk_stock_holding_items_product` FOREIGN KEY (`product_id`) REFERENCES `product_table` (`product_id`)', 'DO 0');
 PREPARE rekey_stmt FROM @sql; EXECUTE rekey_stmt; DEALLOCATE PREPARE rekey_stmt;
 
 DROP TABLE `product_id_rekey_map`;
