@@ -541,12 +541,6 @@ class Server {
     );
     this.productsExpiryCheckerRepo =
       require("./repository/products_expiry_checker")(this.mysql.connection);
-    this.stockTransferOutRepo = require("./repository/stock_transfer_out")(
-      this.mysqlGofrugal.connection
-    );
-    this.stoCheckRepo = require("./repository/sto_check")(
-      this.mysql.connection
-    );
     this.offersV3Repo = require("./repository/offers_v3")(
       this.mysql.connection
     );
@@ -1448,13 +1442,6 @@ class Server {
       require("./usecase/products_expiry_checker")(
         this.productsExpiryCheckerRepo
       );
-    this.stoCheckUsecase = require("./usecase/sto_check")(this.stoCheckRepo);
-    this.stockTransferOutUsecase = require("./usecase/stock_transfer_out")(
-      this.stockTransferOutRepo,
-      this.outletUsecase,
-      this.stoCheckUsecase,
-      this.mysql.connection
-    );
     this.offersV3Usecase = require("./usecase/offers_v3")(
       this.offersV3Repo,
       this.outletRepo,
@@ -2062,10 +2049,6 @@ class Server {
       require("./routes/products_expiry_checker")(
         this.productsExpiryCheckerUsecase
       );
-    const stockTransferOutRouter = require("./routes/stock_transfer_out")(
-      this.stockTransferOutUsecase
-    );
-    const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
     const offersV3Router = require("./routes/offers_v3")(
       this.offersV3Usecase,
       this.retailPilotStockSyncUsecase,
@@ -2248,8 +2231,6 @@ class Server {
       "/products-expiry-checker",
       productsExpiryCheckerRouter.getRouter()
     );
-    app.use("/stock-transfer-out", stockTransferOutRouter.getRouter());
-    app.use("/sto-check", stoCheckRouter.getRouter());
     app.use("/offers-v3", offersV3Router.getRouter());
     app.use("/offers-v3-talker", offersV3TalkerRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
