@@ -8,12 +8,18 @@ const A = require("./retailpilot_articles");
 const tax = (article_id, level_id, hierarchy_id, hierarchy_name) => ({ article_id, level_id, hierarchy_id, hierarchy_name });
 
 describe("resolveProductIds", () => {
-  it("keeps an existing code, else the old code, else RetailPilot's id", () => {
+  it("keeps the product an article already has (by article id, then old code), else its article id", () => {
     const ids = A.resolveProductIds(
-      [{ article_id: 100001, external_id: "33097" }, { article_id: 127784, external_id: null }, { article_id: 100002, external_id: "5" }],
-      new Map([[100002, 900]])
+      [
+        { article_id: 100001, external_id: "33097" },
+        { article_id: 127784, external_id: null },
+        { article_id: 100002, external_id: "5" },
+        { article_id: 100003, external_id: "6" },
+      ],
+      new Map([[100002, 100002]]),
+      new Map([[33097, 100001], [5, 999]])
     );
-    assert.deepEqual([...ids], [[100001, 33097], [127784, 127784], [100002, 900]]);
+    assert.deepEqual([...ids], [[100001, 100001], [127784, 127784], [100002, 100002], [100003, 100003]]);
   });
 });
 
@@ -49,8 +55,8 @@ describe("hierarchy", () => {
       taxonomy
     );
     assert.deepEqual(
-      [p1.product_id, p1.de_name, p1.department_id, p1.category_id, p1.brand_id, p1.subcategory_id, p1.de_manufacturer_name],
-      [33097, "gold winner oil 1l", 10, 20, 30, null, "Kaleesuwari"]
+      [p1.product_id, p1.legacy_code, p1.de_name, p1.department_id, p1.category_id, p1.brand_id, p1.subcategory_id, p1.de_manufacturer_name],
+      [33097, 33097, "gold winner oil 1l", 10, 20, 30, null, "Kaleesuwari"]
     );
     assert.equal(p2.category_id, 21);
   });

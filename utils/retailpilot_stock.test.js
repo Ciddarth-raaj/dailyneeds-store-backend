@@ -27,9 +27,9 @@ describe("mapStockRows", () => {
   it("maps one batch to a price, a stock and a price checker row", () => {
     const r = mapStockRows([row()], [], STORE_MAP);
     assert.deepEqual(r.priceRows, [
-      { item_code: 33097, outlet: "2", batch_no: "B-1", mrp: 135, selling_price: 120, landing_cost: 80 },
+      { item_code: 109996, outlet: "2", batch_no: "B-1", mrp: 135, selling_price: 120, landing_cost: 80 },
     ]);
-    assert.deepEqual(r.stockRows, [{ item_code: 33097, outlet: "2", batch_no: "B-1", stock_qty: 10 }]);
+    assert.deepEqual(r.stockRows, [{ item_code: 109996, outlet: "2", batch_no: "B-1", stock_qty: 10 }]);
     assert.equal(r.priceCheckerRows[0].purchase_price, 80);
     assert.equal(r.priceCheckerRows[0].landing_cost, 82);
     assert.equal(r.priceCheckerRows[0].old_selling_price, 120);
@@ -57,14 +57,14 @@ describe("mapStockRows", () => {
     assert.equal(price("2", "B-2"), 120);
   });
 
-  it("item code: the article sync's id, else the old code, else RetailPilot's id", () => {
+  it("item code: the article sync's product id, else the article id (never the old code)", () => {
     const r = mapStockRows(
       [row(), row({ batch_id: "B-2", item_code: null, article_id: 127784 }), row({ batch_id: "B-3", article_id: 555 })],
       [],
       STORE_MAP,
       new Map([[555, 40001]])
     );
-    assert.deepEqual(r.priceRows.map((p) => [p.batch_no, p.item_code]), [["B-1", 33097], ["B-2", 127784], ["B-3", 40001]]);
+    assert.deepEqual(r.priceRows.map((p) => [p.batch_no, p.item_code]), [["B-1", 109996], ["B-2", 127784], ["B-3", 40001]]);
   });
 
   it("skips rows with no price, and unmapped stores", () => {

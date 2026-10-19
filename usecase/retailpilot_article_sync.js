@@ -34,7 +34,11 @@ class RetailPilotArticleSync {
         return { code: 400, message: "RetailPilot returned no articles; nothing was changed." };
       }
 
-      const productIdOf = A.resolveProductIds(articles, await this.masterRepo.getProductIdsByArticleId());
+      const productIdOf = A.resolveProductIds(
+        articles,
+        await this.masterRepo.getProductIdsByArticleId(),
+        await this.masterRepo.getProductIdsByLegacyCode()
+      );
       const taxonomy = A.taxonomyByArticle(taxonomyRows);
       const nodes = A.collectNodes(taxonomy);
 

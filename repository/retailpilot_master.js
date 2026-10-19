@@ -43,6 +43,16 @@ class RetailPilotMasterRepository {
     return new Map(rows.map((r) => [Number(r.retailpilot_article_id), Number(r.product_id)]));
   }
 
+  /** Map<old item code, product_id> */
+  async getProductIdsByLegacyCode() {
+    const rows = await this._query(
+      `SELECT product_id, legacy_code FROM product_table WHERE legacy_code IS NOT NULL`,
+      [],
+      "PRODUCT_IDS_BY_LEGACY"
+    );
+    return new Map(rows.map((r) => [Number(r.legacy_code), Number(r.product_id)]));
+  }
+
   /** [{ id, name }] of our table for one level. */
   async getLocalHierarchy(level) {
     const L = LEVELS[level];
@@ -94,6 +104,7 @@ class RetailPilotMasterRepository {
     const cols = [
       "product_id",
       "retailpilot_article_id",
+      "legacy_code",
       "de_name",
       "de_display_name",
       "de_preparation_type",
@@ -110,6 +121,7 @@ class RetailPilotMasterRepository {
          VALUES ${batch.map(() => `(${cols.map(() => "?").join(", ")})`).join(", ")}
          ON DUPLICATE KEY UPDATE
            retailpilot_article_id = VALUES(retailpilot_article_id),
+           legacy_code = COALESCE(legacy_code, VALUES(legacy_code)),
            de_name = COALESCE(VALUES(de_name), de_name),
            de_display_name = IF(de_display_name IS NULL OR de_display_name = '', VALUES(de_display_name), de_display_name),
            de_preparation_type = COALESCE(VALUES(de_preparation_type), de_preparation_type),

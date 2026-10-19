@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { rewriteLegacyCodes } = require("../utils/legacy_item_codes");
 const { resolveByMedishopDistCodes } = require("./lib/distributor_master_lookup");
 
 const PUR_RETURN_DT_CUTOFF = "2026-02-01 00:00:00";
@@ -141,7 +142,8 @@ class PurchaseReturnRepository {
             });
             return reject(err);
           }
-          resolve(rows || []);
+          // GoFrugal returns carry the old item code.
+          rewriteLegacyCodes(this.db, rows || [], "MPR_ITEM_CODE").then(resolve, reject);
         }
       );
     });
@@ -477,9 +479,15 @@ class PurchaseReturnRepository {
             `SELECT MPR_PR_NO, MPR_MRC_NO, MPR_ITEM_CODE, MPR_ITEM_QTY, MPR_ITEM_AMOUNT
              FROM medishopdb_MED_PUR_RETURN WHERE MPR_PR_NO = ?`,
             [prNo],
-            (err2, itemRows) => {
+            async (err2, itemRows) => {
               if (err2) return reject(err2);
-              const items = itemRows || [];
+              let items;
+              try {
+                // GoFrugal returns carry the old item code.
+                items = await rewriteLegacyCodes(this.db, itemRows || [], "MPR_ITEM_CODE");
+              } catch (e) {
+                return reject(e);
+              }
               const itemCodes = [...new Set(items.map((i) => i.MPR_ITEM_CODE).filter(Boolean))];
               Promise.all([
                 this.getProductsByProductIds(itemCodes),

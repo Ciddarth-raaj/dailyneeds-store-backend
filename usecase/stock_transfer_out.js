@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { rewriteLegacyCodes } = require("../utils/legacy_item_codes");
 
 async function attachBranch(header, outletUsecase) {
   if (!outletUsecase || header.Cust_Code == null) {
@@ -135,10 +136,22 @@ function pad2(n) {
 }
 
 class StockTransferOutUsecase {
-  constructor(stockTransferOutRepo, outletUsecase, stoCheckUsecase) {
+  /**
+   * @param mainDb our database, to turn the old item codes GoFrugal's STO
+   *   lines carry into product ids (utils/legacy_item_codes.js)
+   */
+  constructor(stockTransferOutRepo, outletUsecase, stoCheckUsecase, mainDb) {
     this.stockTransferOutRepo = stockTransferOutRepo;
     this.outletUsecase = outletUsecase;
     this.stoCheckUsecase = stoCheckUsecase;
+    this.mainDb = mainDb;
+  }
+
+  /** Rewrite each item's old Item_Code to its product id, in place. */
+  async _toProductIds(headers) {
+    if (!this.mainDb) return;
+    const items = (headers || []).flatMap((h) => (h && h.items) || []);
+    await rewriteLegacyCodes(this.mainDb, items, "Item_Code");
   }
 
   /**
@@ -176,8 +189,9 @@ class StockTransferOutUsecase {
       ]);
       list.forEach((h) => {
         h.items = detailsByDnNo[String(h.Dn_no)] || [];
-        applyFileQty(h);
       });
+      await this._toProductIds(list);
+      list.forEach((h) => applyFileQty(h));
       return list;
     } catch (err) {
       logger.Log({
@@ -238,6 +252,7 @@ class StockTransferOutUsecase {
     try {
       const row = await this.stockTransferOutRepo.getByDnNo(Dn_no);
       if (!row) return null;
+      await this._toProductIds([row]);
       await attachBranch(row, this.outletUsecase);
       await attachFileQtyToItems(row, this.stoCheckUsecase);
       return row;
@@ -257,6 +272,7 @@ class StockTransferOutUsecase {
   async getByDnRefNo(Dn_Ref_no) {
     try {
       const list = await this.stockTransferOutRepo.getByDnRefNo(Dn_Ref_no);
+      await this._toProductIds(list);
       await attachBranches(list, this.outletUsecase);
       await attachFileQtyToList(list, this.stoCheckUsecase);
       return list;
@@ -274,6 +290,6 @@ class StockTransferOutUsecase {
   }
 }
 
-module.exports = (stockTransferOutRepo, outletUsecase, stoCheckUsecase) => {
-  return new StockTransferOutUsecase(stockTransferOutRepo, outletUsecase, stoCheckUsecase);
+module.exports = (stockTransferOutRepo, outletUsecase, stoCheckUsecase, mainDb) => {
+  return new StockTransferOutUsecase(stockTransferOutRepo, outletUsecase, stoCheckUsecase, mainDb);
 };

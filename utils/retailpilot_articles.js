@@ -2,11 +2,12 @@
  * RetailPilot article master -> product_table and the product hierarchy
  * tables (product_department, categories, subcategories, brands).
  *
- * Item code: an article keeps whatever product_id it already has here
- * (looked up by product_table.retailpilot_article_id); otherwise it takes its
- * old code (masterhub.articles.external_id); a new RetailPilot item with no
- * old code takes RetailPilot's own id. Old codes run 2-52,018 and RetailPilot
- * ids start at 100,001, so the two never meet.
+ * Item code: product_id is RetailPilot's article id. An article that is
+ * already here keeps its product (found by product_table.retailpilot_article_id,
+ * else by its old code, masterhub.articles.external_id = legacy_code); a new
+ * one gets its article id. The old code is only ever stored, in legacy_code,
+ * never used as an id. Old codes run 2-52,018 and RetailPilot ids start at
+ * 100,001, so the two never meet.
  *
  * Hierarchy: RetailPilot's departments, categories, subcategories and
  * brands are written into our hierarchy tables under RetailPilot's own ids
@@ -53,14 +54,19 @@ const nameKey = (v) => cleanName(v).toLowerCase();
 /**
  * @param articles rows of buildArticleQuery
  * @param existingByArticleId Map<retailpilot article id, product_id> from product_table
+ * @param existingByLegacyCode Map<old item code, product_id> from product_table
  * @returns Map<article id, product_id>
  */
-function resolveProductIds(articles, existingByArticleId) {
+function resolveProductIds(articles, existingByArticleId, existingByLegacyCode = new Map()) {
   const ids = new Map();
   for (const a of articles) {
     const articleId = toInt(a.article_id);
     if (articleId == null) continue;
-    ids.set(articleId, existingByArticleId.get(articleId) ?? toInt(a.external_id) ?? articleId);
+    const legacy = toInt(a.external_id);
+    ids.set(
+      articleId,
+      existingByArticleId.get(articleId) ?? (legacy != null ? existingByLegacyCode.get(legacy) : undefined) ?? articleId
+    );
   }
   return ids;
 }
@@ -158,6 +164,7 @@ function productRows(articles, productIdOf, taxonomy) {
     rows.push({
       product_id: productIdOf.get(articleId),
       retailpilot_article_id: articleId,
+      legacy_code: toInt(a.external_id),
       de_name: name ? name.slice(0, 500) : null,
       de_display_name: name ? name.slice(0, 255) : null,
       de_preparation_type: a.preparation_type ? String(a.preparation_type).slice(0, 200) : null,

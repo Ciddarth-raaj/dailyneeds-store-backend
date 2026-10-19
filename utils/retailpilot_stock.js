@@ -69,8 +69,7 @@ const num = (v) => {
  * @param instoreRows rows of buildInstorePriceQuery
  * @param storeMap { [retailpilot store slug]: outlet_id } from Branch Master
  * @param productIdOf Map<retailpilot article id, product_id> from the article
- *   sync; without it (or for an article it does not know) the item code is
- *   the old code, else RetailPilot's article id - the same rule.
+ *   sync; an article it does not know keys on its article id - the same rule.
  * @returns {
  *   priceRows:        Offers V3 price upload rows,
  *   stockRows:        Offers V3 stock upload rows (main location only),
@@ -103,7 +102,7 @@ function mapStockRows(stockRows, instoreRows, storeMap, productIdOf = new Map())
       continue;
     }
     const articleId = toIntCode(r.article_id);
-    const itemCode = productIdOf.get(articleId) ?? toIntCode(r.item_code) ?? articleId;
+    const itemCode = productIdOf.get(articleId) ?? articleId;
     if (itemCode == null) {
       skipped.push({ store_id: r.store_id, batch_id: r.batch_id, article_id: r.article_id, reason: "no article id in RetailPilot" });
       continue;

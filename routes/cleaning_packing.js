@@ -127,15 +127,14 @@ class CleaningPackingRoutes {
       }
     });
 
-    // Sync all data
+    // Retired: this synced repackaging items from Delium, which is gone, and
+    // it emptied purchase_item before fetching - so calling it now would only
+    // wipe the table. Products come from RetailPilot.
     router.post("/sync", async (req, res) => {
-      try {
-        const result = await this.cleaningPackingUsecase.sync();
-        res.json({ code: 200, msg: "Data successfully synced!" });
-      } catch (err) {
-        console.log(err);
-        res.json({ code: 500, msg: "An error occurred!" });
-      }
+      res.status(410).json({
+        code: 410,
+        msg: "Cleaning/packing sync from Delium is retired (Delium is no longer available).",
+      });
     });
   }
 

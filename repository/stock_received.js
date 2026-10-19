@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { rewriteLegacyCodes, productIdsToLegacy, legacyToProductIds } = require("../utils/legacy_item_codes");
 const { mapWithConcurrency } = require("../utils/concurrency");
 const {
   LATEST_GRN_LINE_EXPR,
@@ -497,7 +498,8 @@ class StockReceivedRepository {
               }
 
               try {
-                const rawItems = dtlRows || [];
+                // GoFrugal lines carry the old item code.
+                const rawItems = await rewriteLegacyCodes(this.db, dtlRows || [], "MMD_ITEM_CODE");
                 const productIds = rawItems
                   .map((row) => normalizeItemCode(row.MMD_ITEM_CODE ?? row.mmd_item_code))
                   .filter((id) => id != null);
@@ -585,7 +587,8 @@ class StockReceivedRepository {
           }
 
           try {
-            const rawItems = rows || [];
+            // GoFrugal lines carry the old item code.
+            const rawItems = await rewriteLegacyCodes(this.db, rows || [], "MMD_ITEM_CODE");
             const productIds = rawItems
               .map((row) => normalizeItemCode(row.MMD_ITEM_CODE))
               .filter((id) => id != null);
@@ -669,8 +672,15 @@ class StockReceivedRepository {
     if (!this.gofrugalDb) {
       throw new Error("Gofrugal DB connection is not configured");
     }
-    const unique = [...new Set((productIds || []).filter((id) => id != null))];
+    const wanted = [...new Set((productIds || []).filter((id) => id != null))];
+    if (!wanted.length) return new Map();
+    // GoFrugal is keyed on the old item code: ask it by old code, answer by
+    // product id. Products with no old code (new in RetailPilot) have no
+    // GoFrugal history.
+    const legacyOf = await productIdsToLegacy(this.db, wanted);
+    const unique = [...new Set([...legacyOf.values()])];
     if (!unique.length) return new Map();
+    const productIdOf = await legacyToProductIds(this.db, unique);
 
     const chunks = chunkArray(unique, GRN_PRICING_CHUNK_SIZE);
     const map = new Map();
@@ -697,9 +707,10 @@ class StockReceivedRepository {
       const bestLine = new Map();
       chunkRows.forEach((rows) => {
         (rows || []).forEach((row) => {
-          const productId = normalizeItemCode(
+          const legacyCode = normalizeItemCode(
             row.item_code ?? row.MMD_ITEM_CODE
           );
+          const productId = legacyCode == null ? null : productIdOf.get(legacyCode);
           if (productId == null) return;
           const encoded = row.latest_line ?? row.LATEST_LINE;
           if (encoded == null) return;

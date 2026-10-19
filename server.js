@@ -1452,7 +1452,8 @@ class Server {
     this.stockTransferOutUsecase = require("./usecase/stock_transfer_out")(
       this.stockTransferOutRepo,
       this.outletUsecase,
-      this.stoCheckUsecase
+      this.stoCheckUsecase,
+      this.mysql.connection
     );
     this.offersV3Usecase = require("./usecase/offers_v3")(
       this.offersV3Repo,
