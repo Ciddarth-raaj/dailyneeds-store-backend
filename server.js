@@ -562,9 +562,20 @@ class Server {
     this.deadStockItemsRepo = require("./repository/dead_stock_items")(
       this.mysql.connection
     );
+    // GRNs: the warehouse's RetailPilot purchases, plus the frozen GoFrugal
+    // copy for the ones before RetailPilot. The warehouse's RetailPilot store
+    // id comes from Branch Master on every call.
     this.stockReceivedRepo = require("./repository/stock_received")(
       this.mysql.connection,
-      this.mysqlGofrugal.connection
+      this.mysqlGofrugal.connection,
+      {
+        spectra: require("./services/retailpilot_spectra")(require("./config/retailpilot")),
+        getStoreId: async () => {
+          const map = await this.outletUsecase.getRetailPilotStoreMap();
+          const outletId = require("./config/retailpilot").grnOutletId;
+          return Object.keys(map).find((slug) => Number(map[slug]) === outletId) || null;
+        },
+      }
     );
     this.purchaseRefRepo = require("./repository/purchase_ref")(
       this.mysql.connection
