@@ -38,7 +38,9 @@ const LIST_ITEMS_SQL = `SELECT
   de_preparation_type,
   distributor_id,
   buyer_id,
-  buyer_name
+  buyer_name,
+  (SELECT pt.retailpilot_article_id FROM product_table pt
+    WHERE pt.product_id = \`${ITEMS_TABLE}\`.product_id) AS retailpilot_article_id
 FROM \`${ITEMS_TABLE}\``;
 
 const GET_META_SQL = `SELECT

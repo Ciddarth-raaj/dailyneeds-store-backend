@@ -1494,6 +1494,13 @@ class Server {
       this.hqOffersRepo,
       this.offersV3Repo
     );
+    this.retailPilotStockSyncUsecase = require("./usecase/retailpilot_stock_sync")(
+      require("./services/retailpilot_spectra")(require("./config/retailpilot")),
+      this.offersV3Usecase,
+      this.priceCheckerUsecase,
+      this.productRepo,
+      () => this.outletUsecase.getRetailPilotStoreMap()
+    );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
       this.itemMarkupdownRepo
     );
@@ -2054,7 +2061,9 @@ class Server {
     );
     const stoCheckRouter = require("./routes/sto_check")(this.stoCheckUsecase);
     const offersV3Router = require("./routes/offers_v3")(
-      this.offersV3Usecase
+      this.offersV3Usecase,
+      this.retailPilotStockSyncUsecase,
+      this.permissions
     );
     const offersV3TalkerRouter = require("./routes/offers_v3_talker")(
       this.offersV3TalkerUsecase
@@ -2298,6 +2307,27 @@ class Server {
               runRetailPilotPurchaseSync
             )
           : runRetailPilotPurchaseSync,
+        { preventOverlap: true }
+      );
+    }
+
+    // 6:00 AM (Asia/Kolkata) - pull batch stock and prices from RetailPilot
+    // into Offers V3 (price, then stock) and the Price Checker, replacing the
+    // hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
+    // POST /offers-v3/retailpilot-sync runs it by hand either way.
+    if (require("./config/retailpilot").stockSyncEnabled) {
+      const runRetailPilotStockSync = async () =>
+        await this.retailPilotStockSyncUsecase.run();
+      this.cronService.register(
+        "retailpilot_stock_sync",
+        "0 6 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron(
+              "retailpilot_stock_sync",
+              "/offers-v3/retailpilot-sync",
+              runRetailPilotStockSync
+            )
+          : runRetailPilotStockSync,
         { preventOverlap: true }
       );
     }

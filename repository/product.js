@@ -535,6 +535,48 @@ class ProductRepository {
       );
     });
   }
+
+  /**
+   * Store RetailPilot's article id against our (old) product_id. Only rows
+   * whose value changes are written; products RetailPilot does not list are
+   * left as they are.
+   * @param pairs [{ product_id, retailpilot_article_id }]
+   */
+  async setRetailPilotArticleIds(pairs) {
+    if (!Array.isArray(pairs) || pairs.length === 0) return { updated: 0 };
+    const query = (sql, params) =>
+      new Promise((resolve, reject) => {
+        this.db.query(sql, params, (err, res) => (err ? reject(err) : resolve(res)));
+      });
+    let updated = 0;
+    for (let i = 0; i < pairs.length; i += 1000) {
+      const batch = pairs.slice(i, i + 1000);
+      const cases = batch.map(() => "WHEN ? THEN ?").join(" ");
+      const params = batch.flatMap((p) => [p.product_id, p.retailpilot_article_id]);
+      const ids = batch.map((p) => p.product_id);
+      try {
+        const res = await query(
+          `UPDATE product_table
+              SET retailpilot_article_id = CASE product_id ${cases} END
+            WHERE product_id IN (${ids.map(() => "?").join(",")})
+              AND NOT (retailpilot_article_id <=> CASE product_id ${cases} END)`,
+          [...params, ...ids, ...params]
+        );
+        updated += res.affectedRows || 0;
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "REPOSITORY.PRODUCT",
+          code: "REPOSITORY.PRODUCT.SET_RETAILPILOT_ARTICLE_IDS",
+          description: err.toString(),
+          category: "",
+          ref: {},
+        });
+        throw err;
+      }
+    }
+    return { updated };
+  }
 }
 
 module.exports = (db) => {

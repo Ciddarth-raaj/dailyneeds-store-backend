@@ -59,6 +59,7 @@ function buildProducts(rows) {
     if (!groupedByItem[itemCode]) {
       groupedByItem[itemCode] = {
         Item_Code: itemCode,
+        RetailPilot_Article_ID: row.retailpilot_article_id ?? "",
         Item_Name: productDisplayName(row),
         de_distributor: row.de_distributor ?? "",
         de_preparation_type: row.de_preparation_type ?? "",

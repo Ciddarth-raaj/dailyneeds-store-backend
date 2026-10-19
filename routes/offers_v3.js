@@ -103,13 +103,40 @@ const importRowSchema = Joi.object({
 });
 const importSchema = Joi.array().items(importRowSchema).min(1);
 
+const RETAILPILOT_STOCK_SYNC_PERMISSION = "sync_retailpilot_stock";
+
 class OffersV3Routes {
-  constructor(offersV3Usecase) {
+  constructor(offersV3Usecase, retailPilotStockSync, permissions) {
     this.offersV3Usecase = offersV3Usecase;
+    this.retailPilotStockSync = retailPilotStockSync;
+    this.permissions = permissions;
     this.init();
   }
 
   init() {
+    // Pull batch stock and prices from RetailPilot now (what the 6:00 cron
+    // does): Offers V3 price, then stock, then the Price Checker. Body
+    // { dry_run: true } returns the counts without writing. Admins, and
+    // designations granted sync_retailpilot_stock.
+    const requireStockSyncPermission = this.permissions
+      ? this.permissions.require(RETAILPILOT_STOCK_SYNC_PERMISSION)
+      : (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    router.post("/retailpilot-sync", requireStockSyncPermission, async (req, res) => {
+      try {
+        if (!this.retailPilotStockSync) {
+          return res.json({ code: 503, msg: "RetailPilot sync is not available" });
+        }
+        const { error, value } = Joi.object({ dry_run: Joi.boolean().default(false) }).validate(req.body || {});
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+        const result = await this.retailPilotStockSync.run({ dryRun: value.dry_run });
+        res.json(result);
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
     // Item-level offers
     router.get("/items", async (req, res) => {
       try {
@@ -557,6 +584,6 @@ class OffersV3Routes {
   }
 }
 
-module.exports = (offersV3Usecase) => {
-  return new OffersV3Routes(offersV3Usecase);
+module.exports = (offersV3Usecase, retailPilotStockSync, permissions) => {
+  return new OffersV3Routes(offersV3Usecase, retailPilotStockSync, permissions);
 };

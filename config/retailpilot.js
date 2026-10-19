@@ -9,6 +9,9 @@ require("dotenv").config();
  *   RETAILPILOT_PURCHASE_SYNC_ENABLED  "true" schedules the cron at 9:00,
  *                                14:00 and 17:00 Asia/Kolkata
  *   RETAILPILOT_PURCHASE_LOOKBACK_DAYS days re-read on every cron run (default 3)
+ *   RETAILPILOT_STOCK_SYNC_ENABLED     the daily 6:00 Asia/Kolkata pull of batch
+ *                                stock and prices into Offers V3 and the Price
+ *                                Checker. ON unless set to "false".
  *
  * There are no defaults for the URL or key: without them the sync refuses
  * to run rather than calling anything. The RetailPilot store -> outlet map
@@ -23,6 +26,8 @@ module.exports = {
   product: process.env.RETAILPILOT_PRODUCT || "runway",
   purchaseSyncEnabled:
     String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
+  stockSyncEnabled:
+    String(process.env.RETAILPILOT_STOCK_SYNC_ENABLED || "").toLowerCase() !== "false",
   purchaseLookbackDays: Number.isInteger(lookback) && lookback >= 0 ? lookback : 3,
   pageSize: 2000,
   timeoutMs: 60000,
