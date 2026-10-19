@@ -795,10 +795,10 @@ class OffersV3Usecase {
       untaggedCandidates.push({ item_code: row.item_code, outlet_id: row.outlet_id, batch_no: row.batch_no });
     }
 
-    await Promise.all([
-      this.offersV3Repo.updateBatchOffersStatusByIds(toFlag, "zero_stock_flagged"),
-      this.offersV3Repo.updateBatchOffersStatusByIds(toRevert, "active"),
-    ]);
+    // One after the other, not in parallel: each runs on its own pooled
+    // connection, and two writers on one table can deadlock each other.
+    await this.offersV3Repo.updateBatchOffersStatusByIds(toFlag, "zero_stock_flagged");
+    await this.offersV3Repo.updateBatchOffersStatusByIds(toRevert, "active");
     const untagged = await this.detectUntaggedBatchesBulk(untaggedCandidates);
     const lowStock = await this.detectLowStockWarningsBulk();
 
@@ -865,10 +865,11 @@ class OffersV3Usecase {
     const alreadyPending = new Set(existingPending.map((w) => w.item_code));
     const newlyWarned = toWarn.filter((w) => !alreadyPending.has(w.item_code));
 
-    await Promise.all([
-      this.offersV3Repo.upsertLowStockWarnings(toWarn),
-      this.offersV3Repo.clearLowStockWarningsByItemCodes(toClear),
-    ]);
+    // Sequential: the upsert and the delete both take next-key locks on the
+    // same unique index, and run in parallel they deadlocked (ER_LOCK_DEADLOCK)
+    // on large stock uploads. toWarn and toClear never share an item_code.
+    await this.offersV3Repo.upsertLowStockWarnings(toWarn);
+    await this.offersV3Repo.clearLowStockWarningsByItemCodes(toClear);
 
     if (newlyWarned.length > 0) {
       // Out of stock is not the same news as running low - an offer with
