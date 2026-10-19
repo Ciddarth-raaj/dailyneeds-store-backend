@@ -7,13 +7,13 @@ const UNTAGGED_TABLE = "offers_v3_untagged_batches";
 const LOW_STOCK_TABLE = "offers_v3_low_stock_warnings";
 const UPLOAD_META_TABLE = "offers_v3_upload_meta";
 
-const ITEM_SELECT = `oi.id, oi.item_code, pt.retailpilot_article_id, pt.de_name AS item_name, oi.offer_type, oi.value,
+const ITEM_SELECT = `oi.id, oi.item_code, pt.de_name AS item_name, oi.offer_type, oi.value,
                 oi.threshold_qty, oi.status, oi.created_by, COALESCE(ne.employee_name, '') AS created_by_name,
                 oi.created_at, oi.updated_at`;
 const ITEM_JOINS = `LEFT JOIN product_table pt ON pt.product_id = oi.item_code
                 LEFT JOIN new_employee ne ON ne.employee_id = oi.created_by`;
 
-const BATCH_SELECT = `ob.id, ob.item_code, pt.retailpilot_article_id, pt.de_name AS item_name, ob.outlet_id, o.outlet_name,
+const BATCH_SELECT = `ob.id, ob.item_code, pt.de_name AS item_name, ob.outlet_id, o.outlet_name,
                 ob.batch_no, ob.offer_type, ob.value, ob.status, ob.created_by,
                 COALESCE(ne.employee_name, '') AS created_by_name, ob.created_at, ob.updated_at`;
 const BATCH_JOINS = `LEFT JOIN product_table pt ON pt.product_id = ob.item_code
@@ -727,7 +727,7 @@ class OffersV3Repository {
       const where = status ? "WHERE ub.status = ?" : "";
       const params = status ? [status] : [];
       this.db.query(
-        `SELECT ub.id, ub.item_code, pt.retailpilot_article_id, pt.de_name AS item_name, ub.outlet_id, o.outlet_name,
+        `SELECT ub.id, ub.item_code, pt.de_name AS item_name, ub.outlet_id, o.outlet_name,
                 ub.batch_no, ub.status, ub.detected_at
          FROM \`${UNTAGGED_TABLE}\` ub
          LEFT JOIN product_table pt ON pt.product_id = ub.item_code
@@ -830,7 +830,7 @@ class OffersV3Repository {
       const where = status ? "WHERE lw.status = ?" : "";
       const params = status ? [status] : [];
       this.db.query(
-        `SELECT lw.id, lw.item_code, pt.retailpilot_article_id, pt.de_name AS item_name,
+        `SELECT lw.id, lw.item_code, pt.de_name AS item_name,
                 lw.total_stock_qty, lw.threshold_qty, lw.status, lw.detected_at
          FROM \`${LOW_STOCK_TABLE}\` lw
          LEFT JOIN product_table pt ON pt.product_id = lw.item_code

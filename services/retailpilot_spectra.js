@@ -48,6 +48,25 @@ class RetailPilotSpectra {
     return data;
   }
 
+  /**
+   * Run `query` page by page, handing each page's rows to onPage before the
+   * next is fetched, so a table of hundreds of thousands of rows never sits
+   * in memory at once. Resolves to the number of rows read.
+   */
+  async queryEach(query, onPage, maxPages = 2000) {
+    if (!this.isConfigured()) {
+      throw new Error("RetailPilot is not configured (RETAILPILOT_SPECTRA_URL / RETAILPILOT_SPECTRA_KEY)");
+    }
+    let total = 0;
+    for (let page = 1; page <= maxPages; page++) {
+      const data = await this._page(query, page);
+      total += data.data.length;
+      await onPage(data.data);
+      if (!data.pagination.has_next) return total;
+    }
+    throw new Error(`SPECTRA query did not finish within ${maxPages} pages`);
+  }
+
   /** Every row of `query`, across all pages. */
   async queryAll(query, maxPages = 500) {
     if (!this.isConfigured()) {
