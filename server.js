@@ -1494,11 +1494,15 @@ class Server {
       this.hqOffersRepo,
       this.offersV3Repo
     );
+    const retailPilotSpectra = require("./services/retailpilot_spectra")(require("./config/retailpilot"));
     this.retailPilotStockSyncUsecase = require("./usecase/retailpilot_stock_sync")(
-      require("./services/retailpilot_spectra")(require("./config/retailpilot")),
+      retailPilotSpectra,
+      require("./usecase/retailpilot_article_sync")(
+        retailPilotSpectra,
+        require("./repository/retailpilot_master")(this.mysql.connection)
+      ),
       this.offersV3Usecase,
       this.priceCheckerUsecase,
-      this.productRepo,
       () => this.outletUsecase.getRetailPilotStoreMap()
     );
     this.itemMarkupdownUsecase = require("./usecase/item_markupdown")(
@@ -2311,9 +2315,10 @@ class Server {
       );
     }
 
-    // 6:00 AM (Asia/Kolkata) - pull batch stock and prices from RetailPilot
-    // into Offers V3 (price, then stock) and the Price Checker, replacing the
-    // hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
+    // 6:00 AM (Asia/Kolkata) - pull the article master from RetailPilot into
+    // product_table and the product hierarchy (new items created), then batch
+    // stock and prices into Offers V3 (price, then stock) and the Price
+    // Checker, replacing the hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
     // POST /offers-v3/retailpilot-sync runs it by hand either way.
     if (require("./config/retailpilot").stockSyncEnabled) {
       const runRetailPilotStockSync = async () =>

@@ -10,7 +10,7 @@
 /**
  * One row per batch per stock location with a non-zero quantity, with the
  * batch's default selling price (the row with no channel, customer or store).
- * item_code is the old (GoFrugal) code our product_table is keyed on;
+ * item_code is the old code (null for items created in RetailPilot);
  * article_id is RetailPilot's own id.
  */
 function buildStockQuery() {
@@ -49,16 +49,6 @@ ORDER BY batch_id, store_id
 `;
 }
 
-/** Old item code -> RetailPilot article id, for product_table. */
-function buildArticleIdQuery() {
-  return `
-SELECT slug AS article_id, external_id AS item_code
-FROM masterhub.articles
-WHERE external_id IS NOT NULL
-ORDER BY slug
-`;
-}
-
 // Only stock in the selling location counts towards Offers V3 stock; damaged,
 // dock, GRN-holding and production stock is not on the shelf.
 const SELLABLE_LOCATION = "main";
@@ -78,6 +68,9 @@ const num = (v) => {
  * @param stockRows rows of buildStockQuery
  * @param instoreRows rows of buildInstorePriceQuery
  * @param storeMap { [retailpilot store slug]: outlet_id } from Branch Master
+ * @param productIdOf Map<retailpilot article id, product_id> from the article
+ *   sync; without it (or for an article it does not know) the item code is
+ *   the old code, else RetailPilot's article id - the same rule.
  * @returns {
  *   priceRows:        Offers V3 price upload rows,
  *   stockRows:        Offers V3 stock upload rows (main location only),
@@ -88,7 +81,7 @@ const num = (v) => {
  * in-store retail price for every store, else its default price. Online and
  * B2B prices are never used.
  */
-function mapStockRows(stockRows, instoreRows, storeMap) {
+function mapStockRows(stockRows, instoreRows, storeMap, productIdOf = new Map()) {
   const instoreForStore = new Map();
   const instoreAll = new Map();
   for (const r of instoreRows || []) {
@@ -109,9 +102,10 @@ function mapStockRows(stockRows, instoreRows, storeMap) {
       unmappedStores.add(r.store_id);
       continue;
     }
-    const itemCode = toIntCode(r.item_code);
+    const articleId = toIntCode(r.article_id);
+    const itemCode = productIdOf.get(articleId) ?? toIntCode(r.item_code) ?? articleId;
     if (itemCode == null) {
-      skipped.push({ store_id: r.store_id, batch_id: r.batch_id, article_id: r.article_id, reason: "no item code (external_id) in RetailPilot" });
+      skipped.push({ store_id: r.store_id, batch_id: r.batch_id, article_id: r.article_id, reason: "no article id in RetailPilot" });
       continue;
     }
     const key = `${itemCode}|${outletId}|${r.batch_id}`;
@@ -190,22 +184,9 @@ function mapStockRows(stockRows, instoreRows, storeMap) {
   };
 }
 
-/** [{ product_id, retailpilot_article_id }] from buildArticleIdQuery rows. */
-function mapArticleIds(rows) {
-  const out = [];
-  for (const r of rows || []) {
-    const productId = toIntCode(r.item_code);
-    const articleId = toIntCode(r.article_id);
-    if (productId != null && articleId != null) out.push({ product_id: productId, retailpilot_article_id: articleId });
-  }
-  return out;
-}
-
 module.exports = {
   buildStockQuery,
   buildInstorePriceQuery,
-  buildArticleIdQuery,
   mapStockRows,
-  mapArticleIds,
   SELLABLE_LOCATION,
 };

@@ -3,7 +3,7 @@
  */
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
-const { mapStockRows, mapArticleIds } = require("./retailpilot_stock");
+const { mapStockRows } = require("./retailpilot_stock");
 
 const STORE_MAP = { "store-a": 2, "store-b": 3 };
 
@@ -57,25 +57,26 @@ describe("mapStockRows", () => {
     assert.equal(price("2", "B-2"), 120);
   });
 
-  it("skips rows with no item code or no price, and unmapped stores", () => {
+  it("item code: the article sync's id, else the old code, else RetailPilot's id", () => {
     const r = mapStockRows(
-      [row({ item_code: null }), row({ batch_id: "B-2", default_selling_price: null }), row({ store_id: "store-x" })],
+      [row(), row({ batch_id: "B-2", item_code: null, article_id: 127784 }), row({ batch_id: "B-3", article_id: 555 })],
+      [],
+      STORE_MAP,
+      new Map([[555, 40001]])
+    );
+    assert.deepEqual(r.priceRows.map((p) => [p.batch_no, p.item_code]), [["B-1", 33097], ["B-2", 127784], ["B-3", 40001]]);
+  });
+
+  it("skips rows with no price, and unmapped stores", () => {
+    const r = mapStockRows(
+      [row({ default_selling_price: null }), row({ store_id: "store-x" })],
       [],
       STORE_MAP
     );
     assert.equal(r.priceRows.length, 0);
-    assert.equal(r.skipped.length, 2);
+    assert.equal(r.skipped.length, 1);
     assert.deepEqual(r.unmappedStores, ["store-x"]);
     // A batch with no price still reports its stock.
-    assert.deepEqual(r.stockRows.map((s) => s.batch_no), ["B-2"]);
-  });
-});
-
-describe("mapArticleIds", () => {
-  it("keeps numeric pairs only", () => {
-    assert.deepEqual(
-      mapArticleIds([{ article_id: 109996, item_code: "33097" }, { article_id: 1, item_code: "X1" }]),
-      [{ product_id: 33097, retailpilot_article_id: 109996 }]
-    );
+    assert.deepEqual(r.stockRows.map((s) => s.batch_no), ["B-1"]);
   });
 });
