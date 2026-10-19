@@ -61,10 +61,12 @@ class ProductRoutes {
 
         const data = req.query;
 
+        // Old products RetailPilot does not have are hidden unless asked for.
         const product = await this.productUsecase.get(
           data.limit,
           data.offset,
-          data.fetchAll
+          data.fetchAll,
+          String(data.include_legacy) === "true"
         );
         res.json(product);
       } catch (err) {
@@ -172,7 +174,9 @@ class ProductRoutes {
 
     router.get("/prodcount", async (req, res) => {
       try {
-        const product = await this.productUsecase.getProductCount();
+        const product = await this.productUsecase.getProductCount(
+          String(req.query.include_legacy) === "true"
+        );
         res.json(product);
       } catch (err) {
         console.log(err);

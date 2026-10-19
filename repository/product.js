@@ -206,7 +206,11 @@ class ProductRepository {
     });
   }
 
-  get(limit, offset, fetchAll = false) {
+  /**
+   * @param includeLegacy also list old products RetailPilot does not have
+   *   (no retailpilot_article_id); left out by default, as nothing sells them.
+   */
+  get(limit, offset, fetchAll = false, includeLegacy = false) {
     return new Promise((resolve, reject) => {
       this.db.query(
         `SELECT
@@ -245,6 +249,7 @@ class ProductRepository {
         LEFT JOIN product_distributor_master pdm ON pdm.cid = p.distributor_id
         LEFT JOIN categories cat ON p.category_id = cat.category_id
         LEFT JOIN subcategories sub ON p.subcategory_id = sub.category_id
+        ${includeLegacy ? "" : "WHERE p.retailpilot_article_id IS NOT NULL"}
         ORDER BY p.product_id DESC
         LIMIT ${offset}, ${limit}`,
         [],
@@ -361,10 +366,11 @@ class ProductRepository {
       );
     });
   }
-  getProductCount() {
+  getProductCount(includeLegacy = false) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT count(product_id) AS product_count FROM product_table`,
+        `SELECT count(product_id) AS product_count FROM product_table
+         ${includeLegacy ? "" : "WHERE retailpilot_article_id IS NOT NULL"}`,
         [],
         (err, docs) => {
           if (err) {

@@ -174,10 +174,10 @@ class ProductUsecase {
     });
   }
 
-  getProductCount() {
+  getProductCount(includeLegacy = false) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.productRepo.getProductCount();
+        const data = await this.productRepo.getProductCount(includeLegacy);
         resolve(data);
       } catch (err) {
         reject(err);
@@ -185,10 +185,10 @@ class ProductUsecase {
     });
   }
 
-  get(limit, offset, fetchAll = false) {
+  get(limit, offset, fetchAll = false, includeLegacy = false) {
     return new Promise(async (resolve, reject) => {
       try {
-        const data = await this.productRepo.get(limit, offset, fetchAll);
+        const data = await this.productRepo.get(limit, offset, fetchAll, includeLegacy);
         resolve(data);
       } catch (err) {
         reject(err);
