@@ -63,7 +63,6 @@ function memoryRepo() {
       const r = find(year, month, employee_id);
       if (!r || !r.calc_status) return { outcome: "NOT_CALCULATED" };
       if (!r.published) return { outcome: "NOT_PUBLISHED" };
-      if (r.document_type !== "FNF") return { outcome: "NOT_FNF" };
       const id = await repo.ensureCase({ employee_id, exit_date: r.exit_date });
       const c = state.cases.find((x) => x.fnf_settlement_id === id);
       if (c.status === "SETTLED") return { outcome: "ALREADY_SETTLED", case: c };
@@ -154,9 +153,10 @@ describe("settlement completion", () => {
     assert.equal(repo.state.cases.length, 1);
   });
 
-  it("a month whose published document is a Salary Payslip is not an F&F to settle", async () => {
+  it("payment is confirmed against the exit month's published payslip, whatever form it was published in", async () => {
+    // e.g. the resignation was recorded after the month was published as an ordinary payslip
     Object.assign(repo.state.payrun[0], { calc_status: "APPROVED_LOCKED", published: true, document_type: "PAYSLIP" });
-    await assert.rejects(uc.settle(settleInput), /not a Full & Final/);
+    assert.equal((await uc.settle(settleInput)).outcome, "SETTLED");
   });
 
   it("validates the payment: mode, bank reference, date not in the future or before the exit", async () => {

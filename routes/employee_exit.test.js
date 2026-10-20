@@ -73,7 +73,6 @@ const spy = (name, out = {}) => async (...args) => {
 };
 const usecase = {
   getMonth: spy("getMonth", { rows: [] }),
-  reconcileExit: spy("reconcileExit"),
   settle: spy("settle"),
   reopen: spy("reopen"),
   employeeExits: spy("employeeExits", { exits: [] }),
@@ -167,12 +166,12 @@ describe("F&F payroll endpoints", () => {
     assert.equal(seen.length, 0);
   });
 
-  it("reconciling a late-recorded exit is a payroll action (process_payroll), not an Accounts one", async () => {
+  it("there is no Reconcile Exit step: the endpoint is gone", async () => {
     const body = { ...MONTH, employee_id: 2095 };
-    assert.equal((await call(FNF_MANAGER, "POST", "/payrun/fnf/reconcile-exit", body)).status, 403);
+    for (const who of [FNF_MANAGER, PAYROLL_PROCESSOR]) {
+      assert.equal((await call(who, "POST", "/payrun/fnf/reconcile-exit", body)).status, 404);
+    }
     assert.equal(seen.length, 0);
-    assert.equal((await call(PAYROLL_PROCESSOR, "POST", "/payrun/fnf/reconcile-exit", body)).status, 200);
-    assert.equal(seen[0].name, "reconcileExit");
   });
 
   it("the schema refuses figures and fields a client may not send", async () => {
