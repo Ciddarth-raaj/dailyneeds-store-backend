@@ -12,7 +12,8 @@ const { asExitMonthView } = require("../utils/payslip_snapshot");
  */
 module.exports = (payslipRepo) => async (snapshot) => {
   const src = snapshot && snapshot.source;
-  if (!snapshot || snapshot.document_type !== "PAYSLIP" || !src) return snapshot;
+  // Only an F&F is already the F&F; an older payslip may carry no document_type at all.
+  if (!snapshot || snapshot.document_type === "FNF" || !src) return snapshot;
   if (!payslipRepo || typeof payslipRepo.getExitFacts !== "function") return snapshot;
   const facts = await payslipRepo.getExitFacts({
     payrun_employee_id: src.payrun_employee_id,

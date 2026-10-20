@@ -379,6 +379,14 @@ describe("an exit month published as an ordinary payslip PRINTS as the F&F", () 
     assert.equal(s.payslipFilename(view).startsWith("FnF_Settlement_Sep-2026"), true);
   });
 
+  it("a payslip published before document_type existed (September, before the F&F release) converts too", () => {
+    const { document_type, fnf, ...legacy } = build({ ncp_days: 4 });
+    assert.equal(legacy.document_type, undefined);
+    const view = s.asExitMonthView(legacy, FACTS);
+    assert.equal(view.document_type, "FNF");
+    assert.deepEqual(view.fnf, asPublishedFnf().fnf);
+  });
+
   it("never changes the stored snapshot", () => {
     const payslip = build();
     const frozen = s.freezeSnapshot(payslip);

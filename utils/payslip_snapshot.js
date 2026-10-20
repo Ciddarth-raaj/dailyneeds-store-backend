@@ -360,7 +360,8 @@ function fnfBlock({ netPay, ...facts }) {
  * returned as it is.
  */
 function asExitMonthView(snapshot, facts) {
-  if (!snapshot || snapshot.document_type !== DOCUMENT_TYPE.PAYSLIP || !facts) return snapshot;
+  // A payslip published before document_type existed (before the F&F release) has none: it is a payslip.
+  if (!snapshot || snapshot.document_type === DOCUMENT_TYPE.FNF || !facts) return snapshot;
   const period = snapshot.period || {};
   if (!isExitMonth({ year: period.year, month: period.month, resignation_date: facts.exit_date })) return snapshot;
   const attendance = snapshot.attendance || {};
