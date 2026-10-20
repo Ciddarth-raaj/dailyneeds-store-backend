@@ -14,8 +14,6 @@ const {
   isLockedStatus,
   LIFECYCLE_ACTION,
   RECALC_REASON,
-  READY_BLOCKER,
-  CALC_STATUS_LABEL,
 } = require("../constants/payrun_calculation");
 const { monthWindow, statutorySetupComplete, statutorySetupGaps } = require("../utils/payrun_eligibility");
 const { deriveState } = require("../utils/payrun_adjustments");
@@ -673,31 +671,21 @@ class PayrunCalculationUsecase {
     const currentSourceHash = calc.sourceHash(currentMarkers);
     const priorMonthOt = (context.lateOtOf && context.lateOtOf.get(id)) || [];
     /*
-     * THE F&F MONTH: the payrun snapshot's last working day falls in this
-     * month. It is calculated exactly like any other month; Publish issues an
-     * F&F statement for it.
+     * THE F&F MONTH - the F&F statement is just this month's payslip in its
+     * F&F form. The last working day is the payrun snapshot's, or - when the
+     * resignation was recorded after the month was initialized - the employee
+     * master's. Nothing else changes: the month is calculated, approved and
+     * published exactly like any other; Publish picks the F&F form.
      */
+    const liveExit = context.liveExitOf ? (context.liveExitOf.get(id) || {}).live_exit_date || null : null;
+    const exitDate = employee.resignation_date || liveExit || null;
     const exitMonth = isExitMonth({
       year: context.period.year,
       month: context.period.month,
-      resignation_date: employee.resignation_date,
+      resignation_date: exitDate,
     });
     const currentInputsHash = calc.inputsHash({ amounts, pay_type: employee.pay_type, prior_month_ot: priorMonthOt });
 
-    /*
-     * ===================== AN EXIT THE SNAPSHOT DOES NOT KNOW ABOUT ========
-     * The master's exit date against the snapshot's, decided BEFORE readiness
-     * so the existing readiness refuses the calculation (and therefore the
-     * approval) - see `utils/payroll_readiness.js#EXIT_NOT_RECONCILED`. Only
-     * dates on or before the month end matter.
-     */
-    const liveExit = context.liveExitOf
-      ? ((context.liveExitOf.get(id) || {}).live_exit_date || null)
-      : undefined;
-    const snapshotExit = employee.resignation_date || null;
-    const inScope = (d) => Boolean(d) && d <= context.window.to;
-    const exitMismatch =
-      liveExit !== undefined && liveExit !== snapshotExit && (inScope(liveExit) || inScope(snapshotExit));
     /*
      * THE SHARED PAYROLL READINESS. A dry run of the very calculation
      * Calculate performs supplies its errors, so "calculable" here and
@@ -731,7 +719,6 @@ class PayrunCalculationUsecase {
         // F&F: the final month's own rules, inside the existing readiness.
         final_month: exitMonth,
         pending_ot_to_exit: Number(((context.openOtToDateOf && context.openOtToDateOf.get(id)) || {}).pending_ot || 0),
-        exit_mismatch: exitMismatch ? { snapshot_exit_date: snapshotExit, live_exit_date: liveExit } : null,
       });
     }
 
@@ -828,18 +815,6 @@ class PayrunCalculationUsecase {
     const attendanceDependent = (value) => (verdict.attendance_pending ? null : value);
 
     /*
-     * THE SAME RULE WHERE READINESS COULD NOT BE EVALUATED (no day-row read):
-     * the mismatch is still an approval blocker, in the existing vocabulary.
-     * A locked month is never re-judged here; Publish refuses it instead.
-     */
-    if (exitMismatch && !readiness && !isLockedStatus(verdict.status)) {
-      verdict.blockers = [...(verdict.blockers || []), calc.blockerOf(READY_BLOCKER.EXIT_NOT_RECONCILED)];
-      if (verdict.status === CALC_STATUS.READY_FOR_APPROVAL) {
-        verdict.status = CALC_STATUS.CALCULATED;
-        verdict.status_label = CALC_STATUS_LABEL[CALC_STATUS.CALCULATED];
-      }
-    }
-    /*
      * APPROVED OT STILL PENDING SETTLEMENT IN THE LEAVER'S LAST MONTH. Shown
      * on the row, refused at Publish and at Settle - see `lifecycle`.
      */
@@ -860,7 +835,7 @@ class PayrunCalculationUsecase {
         amounts,
         priorMonthOt,
         exitMonth,
-        exitMismatch,
+        exitDate,
         outstandingOt,
         openOtRequests,
         entrySalary,
@@ -880,9 +855,7 @@ class PayrunCalculationUsecase {
          * an F&F statement rather than a Salary Payslip.
          */
         is_fnf: exitMonth,
-        last_working_day: exitMonth ? employee.resignation_date || null : null,
-        /** The master's exit date disagrees with the snapshot's - see `_present`. */
-        exit_reconcile: exitMismatch ? { snapshot_exit_date: snapshotExit, live_exit_date: liveExit } : null,
+        last_working_day: exitMonth ? exitDate : null,
         /** Approved OT of the leaver still waiting for a payroll month. */
         outstanding_ot: outstandingOt.length
           ? {
@@ -2476,7 +2449,10 @@ class PayrunCalculationUsecase {
      * row keeps its snapshot's split, exactly as before.
      */
     const payslipEmployee = (presented) => {
-      const { employee, stored } = presented.internals;
+      const { stored, exitDate } = presented.internals;
+      // The last working day as payroll knows it now (see `_present`): an exit
+      // recorded after initialization still makes this month's payslip the F&F one.
+      const employee = { ...presented.internals.employee, resignation_date: exitDate || presented.internals.employee.resignation_date };
       const record = stored ? pricedSalaryOf.get(String(pricedSalaryIdOf(presented.internals))) : null;
       if (!record || paiseOf(record.monthly_gross) !== paiseOf(stored.monthly_gross)) return employee;
       const fixed = fixedSalaryFigures(record);
@@ -2499,7 +2475,6 @@ class PayrunCalculationUsecase {
       MONTH_LOCKED: [ROW_RESULT.LOCKED, `Payroll month ${monthLabel} is locked.`],
       SOURCE_MOVED: [ROW_RESULT.BLOCKED, "Not published — the attendance changed after this month was calculated. Unlock, recalculate and approve again."],
       CALCULATION_CHANGED: [ROW_RESULT.BLOCKED, "Not published — the calculation changed while publishing. Reload and try again."],
-      EXIT_NOT_RECONCILED: [ROW_RESULT.BLOCKED, "Not published — the employee's exit was recorded or changed after this month was initialized. Unlock, reset, reconcile the exit on the F&F Settlement screen, recalculate and approve again."],
       FNF_OUTSTANDING_OT: [ROW_RESULT.BLOCKED, "Not published — this is the employee's final (F&F) month and OT is still undecided or approved-but-unpaid. Decide it, unlock and recalculate so the F&F pays it, then approve again."],
       FNF_SETTLED: [ROW_RESULT.BLOCKED, "Not changed — this Full & Final Settlement is marked settled (paid). Reopen the settlement first."],
       ATTENDANCE_STALE: [ROW_RESULT.BLOCKED, "Not published — the attendance summary is not current with its days. Unlock, process attendance, recalculate and approve again."],
@@ -2542,15 +2517,9 @@ class PayrunCalculationUsecase {
       }
       if (action === LIFECYCLE_ACTION.PUBLISH) {
         /*
-         * NEVER RELEASE THE WRONG DOCUMENT. An exit recorded or changed after
-         * the month was initialized means the stored month is the wrong kind
-         * of month; an F&F with approved OT still pending settlement would
-         * close the leaver's last month without paying it.
+         * An F&F with approved OT still pending settlement would close the
+         * leaver's last month without paying it.
          */
-        if (presented.internals.exitMismatch) {
-          push(SKIP.EXIT_NOT_RECONCILED);
-          continue;
-        }
         if (
           presented.internals.exitMonth &&
           ((presented.internals.outstandingOt || []).length > 0 || presented.internals.openOtRequests > 0)
