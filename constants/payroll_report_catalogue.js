@@ -204,15 +204,17 @@ const PAYROLL_FIELDS = [
   }),
   // ACTIVE AND EXITED EMPLOYEES ARE ONE REPORT: an employee whose last working
   // day falls in the payroll month is that month's F&F (Exited Employee).
+  // The last working day as payroll knows it: the payrun snapshot's, or the
+  // employee master's when the resignation was recorded after initialization.
   f("employee_classification", "Employee Classification", G.EMPLOYEE, {
     select:
-      "CASE WHEN pe.resignation_date IS NOT NULL AND YEAR(pe.resignation_date) = pe.period_year " +
-      "AND MONTH(pe.resignation_date) = pe.period_month THEN 'Exited Employee' ELSE 'Active Employee' END",
-    source: SOURCE.PAYRUN_SNAPSHOT,
+      "CASE WHEN COALESCE(pe.resignation_date, new_employee.resignation_date) IS NOT NULL AND YEAR(COALESCE(pe.resignation_date, new_employee.resignation_date)) = pe.period_year " +
+      "AND MONTH(COALESCE(pe.resignation_date, new_employee.resignation_date)) = pe.period_month THEN 'Exited Employee' ELSE 'Active Employee' END",
+    join: "new_employee", source: SOURCE.PAYRUN_SNAPSHOT,
   }),
   f("last_working_day", "Last Working Day", G.EMPLOYEE, {
-    select: "DATE_FORMAT(pe.resignation_date, '%Y-%m-%d')", sort: "pe.resignation_date",
-    type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
+    select: "DATE_FORMAT(COALESCE(pe.resignation_date, new_employee.resignation_date), '%Y-%m-%d')", sort: "COALESCE(pe.resignation_date, new_employee.resignation_date)",
+    join: "new_employee", type: TYPE.DATE, source: SOURCE.PAYRUN_SNAPSHOT,
   }),
   f("pay_type", "Pay Type", G.EMPLOYEE, { select: PAY_TYPE, always: true }),
   f("uan", "UAN", G.EMPLOYEE, {

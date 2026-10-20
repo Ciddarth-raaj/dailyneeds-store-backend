@@ -23,13 +23,16 @@ const { istToday } = require("../utils/istDate");
  * salary days, OT (approved only), PF, ESI and the existing adjustments -
  * advance recovery included - all go through the one engine, unchanged. This
  * usecase reports where each exit's settlement stands, records Accounts'
- * confirmation that a published F&F was paid, reconciles a late-recorded
- * exit, and keeps the confidential exit interview and rehire assessments.
+ * confirmation that the exit month's published payslip was paid, and keeps
+ * the confidential exit interview and rehire assessments.
+ *
+ * THE F&F IS JUST THE EXIT MONTH'S PAYSLIP. The last working day is the
+ * payroll snapshot's or, when the resignation was recorded later, the
+ * employee master's; the month is otherwise handled like any other.
  *
  * IT NEVER CHANGES AN APPROVED OR PUBLISHED MONTH. Settle only records a
- * fact about the published figures; Reconcile Exit refuses any calculated
- * month; Unlock / Unpublish of a SETTLED month is refused by the payroll
- * lifecycle itself.
+ * fact about the published figures; Unlock / Unpublish of a SETTLED month is
+ * refused by the payroll lifecycle itself.
  */
 
 function validationError(message) {
@@ -103,7 +106,6 @@ class EmployeeExitUsecase {
       const published = r.calc_stored_status === "APPROVED_LOCKED" && Boolean(r.published_at);
       const ot = outstanding.get(Number(r.employee_id));
       const openOt = undecided.get(Number(r.employee_id)) || 0;
-      const exitChanged = r.live_exit_date !== undefined && (r.live_exit_date || null) !== (r.exit_date || null);
       const calcStatus = published ? "PUBLISHED" : r.calc_stored_status || null;
       return {
         employee_id: Number(r.employee_id),
@@ -133,11 +135,7 @@ class EmployeeExitUsecase {
           : null,
         /* OT requests up to the last working day still awaiting a decision. */
         open_ot_requests: openOt,
-        live_exit_date: r.live_exit_date || null,
-        needs_reconcile: exitChanged,
-        warning: exitChanged
-          ? `The employee master's exit date (${r.live_exit_date || "none"}) differs from this month's payroll snapshot (${r.exit_date}). Reconcile the exit before approving or publishing.`
-          : ot
+        warning: ot
           ? `${ot.items} approved OT item(s) are still pending settlement. Unlock and recalculate this month so the F&F pays them; Publish and payment confirmation are refused until then.`
           : openOt
           ? `${openOt} OT request(s) up to the last working day are still awaiting a decision. Decide them; payment cannot be confirmed until then.`
@@ -164,16 +162,7 @@ class EmployeeExitUsecase {
         payment_reference: r.payment_reference || null,
         paid_on: r.paid_on || null,
         settled_at: r.settled_at || null,
-        /*
-         * INITIALIZED BEFORE THE RESIGNATION WAS RECORDED: the payrun snapshot
-         * has no last working day, so this month would publish an ordinary
-         * payslip, not an F&F. Shown so it is never missed; nothing here
-         * changes the payroll.
-         */
-        needs_reconcile: Number(r.initialized_without_exit) === 1,
-        warning: Number(r.initialized_without_exit) === 1
-          ? "This month was initialized before the resignation was recorded. Approval and Publish are refused until the exit is reconciled: reset the calculation (unpublish / unlock first if needed), then Reconcile Exit, then recalculate."
-          : null,
+        warning: null,
         ...settlementStage({ settlement_status: r.settlement_status, initialized: false, calc_status: null }),
       });
     });
@@ -192,33 +181,6 @@ class EmployeeExitUsecase {
       );
     }
     return row;
-  }
-
-  /* ===================================================== exit reconcile */
-
-  /**
-   * BRING A LATE-RECORDED EXIT INTO THE MONTH'S SNAPSHOT - the explicit
-   * correction for a resignation recorded after the month was initialized.
-   * Refused while the month holds any calculation (Reset it first; an
-   * approved or published month is unpublished / unlocked first with the
-   * existing actions), so no approved or published figure ever changes here.
-   */
-  async reconcileExit({ year, month, employee_id, store_ids = null, actor = {} }) {
-    const p = this._month(year, month);
-    const row = await this.repo.getPayrunRow({ year: p.year, month: p.month, employee_id: Number(employee_id), store_ids });
-    if (!row) throw notFound("This employee is not initialized for the selected month, or is outside your branch scope");
-    const res = await this.repo.reconcileExit({ ...p, employee_id: Number(employee_id), actor });
-    const refusals = {
-      MONTH_LOCKED: "The payroll month is locked.",
-      PUBLISHED: "This month is published. Unpublish it, unlock it and reset the calculation before reconciling the exit.",
-      APPROVED_LOCKED: "This month is approved & locked. Unlock it and reset the calculation before reconciling the exit.",
-      CALCULATED: "This month has a calculation. Reset the calculation first, then reconcile the exit and recalculate.",
-      NOT_INITIALIZED: "This employee is not initialized for the selected month.",
-      NOTHING_TO_RECONCILE: "The payroll snapshot already carries the employee master's exit date.",
-      EXIT_BEFORE_MONTH: `The recorded exit (${res.live_exit_date}) is before this month: the employee was not employed in it. This needs a payroll correction, not a reconcile.`,
-    };
-    if (refusals[res.outcome]) throw conflict(refusals[res.outcome]);
-    return { code: 200, ...res, message: "Exit reconciled. Process attendance if needed, then recalculate this employee." };
   }
 
   /* ============================================ settlement completion */
@@ -246,8 +208,7 @@ class EmployeeExitUsecase {
     });
     const refusals = {
       NOT_CALCULATED: "This employee's exit month is not calculated.",
-      NOT_PUBLISHED: "The F&F statement must be approved and published before it can be marked settled.",
-      NOT_FNF: "The published document for this month is not a Full & Final Settlement statement.",
+      NOT_PUBLISHED: "The exit month's payslip must be approved and published before payment can be confirmed.",
       CALCULATION_CHANGED: "The published statement does not match the calculation. Reload and try again.",
       OUTSTANDING_OT: "OT for this employee is still undecided, or approved but not yet paid. Decide it, unlock and recalculate the F&F month so it is paid, then publish again before confirming payment.",
       ALREADY_SETTLED: "This Full & Final Settlement is already marked settled.",

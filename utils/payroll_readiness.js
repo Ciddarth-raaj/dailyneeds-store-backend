@@ -71,15 +71,6 @@ const REASON = Object.freeze({
    */
   STATUTORY_SETUP_INCOMPLETE: "STATUTORY_SETUP_INCOMPLETE",
   CALCULATION_REJECTED: "CALCULATION_REJECTED",
-  /*
-   * F&F: THE EXIT MUST BE RECORDED BEFORE THE MONTH IS CALCULATED. The
-   * employee master's exit date disagrees with the payroll snapshot's (a
-   * resignation recorded, moved or voided after initialization), so the month
-   * would be priced as the wrong kind of month. Never accepted by Close
-   * Attendance for Payroll and never cleared by Process Attendance - only by
-   * reconciling the exit (F&F Settlement -> Reconcile Exit).
-   */
-  EXIT_NOT_RECONCILED: "EXIT_NOT_RECONCILED",
 });
 
 const LABEL = Object.freeze({
@@ -95,7 +86,6 @@ const LABEL = Object.freeze({
   [REASON.SALARY_NOT_READY]: "Salary not ready",
   [REASON.STATUTORY_SETUP_INCOMPLETE]: "Statutory setup incomplete - on hold",
   [REASON.CALCULATION_REJECTED]: "Calculation would be rejected",
-  [REASON.EXIT_NOT_RECONCILED]: "Exit not reconciled",
 });
 
 /**
@@ -211,12 +201,10 @@ function evaluatePayrollReadiness(input = {}) {
     /**
      * F&F. `final_month`: this is the employee's exit (last payroll) month.
      * `pending_ot_to_exit`: OT requests still undecided on ANY date up to the
-     * month end - earlier months included. `exit_mismatch`: the master's exit
-     * date against the snapshot's, when they differ.
+     * month end - earlier months included.
      */
     final_month = false,
     pending_ot_to_exit = 0,
-    exit_mismatch = null,
   } = input;
 
   const reasons = [];
@@ -401,18 +389,6 @@ function evaluatePayrollReadiness(input = {}) {
       reason(
         REASON.PENDING_OT_APPROVAL,
         `${int0(pending.pending_ot)} OT request(s) in this month are still awaiting a decision.`
-      )
-    );
-  }
-
-  if (exit_mismatch) {
-    reasons.push(
-      reason(
-        REASON.EXIT_NOT_RECONCILED,
-        `The employee master's exit date (${exit_mismatch.live_exit_date || "none"}) differs from this month's payroll ` +
-          `snapshot (${exit_mismatch.snapshot_exit_date || "none"}). Record exits before calculating; to correct it, ` +
-          "reset the calculation if there is one, then Reconcile Exit on the F&F Settlement screen.",
-        exit_mismatch
       )
     );
   }

@@ -156,10 +156,11 @@ describe("the EXISTING payroll readiness carries the F&F rules", () => {
   };
   const codes = (r) => r.reasons.map((x) => x.code);
 
-  it("an exit recorded after initialization makes the month NOT calculable, and Close Attendance cannot accept it", () => {
-    const r = evaluatePayrollReadiness({ ...base, closed_for_payroll: true, exit_mismatch: { snapshot_exit_date: null, live_exit_date: "2026-08-16" } });
-    assert.ok(codes(r).includes(READINESS_REASON.EXIT_NOT_RECONCILED));
-    assert.equal(r.calculable, false);
+  it("an exit recorded after the month was initialized adds NO readiness rule: the F&F is just that month's payslip", () => {
+    assert.equal("EXIT_NOT_RECONCILED" in READINESS_REASON, false);
+    const plain = evaluatePayrollReadiness({ ...base, closed_for_payroll: true });
+    const exitMonth = evaluatePayrollReadiness({ ...base, closed_for_payroll: true, final_month: true, pending_ot_to_exit: 0 });
+    assert.deepEqual(codes(exitMonth), codes(plain), "the exit month is judged exactly like any other month");
   });
 
   it("pending OT in an ORDINARY month may be accepted by Close Attendance for Payroll (existing rule, unchanged)", () => {
