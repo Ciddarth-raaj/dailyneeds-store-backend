@@ -314,8 +314,7 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
       actual[key] = money(weights[i] === null ? null : weights[i]);
     });
   }
-  const recoverable = netPay < 0;
-  return {
+  return fnfBlock({
     last_working_day: dateOnly(employee.resignation_date),
     date_of_joining: textOrNull(employee.date_of_joining),
     lop_days: c.ncp_days === null || c.ncp_days === undefined ? null : Number(c.ncp_days),
@@ -323,6 +322,15 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
     lateness_amount: moneyOf(c.missing_hours_deduction),
     actual_monthly_gross: moneyOf(employee.monthly_gross),
     actual,
+    netPay,
+  });
+}
+
+/** The F&F block from its printed facts and the stored Net Pay (paise). */
+function fnfBlock({ netPay, ...facts }) {
+  const recoverable = netPay < 0;
+  return {
+    ...facts,
     net_payable_label: recoverable ? "Total Recoverable from Employee" : "Total Net Payable",
     recoverable,
     net_payable_words: amountInWords(money(Math.abs(netPay))),
@@ -332,6 +340,51 @@ function fnfBlockOf({ c, employee, split, weights, netPay, salaryDays }) {
       .replace("{amount}", rupeeText(Math.abs(netPay)))
       .replace("{words}", amountInWords(money(Math.abs(netPay)))),
     declaration_signing: recoverable ? FNF_RECOVERABLE_SIGNING : FNF_DECLARATION_SIGNING,
+  };
+}
+
+/**
+ * AN EXIT MONTH ALWAYS PRINTS AS THE F&F. A month published as an ordinary
+ * payslip before the employee's exit was recorded is still their final
+ * month: shown or downloaded, it is laid out as the Full & Final Settlement.
+ *
+ * A VIEW, NOT A CHANGE. The stored snapshot and its hash are untouched; every
+ * figure printed is the snapshot's own. `facts` adds only what the ordinary
+ * payslip does not carry, read at render time from the month's payrun rows:
+ *   exit_date      the last working day (payrun snapshot, else the master)
+ *   ncp_days       the stored LOP days of the published calculation
+ *   basic, hra, conveyance, special_allowance, monthly_gross
+ *                  the payrun's salary structure, used for the "Actual"
+ *                  column only when it is the gross the snapshot was paid on
+ * Anything else - an F&F already, no exit, an exit in another month - is
+ * returned as it is.
+ */
+function asExitMonthView(snapshot, facts) {
+  if (!snapshot || snapshot.document_type !== DOCUMENT_TYPE.PAYSLIP || !facts) return snapshot;
+  const period = snapshot.period || {};
+  if (!isExitMonth({ year: period.year, month: period.month, resignation_date: facts.exit_date })) return snapshot;
+  const attendance = snapshot.attendance || {};
+  const gross = toPaise(attendance.monthly_gross);
+  const weights = [facts.basic, facts.hra, facts.conveyance, facts.special_allowance].map(toPaise);
+  const structured = gross !== null && toPaise(facts.monthly_gross) === gross && weights.every((w) => w !== null && w >= 0)
+    && weights.reduce((a, b) => a + b, 0) === gross;
+  const actual = {};
+  if (structured) COMPONENTS.forEach(([key], i) => { actual[key] = money(weights[i]); });
+  const netPay = toPaise(snapshot.final && snapshot.final.net_pay) || 0;
+  return {
+    ...snapshot,
+    document_type: DOCUMENT_TYPE.FNF,
+    template_version: FNF_TEMPLATE_VERSION,
+    fnf: fnfBlock({
+      last_working_day: dateOnly(facts.exit_date),
+      date_of_joining: textOrNull(snapshot.employee && snapshot.employee.date_of_joining),
+      lop_days: facts.ncp_days === null || facts.ncp_days === undefined ? null : Number(facts.ncp_days),
+      actual_working_days: attendance.salary_days === null || attendance.salary_days === undefined ? null : Number(attendance.salary_days),
+      lateness_amount: money(paiseOr0(attendance.missing_hours_deduction)),
+      actual_monthly_gross: money(gross),
+      actual,
+      netPay,
+    }),
   };
 }
 
@@ -682,6 +735,7 @@ module.exports = {
   balancedComponents,
   maskTail,
   buildPayslipSnapshot,
+  asExitMonthView,
   canonicalJson,
   sha256,
   freezeSnapshot,

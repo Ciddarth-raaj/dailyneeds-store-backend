@@ -318,3 +318,29 @@ describe("the PDF, on demand", () => {
     assert.equal((await get(`/telegram/payslips/pdf?ref=${A_SEP.payslip_ref}&t=x`)).status, 400);
   });
 });
+
+describe("an exit month published as an ordinary payslip opens and downloads as the F&F", () => {
+  it("detail and PDF are the F&F; the stored payslip is untouched", async () => {
+    const asked = [];
+    const exitRepo = {
+      ...payslipRepo,
+      getExitFacts: async (src) => {
+        asked.push(src);
+        return { exit_date: "2026-09-18", monthly_gross: null, ncp_days: 3 };
+      },
+    };
+    const own = buildPayslips({ payslipRepo: exitRepo, renderPdf, now: () => clockMs });
+    const storedBefore = A_SEP.snapshot_json;
+    const detail = await own.detail(101, A_SEP.payslip_ref);
+    assert.equal(detail.payslip.document_type, "FNF");
+    assert.equal(detail.payslip.snapshot.fnf.last_working_day, "2026-09-18");
+    assert.match(detail.payslip.filename, /^FnF_Settlement_Sep-2026/);
+    const pdf = await own.pdf(101, A_SEP.payslip_ref);
+    assert.equal(rendered[rendered.length - 1].document_type, "FNF");
+    assert.match(pdf.filename, /^FnF_Settlement_Sep-2026/);
+    assert.deepEqual(asked[0], { payrun_employee_id: 101 * 100 + 9, payrun_calculation_id: 101 * 10 + 9 });
+    // August is not the exit month: still the ordinary payslip.
+    assert.equal((await own.detail(101, A_AUG.payslip_ref)).payslip.document_type, "PAYSLIP");
+    assert.equal(A_SEP.snapshot_json, storedBefore);
+  });
+});

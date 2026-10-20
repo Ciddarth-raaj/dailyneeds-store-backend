@@ -4101,6 +4101,30 @@ describe("bulk payslip export - server-resolved, filtered, read-only", () => {
     assert.deepEqual(world.payslips.map((p) => p.first_viewed_at), [null, "2026-10-05 08:44:10", null]);
   });
 
+  it("AN EXIT MONTH PUBLISHED AS AN ORDINARY PAYSLIP downloads as the F&F; the stored payslip is unchanged", async () => {
+    await seed(2, [1, 2]);
+    const rendered = [];
+    calculation.renderPdfs = async (snapshots) => {
+      rendered.push(...snapshots);
+      return snapshots.map(() => Buffer.from("PDF"));
+    };
+    const asked = [];
+    calculation.payslipRepo.getExitFacts = async (ref) => {
+      asked.push(ref);
+      // Asked in order: employee 1 left on 20 August; employee 2 has no exit.
+      return { exit_date: asked.length === 1 ? "2026-08-20" : null };
+    };
+    const before = JSON.stringify(world.payslips);
+    await calculation.exportPayslipPdfs({ ...MONTH, employee_ids: [1, 2] });
+    assert.deepEqual(rendered.map((r) => r.document_type), ["FNF", "PAYSLIP"]);
+    assert.equal(rendered[0].fnf.last_working_day, "2026-08-20");
+    assert.equal(rendered[0].final.net_pay, JSON.parse(world.payslips[0].snapshot_json).final.net_pay, "same figures");
+    assert.equal(JSON.stringify(world.payslips), before, "nothing stored is changed");
+    assert.equal(JSON.parse(world.payslips[0].snapshot_json).document_type, "PAYSLIP");
+    assert.equal(asked.length, 2);
+    assert.ok(asked.every((r) => r.payrun_employee_id && r.payrun_calculation_id), "looked up by the snapshot's own source");
+  });
+
   it("a render failure fails the whole batch loudly - never a partial batch", async () => {
     await seed(2, [1, 2]);
     calculation.renderPdfs = async () => { throw new Error("chrome died"); };

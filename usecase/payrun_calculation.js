@@ -24,6 +24,7 @@ const { latestClosableDate } = require("../utils/attendance_persist_guard");
 const { istToday } = require("../utils/istDate");
 const crypto = require("crypto");
 const payslipSnapshot = require("../utils/payslip_snapshot");
+const printView = require("./payslip_print_view");
 const { isExitMonth } = require("../utils/fnf");
 const pfCeilingImpact = require("../utils/pf_ceiling_impact");
 const epfoEcr = require("../utils/epfo_ecr");
@@ -2809,7 +2810,9 @@ class PayrunCalculationUsecase {
     if (!active) {
       return { period_year: period.year, period_month: period.month, employee_id: ids[0], payslip: null, versions };
     }
-    const snapshot = payslipSnapshot.readFrozenSnapshot(active.snapshot_json, active.snapshot_sha256);
+    const snapshot = await printView(this.payslipRepo)(
+      payslipSnapshot.readFrozenSnapshot(active.snapshot_json, active.snapshot_sha256)
+    );
     const notifications = await this.payslipRepo.listNotifications(active.payslip_id);
     return {
       period_year: period.year,
@@ -2912,7 +2915,8 @@ class PayrunCalculationUsecase {
         skipped.push({ employee_id: id, reason: "NOT_EXPORTABLE" });
         continue;
       }
-      found.push({ id, snapshot: payslipSnapshot.readFrozenSnapshot(active.snapshot_json, active.snapshot_sha256) });
+      // An exit month prints as the F&F even when it was published as an ordinary payslip.
+      found.push({ id, snapshot: await printView(this.payslipRepo)(payslipSnapshot.readFrozenSnapshot(active.snapshot_json, active.snapshot_sha256)) });
     }
     const pdfs = await this.renderPdfs(found.map((f) => f.snapshot));
     return {

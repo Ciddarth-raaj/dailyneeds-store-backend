@@ -1,4 +1,5 @@
 const { readFrozenSnapshot, payslipFilename } = require("../utils/payslip_snapshot");
+const printView = require("./payslip_print_view");
 const crypto = require("crypto");
 const { monthLabel, PDF_LINK_TTL_SECONDS } = require("../constants/payslip");
 
@@ -73,6 +74,7 @@ function employeeView(snapshot) {
 module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), linkTtlSeconds = PDF_LINK_TTL_SECONDS, maxLinks = 5000 }) => {
   /** sha256(token) -> { employee_id, ref, expires_at } */
   const links = new Map();
+  const asPrinted = printView(payslipRepo);
   const hash = (token) => crypto.createHash("sha256").update(token, "utf8").digest("hex");
   const prune = () => {
     const t = now();
@@ -94,7 +96,8 @@ module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), 
     if (typeof payslipRef !== "string" || !REF_RE.test(payslipRef)) throw notFound();
     const row = await payslipRepo.getPublishedForEmployee(employeeId, payslipRef);
     if (!row || Number(row.employee_id) !== employeeId) throw notFound();
-    return { row, snapshot: readFrozenSnapshot(row.snapshot_json, row.snapshot_sha256) };
+    // An exit month reads as the F&F even when it was published as an ordinary payslip.
+    return { row, snapshot: await asPrinted(readFrozenSnapshot(row.snapshot_json, row.snapshot_sha256)) };
   };
 
   /** "September 2026 - Published - View", newest month first. */

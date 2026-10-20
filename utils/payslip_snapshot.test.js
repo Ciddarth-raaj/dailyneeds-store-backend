@@ -350,3 +350,63 @@ describe("the establishment code is required only where it applies", () => {
     assert.doesNotThrow(() => build({ esi_applicable: 0 }, { ...COMPANY, esi_establishment_code: "" }));
   });
 });
+
+describe("an exit month published as an ordinary payslip PRINTS as the F&F", () => {
+  const FACTS = {
+    exit_date: "2026-09-20", monthly_gross: "26013.37",
+    basic: "13006.69", hra: "5000.00", conveyance: "2500.00", special_allowance: "5506.68", ncp_days: 4,
+  };
+  const asPublishedFnf = (over = {}) =>
+    s.buildPayslipSnapshot({
+      period: PERIOD,
+      calculation: { ...STORED(), ncp_days: 4, ...over },
+      employee: { ...EMPLOYEE, resignation_date: "2026-09-20", monthly_gross: "26013.37" },
+      extras: EXTRAS,
+      company: COMPANY,
+    });
+
+  it("is exactly the F&F that Publish would have frozen, with the same figures", () => {
+    const payslip = build({ ncp_days: 4 });
+    assert.equal(payslip.document_type, "PAYSLIP");
+    const view = s.asExitMonthView(payslip, FACTS);
+    const fnf = asPublishedFnf();
+    assert.equal(view.document_type, "FNF");
+    assert.equal(view.template_version, fnf.template_version);
+    assert.deepEqual(view.fnf, fnf.fnf);
+    for (const k of ["earnings", "deductions", "final", "employee", "attendance", "statutory", "source"]) {
+      assert.deepEqual(view[k], payslip[k], `${k} is the published snapshot's own`);
+    }
+    assert.equal(s.payslipFilename(view).startsWith("FnF_Settlement_Sep-2026"), true);
+  });
+
+  it("never changes the stored snapshot", () => {
+    const payslip = build();
+    const frozen = s.freezeSnapshot(payslip);
+    s.asExitMonthView(s.readFrozenSnapshot(frozen.text, frozen.sha256), FACTS);
+    const again = s.readFrozenSnapshot(frozen.text, frozen.sha256);
+    assert.equal(again.document_type, "PAYSLIP");
+    assert.equal(again.fnf, null);
+  });
+
+  it("a recoverable month gets the recoverable acknowledgement", () => {
+    const over = { incentive: "0.00", advance_recovery: "30000.00", total_earnings: "27326.42", total_employee_deductions: "31992.03", net_pay: "-4666.00", net_pay_rounding: "-0.39" };
+    const view = s.asExitMonthView(build(over), FACTS);
+    assert.deepEqual(view.fnf, asPublishedFnf(over).fnf);
+    assert.equal(view.fnf.recoverable, true);
+  });
+
+  it("leaves everything else as it is", () => {
+    const payslip = build();
+    assert.equal(s.asExitMonthView(payslip, null), payslip, "no payrun row");
+    assert.equal(s.asExitMonthView(payslip, { ...FACTS, exit_date: null }), payslip, "no exit");
+    assert.equal(s.asExitMonthView(payslip, { ...FACTS, exit_date: "2026-10-03" }), payslip, "exit in another month");
+    const fnf = asPublishedFnf();
+    assert.equal(s.asExitMonthView(fnf, FACTS), fnf, "already the F&F");
+  });
+
+  it("prints no Actual column it cannot vouch for", () => {
+    const view = s.asExitMonthView(build(), { ...FACTS, monthly_gross: "30000.00", basic: "15000.00" });
+    assert.deepEqual(view.fnf.actual, {});
+    assert.equal(view.fnf.actual_monthly_gross, "26013.37");
+  });
+});

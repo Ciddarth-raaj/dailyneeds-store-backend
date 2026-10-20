@@ -177,6 +177,28 @@ class PayrunPayslipRepository {
     return rows.length === 0 ? null : rows[0];
   }
 
+  /**
+   * WHAT AN ORDINARY PAYSLIP NEEDS TO PRINT AS THE F&F - read-only, for
+   * `asExitMonthView`: the month's last working day (the payrun snapshot's,
+   * else the employee master's), the payrun's salary structure and the
+   * published calculation's LOP days. Null when the payrun row is gone.
+   */
+  async getExitFacts({ payrun_employee_id, payrun_calculation_id }) {
+    const rows = await this._read(
+      "GET-EXIT-FACTS",
+      `SELECT DATE_FORMAT(COALESCE(pe.resignation_date, ne.resignation_date), '%Y-%m-%d') AS exit_date,
+              pe.monthly_gross, pe.basic, pe.hra, pe.conveyance, pe.special_allowance,
+              c.ncp_days
+         FROM payrun_employee pe
+         LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
+         LEFT JOIN payrun_employee_calculation c
+           ON c.payrun_employee_id = pe.payrun_employee_id AND c.payrun_calculation_id = ?
+        WHERE pe.payrun_employee_id = ?`,
+      [payrun_calculation_id || null, payrun_employee_id]
+    );
+    return rows.length === 0 ? null : rows[0];
+  }
+
   /** Every version of one employee month, newest first - history, no snapshot text. */
   async listVersions({ year, month, employee_id }) {
     return this._read(
