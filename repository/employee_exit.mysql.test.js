@@ -493,6 +493,27 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal(Number(kase.settled_payslip_id), Number(slip.payslip_id), "references the payslip as published");
     const still = (await q(pool, "SELECT document_type, snapshot_json FROM payrun_payslip WHERE payslip_id = ?", [slip.payslip_id]))[0];
     assert.deepEqual([still.document_type, still.snapshot_json], ["PAYSLIP", slip.snapshot_json], "the published payslip is unchanged");
+
+    // Downloaded - the Payrun export and the employee's own Mini App PDF - it is the F&F statement.
+    let exported = null;
+    calcUsecase.renderPdfs = async (snapshots) => {
+      exported = snapshots;
+      return snapshots.map((x) => Buffer.from(payslipHtml(x, { logo: null })));
+    };
+    const out = await calcUsecase.exportPayslipPdfs({ year: YEAR, month: MONTH, employee_ids: [9] });
+    const html = Buffer.from(out.files[0].pdf_base64, "base64").toString();
+    assert.match(html, /Full &amp; Final Settlement/);
+    assert.match(html, /Employee Declaration/);
+    const published = JSON.parse(slip.snapshot_json);
+    assert.equal(exported[0].fnf.last_working_day, "2026-08-30");
+    assert.equal(exported[0].final.net_pay, published.final.net_pay, "the published figures");
+    assert.ok(Object.keys(exported[0].fnf.actual).length > 0, "the Actual column comes from the payrun's own structure");
+    const ref = (await q(pool, "SELECT payslip_ref FROM payrun_payslip WHERE payslip_id = ?", [slip.payslip_id]))[0].payslip_ref;
+    const own = await miniApp.pdf(9, ref);
+    assert.match(own.buffer.toString(), /Full &amp; Final Settlement/);
+    assert.match(own.filename, /^FnF_Settlement_/);
+    const after = (await q(pool, "SELECT document_type, snapshot_json, snapshot_sha256 FROM payrun_payslip WHERE payslip_id = ?", [slip.payslip_id]))[0];
+    assert.deepEqual([after.document_type, after.snapshot_json], ["PAYSLIP", slip.snapshot_json], "downloading changes nothing stored");
   });
 
   it("P0 OUTSTANDING OT: approved OT pending settlement blocks the F&F publish and settle; unlock + recalculate pays it exactly once; cancelled/rejected OT is never paid", async () => {
