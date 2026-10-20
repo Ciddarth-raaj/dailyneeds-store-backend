@@ -20,9 +20,6 @@ const {
  *   GET  /payrun/fnf/month         the month's exits and where each F&F stands
  *   POST /payrun/fnf/settle        ACCOUNTS confirms a PUBLISHED F&F was paid
  *   POST /payrun/fnf/reopen        ACCOUNTS reopens that, with a reason
- *   POST /payrun/fnf/reconcile-exit bring a late-recorded exit into the
- *                                  month's snapshot (view_employees +
- *                                  process_payroll)
  *
  *   GET  /hr/exit/employee/:employee_id                  every exit (CONFIDENTIAL)
  *   GET  /hr/exit/employee/:employee_id/case/:case_id    interview + rehire history
@@ -123,28 +120,6 @@ class EmployeeExitRoutes {
           if (!scoped) return;
           const actor = await this.permissions.actorFor(req);
           res.json(await this.usecase.settle({ ...req.body, store_ids: scoped.store_ids, actor }));
-        } catch (err) {
-          this._fail(res, err);
-        }
-      }
-    );
-
-    /*
-     * RECONCILE A LATE-RECORDED EXIT into the month's payroll snapshot. It
-     * changes the payroll snapshot, so it takes the existing payroll
-     * processing key - the one that initializes and calculates a month.
-     */
-    r.post(
-      "/payrun/fnf/reconcile-exit",
-      this.permissions.requireAll(P.VIEW_EMPLOYEES, P.PROCESS_PAYROLL),
-      async (req, res) => {
-        try {
-          const v = Joi.validate(req.body, { ...this._month(), employee_id: Joi.number().integer().positive().required() });
-          if (v.error !== null) throw v.error;
-          const scoped = await this._scope(req, res);
-          if (!scoped) return;
-          const actor = await this.permissions.actorFor(req);
-          res.json(await this.usecase.reconcileExit({ ...req.body, store_ids: scoped.store_ids, actor }));
         } catch (err) {
           this._fail(res, err);
         }

@@ -189,9 +189,12 @@ class EmployeeExitRepository {
   /* ============================================ the month's exits (F&F) */
 
   /**
-   * THE EXIT MONTH'S PAYROLL ROWS: every initialized employee whose snapshot
-   * last working day falls in the month, with their stored calculation
-   * status, the ACTIVE payslip and the settlement case for that exit.
+   * THE EXIT MONTH'S PAYROLL ROWS: every initialized employee whose last
+   * working day falls in the month - the payroll snapshot's, or the employee
+   * master's when the resignation was recorded after the month was
+   * initialized - with their stored calculation status, the ACTIVE payslip
+   * (the exit month's payslip, whatever form it was published in) and the
+   * settlement case for that exit.
    */
   async listMonthPayrunExits({ year, month, from, to, store_ids = null, employee_ids = null }) {
     const params = [from, to, year, month];
@@ -211,12 +214,11 @@ class EmployeeExitRepository {
       `SELECT pe.payrun_employee_id, pe.employee_id, pe.employee_name, pe.store_id, pe.store_name,
               pe.designation_name, pe.pay_type,
               DATE_FORMAT(pe.date_of_joining, '%Y-%m-%d') AS date_of_joining,
-              DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS exit_date,
+              DATE_FORMAT(COALESCE(pe.resignation_date, ne.resignation_date), '%Y-%m-%d') AS exit_date,
               c.payrun_calculation_id, c.status AS calc_stored_status,
               DATE_FORMAT(c.published_at, '%Y-%m-%d %H:%i:%s') AS published_at,
               c.net_pay, c.calculation_hash,
               p.payslip_id, p.document_type,
-              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS live_exit_date,
               ${CASE_JOIN_COLUMNS}
          FROM payrun_employee pe
          LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
@@ -225,24 +227,21 @@ class EmployeeExitRepository {
          LEFT JOIN payrun_payslip p
            ON p.payrun_employee_id = pe.payrun_employee_id AND p.status = 'ACTIVE'
          LEFT JOIN employee_fnf_settlement s
-           ON s.employee_id = pe.employee_id AND s.exit_date = pe.resignation_date
-        WHERE pe.resignation_date BETWEEN ? AND ?
+           ON s.employee_id = pe.employee_id AND s.exit_date = COALESCE(pe.resignation_date, ne.resignation_date)
+        WHERE COALESCE(pe.resignation_date, ne.resignation_date) BETWEEN ? AND ?
           AND pe.period_year = ? AND pe.period_month = ?${clause}
-        ORDER BY pe.resignation_date, pe.employee_id`,
+        ORDER BY COALESCE(pe.resignation_date, ne.resignation_date), pe.employee_id`,
       params
     );
   }
 
   /**
-   * EXITS IN THE MONTH THAT PAYROLL HAS NOT REACHED AS AN EXIT: closed
-   * employment periods that ended in the month, for employees with no payrun
-   * row carrying THAT exit date - either no payrun row at all, or one
-   * initialized before the resignation was recorded (`initialized_without_exit`).
-   * The second kind is reported, never silently dropped: its snapshot has no
-   * last working day, so the month would publish an ordinary payslip.
+   * EXITS IN THE MONTH THAT PAYROLL HAS NOT REACHED: closed employment
+   * periods that ended in the month, for employees with no payrun row for the
+   * month at all (those that have one are listed by listMonthPayrunExits).
    */
   async listMonthUninitializedExits({ year, month, from, to, store_ids = null }) {
-    const params = [year, month, from, to, year, month];
+    const params = [from, to, year, month];
     let clause = "";
     if (Array.isArray(store_ids)) {
       if (store_ids.length === 0) return [];
@@ -254,9 +253,6 @@ class EmployeeExitRepository {
         "LIST-MONTH-UNINITIALIZED-EXITS",
         `SELECT ep.employee_id, ne.employee_name, ne.store_id,
                 DATE_FORMAT(ep.ended_on, '%Y-%m-%d') AS exit_date,
-                EXISTS (SELECT 1 FROM payrun_employee pe2
-                         WHERE pe2.employee_id = ep.employee_id
-                           AND pe2.period_year = ? AND pe2.period_month = ?) AS initialized_without_exit,
                 ${CASE_JOIN_COLUMNS}
            FROM employee_employment_period ep
            JOIN new_employee ne ON ne.employee_id = ep.employee_id
@@ -265,8 +261,7 @@ class EmployeeExitRepository {
           WHERE ep.period_state = 'closed' AND ep.ended_on BETWEEN ? AND ?
             AND NOT EXISTS (SELECT 1 FROM payrun_employee pe
                              WHERE pe.employee_id = ep.employee_id
-                               AND pe.period_year = ? AND pe.period_month = ?
-                               AND pe.resignation_date = ep.ended_on)${clause}
+                               AND pe.period_year = ? AND pe.period_month = ?)${clause}
           ORDER BY ep.ended_on, ep.employee_id`,
         params
       );
@@ -287,28 +282,6 @@ class EmployeeExitRepository {
       this._log(code, err);
       throw err;
     }
-  }
-
-  /** One employee's payrun row for the month, inside the caller's branch scope. */
-  async getPayrunRow({ year, month, employee_id, store_ids = null }) {
-    const params = [year, month, employee_id];
-    let clause = "";
-    if (Array.isArray(store_ids)) {
-      if (store_ids.length === 0) return null;
-      clause = " AND pe.store_id IN (?)";
-      params.push(store_ids);
-    }
-    const rows = await this._read(
-      "GET-PAYRUN-ROW",
-      `SELECT pe.payrun_employee_id, pe.employee_id, pe.employee_name,
-              DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS snapshot_exit_date,
-              DATE_FORMAT(ne.resignation_date, '%Y-%m-%d') AS live_exit_date
-         FROM payrun_employee pe
-         LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
-        WHERE pe.period_year = ? AND pe.period_month = ? AND pe.employee_id = ?${clause}`,
-      params
-    );
-    return rows.length ? rows[0] : null;
   }
 
   /** Approved OT still PENDING_SETTLEMENT up to this month, per employee (counts). */
@@ -346,93 +319,15 @@ class EmployeeExitRepository {
     );
   }
 
-  /* ===================================================== exit reconcile */
-
-  /**
-   * RECONCILE A LATE-RECORDED EXIT INTO THE MONTH'S SNAPSHOT.
-   *
-   * The payrun snapshot's `resignation_date` is set to the employee master's
-   * current one - the ONLY write - with an audit row, in one transaction.
-   *
-   * IT NEVER TOUCHES FIGURES. It refuses whenever the month holds a
-   * calculation of any kind (the user resets it first with the existing,
-   * audited Reset, which also releases any prior-month OT it had claimed);
-   * an approved or published month must be unpublished / unlocked first with
-   * the existing lifecycle actions. A locked payroll month refuses. An exit
-   * date BEFORE the month means the employee was not employed in it at all,
-   * which this action does not decide.
-   */
-  async reconcileExit({ year, month, from, to, employee_id, actor = {} }) {
-    return this.withTransaction(async (conn) => {
-      const [periodRow] = await this._read(
-        "RECONCILE-LOCK-PERIOD",
-        "SELECT status FROM payrun_period WHERE period_year = ? AND period_month = ? LOCK IN SHARE MODE",
-        [year, month],
-        conn
-      );
-      if (periodRow && periodRow.status === "LOCKED") return { outcome: "MONTH_LOCKED" };
-      const [calcRow] = await this._read(
-        "RECONCILE-LOCK-CALCULATION",
-        `SELECT status, published_at FROM payrun_employee_calculation
-          WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
-        [year, month, employee_id],
-        conn
-      );
-      if (calcRow && calcRow.status === "APPROVED_LOCKED") {
-        return { outcome: calcRow.published_at ? "PUBLISHED" : "APPROVED_LOCKED" };
-      }
-      if (calcRow) return { outcome: "CALCULATED" };
-      const [payrun] = await this._read(
-        "RECONCILE-LOCK-PAYRUN",
-        `SELECT payrun_employee_id, DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
-           FROM payrun_employee WHERE period_year = ? AND period_month = ? AND employee_id = ? FOR UPDATE`,
-        [year, month, employee_id],
-        conn
-      );
-      if (!payrun) return { outcome: "NOT_INITIALIZED" };
-      const [live] = await this._read(
-        "RECONCILE-READ-MASTER",
-        `SELECT DATE_FORMAT(resignation_date, '%Y-%m-%d') AS resignation_date
-           FROM new_employee WHERE employee_id = ? LOCK IN SHARE MODE`,
-        [employee_id],
-        conn
-      );
-      const liveExit = live ? live.resignation_date || null : null;
-      const snapshotExit = payrun.resignation_date || null;
-      if (liveExit === snapshotExit) return { outcome: "NOTHING_TO_RECONCILE" };
-      if (liveExit && liveExit < from) return { outcome: "EXIT_BEFORE_MONTH", live_exit_date: liveExit };
-      // An exit AFTER this month is not this month's: the snapshot keeps none.
-      const next = liveExit && liveExit <= to ? liveExit : null;
-      if (next === snapshotExit) return { outcome: "NOTHING_TO_RECONCILE" };
-      const res = await this._read(
-        "RECONCILE-UPDATE",
-        `UPDATE payrun_employee SET resignation_date = ?
-          WHERE payrun_employee_id = ? AND (resignation_date <=> ?)`,
-        [next, payrun.payrun_employee_id, snapshotExit],
-        conn
-      );
-      if (Number(res.affectedRows) !== 1) throw new Error("RECONCILE moved no row; rolled back");
-      await this._read(
-        "RECONCILE-AUDIT",
-        `INSERT INTO payrun_exit_reconcile_audit
-                (payrun_employee_id, period_year, period_month, employee_id,
-                 old_resignation_date, new_resignation_date, actor_employee_id, actor_user_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [payrun.payrun_employee_id, year, month, employee_id, snapshotExit, next, actor.employeeId ?? null, actor.userId ?? null],
-        conn
-      );
-      return { outcome: "RECONCILED", old_exit_date: snapshotExit, new_exit_date: next };
-    });
-  }
-
   /* ================================================ settlement completion */
 
   /**
    * MARK AN F&F AS SETTLED - once.
    *
    * Under the calculation row's lock (the payroll lifecycle's own), the month
-   * must still be Approved & Locked AND published, its ACTIVE document must be
-   * an F&F statement, and the case must not already be SETTLED. What was
+   * must still be Approved & Locked AND published (its ACTIVE payslip - the
+   * exit month's payslip, in whatever form it was published), and the case
+   * must not already be SETTLED. What was
    * settled is frozen on the case: the payslip, the calculation hash and the
    * Net Pay. `uq_fnf_payrun` refuses one payroll month settling two exits.
    * A second Settle - a double click, two tabs - finds SETTLED and changes
@@ -443,9 +338,10 @@ class EmployeeExitRepository {
       const [calcRow] = await this._read(
         "SETTLE-LOCK-CALCULATION",
         `SELECT c.payrun_calculation_id, c.payrun_employee_id, c.status, c.published_at, c.calculation_hash,
-                DATE_FORMAT(pe.resignation_date, '%Y-%m-%d') AS exit_date
+                DATE_FORMAT(COALESCE(pe.resignation_date, ne.resignation_date), '%Y-%m-%d') AS exit_date
            FROM payrun_employee_calculation c
            JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id
+           LEFT JOIN new_employee ne ON ne.employee_id = pe.employee_id
           WHERE c.period_year = ? AND c.period_month = ? AND c.employee_id = ?
           FOR UPDATE`,
         [year, month, employee_id],
@@ -461,7 +357,6 @@ class EmployeeExitRepository {
         conn
       );
       if (!slip) return { outcome: "NOT_PUBLISHED" };
-      if (slip.document_type !== "FNF") return { outcome: "NOT_FNF" };
       if (String(slip.calculation_hash) !== String(calcRow.calculation_hash)) return { outcome: "CALCULATION_CHANGED" };
       /*
        * APPROVED OT STILL WAITING FOR A MONTH. The F&F month is the leaver's
