@@ -75,7 +75,7 @@ describe("the pull", () => {
     const fs = require("fs");
     const server = fs.readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
     assert.match(server, /require\("\.\/usecase\/retailpilot_sales"\)\(\s*require\("\.\/services\/retailpilot_spectra"\)\(\{\s*\.\.\.retailPilotConfig,\s*product: retailPilotConfig\.salesProduct,/);
-    assert.equal(require("../config/retailpilot").salesProduct, process.env.RETAILPILOT_SALES_PRODUCT || "mandapam");
+    assert.equal(require("../config/retailpilot").salesProduct, "Mandapam", "fixed, whatever .env says");
   });
 
   it("not configured, a bad day, or a SPECTRA failure: a reason, never a throw", async () => {
