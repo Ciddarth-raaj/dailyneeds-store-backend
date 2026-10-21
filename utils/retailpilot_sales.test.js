@@ -30,11 +30,9 @@ describe("the day", () => {
     assert.match(q, /FILTER \(WHERE b\.sign = -1\)/);
     assert.match(q, /bp\.payment_type = 'loyalty'/);
     assert.match(q, /AS outletname/);
-    assert.match(q, /LEFT JOIN masterhub\.stores st ON st\.slug = s\.store_slug/, "store names from an allowed table");
-    assert.doesNotMatch(q, /peti\./, "SPECTRA refuses peti.stores (whitelist_violation)");
-    assert.match(q, /FROM relational\.bills b/, "bills are in SPECTRA's relational schema");
-    assert.match(q, /FROM relational\.bill_payments bp\s+JOIN relational\.bills b ON b\.bill_no = bp\.bill_no/);
-    assert.doesNotMatch(q, /public\./, "not public.bills (whitelist_violation)");
+    assert.match(q, /FROM public\.bills b/, "the owner's tables, as the query runs on RetailPilot");
+    assert.match(q, /FROM public\.bill_payments bp\s+JOIN public\.bills b ON b\.bill_no = bp\.bill_no/);
+    assert.match(q, /LEFT JOIN peti\.stores st ON st\.slug = s\.store_slug/);
     assert.throws(() => buildSalesQuery("2026-10-16' OR '1'='1"), /YYYY-MM-DD/);
   });
 });
@@ -74,8 +72,26 @@ describe("the pull", () => {
   it("the server builds the sales client with the sales product, not the purchase one", () => {
     const fs = require("fs");
     const server = fs.readFileSync(require("path").join(__dirname, "..", "server.js"), "utf8");
-    assert.match(server, /require\("\.\/usecase\/retailpilot_sales"\)\(\s*require\("\.\/services\/retailpilot_spectra"\)\(\{\s*\.\.\.retailPilotConfig,\s*product: retailPilotConfig\.salesProduct,/);
+    assert.match(server, /require\("\.\/usecase\/retailpilot_sales"\)\(\s*require\("\.\/services\/retailpilot_spectra"\)\(\{\s*\.\.\.retailPilotConfig,\s*baseUrl: retailPilotConfig\.salesBaseUrl,\s*apiKey: retailPilotConfig\.salesApiKey,\s*product: retailPilotConfig\.salesProduct,/);
     assert.equal(require("../config/retailpilot").salesProduct, "Mandapam", "fixed, whatever .env says");
+  });
+
+  it("sales use their own SPECTRA key and URL when set; the purchase ones otherwise", () => {
+    const load = (env) => {
+      const saved = { ...process.env };
+      for (const k of ["RETAILPILOT_SPECTRA_URL", "RETAILPILOT_SPECTRA_KEY", "RETAILPILOT_SALES_SPECTRA_URL", "RETAILPILOT_SALES_SPECTRA_KEY"]) delete process.env[k];
+      Object.assign(process.env, env);
+      const path = require.resolve("../config/retailpilot");
+      delete require.cache[path];
+      const c = require(path);
+      delete require.cache[path];
+      process.env = saved;
+      return c;
+    };
+    const own = load({ RETAILPILOT_SPECTRA_URL: "https://runway.example/", RETAILPILOT_SPECTRA_KEY: "rk", RETAILPILOT_SALES_SPECTRA_URL: "https://pos.example/", RETAILPILOT_SALES_SPECTRA_KEY: "sk" });
+    assert.deepEqual([own.salesBaseUrl, own.salesApiKey, own.baseUrl, own.apiKey], ["https://pos.example", "sk", "https://runway.example", "rk"]);
+    const shared = load({ RETAILPILOT_SPECTRA_URL: "https://runway.example", RETAILPILOT_SPECTRA_KEY: "rk" });
+    assert.deepEqual([shared.salesBaseUrl, shared.salesApiKey], ["https://runway.example", "rk"]);
   });
 
   it("not configured, a bad day, or a SPECTRA failure: a reason, never a throw", async () => {
