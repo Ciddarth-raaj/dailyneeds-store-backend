@@ -8,8 +8,8 @@
  *   total_bill_amount   bills (sign 1), total_payable_with_services
  *   total_sales_return  returns (sign -1), total_payable_with_services
  *   loyalty             loyalty payments, net of returns (amount * sign)
- *   tables              bill.bills, bill.bill_payments (SPECTRA schema
- *                       "bill"), masterhub.stores.name for the outlet
+ *   tables              relational.bills, relational.bill_payments (SPECTRA
+ *                       schema "relational"), masterhub.stores for the outlet
  *   outletname          masterhub.stores.name (peti.stores is not on SPECTRA's
  *                       allowed list)
  */
@@ -39,14 +39,14 @@ WITH s AS (
   SELECT b.bill_date, b.store_slug,
     COALESCE(SUM(b.total_payable_with_services) FILTER (WHERE b.sign = 1), 0)  AS total_bill_amount,
     COALESCE(SUM(b.total_payable_with_services) FILTER (WHERE b.sign = -1), 0) AS total_sales_return
-  FROM bill.bills b
+  FROM relational.bills b
   WHERE b.bill_date = DATE '${d}'
   GROUP BY b.bill_date, b.store_slug
 ),
 l AS (
   SELECT b.bill_date, b.store_slug, SUM(bp.amount * b.sign) AS loyalty
-  FROM bill.bill_payments bp
-  JOIN bill.bills b ON b.bill_no = bp.bill_no
+  FROM relational.bill_payments bp
+  JOIN relational.bills b ON b.bill_no = bp.bill_no
   WHERE bp.payment_type = 'loyalty'
     AND b.bill_date = DATE '${d}'
   GROUP BY b.bill_date, b.store_slug
