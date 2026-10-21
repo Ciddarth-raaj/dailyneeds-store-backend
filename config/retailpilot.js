@@ -6,8 +6,11 @@ require("dotenv").config();
  *   RETAILPILOT_SPECTRA_URL      base URL; requests go to <url>/spectra/query
  *   RETAILPILOT_SPECTRA_KEY      X-Authentication token
  *   RETAILPILOT_PRODUCT          X-Product header (default "runway")
- *   RETAILPILOT_SALES_PRODUCT    X-Product header for POS sales (bills),
- *                                read by Sales Reconciliation (default "mandapam")
+ *   salesProduct                 X-Product header for POS sales (bills), read by
+ *                                Sales Reconciliation: always "Mandapam", the
+ *                                product the bill tables belong to. Fixed, not an
+ *                                env setting: a stale RETAILPILOT_SALES_PRODUCT
+ *                                once sent these queries to runway.
  *   RETAILPILOT_PURCHASE_SYNC_ENABLED  "true" schedules the cron at 9:00,
  *                                14:00 and 17:00 Asia/Kolkata
  *   RETAILPILOT_PURCHASE_LOOKBACK_DAYS days re-read on every cron run (default 3)
@@ -28,7 +31,7 @@ module.exports = {
   baseUrl: (process.env.RETAILPILOT_SPECTRA_URL || "").replace(/\/+$/, ""),
   apiKey: process.env.RETAILPILOT_SPECTRA_KEY || "",
   product: process.env.RETAILPILOT_PRODUCT || "runway",
-  salesProduct: process.env.RETAILPILOT_SALES_PRODUCT || "mandapam",
+  salesProduct: "Mandapam",
   purchaseSyncEnabled:
     String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
   stockSyncEnabled:
