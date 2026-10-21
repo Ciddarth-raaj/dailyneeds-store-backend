@@ -1299,10 +1299,12 @@ class Server {
       retailPilotConfig,
       () => this.outletUsecase.getRetailPilotStoreMap()
     );
-    // POS sales (bills) live under their own SPECTRA product: same URL and key.
+    // POS sales (bills): their own SPECTRA key (and URL) and product.
     this.retailPilotSalesUsecase = require("./usecase/retailpilot_sales")(
       require("./services/retailpilot_spectra")({
         ...retailPilotConfig,
+        baseUrl: retailPilotConfig.salesBaseUrl,
+        apiKey: retailPilotConfig.salesApiKey,
         product: retailPilotConfig.salesProduct,
       })
     );

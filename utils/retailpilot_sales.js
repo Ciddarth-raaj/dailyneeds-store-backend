@@ -8,10 +8,10 @@
  *   total_bill_amount   bills (sign 1), total_payable_with_services
  *   total_sales_return  returns (sign -1), total_payable_with_services
  *   loyalty             loyalty payments, net of returns (amount * sign)
- *   tables              relational.bills, relational.bill_payments (SPECTRA
- *                       schema "relational"), masterhub.stores for the outlet
- *   outletname          masterhub.stores.name (peti.stores is not on SPECTRA's
- *                       allowed list)
+ *   tables              public.bills, public.bill_payments, peti.stores - the
+ *                       owner's query as it runs on RetailPilot. Needs the
+ *                       sales SPECTRA key (config/retailpilot.js): the
+ *                       purchase key's whitelist has none of these tables.
  */
 
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -39,14 +39,14 @@ WITH s AS (
   SELECT b.bill_date, b.store_slug,
     COALESCE(SUM(b.total_payable_with_services) FILTER (WHERE b.sign = 1), 0)  AS total_bill_amount,
     COALESCE(SUM(b.total_payable_with_services) FILTER (WHERE b.sign = -1), 0) AS total_sales_return
-  FROM relational.bills b
+  FROM public.bills b
   WHERE b.bill_date = DATE '${d}'
   GROUP BY b.bill_date, b.store_slug
 ),
 l AS (
   SELECT b.bill_date, b.store_slug, SUM(bp.amount * b.sign) AS loyalty
-  FROM relational.bill_payments bp
-  JOIN relational.bills b ON b.bill_no = bp.bill_no
+  FROM public.bill_payments bp
+  JOIN public.bills b ON b.bill_no = bp.bill_no
   WHERE bp.payment_type = 'loyalty'
     AND b.bill_date = DATE '${d}'
   GROUP BY b.bill_date, b.store_slug
@@ -55,7 +55,7 @@ SELECT s.bill_date AS date, st.name AS outletname, s.store_slug,
   s.total_bill_amount, s.total_sales_return, COALESCE(l.loyalty, 0) AS loyalty
 FROM s
 LEFT JOIN l ON l.bill_date = s.bill_date AND l.store_slug = s.store_slug
-LEFT JOIN masterhub.stores st ON st.slug = s.store_slug
+LEFT JOIN peti.stores st ON st.slug = s.store_slug
 ORDER BY s.bill_date, st.name`;
 }
 

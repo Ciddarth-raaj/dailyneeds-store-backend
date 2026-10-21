@@ -6,6 +6,11 @@ require("dotenv").config();
  *   RETAILPILOT_SPECTRA_URL      base URL; requests go to <url>/spectra/query
  *   RETAILPILOT_SPECTRA_KEY      X-Authentication token
  *   RETAILPILOT_PRODUCT          X-Product header (default "runway")
+ *   RETAILPILOT_SALES_SPECTRA_URL, RETAILPILOT_SALES_SPECTRA_KEY
+ *                                the SPECTRA address and key for POS sales (bills),
+ *                                read by Sales Reconciliation. A key of its own:
+ *                                the purchase key's whitelist has no bill tables.
+ *                                Unset, the purchase URL / key are used.
  *   salesProduct                 X-Product header for POS sales (bills), read by
  *                                Sales Reconciliation: always "Mandapam", the
  *                                product the bill tables belong to. Fixed, not an
@@ -31,6 +36,8 @@ module.exports = {
   baseUrl: (process.env.RETAILPILOT_SPECTRA_URL || "").replace(/\/+$/, ""),
   apiKey: process.env.RETAILPILOT_SPECTRA_KEY || "",
   product: process.env.RETAILPILOT_PRODUCT || "runway",
+  salesBaseUrl: (process.env.RETAILPILOT_SALES_SPECTRA_URL || process.env.RETAILPILOT_SPECTRA_URL || "").replace(/\/+$/, ""),
+  salesApiKey: process.env.RETAILPILOT_SALES_SPECTRA_KEY || process.env.RETAILPILOT_SPECTRA_KEY || "",
   salesProduct: "Mandapam",
   purchaseSyncEnabled:
     String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
