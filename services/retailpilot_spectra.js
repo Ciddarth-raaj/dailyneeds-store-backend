@@ -35,7 +35,8 @@ class RetailPilotSpectra {
     } catch (err) {
       const status = err.response && err.response.status;
       const body = err.response && err.response.data;
-      const detail = body ? JSON.stringify(body).slice(0, 500) : err.message;
+      // Long enough for a whitelist_violation's full list of allowed tables.
+      const detail = body ? JSON.stringify(body).slice(0, 4000) : err.message;
       throw new Error(`SPECTRA request failed${status ? ` (HTTP ${status})` : ""}: ${detail}`);
     }
     const data = response.data || {};
