@@ -8,6 +8,8 @@
  *   total_bill_amount   bills (sign 1), total_payable_with_services
  *   total_sales_return  returns (sign -1), total_payable_with_services
  *   loyalty             loyalty payments, net of returns (amount * sign)
+ *   outletname          masterhub.stores.name (peti.stores is not on SPECTRA's
+ *                       allowed list)
  */
 
 const DATE_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
@@ -51,7 +53,7 @@ SELECT s.bill_date AS date, st.name AS outletname, s.store_slug,
   s.total_bill_amount, s.total_sales_return, COALESCE(l.loyalty, 0) AS loyalty
 FROM s
 LEFT JOIN l ON l.bill_date = s.bill_date AND l.store_slug = s.store_slug
-LEFT JOIN peti.stores st ON st.slug = s.store_slug
+LEFT JOIN masterhub.stores st ON st.slug = s.store_slug
 ORDER BY s.bill_date, st.name`;
 }
 
