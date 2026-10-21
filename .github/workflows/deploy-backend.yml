@@ -29,8 +29,8 @@ name: Deploy Backend
       - main-autodeploy
   workflow_dispatch:
     inputs:
-      skip_db_backup:
-        description: "Owner-authorized, THIS run only: deploy without the pre-deploy database backup"
+      take_db_backup:
+        description: "Take the pre-deploy database backup on THIS run (skipped by default)"
         type: boolean
         default: false
 
@@ -89,15 +89,17 @@ jobs:
       # failing here fails the job before the server's code or database is
       # touched. Host and user names are masked in this log; no password is
       # ever printed (credentials stay in a mode-600 file on the server).
-      # Push deploys always take the backup. Only a manual run with
-      # skip_db_backup ticked (the owner accepting the risk for that run)
-      # goes without it, and says so in the log.
-      - name: Pre-deploy database backup SKIPPED (owner-authorized, this run only)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_db_backup }}
-        run: echo "WARNING - no pre-deploy database backup taken for this run (workflow_dispatch skip_db_backup=true)."
+      # SKIPPED BY DEFAULT, at the owner's request (2026-10-21): the server's
+      # disk cannot hold a full dump of the 29 GB database, so every deploy
+      # with a migration was stopping here. Push deploys now go without it
+      # and say so in the log. A manual run with take_db_backup ticked still
+      # takes it - do that before a risky migration once there is space.
+      - name: Pre-deploy database backup SKIPPED (default; owner-authorized)
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.take_db_backup) }}
+        run: echo "WARNING - no pre-deploy database backup taken for this run (skipped by default; run manually with take_db_backup to take one)."
 
       - name: Pre-deploy database backup (when migrations are pending)
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.skip_db_backup) }}
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.take_db_backup }}
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
