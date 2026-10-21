@@ -471,6 +471,21 @@ function create(deps = {}) {
       is_system_account: isSystemAccount,
     };
 
+    // Forced logout (config.login.forcedLogoutAt): every person signs in
+    // again. A service account is spared - it is read from the row, never
+    // from the token - so the integrations keep working.
+    const forcedLogoutAt = config.login.forcedLogoutAt;
+    if (forcedLogoutAt && userUsecase && typeof decoded.iat === "number" && decoded.iat < forcedLogoutAt) {
+      try {
+        const state = await loadSession(userId);
+        if (!state || Number(state.is_service_account) !== 1) {
+          return deny(res, 403, "Access Denied", { error: "TOKEN_REVOKED" });
+        }
+      } catch (err) {
+        return deny(res, 500, "An error occurred !");
+      }
+    }
+
     // A legacy token must resolve to a genuine employee-linked account and
     // never to a system account. With the usecase available this is
     // checked against the database, cached briefly, failing closed.
