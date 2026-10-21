@@ -290,6 +290,7 @@ class AccountsRepository {
                'payment_type', s2.payment_type,
                'person_id', s2.person_id,
                'person_name', pl.name,
+               'employee_name', IF(s2.person_type = 5, pe.employee_name, NULL),
                'description', s2.description,
                'amount', s2.amount,
                'receipt_path', s2.receipt_path,
@@ -298,6 +299,7 @@ class AccountsRepository {
            )
            FROM accounts_sales s2 
            LEFT JOIN people_list pl ON pl.person_id = s2.person_id
+           LEFT JOIN new_employee pe ON pe.employee_id = s2.person_id
            WHERE s2.accounts_id = a.accounts_id
          ) as sales
          FROM accounts a
@@ -347,6 +349,7 @@ class AccountsRepository {
                'payment_type', s2.payment_type,
                'person_id', s2.person_id,
                'person_name', pl.name,
+               'employee_name', IF(s2.person_type = 5, pe.employee_name, NULL),
                'description', s2.description,
                'amount', s2.amount,
                'receipt_path', s2.receipt_path,
@@ -355,6 +358,7 @@ class AccountsRepository {
            )
            FROM accounts_sales s2 
            LEFT JOIN people_list pl ON pl.person_id = s2.person_id
+           LEFT JOIN new_employee pe ON pe.employee_id = s2.person_id
            WHERE s2.accounts_id = a.accounts_id
          ) as sales,
          EXISTS(
@@ -729,9 +733,11 @@ class AccountsRepository {
           : "";
 
       this.db.query(
-        `SELECT s.*, pl.name as person_name
+        `SELECT s.*, pl.name as person_name,
+         IF(s.person_type = 5, pe.employee_name, NULL) as employee_name
          FROM accounts_warehouse_sales s
          LEFT JOIN people_list pl ON pl.person_id = s.person_id
+         LEFT JOIN new_employee pe ON pe.employee_id = s.person_id
          ${whereClause}
          ORDER BY s.date DESC, s.sales_id DESC`,
         filterValues,
@@ -757,9 +763,11 @@ class AccountsRepository {
   getWarehouseSaleById(saleId) {
     return new Promise((resolve, reject) => {
       this.db.query(
-        `SELECT s.*, pl.name as person_name
+        `SELECT s.*, pl.name as person_name,
+         IF(s.person_type = 5, pe.employee_name, NULL) as employee_name
          FROM accounts_warehouse_sales s
          LEFT JOIN people_list pl ON pl.person_id = s.person_id
+         LEFT JOIN new_employee pe ON pe.employee_id = s.person_id
          WHERE s.sales_id = ?`,
         [saleId],
         (err, docs) => {
