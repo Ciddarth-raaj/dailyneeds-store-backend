@@ -137,6 +137,14 @@ const login = {
   // session-state lookup as token_valid_from (tokenValidFromCacheMs).
   employeeStatusCheck: bool("AUTH_EMPLOYEE_STATUS_CHECK", true),
   tokenValidFromCacheMs: int("AUTH_TOKEN_VALID_FROM_CACHE_MS", 60 * 1000),
+  // Forced logout of every person: a token issued before this epoch is
+  // refused unless its account is a service account. Unlike
+  // JWT_TOKEN_CUTOFF it spares integrations (the Tally bridge runs on an
+  // installed token that cannot simply log in again). Last forced at the
+  // owner's request, 2026-10-21 14:07 UTC. To force another, set the env
+  // var or move this default to the current epoch - never a future one,
+  // which would refuse every new login until then.
+  forcedLogoutAt: int("AUTH_FORCED_LOGOUT_AT", 1792591649),
 };
 
 const resetToken = {
