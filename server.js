@@ -1299,6 +1299,13 @@ class Server {
       retailPilotConfig,
       () => this.outletUsecase.getRetailPilotStoreMap()
     );
+    // POS sales (bills) live under their own SPECTRA product: same URL and key.
+    this.retailPilotSalesUsecase = require("./usecase/retailpilot_sales")(
+      require("./services/retailpilot_spectra")({
+        ...retailPilotConfig,
+        product: retailPilotConfig.salesProduct,
+      })
+    );
     this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       this.retailPilotGrnRepo,
@@ -1893,7 +1900,8 @@ class Server {
       this.accountsEbookUsecase
     );
     const reconciliationRouter = require("./routes/reconciliation")(
-      this.reconciliationUsecase
+      this.reconciliationUsecase,
+      this.retailPilotSalesUsecase
     );
     const digitalPaymentsRouter = require("./routes/digital_payments")(
       this.digitalPaymentsUsecase

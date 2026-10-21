@@ -2,12 +2,27 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
 class ReconciliationRoutes {
-  constructor(reconciliationUsecase) {
+  constructor(reconciliationUsecase, retailPilotSales) {
     this.reconciliationUsecase = reconciliationUsecase;
+    this.retailPilotSales = retailPilotSales;
     this.init();
   }
 
   init() {
+    // One day's POS sales per store from RetailPilot, in the Retail Pilot
+    // CSV's shape. Read-only: the screen compares and saves as for a CSV.
+    router.get("/retailpilot-sales", async (req, res) => {
+      try {
+        if (!this.retailPilotSales) {
+          return res.json({ code: 503, msg: "RetailPilot sales are not available" });
+        }
+        res.json(await this.retailPilotSales.daySales(req.query.date));
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
     router.post("/sales", async (req, res) => {
       try {
         const schema = Joi.object({
@@ -156,6 +171,6 @@ class ReconciliationRoutes {
   }
 }
 
-module.exports = (reconciliationUsecase) => {
-  return new ReconciliationRoutes(reconciliationUsecase);
+module.exports = (reconciliationUsecase, retailPilotSales) => {
+  return new ReconciliationRoutes(reconciliationUsecase, retailPilotSales);
 };
