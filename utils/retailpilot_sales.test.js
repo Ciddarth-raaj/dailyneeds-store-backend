@@ -30,6 +30,8 @@ describe("the day", () => {
     assert.match(q, /FILTER \(WHERE b\.sign = -1\)/);
     assert.match(q, /bp\.payment_type = 'loyalty'/);
     assert.match(q, /AS outletname/);
+    assert.match(q, /LEFT JOIN masterhub\.stores st ON st\.slug = s\.store_slug/, "store names from an allowed table");
+    assert.doesNotMatch(q, /peti\./, "SPECTRA refuses peti.stores (whitelist_violation)");
     assert.throws(() => buildSalesQuery("2026-10-16' OR '1'='1"), /YYYY-MM-DD/);
   });
 });
