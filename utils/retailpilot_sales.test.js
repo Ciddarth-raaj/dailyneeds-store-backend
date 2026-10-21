@@ -32,6 +32,9 @@ describe("the day", () => {
     assert.match(q, /AS outletname/);
     assert.match(q, /LEFT JOIN masterhub\.stores st ON st\.slug = s\.store_slug/, "store names from an allowed table");
     assert.doesNotMatch(q, /peti\./, "SPECTRA refuses peti.stores (whitelist_violation)");
+    assert.match(q, /FROM bill\.bills b/, "bills are in SPECTRA's bill schema");
+    assert.match(q, /FROM bill\.bill_payments bp\s+JOIN bill\.bills b ON b\.bill_no = bp\.bill_no/);
+    assert.doesNotMatch(q, /public\./, "not public.bills (whitelist_violation)");
     assert.throws(() => buildSalesQuery("2026-10-16' OR '1'='1"), /YYYY-MM-DD/);
   });
 });
