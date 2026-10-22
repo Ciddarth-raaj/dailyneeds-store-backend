@@ -4,11 +4,14 @@
  * laid out like the old system's article_store_master sheet.
  *
  * Not in it for now, by the owner's decision: MRP, net cost, sale rate. Not
- * in it yet: buyer, status, allow purchase, allow negative, purchase type -
- * these are masterhub article attributes whose ids are still to be confirmed.
+ * in it: buyer and status - masterhub has no attribute for either; allow
+ * negative - not wanted. Allow purchase and purchase type are masterhub
+ * article attributes (derived.article_store_attributes: purchase_allowed,
+ * purchase_type).
  *
  * SPECTRA, per product address (config/retailpilot.js):
- *   masterhub  derived.article_master, derived.article_taxonomy,
+ *   masterhub  public.articles (every article), derived.article_master and
+ *              constants.hsn_tax_linker (tax), derived.article_taxonomy,
  *              derived.hierarchy_master, derived.article_store_suppliers,
  *              public.vendors, public.preparation_master, public.stores,
  *              constants.tax_rates
@@ -19,11 +22,23 @@
  */
 
 const MASTERHUB_QUERIES = {
+  // Every article: masterhub's own articles table. (derived.article_master
+  // holds only a few - 118 on the first live run - so it is not the list.)
   articles: `
-SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.tax_code, a.preparation_type,
+SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.preparation_type,
        a.purchase_measure, a.sales_measure
+FROM public.articles a
+ORDER BY a.slug`,
+  // Tax: the article's own tax code where derived.article_master has it,
+  // else the HSN code's rate (constants.hsn_tax_linker).
+  articleTax: `
+SELECT a.slug AS article_id, a.tax_code
 FROM derived.article_master a
 ORDER BY a.slug`,
+  hsnTax: `
+SELECT l.hsn_code, l.tax_code
+FROM constants.hsn_tax_linker l
+ORDER BY l.hsn_code, l.tax_code`,
   taxonomy: `
 SELECT t.article_id, t.level_id, t.hierarchy_id, h.hierarchy_name, h.level_name
 FROM derived.article_taxonomy t
@@ -41,6 +56,11 @@ ORDER BY v.id`,
 SELECT r.code, r.description
 FROM constants.tax_rates r
 ORDER BY r.code`,
+  attributes: `
+SELECT a.article_id, a.store_id, a.attr_id, a.attr_value
+FROM derived.article_store_attributes a
+WHERE a.attr_id IN ('purchase_allowed', 'purchase_type')
+ORDER BY a.article_id, a.attr_id, a.store_id`,
   preparation: `
 SELECT p.prepared_item, p.ingredient_item, p.ingredient_measure
 FROM public.preparation_master p
@@ -124,6 +144,23 @@ function supplierNames(rows, vendorName, warehouseSlugs) {
   return names.join(", ");
 }
 
+/**
+ * One value for an article attribute that can differ by store: the
+ * article-wide value (store_id NULL) when set, else the warehouse's, else the
+ * stores' when they all agree, else "mixed".
+ */
+function attributeValue(rows, warehouseSlugs) {
+  if (!rows || !rows.length) return "";
+  const general = rows.find((r) => r.store_id == null || str(r.store_id) === "");
+  if (general) return str(general.attr_value);
+  const wh = rows.find((r) => warehouseSlugs.has(str(r.store_id)));
+  if (wh) return str(wh.attr_value);
+  const values = [...new Set(rows.map((r) => str(r.attr_value)))];
+  return values.length === 1 ? values[0] : "mixed";
+}
+
+const ATTRIBUTE_COLUMNS = { allow_purchase: "purchase_allowed", purchase_type: "purchase_type" };
+
 const COLUMNS_BEFORE_STOCK = [
   { key: "article_id", header: "article_id", width: 10 },
   { key: "article_name", header: "article_name", width: 50 },
@@ -132,6 +169,8 @@ const COLUMNS_BEFORE_STOCK = [
   { key: "department_name", header: "department_name", width: 22 },
   { key: "category_name", header: "category_name", width: 24 },
   { key: "subcategory_name", header: "subcategory_name", width: 26 },
+  { key: "allow_purchase", header: "allow_purchase", width: 14 },
+  { key: "purchase_type", header: "purchase_type", width: 14 },
   { key: "preparation_type", header: "preparation_type", width: 16 },
   { key: "repackage_conversion", header: "repackage_conversion", width: 12 },
   { key: "purchase_item", header: "purchase_item", width: 12 },
@@ -154,6 +193,22 @@ function buildReport(data) {
   const articles = data.articles || [];
 
   const tax = new Map((data.taxRates || []).map((r) => [str(r.code), str(r.description)]));
+  const taxLabel = (code) => tax.get(str(code)) || `GST ${str(code)}%`;
+  const ownTax = new Map((data.articleTax || []).filter((r) => str(r.tax_code)).map((r) => [str(r.article_id), str(r.tax_code)]));
+  const hsnTax = new Map(); // hsn -> [tax codes]
+  for (const r of data.hsnTax || []) {
+    const h = str(r.hsn_code);
+    if (!h || !str(r.tax_code)) continue;
+    if (!hsnTax.has(h)) hsnTax.set(h, []);
+    if (!hsnTax.get(h).includes(str(r.tax_code))) hsnTax.get(h).push(str(r.tax_code));
+  }
+  // The article's own code; else its HSN's rate(s), several shown as "a / b".
+  const taxOf = (a) => {
+    const own = ownTax.get(str(a.article_id)) || str(a.tax_code);
+    if (own) return taxLabel(own);
+    const codes = hsnTax.get(str(a.hsn_code)) || [];
+    return codes.map(taxLabel).join(" / ");
+  };
   const vendorName = new Map((data.vendors || []).map((v) => [str(v.id), str(v.trade_name) || str(v.name)]));
   const articleName = new Map(articles.map((a) => [str(a.article_id), str(a.article_name)]));
 
@@ -179,6 +234,16 @@ function buildReport(data) {
     if (!id || r.ingredient_item == null) continue;
     if (!recipe.has(id)) recipe.set(id, []);
     recipe.get(id).push(r);
+  }
+
+  const attributes = new Map(); // article id -> attr id -> rows
+  for (const r of data.attributes || []) {
+    const id = str(r.article_id);
+    if (!attributes.has(id)) attributes.set(id, new Map());
+    const m = attributes.get(id);
+    const attr = str(r.attr_id);
+    if (!m.has(attr)) m.set(attr, []);
+    m.get(attr).push(r);
   }
 
   const stock = data.stock || [];
@@ -207,13 +272,16 @@ function buildReport(data) {
       department_name: t.department ? t.department.name : "",
       category_name: t.category ? t.category.name : "",
       subcategory_name: t.subcategory ? t.subcategory.name : "",
+      ...Object.fromEntries(
+        Object.entries(ATTRIBUTE_COLUMNS).map(([col, attr]) => [col, attributeValue(attributes.get(id)?.get(attr), warehouseSlugs)])
+      ),
       preparation_type: str(a.preparation_type),
       repackage_conversion: lines.length ? lines.map((l) => num(l.ingredient_measure)).join("; ") : 0,
       purchase_item: lines.length ? lines.map((l) => str(l.ingredient_item)).join("; ") : 0,
       purchase_item_name: lines.map((l) => articleName.get(str(l.ingredient_item)) || "").filter(Boolean).join("; "),
       subcategory_id: t.subcategory ? t.subcategory.id : null,
       hsn_code: str(a.hsn_code),
-      tax: tax.get(str(a.tax_code)) || (str(a.tax_code) ? `GST ${str(a.tax_code)}%` : ""),
+      tax: taxOf(a),
       pur_uom: str(a.purchase_measure),
       supply_uom: str(a.sales_measure),
     };
@@ -248,5 +316,6 @@ module.exports = {
   levelOf,
   storeColumns,
   supplierNames,
+  attributeValue,
   buildReport,
 };
