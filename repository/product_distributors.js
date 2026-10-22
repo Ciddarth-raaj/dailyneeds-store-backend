@@ -20,7 +20,24 @@ class ProductDistributorsRepository {
       buyer_id: row.buyer_id ?? null,
       buyer_name: row.buyer_name ?? null,
       holding_days: row.holding_days ?? null,
+      // 'a' active, 'i' inactive in RetailPilot, 'old' a pre-RetailPilot
+      // supplier kept only because history refers to it (hidden from pickers).
+      mdm_tag: row.mdm_tag ?? null,
+      is_old: row.mdm_tag === "old",
     };
+  }
+
+  _masterCodeByCid(cid) {
+    return new Promise((resolve, reject) => {
+      this.mainDb.query(
+        `SELECT mdm_dist_code FROM ${MASTER_TABLE} WHERE cid = ? LIMIT 1`,
+        [String(cid).trim()],
+        (err, rows) => {
+          if (err) return reject(err);
+          resolve(rows && rows[0] && rows[0].mdm_dist_code != null ? String(rows[0].mdm_dist_code) : null);
+        }
+      );
+    });
   }
 
   _getMedishopDistCodeByCid(cid) {
@@ -108,7 +125,7 @@ class ProductDistributorsRepository {
   getAll() {
     return new Promise((resolve, reject) => {
       this.mainDb.query(
-        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days, pdm.mdm_tag
          FROM ${MASTER_TABLE} pdm
          ORDER BY pdm.mdm_dist_name`,
         (err, masterRows) => {
@@ -160,7 +177,7 @@ class ProductDistributorsRepository {
     const key = String(cid).trim();
     return new Promise((resolve, reject) => {
       this.mainDb.query(
-        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days,
+        `SELECT pdm.cid, pdm.mdm_dist_code, pdm.mdm_dist_name, pdm.mdm_short_name, pdm.holding_days, pdm.mdm_tag,
                 pd.buyer_id, ne.employee_name AS buyer_name
          FROM ${MASTER_TABLE} pdm
          LEFT JOIN ${MAP_TABLE} pd ON pd.cid = pdm.cid
@@ -199,7 +216,10 @@ class ProductDistributorsRepository {
             return resolve({ code: 200, CID: key, buyer_id: bid });
           }
 
+          // A RetailPilot supplier has no GoFrugal (medishop) code: the buyer
+          // row is keyed by its own supplier code instead.
           this._getMedishopDistCodeByCid(key)
+            .then((medishopCode) => medishopCode || this._masterCodeByCid(key))
             .then((medishopCode) => {
               if (!medishopCode) {
                 const err = new Error(

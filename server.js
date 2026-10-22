@@ -1487,6 +1487,16 @@ class Server {
     const retailPilotSpectra = require("./services/retailpilot_spectra")(require("./config/retailpilot"));
     // Article Store Master report: the catalogue from masterhub (its own
     // SPECTRA address, same key), stock from runway.
+    // Suppliers from RetailPilot (masterhub vendors) replace the old DNDS /
+    // GoFrugal distributor list; each product's supplier follows RetailPilot.
+    this.retailPilotSupplierSyncUsecase = require("./usecase/retailpilot_supplier_sync")(
+      require("./services/retailpilot_spectra")({
+        ...require("./config/retailpilot"),
+        baseUrl: require("./config/retailpilot").masterhubBaseUrl,
+        product: require("./config/retailpilot").masterhubProduct,
+      }),
+      require("./repository/retailpilot_suppliers")(this.mysql.connection)
+    );
     this.articleStoreMasterUsecase = require("./usecase/article_store_master")(
       require("./services/retailpilot_spectra")({
         ...require("./config/retailpilot"),
@@ -2017,7 +2027,9 @@ class Server {
       this.purchaseReturnUsecase
     );
     const productDistributorsRouter = require("./routes/product_distributors")(
-      this.productDistributorsUsecase
+      this.productDistributorsUsecase,
+      this.retailPilotSupplierSyncUsecase,
+      this.permissions
     );
     const remarksMasterRouter = require("./routes/remarks_master")(
       this.remarksMasterUsecase
@@ -2358,6 +2370,28 @@ class Server {
     // stock and prices into Offers V3 (price, then stock) and the Price
     // Checker, replacing the hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
     // POST /offers-v3/retailpilot-sync runs it by hand either way.
+    // 6:45 AM (Asia/Kolkata) - suppliers from RetailPilot: masterhub's
+    // vendors become the supplier list (buyer and holding days kept), each
+    // product's supplier follows RetailPilot. After the 6:00 article sync, so
+    // a product created this morning gets its supplier today. On unless
+    // RETAILPILOT_SUPPLIER_SYNC_ENABLED=false; POST
+    // /product-distributors/retailpilot-sync runs it by hand either way.
+    if (String(process.env.RETAILPILOT_SUPPLIER_SYNC_ENABLED || "").toLowerCase() !== "false") {
+      const runSupplierSync = async () => {
+        const r = await this.retailPilotSupplierSyncUsecase.run({ scheduled: true });
+        if (r.code !== 200) throw new Error(r.msg);
+        return r;
+      };
+      this.cronService.register(
+        "retailpilot_supplier_sync",
+        "45 6 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_supplier_sync", "/retailpilot/supplier-sync-run", runSupplierSync)
+          : runSupplierSync,
+        { preventOverlap: true }
+      );
+    }
+
     // 5:45 AM (Asia/Kolkata) - build the Article Store Master report (the
     // catalogue from masterhub, stock from runway) so the morning download is
     // ready. Read-only; on unless RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED=false.

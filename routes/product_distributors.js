@@ -2,13 +2,31 @@ const router = require("express").Router();
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
 
+/** Running the RetailPilot supplier sync by hand: the buyer-assignment key. */
+const SYNC_SUPPLIERS = "add_product_distributor";
+
 class ProductDistributorsRoutes {
-  constructor(productDistributorsUsecase) {
+  constructor(productDistributorsUsecase, supplierSync, permissions) {
     this.productDistributorsUsecase = productDistributorsUsecase;
+    this.supplierSync = supplierSync;
+    this.permissions = permissions;
     this.init();
   }
 
   init() {
+    // Suppliers from RetailPilot (usecase/retailpilot_supplier_sync.js), by
+    // hand. dry_run: every step, then rolled back - the counts, no change.
+    if (this.supplierSync && this.permissions) {
+      router.post("/retailpilot-sync", this.permissions.require(SYNC_SUPPLIERS), async (req, res) => {
+        try {
+          const dryRun = req.body?.dry_run === true || req.body?.dry_run === "true";
+          res.json(await this.supplierSync.run({ dryRun }));
+        } catch (err) {
+          respondError(res, err);
+        }
+      });
+    }
+
     const upsertSchema = Joi.object({
       CID: Joi.string().trim().min(1).required(),
       buyer_id: Joi.number().integer().allow(null).optional(),
@@ -191,6 +209,7 @@ class ProductDistributorsRoutes {
   }
 }
 
-module.exports = (productDistributorsUsecase) => {
-  return new ProductDistributorsRoutes(productDistributorsUsecase);
+module.exports = (productDistributorsUsecase, supplierSync, permissions) => {
+  return new ProductDistributorsRoutes(productDistributorsUsecase, supplierSync, permissions);
 };
+module.exports.SYNC_SUPPLIERS = SYNC_SUPPLIERS;
