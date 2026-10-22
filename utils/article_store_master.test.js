@@ -47,7 +47,10 @@ const DATA = {
     { article_id: 51156, tax_code: 40 },
     { article_id: 900, tax_code: 5 },
   ],
-  hsnTax: [{ hsn_code: "48202000", tax_code: 5 }],
+  hsnTax: [
+    { code: "hl-48202000-5", hsn_code: "48202000", tax_code: 5 },
+    { code: "hl-0401-12", hsn_code: "0401", tax_code: 12 },
+  ],
   taxRates: [
     { code: 5, description: "GST 5%" },
     { code: 40, description: "GST 40%" },
@@ -96,6 +99,11 @@ describe("the rows", () => {
     assert.equal(byId[42953].tax, "GST 5%", "not in derived.article_master: its HSN code's rate");
     assert.equal(byId[900].tax, "GST 5%");
     assert.equal(byId[901].tax, "", "no tax code and no HSN rate: blank, not a guess");
+  });
+
+  it("an article whose hsn_code is a linker record's id: that record's real HSN and tax", () => {
+    const r = buildReport({ ...DATA, articles: [{ article_id: 7, article_name: "milk", hsn_code: "hl-0401-12" }] }).rows[0];
+    assert.deepEqual([r.hsn_code, r.tax], ["0401", "GST 12%"]);
   });
 
   it("supplier: the all-stores one; else the warehouse's", () => {

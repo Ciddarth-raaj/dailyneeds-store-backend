@@ -35,10 +35,13 @@ ORDER BY a.slug`,
 SELECT a.slug AS article_id, a.tax_code
 FROM derived.article_master a
 ORDER BY a.slug`,
+  // An article's hsn_code may be a linker record's id (the linker exists "to
+  // auto-resolve tax slabs on articles") rather than the HSN itself; the
+  // linker gives the real HSN and its tax.
   hsnTax: `
-SELECT l.hsn_code, l.tax_code
+SELECT l.code, l.hsn_code, l.tax_code
 FROM constants.hsn_tax_linker l
-ORDER BY l.hsn_code, l.tax_code`,
+ORDER BY l.hsn_code, l.tax_code, l.code`,
   taxonomy: `
 SELECT t.article_id, t.level_id, t.hierarchy_id, h.hierarchy_name, h.level_name
 FROM derived.article_taxonomy t
@@ -195,6 +198,7 @@ function buildReport(data) {
   const tax = new Map((data.taxRates || []).map((r) => [str(r.code), str(r.description)]));
   const taxLabel = (code) => tax.get(str(code)) || `GST ${str(code)}%`;
   const ownTax = new Map((data.articleTax || []).filter((r) => str(r.tax_code)).map((r) => [str(r.article_id), str(r.tax_code)]));
+  const linker = new Map((data.hsnTax || []).filter((r) => str(r.code)).map((r) => [str(r.code), r]));
   const hsnTax = new Map(); // hsn -> [tax codes]
   for (const r of data.hsnTax || []) {
     const h = str(r.hsn_code);
@@ -202,12 +206,16 @@ function buildReport(data) {
     if (!hsnTax.has(h)) hsnTax.set(h, []);
     if (!hsnTax.get(h).includes(str(r.tax_code))) hsnTax.get(h).push(str(r.tax_code));
   }
-  // The article's own code; else its HSN's rate(s), several shown as "a / b".
-  const taxOf = (a) => {
+  // HSN and tax of an article. Its hsn_code names a linker record: that
+  // record's HSN and tax. Otherwise it is the HSN itself: the article's own
+  // tax code, else that HSN's rate(s), several shown as "a / b".
+  const hsnAndTax = (a) => {
+    const link = linker.get(str(a.hsn_code));
+    if (link) return { hsn: str(link.hsn_code), tax: str(link.tax_code) ? taxLabel(link.tax_code) : "" };
+    const hsn = str(a.hsn_code);
     const own = ownTax.get(str(a.article_id)) || str(a.tax_code);
-    if (own) return taxLabel(own);
-    const codes = hsnTax.get(str(a.hsn_code)) || [];
-    return codes.map(taxLabel).join(" / ");
+    if (own) return { hsn, tax: taxLabel(own) };
+    return { hsn, tax: (hsnTax.get(hsn) || []).map(taxLabel).join(" / ") };
   };
   const vendorName = new Map((data.vendors || []).map((v) => [str(v.id), str(v.trade_name) || str(v.name)]));
   const articleName = new Map(articles.map((a) => [str(a.article_id), str(a.article_name)]));
@@ -280,8 +288,8 @@ function buildReport(data) {
       purchase_item: lines.length ? lines.map((l) => str(l.ingredient_item)).join("; ") : 0,
       purchase_item_name: lines.map((l) => articleName.get(str(l.ingredient_item)) || "").filter(Boolean).join("; "),
       subcategory_id: t.subcategory ? t.subcategory.id : null,
-      hsn_code: str(a.hsn_code),
-      tax: taxOf(a),
+      hsn_code: hsnAndTax(a).hsn,
+      tax: hsnAndTax(a).tax,
       pur_uom: str(a.purchase_measure),
       supply_uom: str(a.sales_measure),
     };
