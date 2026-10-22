@@ -169,6 +169,7 @@ describe("the rows", () => {
     assert.match(MASTERHUB_QUERIES.attributes, /FROM derived\.article_store_attributes a\s+WHERE a\.attr_id IN \('purchase_allowed', 'purchase_type', 'purchase_uom', 'store_uom'\)/);
     assert.doesNotMatch(MASTERHUB_QUERIES.attributes, /allow_negative/, "not wanted");
     assert.match(RUNWAY_QUERIES.stock, /FROM public\.batch_stock_positions p\s+JOIN public\.inventory_batches b/);
+    assert.match(RUNWAY_QUERIES.stock, /WHERE p\.stock_location = 'main'/, "main location stock only");
     assert.ok(!all.some((q) => /\b(mrp|net_cost|sale_rate|cost_master|selling_master)\b/i.test(q)), "no prices, for now");
   });
 });

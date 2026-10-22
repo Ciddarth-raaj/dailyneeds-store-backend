@@ -15,7 +15,8 @@
  *              derived.hierarchy_master, derived.article_store_suppliers,
  *              public.vendors, public.preparation_master, public.stores,
  *              constants.tax_rates
- *   runway     public.batch_stock_positions + public.inventory_batches
+ *   runway     public.batch_stock_positions + public.inventory_batches,
+ *              main stock location only (the sellable stock)
  *
  * Every query is plain and ordered, so SPECTRA's paging is stable; joining
  * them happens here, in buildReport.
@@ -74,10 +75,13 @@ ORDER BY s.slug`,
 };
 
 const RUNWAY_QUERIES = {
+  // Main location only, by the owner's decision: other locations (damage,
+  // returns, ...) are not counted.
   stock: `
 SELECT p.store_id, b.article_id, SUM(p.quantity) AS quantity
 FROM public.batch_stock_positions p
 JOIN public.inventory_batches b ON b.batch_id = p.batch_id
+WHERE p.stock_location = 'main'
 GROUP BY p.store_id, b.article_id
 ORDER BY b.article_id, p.store_id`,
 };
