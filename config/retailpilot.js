@@ -24,6 +24,14 @@ require("dotenv").config();
  *   RETAILPILOT_STOCK_SYNC_ENABLED     the daily 6:00 Asia/Kolkata pull of batch
  *                                stock and prices into Offers V3 and the Price
  *                                Checker. ON unless set to "false".
+ *   RETAILPILOT_MASTERHUB_SPECTRA_URL  masterhub's SPECTRA address (the
+ *                                catalogue: articles, taxonomy, suppliers, tax).
+ *                                Unset: RETAILPILOT_SPECTRA_URL with its last
+ *                                path part (/runway) replaced by /masterhub -
+ *                                each product has its own address. Same key.
+ *   RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED  the daily 5:45 Asia/Kolkata build
+ *                                of the Article Store Master report. ON unless
+ *                                set to "false".
  *
  * There are no defaults for the URL or key: without them the sync refuses
  * to run rather than calling anything. The RetailPilot store -> outlet map
@@ -32,6 +40,14 @@ require("dotenv").config();
 
 const lookback = parseInt(process.env.RETAILPILOT_PURCHASE_LOOKBACK_DAYS, 10);
 
+/** masterhub's address: given, else the runway address with /masterhub in place of its last part. */
+function masterhubUrl(explicit, runway) {
+  const clean = (v) => String(v || "").trim().replace(/\/+$/, "");
+  if (clean(explicit)) return clean(explicit);
+  const r = clean(runway);
+  return r ? r.replace(/\/[^/]+$/, "/masterhub") : "";
+}
+
 module.exports = {
   baseUrl: (process.env.RETAILPILOT_SPECTRA_URL || "").replace(/\/+$/, ""),
   apiKey: process.env.RETAILPILOT_SPECTRA_KEY || "",
@@ -39,6 +55,10 @@ module.exports = {
   salesBaseUrl: (process.env.RETAILPILOT_SALES_SPECTRA_URL || process.env.RETAILPILOT_SPECTRA_URL || "").replace(/\/+$/, ""),
   salesApiKey: process.env.RETAILPILOT_SALES_SPECTRA_KEY || process.env.RETAILPILOT_SPECTRA_KEY || "",
   salesProduct: "Mandapam",
+  masterhubBaseUrl: masterhubUrl(process.env.RETAILPILOT_MASTERHUB_SPECTRA_URL, process.env.RETAILPILOT_SPECTRA_URL),
+  masterhubProduct: "masterhub",
+  articleStoreMasterEnabled:
+    String(process.env.RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED || "").toLowerCase() !== "false",
   purchaseSyncEnabled:
     String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
   stockSyncEnabled:
