@@ -61,6 +61,8 @@ const DATA = {
     { article_id: 51156, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
     { article_id: 51156, store_id: "whslug", attr_id: "allow_negative", attr_value: "N" },
     { article_id: 51156, store_id: null, attr_id: "purchase_type", attr_value: "FT" },
+    { article_id: 51156, store_id: null, attr_id: "purchase_uom", attr_value: "24" },
+    { article_id: 51156, store_id: null, attr_id: "store_uom", attr_value: "1" },
     { article_id: 42953, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
     { article_id: 42953, store_id: "dn2slug", attr_id: "allow_negative", attr_value: "Y" },
     { article_id: 900, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
@@ -94,7 +96,9 @@ describe("the rows", () => {
     const r = byId[51156];
     assert.equal(r.article_name, "zyro zero sugar tonic water drink 250ml tin");
     assert.deepEqual([r.department_name, r.category_name, r.subcategory_name, r.brand_name, r.subcategory_id], ["beverages", "soft drinks", "soda & cocktail mix", "zyro", 3534]);
-    assert.deepEqual([r.hsn_code, r.tax, r.pur_uom, r.supply_uom], ["22029990", "GST 40%", "CASE", "NOS"]);
+    assert.deepEqual([r.hsn_code, r.tax], ["22029990", "GST 40%"]);
+    assert.deepEqual([r.pur_uom, r.supply_uom], [24, 1], "pack quantities from purchase_uom / store_uom, as numbers");
+    assert.deepEqual([byId[901].pur_uom, byId[901].supply_uom], ["", ""], "not set: blank");
     assert.equal(byId[42953].department_name, "household needs", "a level known by its id when the name is missing");
     assert.equal(byId[42953].tax, "GST 5%", "not in derived.article_master: its HSN code's rate");
     assert.equal(byId[900].tax, "GST 5%");
@@ -162,7 +166,7 @@ describe("the rows", () => {
     assert.match(MASTERHUB_QUERIES.hsnTax, /FROM constants\.hsn_tax_linker/);
     assert.match(MASTERHUB_QUERIES.suppliers, /FROM derived\.article_store_suppliers/);
     assert.match(MASTERHUB_QUERIES.taxRates, /FROM constants\.tax_rates/);
-    assert.match(MASTERHUB_QUERIES.attributes, /FROM derived\.article_store_attributes a\s+WHERE a\.attr_id IN \('purchase_allowed', 'purchase_type'\)/);
+    assert.match(MASTERHUB_QUERIES.attributes, /FROM derived\.article_store_attributes a\s+WHERE a\.attr_id IN \('purchase_allowed', 'purchase_type', 'purchase_uom', 'store_uom'\)/);
     assert.doesNotMatch(MASTERHUB_QUERIES.attributes, /allow_negative/, "not wanted");
     assert.match(RUNWAY_QUERIES.stock, /FROM public\.batch_stock_positions p\s+JOIN public\.inventory_batches b/);
     assert.ok(!all.some((q) => /\b(mrp|net_cost|sale_rate|cost_master|selling_master)\b/i.test(q)), "no prices, for now");
