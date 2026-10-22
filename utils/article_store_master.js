@@ -25,8 +25,7 @@ const MASTERHUB_QUERIES = {
   // Every article: masterhub's own articles table. (derived.article_master
   // holds only a few - 118 on the first live run - so it is not the list.)
   articles: `
-SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.preparation_type,
-       a.purchase_measure, a.sales_measure
+SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.preparation_type
 FROM public.articles a
 ORDER BY a.slug`,
   // Tax: the article's own tax code where derived.article_master has it,
@@ -62,7 +61,7 @@ ORDER BY r.code`,
   attributes: `
 SELECT a.article_id, a.store_id, a.attr_id, a.attr_value
 FROM derived.article_store_attributes a
-WHERE a.attr_id IN ('purchase_allowed', 'purchase_type')
+WHERE a.attr_id IN ('purchase_allowed', 'purchase_type', 'purchase_uom', 'store_uom')
 ORDER BY a.article_id, a.attr_id, a.store_id`,
   preparation: `
 SELECT p.prepared_item, p.ingredient_item, p.ingredient_measure
@@ -162,7 +161,15 @@ function attributeValue(rows, warehouseSlugs) {
   return values.length === 1 ? values[0] : "mixed";
 }
 
-const ATTRIBUTE_COLUMNS = { allow_purchase: "purchase_allowed", purchase_type: "purchase_type" };
+// Pur uom / Supply uom are pack quantities (e.g. 24 / 1), the purchase_uom
+// and store_uom attributes - not articles.purchase_measure / sales_measure,
+// which only say "weight" or "units".
+const ATTRIBUTE_COLUMNS = {
+  allow_purchase: "purchase_allowed",
+  purchase_type: "purchase_type",
+  pur_uom: "purchase_uom",
+  supply_uom: "store_uom",
+};
 
 const COLUMNS_BEFORE_STOCK = [
   { key: "article_id", header: "article_id", width: 10 },
@@ -290,12 +297,10 @@ function buildReport(data) {
       subcategory_id: t.subcategory ? t.subcategory.id : null,
       hsn_code: hsnAndTax(a).hsn,
       tax: hsnAndTax(a).tax,
-      pur_uom: str(a.purchase_measure),
-      supply_uom: str(a.sales_measure),
     };
     // Numbers stay numbers in the sheet: a purchase item / conversion with
     // one line is written as that number, several as text "a; b".
-    for (const k of ["repackage_conversion", "purchase_item"]) {
+    for (const k of ["repackage_conversion", "purchase_item", "pur_uom", "supply_uom"]) {
       if (typeof row[k] === "string" && /^-?\d+(\.\d+)?$/.test(row[k])) row[k] = Number(row[k]);
     }
     const s = stockOf.get(id);
