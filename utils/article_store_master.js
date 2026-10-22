@@ -4,10 +4,10 @@
  * laid out like the old system's article_store_master sheet.
  *
  * Not in it for now, by the owner's decision: MRP, net cost, sale rate. Not
- * in it: buyer and status - masterhub has no attribute for either. Allow
- * purchase, allow negative and purchase type are masterhub article
- * attributes (derived.article_store_attributes: purchase_allowed,
- * allow_negative, purchase_type).
+ * in it: buyer and status - masterhub has no attribute for either; allow
+ * negative - not wanted. Allow purchase and purchase type are masterhub
+ * article attributes (derived.article_store_attributes: purchase_allowed,
+ * purchase_type).
  *
  * SPECTRA, per product address (config/retailpilot.js):
  *   masterhub  derived.article_master, derived.article_taxonomy,
@@ -46,7 +46,7 @@ ORDER BY r.code`,
   attributes: `
 SELECT a.article_id, a.store_id, a.attr_id, a.attr_value
 FROM derived.article_store_attributes a
-WHERE a.attr_id IN ('purchase_allowed', 'allow_negative', 'purchase_type')
+WHERE a.attr_id IN ('purchase_allowed', 'purchase_type')
 ORDER BY a.article_id, a.attr_id, a.store_id`,
   preparation: `
 SELECT p.prepared_item, p.ingredient_item, p.ingredient_measure
@@ -146,7 +146,7 @@ function attributeValue(rows, warehouseSlugs) {
   return values.length === 1 ? values[0] : "mixed";
 }
 
-const ATTRIBUTE_COLUMNS = { allow_purchase: "purchase_allowed", allow_negative: "allow_negative", purchase_type: "purchase_type" };
+const ATTRIBUTE_COLUMNS = { allow_purchase: "purchase_allowed", purchase_type: "purchase_type" };
 
 const COLUMNS_BEFORE_STOCK = [
   { key: "article_id", header: "article_id", width: 10 },
@@ -157,7 +157,6 @@ const COLUMNS_BEFORE_STOCK = [
   { key: "category_name", header: "category_name", width: 24 },
   { key: "subcategory_name", header: "subcategory_name", width: 26 },
   { key: "allow_purchase", header: "allow_purchase", width: 14 },
-  { key: "allow_negative", header: "allow_negative", width: 14 },
   { key: "purchase_type", header: "purchase_type", width: 14 },
   { key: "preparation_type", header: "preparation_type", width: 16 },
   { key: "repackage_conversion", header: "repackage_conversion", width: 12 },
