@@ -10,7 +10,8 @@
  * purchase_type).
  *
  * SPECTRA, per product address (config/retailpilot.js):
- *   masterhub  derived.article_master, derived.article_taxonomy,
+ *   masterhub  public.articles (every article), derived.article_master and
+ *              constants.hsn_tax_linker (tax), derived.article_taxonomy,
  *              derived.hierarchy_master, derived.article_store_suppliers,
  *              public.vendors, public.preparation_master, public.stores,
  *              constants.tax_rates
@@ -21,11 +22,23 @@
  */
 
 const MASTERHUB_QUERIES = {
+  // Every article: masterhub's own articles table. (derived.article_master
+  // holds only a few - 118 on the first live run - so it is not the list.)
   articles: `
-SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.tax_code, a.preparation_type,
+SELECT a.slug AS article_id, a.article_name, a.hsn_code, a.preparation_type,
        a.purchase_measure, a.sales_measure
+FROM public.articles a
+ORDER BY a.slug`,
+  // Tax: the article's own tax code where derived.article_master has it,
+  // else the HSN code's rate (constants.hsn_tax_linker).
+  articleTax: `
+SELECT a.slug AS article_id, a.tax_code
 FROM derived.article_master a
 ORDER BY a.slug`,
+  hsnTax: `
+SELECT l.hsn_code, l.tax_code
+FROM constants.hsn_tax_linker l
+ORDER BY l.hsn_code, l.tax_code`,
   taxonomy: `
 SELECT t.article_id, t.level_id, t.hierarchy_id, h.hierarchy_name, h.level_name
 FROM derived.article_taxonomy t
@@ -180,6 +193,22 @@ function buildReport(data) {
   const articles = data.articles || [];
 
   const tax = new Map((data.taxRates || []).map((r) => [str(r.code), str(r.description)]));
+  const taxLabel = (code) => tax.get(str(code)) || `GST ${str(code)}%`;
+  const ownTax = new Map((data.articleTax || []).filter((r) => str(r.tax_code)).map((r) => [str(r.article_id), str(r.tax_code)]));
+  const hsnTax = new Map(); // hsn -> [tax codes]
+  for (const r of data.hsnTax || []) {
+    const h = str(r.hsn_code);
+    if (!h || !str(r.tax_code)) continue;
+    if (!hsnTax.has(h)) hsnTax.set(h, []);
+    if (!hsnTax.get(h).includes(str(r.tax_code))) hsnTax.get(h).push(str(r.tax_code));
+  }
+  // The article's own code; else its HSN's rate(s), several shown as "a / b".
+  const taxOf = (a) => {
+    const own = ownTax.get(str(a.article_id)) || str(a.tax_code);
+    if (own) return taxLabel(own);
+    const codes = hsnTax.get(str(a.hsn_code)) || [];
+    return codes.map(taxLabel).join(" / ");
+  };
   const vendorName = new Map((data.vendors || []).map((v) => [str(v.id), str(v.trade_name) || str(v.name)]));
   const articleName = new Map(articles.map((a) => [str(a.article_id), str(a.article_name)]));
 
@@ -252,7 +281,7 @@ function buildReport(data) {
       purchase_item_name: lines.map((l) => articleName.get(str(l.ingredient_item)) || "").filter(Boolean).join("; "),
       subcategory_id: t.subcategory ? t.subcategory.id : null,
       hsn_code: str(a.hsn_code),
-      tax: tax.get(str(a.tax_code)) || (str(a.tax_code) ? `GST ${str(a.tax_code)}%` : ""),
+      tax: taxOf(a),
       pur_uom: str(a.purchase_measure),
       supply_uom: str(a.sales_measure),
     };

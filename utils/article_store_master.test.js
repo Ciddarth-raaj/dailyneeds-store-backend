@@ -21,10 +21,10 @@ const buildPermissions = require("../middlewares/permissions");
 
 const DATA = {
   articles: [
-    { article_id: 51156, article_name: "zyro zero sugar tonic water drink 250ml tin", hsn_code: "22029990", tax_code: 40, preparation_type: "trade_as_is", purchase_measure: "CASE", sales_measure: "NOS" },
-    { article_id: 42953, article_name: "zzoy toy wooden puzzle", hsn_code: "48202000", tax_code: 5, preparation_type: "trade_as_is", purchase_measure: "NOS", sales_measure: "NOS" },
-    { article_id: 900, article_name: "sugar 1kg repack", hsn_code: "1701", tax_code: 5, preparation_type: "repack", purchase_measure: "KG", sales_measure: "NOS" },
-    { article_id: 901, article_name: "sugar bulk 50kg", hsn_code: "1701", tax_code: null, preparation_type: "bulk", purchase_measure: "KG", sales_measure: "KG" },
+    { article_id: 51156, article_name: "zyro zero sugar tonic water drink 250ml tin", hsn_code: "22029990", preparation_type: "trade_as_is", purchase_measure: "CASE", sales_measure: "NOS" },
+    { article_id: 42953, article_name: "zzoy toy wooden puzzle", hsn_code: "48202000", preparation_type: "trade_as_is", purchase_measure: "NOS", sales_measure: "NOS" },
+    { article_id: 900, article_name: "sugar 1kg repack", hsn_code: "1701", preparation_type: "repack", purchase_measure: "KG", sales_measure: "NOS" },
+    { article_id: 901, article_name: "sugar bulk 50kg", hsn_code: "1701", preparation_type: "bulk", purchase_measure: "KG", sales_measure: "KG" },
   ],
   taxonomy: [
     { article_id: 51156, level_id: "department-cpg", hierarchy_id: 10, hierarchy_name: "beverages", level_name: "Department" },
@@ -43,6 +43,11 @@ const DATA = {
     { id: "10002", name: "x", trade_name: "dn1 supplier" },
     { id: "10003", name: "metro home need (toys)", trade_name: "" },
   ],
+  articleTax: [
+    { article_id: 51156, tax_code: 40 },
+    { article_id: 900, tax_code: 5 },
+  ],
+  hsnTax: [{ hsn_code: "48202000", tax_code: 5 }],
   taxRates: [
     { code: 5, description: "GST 5%" },
     { code: 40, description: "GST 40%" },
@@ -88,7 +93,9 @@ describe("the rows", () => {
     assert.deepEqual([r.department_name, r.category_name, r.subcategory_name, r.brand_name, r.subcategory_id], ["beverages", "soft drinks", "soda & cocktail mix", "zyro", 3534]);
     assert.deepEqual([r.hsn_code, r.tax, r.pur_uom, r.supply_uom], ["22029990", "GST 40%", "CASE", "NOS"]);
     assert.equal(byId[42953].department_name, "household needs", "a level known by its id when the name is missing");
-    assert.equal(byId[901].tax, "", "no tax code: blank, not a guess");
+    assert.equal(byId[42953].tax, "GST 5%", "not in derived.article_master: its HSN code's rate");
+    assert.equal(byId[900].tax, "GST 5%");
+    assert.equal(byId[901].tax, "", "no tax code and no HSN rate: blank, not a guess");
   });
 
   it("supplier: the all-stores one; else the warehouse's", () => {
@@ -142,7 +149,9 @@ describe("the rows", () => {
   it("the queries read only whitelisted tables, each ordered for stable paging", () => {
     const all = [...Object.values(MASTERHUB_QUERIES), ...Object.values(RUNWAY_QUERIES)];
     for (const q of all) assert.match(q, /ORDER BY/);
-    assert.match(MASTERHUB_QUERIES.articles, /FROM derived\.article_master/);
+    assert.match(MASTERHUB_QUERIES.articles, /FROM public\.articles a/, "every article, not derived.article_master's few");
+    assert.match(MASTERHUB_QUERIES.articleTax, /FROM derived\.article_master/);
+    assert.match(MASTERHUB_QUERIES.hsnTax, /FROM constants\.hsn_tax_linker/);
     assert.match(MASTERHUB_QUERIES.suppliers, /FROM derived\.article_store_suppliers/);
     assert.match(MASTERHUB_QUERIES.taxRates, /FROM constants\.tax_rates/);
     assert.match(MASTERHUB_QUERIES.attributes, /FROM derived\.article_store_attributes a\s+WHERE a\.attr_id IN \('purchase_allowed', 'purchase_type'\)/);
