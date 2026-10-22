@@ -1485,6 +1485,16 @@ class Server {
       this.offersV3Repo
     );
     const retailPilotSpectra = require("./services/retailpilot_spectra")(require("./config/retailpilot"));
+    // Article Store Master report: the catalogue from masterhub (its own
+    // SPECTRA address, same key), stock from runway.
+    this.articleStoreMasterUsecase = require("./usecase/article_store_master")(
+      require("./services/retailpilot_spectra")({
+        ...require("./config/retailpilot"),
+        baseUrl: require("./config/retailpilot").masterhubBaseUrl,
+        product: require("./config/retailpilot").masterhubProduct,
+      }),
+      retailPilotSpectra
+    );
     this.retailPilotArticleSyncUsecase = require("./usecase/retailpilot_article_sync")(
       retailPilotSpectra,
       require("./repository/retailpilot_master")(this.mysql.connection)
@@ -2265,6 +2275,10 @@ class Server {
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
+    app.use(
+      "/article-store-master",
+      require("./routes/article_store_master")(this.articleStoreMasterUsecase, this.permissions).getRouter()
+    );
     app.use("/purchase-ref", purchaseRefRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
@@ -2344,6 +2358,30 @@ class Server {
     // stock and prices into Offers V3 (price, then stock) and the Price
     // Checker, replacing the hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
     // POST /offers-v3/retailpilot-sync runs it by hand either way.
+    // 5:45 AM (Asia/Kolkata) - build the Article Store Master report (the
+    // catalogue from masterhub, stock from runway) so the morning download is
+    // ready. Read-only; on unless RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED=false.
+    // POST /article-store-master/refresh builds it by hand either way.
+    if (require("./config/retailpilot").articleStoreMasterEnabled) {
+      const buildArticleStoreMaster = async () => {
+        const r = await this.articleStoreMasterUsecase.build();
+        if (r.code !== 200) throw new Error(r.msg);
+        return r;
+      };
+      this.cronService.register(
+        "article_store_master_report",
+        "45 5 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron(
+              "article_store_master_report",
+              "/retailpilot/article-store-master-run",
+              buildArticleStoreMaster
+            )
+          : buildArticleStoreMaster,
+        { preventOverlap: true }
+      );
+    }
+
     if (require("./config/retailpilot").stockSyncEnabled) {
       const runRetailPilotStockSync = async () =>
         await this.retailPilotStockSyncUsecase.run();

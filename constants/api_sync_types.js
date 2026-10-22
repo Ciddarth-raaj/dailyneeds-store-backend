@@ -77,6 +77,13 @@ const API_SYNC_TYPES = [
     label: "RetailPilot Stock & Price Sync",
     match: "/retailpilot/stock-sync-run",
   },
+  // The 5:45 AM Article Store Master report build; logged the same way.
+  {
+    type: "article_store_master_report",
+    category: "sync",
+    label: "Article Store Master Report",
+    match: "/retailpilot/article-store-master-run",
+  },
   // The 15-minute GRN copy and its manual run; logged the same way.
   {
     type: "retailpilot_grn_sync",
