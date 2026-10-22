@@ -47,6 +47,17 @@ const DATA = {
     { code: 5, description: "GST 5%" },
     { code: 40, description: "GST 40%" },
   ],
+  attributes: [
+    { article_id: 51156, store_id: null, attr_id: "purchase_allowed", attr_value: "true" },
+    { article_id: 51156, store_id: "dn1slug", attr_id: "purchase_allowed", attr_value: "false" },
+    { article_id: 51156, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
+    { article_id: 51156, store_id: "whslug", attr_id: "allow_negative", attr_value: "N" },
+    { article_id: 51156, store_id: null, attr_id: "purchase_type", attr_value: "FT" },
+    { article_id: 42953, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
+    { article_id: 42953, store_id: "dn2slug", attr_id: "allow_negative", attr_value: "Y" },
+    { article_id: 900, store_id: "dn1slug", attr_id: "allow_negative", attr_value: "Y" },
+    { article_id: 900, store_id: "dn2slug", attr_id: "allow_negative", attr_value: "N" },
+  ],
   preparation: [{ prepared_item: 900, ingredient_item: 901, ingredient_measure: 1 }],
   stores: [
     { slug: "whslug", shortname: "Wh", name: "Warehouse", type: "warehouse", is_active: true },
@@ -102,10 +113,17 @@ describe("the rows", () => {
     const headers = report.columns.map((c) => c.header);
     assert.deepEqual(headers, [
       "article_id", "article_name", "supplier_name", "brand_name", "department_name", "category_name", "subcategory_name",
-      "preparation_type", "repackage_conversion", "purchase_item", "purchase_item_name", "subcategory_id", "Hsn code", "Tax",
+      "allow_purchase", "allow_negative", "purchase_type", "preparation_type", "repackage_conversion", "purchase_item", "purchase_item_name", "subcategory_id", "Hsn code", "Tax",
       "Dn1", "Dn2", "Wh", "Total", "Pur uom", "Supply uom",
     ]);
     assert.ok(!headers.some((h) => /mrp|cost|sale_rate/i.test(h)));
+  });
+
+  it("allow purchase, allow negative, purchase type: the article-wide value, else the warehouse's, else the stores' if they agree", () => {
+    assert.deepEqual([byId[51156].allow_purchase, byId[51156].allow_negative, byId[51156].purchase_type], ["true", "N", "FT"]);
+    assert.equal(byId[42953].allow_negative, "Y", "every store agrees");
+    assert.equal(byId[900].allow_negative, "mixed", "stores differ and there is no article-wide or warehouse value");
+    assert.deepEqual([byId[901].allow_purchase, byId[901].allow_negative, byId[901].purchase_type], ["", "", ""]);
   });
 
   it("a closed store that still holds stock keeps its column, so Total misses nothing", () => {
@@ -125,6 +143,7 @@ describe("the rows", () => {
     assert.match(MASTERHUB_QUERIES.articles, /FROM derived\.article_master/);
     assert.match(MASTERHUB_QUERIES.suppliers, /FROM derived\.article_store_suppliers/);
     assert.match(MASTERHUB_QUERIES.taxRates, /FROM constants\.tax_rates/);
+    assert.match(MASTERHUB_QUERIES.attributes, /FROM derived\.article_store_attributes a\s+WHERE a\.attr_id IN \('purchase_allowed', 'allow_negative', 'purchase_type'\)/);
     assert.match(RUNWAY_QUERIES.stock, /FROM public\.batch_stock_positions p\s+JOIN public\.inventory_batches b/);
     assert.ok(!all.some((q) => /\b(mrp|net_cost|sale_rate|cost_master|selling_master)\b/i.test(q)), "no prices, for now");
   });
@@ -161,9 +180,10 @@ describe("the file", () => {
     await wb.xlsx.readFile(path.join(dir, res.file));
     const ws = wb.worksheets[0];
     assert.equal(ws.getRow(1).getCell(1).value, "article_id");
-    assert.equal(ws.getRow(1).getCell(15).value, "Dn1");
+    assert.equal(ws.getRow(1).getCell(18).value, "Dn1");
     assert.equal(ws.getRow(2).getCell(2).value, "zyro zero sugar tonic water drink 250ml tin");
-    assert.equal(ws.getRow(2).getCell(18).value, 36.5);
+    assert.equal(ws.getRow(2).getCell(21).value, 36.5);
+    assert.equal(ws.getRow(2).getCell(8).value, "true", "allow_purchase");
     assert.equal(ws.rowCount, 5);
     assert.equal(r.status().latest.file, res.file);
   });

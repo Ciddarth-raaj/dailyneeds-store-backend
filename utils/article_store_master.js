@@ -4,8 +4,10 @@
  * laid out like the old system's article_store_master sheet.
  *
  * Not in it for now, by the owner's decision: MRP, net cost, sale rate. Not
- * in it yet: buyer, status, allow purchase, allow negative, purchase type -
- * these are masterhub article attributes whose ids are still to be confirmed.
+ * in it: buyer and status - masterhub has no attribute for either. Allow
+ * purchase, allow negative and purchase type are masterhub article
+ * attributes (derived.article_store_attributes: purchase_allowed,
+ * allow_negative, purchase_type).
  *
  * SPECTRA, per product address (config/retailpilot.js):
  *   masterhub  derived.article_master, derived.article_taxonomy,
@@ -41,6 +43,11 @@ ORDER BY v.id`,
 SELECT r.code, r.description
 FROM constants.tax_rates r
 ORDER BY r.code`,
+  attributes: `
+SELECT a.article_id, a.store_id, a.attr_id, a.attr_value
+FROM derived.article_store_attributes a
+WHERE a.attr_id IN ('purchase_allowed', 'allow_negative', 'purchase_type')
+ORDER BY a.article_id, a.attr_id, a.store_id`,
   preparation: `
 SELECT p.prepared_item, p.ingredient_item, p.ingredient_measure
 FROM public.preparation_master p
@@ -124,6 +131,23 @@ function supplierNames(rows, vendorName, warehouseSlugs) {
   return names.join(", ");
 }
 
+/**
+ * One value for an article attribute that can differ by store: the
+ * article-wide value (store_id NULL) when set, else the warehouse's, else the
+ * stores' when they all agree, else "mixed".
+ */
+function attributeValue(rows, warehouseSlugs) {
+  if (!rows || !rows.length) return "";
+  const general = rows.find((r) => r.store_id == null || str(r.store_id) === "");
+  if (general) return str(general.attr_value);
+  const wh = rows.find((r) => warehouseSlugs.has(str(r.store_id)));
+  if (wh) return str(wh.attr_value);
+  const values = [...new Set(rows.map((r) => str(r.attr_value)))];
+  return values.length === 1 ? values[0] : "mixed";
+}
+
+const ATTRIBUTE_COLUMNS = { allow_purchase: "purchase_allowed", allow_negative: "allow_negative", purchase_type: "purchase_type" };
+
 const COLUMNS_BEFORE_STOCK = [
   { key: "article_id", header: "article_id", width: 10 },
   { key: "article_name", header: "article_name", width: 50 },
@@ -132,6 +156,9 @@ const COLUMNS_BEFORE_STOCK = [
   { key: "department_name", header: "department_name", width: 22 },
   { key: "category_name", header: "category_name", width: 24 },
   { key: "subcategory_name", header: "subcategory_name", width: 26 },
+  { key: "allow_purchase", header: "allow_purchase", width: 14 },
+  { key: "allow_negative", header: "allow_negative", width: 14 },
+  { key: "purchase_type", header: "purchase_type", width: 14 },
   { key: "preparation_type", header: "preparation_type", width: 16 },
   { key: "repackage_conversion", header: "repackage_conversion", width: 12 },
   { key: "purchase_item", header: "purchase_item", width: 12 },
@@ -181,6 +208,16 @@ function buildReport(data) {
     recipe.get(id).push(r);
   }
 
+  const attributes = new Map(); // article id -> attr id -> rows
+  for (const r of data.attributes || []) {
+    const id = str(r.article_id);
+    if (!attributes.has(id)) attributes.set(id, new Map());
+    const m = attributes.get(id);
+    const attr = str(r.attr_id);
+    if (!m.has(attr)) m.set(attr, []);
+    m.get(attr).push(r);
+  }
+
   const stock = data.stock || [];
   const stores = storeColumns(data.stores || [], stock);
   const warehouseSlugs = new Set(stores.filter((s) => s.warehouse).map((s) => s.slug));
@@ -207,6 +244,9 @@ function buildReport(data) {
       department_name: t.department ? t.department.name : "",
       category_name: t.category ? t.category.name : "",
       subcategory_name: t.subcategory ? t.subcategory.name : "",
+      ...Object.fromEntries(
+        Object.entries(ATTRIBUTE_COLUMNS).map(([col, attr]) => [col, attributeValue(attributes.get(id)?.get(attr), warehouseSlugs)])
+      ),
       preparation_type: str(a.preparation_type),
       repackage_conversion: lines.length ? lines.map((l) => num(l.ingredient_measure)).join("; ") : 0,
       purchase_item: lines.length ? lines.map((l) => str(l.ingredient_item)).join("; ") : 0,
@@ -248,5 +288,6 @@ module.exports = {
   levelOf,
   storeColumns,
   supplierNames,
+  attributeValue,
   buildReport,
 };
