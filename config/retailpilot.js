@@ -16,8 +16,8 @@ require("dotenv").config();
  *                                product the bill tables belong to. Fixed, not an
  *                                env setting: a stale RETAILPILOT_SALES_PRODUCT
  *                                once sent these queries to runway.
- *   RETAILPILOT_PURCHASE_SYNC_ENABLED  "true" schedules the cron at 9:00,
- *                                14:00 and 17:00 Asia/Kolkata
+ *   RETAILPILOT_PURCHASE_SYNC_ENABLED  the cron at 9:00, 14:00 and 17:00
+ *                                Asia/Kolkata. ON unless set to "false".
  *   RETAILPILOT_PURCHASE_LOOKBACK_DAYS days re-read on every cron run (default 3)
  *   RETAILPILOT_GRN_OUTLET_ID    the outlet whose RetailPilot purchases are the
  *                                GRN pages' GRNs (default 2, the warehouse)
@@ -60,7 +60,7 @@ module.exports = {
   articleStoreMasterEnabled:
     String(process.env.RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED || "").toLowerCase() !== "false",
   purchaseSyncEnabled:
-    String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() === "true",
+    String(process.env.RETAILPILOT_PURCHASE_SYNC_ENABLED || "").toLowerCase() !== "false",
   stockSyncEnabled:
     String(process.env.RETAILPILOT_STOCK_SYNC_ENABLED || "").toLowerCase() !== "false",
   grnSyncEnabled:

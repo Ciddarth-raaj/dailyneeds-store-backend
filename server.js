@@ -2329,8 +2329,8 @@ class Server {
     // 9:00 AM, 2:00 PM AND 5:00 PM (Asia/Kolkata, the cron service's zone) -
     // pull purchase invoices from RetailPilot (replaces the GoFrugal push to
     // POST /purchase/bulk). Each run re-reads the look-back window
-    // (RETAILPILOT_PURCHASE_LOOKBACK_DAYS, default 3). Off until
-    // RETAILPILOT_PURCHASE_SYNC_ENABLED=true; POST /purchase/retailpilot-sync
+    // (RETAILPILOT_PURCHASE_LOOKBACK_DAYS, default 3). On unless
+    // RETAILPILOT_PURCHASE_SYNC_ENABLED=false; POST /purchase/retailpilot-sync
     // runs it by hand either way.
     if (require("./config/retailpilot").purchaseSyncEnabled) {
       const runRetailPilotPurchaseSync = async () =>
