@@ -3,8 +3,8 @@ const respondError = require("../utils/http");
 
 /**
  * The RetailPilot Sync page: when each RetailPilot sync last ran, whether it
- * is running now, and manual starts for the stock & price sync and the GRN
- * sync. The product and purchase syncs keep their own endpoints
+ * is running now, and manual starts for the stock & price sync, the GRN
+ * sync and the Article Store Master build. The product and purchase syncs keep their own endpoints
  * (POST /product/sync, POST /purchase/retailpilot-sync).
  */
 const SYNCS = [
@@ -40,12 +40,21 @@ const SYNCS = [
     schedule: (c) => (c.purchaseSyncEnabled ? "Daily 9:00 AM, 2:00 PM, 5:00 PM" : "Not scheduled"),
     permission: "sync_retailpilot_purchases",
   },
+  {
+    key: "article_store_master",
+    log_type: "article_store_master_report",
+    label: "Article Store Master",
+    description: "The Article Store Master report (catalogue and store stock) for download",
+    schedule: (c) => (c.articleStoreMasterEnabled ? "Daily 5:45 AM" : "Not scheduled"),
+    permission: "view_products",
+  },
 ];
 
 class RetailPilotRoutes {
   /**
    * @param deps { apiSyncLogRepo, config, isRunning: { [key]: () => boolean },
-   *   startStockSync / startGrnSync: (employeeId) => { started, msg }, permissions }
+   *   startStockSync / startGrnSync / startArticleStoreMaster: (employeeId) => { started, msg },
+   *   permissions }
    */
   constructor(deps) {
     this.deps = deps;
@@ -103,6 +112,7 @@ class RetailPilotRoutes {
       });
     startRoute("/stock-sync", "sync_retailpilot_stock", (id) => this.deps.startStockSync(id));
     startRoute("/grn-sync", "sync_retailpilot_purchases", (id) => this.deps.startGrnSync(id));
+    startRoute("/article-store-master-sync", "view_products", (id) => this.deps.startArticleStoreMaster(id));
   }
 
   getRouter() {

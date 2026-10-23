@@ -2095,6 +2095,7 @@ class Server {
         products: () => this.retailPilotArticleSyncUsecase.running,
         purchases: () => this.retailPilotPurchaseSyncUsecase.running,
         grn: () => this.retailPilotGrnSyncUsecase.running,
+        article_store_master: () => Boolean(this.articleStoreMasterUsecase.running),
       },
       startStockSync: (employeeId) => this.retailPilotStockSyncUsecase.startManual(employeeId),
       startGrnSync: (employeeId) => {
@@ -2108,6 +2109,20 @@ class Server {
           : run;
         logged().catch(() => {});
         return { started: true, msg: "GRN sync started" };
+      },
+      startArticleStoreMaster: (employeeId) => {
+        if (this.articleStoreMasterUsecase.running) {
+          return { started: false, msg: "The Article Store Master build is already running" };
+        }
+        const run = () => this.articleStoreMasterUsecase.build();
+        const logged = this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("article_store_master_report", "/retailpilot/article-store-master-sync", run, {
+              source: "manual",
+              employee_id: employeeId,
+            })
+          : run;
+        logged().catch(() => {});
+        return { started: true, msg: "Article Store Master build started" };
       },
       permissions: this.permissions,
     });
