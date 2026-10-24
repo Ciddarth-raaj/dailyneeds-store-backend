@@ -872,6 +872,15 @@ class OffersV3Usecase {
     await this.offersV3Repo.clearLowStockWarningsByItemCodes(toClear);
 
     if (newlyWarned.length > 0) {
+      // The pending queue joins product_table, so re-reading it after the
+      // upsert is the cheapest way to put an article name beside each code.
+      const pendingNow = await this.offersV3Repo.listLowStockWarnings("pending");
+      const nameByCode = new Map(pendingNow.map((w) => [w.item_code, w.item_name]));
+      const itemLabel = (w) => {
+        const name = stripMarkdown(nameByCode.get(w.item_code)).trim();
+        return name ? `🔢 Item Code: ${w.item_code}\n📦 Item: ${name}` : `🔢 Item Code: ${w.item_code}`;
+      };
+
       // Out of stock is not the same news as running low - an offer with
       // nothing behind it is live on the shelf edge right now - so the two are
       // listed apart rather than as one number to read carefully.
@@ -880,15 +889,15 @@ class OffersV3Usecase {
       const lines = [];
       if (out.length) {
         lines.push("🔴 OUT OF STOCK - offer still live:");
-        lines.push(...out.map((w) => `🔢 Item Code: ${w.item_code} | 📊 No stock in any store`));
+        lines.push(out.map((w) => `${itemLabel(w)}\n📊 No stock in any store`).join("\n\n"));
       }
       if (low.length) {
         if (lines.length) lines.push("");
         lines.push("🟡 Running low:");
         lines.push(
-          ...low.map(
-            (w) => `🔢 Item Code: ${w.item_code} | 📊 Total Stock: ${w.total_stock_qty} / Threshold: ${w.threshold_qty}`
-          )
+          low
+            .map((w) => `${itemLabel(w)}\n📊 Total Stock: ${w.total_stock_qty} / Threshold: ${w.threshold_qty}`)
+            .join("\n\n")
         );
       }
       await notifyOffersV3(
