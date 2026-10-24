@@ -415,11 +415,10 @@ describe("31/32. dnds.co.in remains the employee master", () => {
     assert.equal(reload({ LOCAL_EMPLOYEE_MASTER: "nonsense" }).localEmployeeMaster, true);
   });
 
-  it("no unrelated sync was disabled by the removal", () => {
+  it("the employee sync removal disabled nothing else; the stock holding pull went later, with GoFrugal", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "services/synker.js"), "utf8");
-    for (const job of ["stock_holding_report_sync"]) {
-      assert.match(src, new RegExp(`cronService\\.register\\(\\s*"${job}"`), `${job} must still be registered`);
-    }
+    assert.doesNotMatch(src, /cronService\.register\(\s*"stock_holding_report_sync"/);
+    assert.match(src, /stock holding report pull was removed: it read the old\s*\n\s*\/\/ Delium \/ GoFrugal API/);
   });
 });
 
