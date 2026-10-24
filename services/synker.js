@@ -7,8 +7,6 @@ const moment = require("moment");
 const logger = require("../utils/logger");
 const deliumConfig = require("../config/delium");
 
-const CRON_SYNTAX_STOCK_HOLDING = "30 7 * * *";
-
 class Synker {
   constructor(
     productUsecase,
@@ -31,28 +29,13 @@ class Synker {
   }
 
   initCronJobs(cronService, apiSyncLogger) {
-    const wrap = (logType, path, fn) =>
-      apiSyncLogger ? apiSyncLogger.wrapCron(logType, path, fn) : fn;
-
     // The daily 04:00 product_sync cron was removed on request. Products are
     // still synced on demand through POST /product/sync.
 
-    cronService.register(
-      "stock_holding_report_sync",
-      CRON_SYNTAX_STOCK_HOLDING,
-      wrap(
-        "stock_holding_report_sync",
-        "/stock-holding-report/sync",
-        async () => {
-          // RETURN, not just await: wrapCron logs from what this resolves
-          // to, so swallowing the result logged every run with a null row
-          // count and - before the isSuccess fix in utils/api_sync_logger.js
-          // - as a success whatever the sync actually reported. Same shape as
-          // product_sync above.
-          return await this.syncStockHoldingReportWithLogging();
-        }
-      )
-    );
+    // The 7:30 stock holding report pull was removed: it read the old
+    // Delium / GoFrugal API, which is retired (RetailPilot replaced it).
+    // POST /stock-holding-report/sync is refused too
+    // (middlewares/gofrugal_retired.js).
   }
 
   async syncStockHoldingReportWithLogging() {

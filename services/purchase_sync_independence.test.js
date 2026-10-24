@@ -63,10 +63,10 @@ describe("the Digisme employee sync is gone, and took nothing else with it", () 
     assert.ok(!/if\s*\(/.test(init), "no job is registered behind a flag any more");
   });
 
-  it("the other synker jobs survive the removal", () => {
+  it("the stock holding pull (old Delium / GoFrugal API) is retired too", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
     const registered = [...init.matchAll(/register\(\s*"([a-z_]+)"/g)].map((m) => m[1]);
-    assert.ok(registered.includes("stock_holding_report_sync"));
+    assert.ok(!registered.includes("stock_holding_report_sync"));
   });
 
   it("no Digisme code, credential or flag is left in the synker", () => {

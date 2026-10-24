@@ -329,7 +329,7 @@ describe("the cron is gone", () => {
     const init = code.slice(code.indexOf("initCronJobs("), code.indexOf("async syncStockHoldingReportWithLogging"));
     const registered = [...init.matchAll(/register\(\s*["']([a-z_]+)["']/g)].map((m) => m[1]);
     assert.ok(!registered.includes("employee_sync"));
-    assert.deepEqual(registered.sort(), ["stock_holding_report_sync"]);
+    assert.deepEqual(registered, [], "the stock holding pull (old Delium / GoFrugal API) is retired too");
   });
 
   it("no cron expression for it survives", () => {
