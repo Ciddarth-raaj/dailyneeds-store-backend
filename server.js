@@ -1543,6 +1543,10 @@ class Server {
       app.use(this.apiSyncLogger.middleware());
     }
 
+    // GoFrugal's feeds (server scripts pushing GoFrugal data) are refused,
+    // after the API Sync Log middleware so each refusal is still logged.
+    app.use(require("./middlewares/gofrugal_retired").create());
+
     // Stage 0A: built with the user usecase so a revoked or disabled
     // session stops within the cache window rather than at token expiry.
     const authMiddleWare = require("./middlewares/auth").create({
