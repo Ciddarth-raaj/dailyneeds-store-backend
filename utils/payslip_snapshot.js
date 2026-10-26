@@ -430,50 +430,62 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
 
   /*
    * PRIOR-MONTH OT - OT approved after its own month was locked, settled in
-   * this payroll. ONE LINE PER SOURCE MONTH, never merged into this month's
-   * OT and never into Arrears: "Prior-Month OT - Sep 2026: 180 min". The
-   * per-request detail (date, minutes, rate, amount) is kept on the snapshot.
+   * this payroll. ONE LINE PER SOURCE MONTH, never merged into Arrears:
+   * "Prior-Month OT - Sep 2026: 180 min". The per-request detail (date,
+   * minutes, rate, amount) is kept on the snapshot.
+   *
+   * THIS month's own OT, approved while it was locked and paid here after it
+   * was unlocked, is not Prior-Month OT: it is this month's OT, so it is
+   * added into the one "Overtime (OT)" line (and its hours), not shown apart.
    */
   const priorItems = parseJsonList(c.prior_month_ot);
+  const isOwnMonth = (item) =>
+    Number(item.source_year) === Number(period.year) && Number(item.source_month) === Number(period.month);
+  const itemMinutes = (item) => Math.max(0, Math.trunc(Number(item.approved_ot_minutes) || 0));
+  const ownItems = priorItems.filter(isOwnMonth);
+  const ownPaise = ownItems.reduce((n, item) => n + paiseOr0(item.amount), 0);
+  const ownMinutes = ownItems.reduce((n, item) => n + itemMinutes(item), 0);
   const priorByMonth = new Map();
-  priorItems.forEach((item) => {
+  priorItems.filter((item) => !isOwnMonth(item)).forEach((item) => {
     const key = `${item.source_year}-${String(item.source_month).padStart(2, "0")}`;
     const e = priorByMonth.get(key) || { year: Number(item.source_year), month: Number(item.source_month), minutes: 0, paise: 0 };
-    e.minutes += Math.max(0, Math.trunc(Number(item.approved_ot_minutes) || 0));
+    e.minutes += itemMinutes(item);
     e.paise += paiseOr0(item.amount);
     priorByMonth.set(key, e);
   });
   const priorLines = [...priorByMonth.entries()]
     .sort(([a], [b]) => (a < b ? -1 : 1))
     .map(([key, e]) => ({
-      ...line(
-        `prior_month_ot_${key}`,
-        // THIS month's own OT, approved while it was locked and paid here
-        // after it was unlocked, is not "Prior-Month" OT on this payslip.
-        `${
-          e.year === Number(period.year) && e.month === Number(period.month)
-            ? "OT Approved After Lock"
-            : "Prior-Month OT"
-        } — ${MONTH_SHORT[e.month - 1]} ${e.year}: ${e.minutes} min`,
-        e.paise
-      ),
+      ...line(`prior_month_ot_${key}`, `Prior-Month OT — ${MONTH_SHORT[e.month - 1]} ${e.year}: ${e.minutes} min`, e.paise),
       prior_month_ot: { source_year: e.year, source_month: e.month, approved_ot_minutes: e.minutes },
     }));
   const priorSum = [...priorByMonth.values()].reduce((n, e) => n + e.paise, 0);
-  if (priorItems.length > 0 && priorSum !== paiseOr0(c.prior_month_ot_amount)) {
+  if (priorItems.length > 0 && priorSum + ownPaise !== paiseOr0(c.prior_month_ot_amount)) {
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored prior-month OT items do not add up to their total");
   }
+  const otTotal = ot + ownPaise;
+  // One hourly rate only when every paid OT minute was priced at it.
+  const otRates = new Set([
+    ...(ot > 0 ? [toPaise(c.ot_hourly_rate)] : []),
+    ...ownItems.map((item) => toPaise(item.ot_hourly_rate)),
+  ]);
+  const otRate =
+    ownItems.length === 0
+      ? moneyOf(c.ot_hourly_rate)
+      : otRates.size === 1 && !otRates.has(null)
+      ? money([...otRates][0])
+      : null;
 
   const earningsLines = [
     ...salaryLines,
     line("extra_day_amount", "Extra Days", extraDay, true),
-    line("ot_amount", "Overtime (OT)", ot, true),
+    line("ot_amount", "Overtime (OT)", otTotal, true),
     ...priorLines,
     line("incentive", "Incentive", incentive, true),
     line("bonus", "Bonus", bonus, true),
     line("arrears", "Arrears", arrears, true),
   ];
-  const earningsSum = salaryEarnings + extraDay + ot + priorSum + incentive + bonus + arrears;
+  const earningsSum = salaryEarnings + extraDay + otTotal + priorSum + incentive + bonus + arrears;
   const totalEarnings = toPaise(c.total_earnings);
   if (totalEarnings === null || earningsSum !== totalEarnings) {
     throw new SnapshotError("SNAPSHOT_EARNINGS_MISMATCH", "The stored earnings do not add up to the stored total");
@@ -589,11 +601,13 @@ function buildPayslipSnapshot({ period, calculation, employee, extras = {}, comp
       missing_hours_deduction: money(missing),
       extra_days: c.extra_days === null || c.extra_days === undefined ? null : Number(c.extra_days),
       extra_day_amount: money(extraDay),
-      approved_ot_hours: Number(c.approved_ot_hours || 0),
-      ot_hourly_rate: moneyOf(c.ot_hourly_rate),
-      ot_amount: money(ot),
+      // This month's OT, including any approved after the month was locked.
+      approved_ot_hours: Math.round((Number(c.approved_ot_hours || 0) + ownMinutes / 60) * 10000) / 10000,
+      ot_hourly_rate: otRate,
+      ot_amount: money(otTotal),
       ot_groups: otGroups,
-      // Prior-month OT settled here, request by request, for audit.
+      // Prior-month OT settled here, request by request, for audit (this
+      // month's own after-lock items included; their amount is in ot_amount).
       prior_month_ot_amount: money(priorSum),
       prior_month_ot: priorItems.map((item) => ({
         attendance_approval_request_id: Number(item.attendance_approval_request_id),

@@ -1285,6 +1285,13 @@ class PayrunCalculationUsecase {
                   earlier_month_ot_amount: provisional(split.earlier.length > 0 ? split.earlier_amount : null),
                   total_approved_ot_minutes: provisional(total),
                   total_approved_ot_hours: provisional(Math.round((total / 60) * 10000) / 10000),
+                  // This month's OT amount, its after-lock part included: the
+                  // one "Overtime (OT)" figure the payslip shows.
+                  total_ot_amount: provisional(
+                    stored.ot_amount === null || stored.ot_amount === undefined
+                      ? null
+                      : calc.toRupees(calc.toPaise(stored.ot_amount) + (split.own_month.length > 0 ? calc.toPaise(split.own_month_amount) : 0))
+                  ),
                 };
               })(),
             },

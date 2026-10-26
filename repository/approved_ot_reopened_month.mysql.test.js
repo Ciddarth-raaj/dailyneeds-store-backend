@@ -240,6 +240,7 @@ describe("Approved OT of a reopened month over real SQL", { skip: !URL && "ATTEN
     assert.equal(o.total_approved_ot_hours, 0.4667);
     assert.equal(o.late_approved_ot_minutes, 28);
     assert.equal(Number(o.late_approved_ot_amount), 56.68);
+    assert.equal(Number(o.total_ot_amount), Math.round((Number(o.ot_amount || 0) + 56.68) * 100) / 100, "one OT amount");
     assert.equal(o.late_approved_ot[0].attendance_date, OT_DATE);
     assert.deepEqual(o.earlier_month_ot, [], "it is not prior-month OT");
     assert.equal(o.earlier_month_ot_amount, null);
@@ -268,7 +269,7 @@ describe("Approved OT of a reopened month over real SQL", { skip: !URL && "ATTEN
     assert.equal(Number((await settlement()).settlement_month), 9);
   });
 
-  it("Approve & Lock of September SETTLES it in September, and the payslip names it as this month's OT", async () => {
+  it("Approve & Lock of September SETTLES it in September, and the payslip pays it inside this month's one OT line", async () => {
     const approved = await usecase.approve({ year: 2026, month: 9, employee_ids: [OT], actor: ACTOR });
     assert.equal(approved.approved_count, 1, JSON.stringify(approved.results));
     const s = await settlement();
@@ -276,9 +277,11 @@ describe("Approved OT of a reopened month over real SQL", { skip: !URL && "ATTEN
     await usecase.lifecycle({ action: "PUBLISH", year: 2026, month: 9, employee_ids: [OT], mode: "INDIVIDUAL", actor: ACTOR });
     const slip = await usecase.getPayslip({ year: 2026, month: 9, employee_id: OT });
     const lines = slip.payslip.snapshot.earnings.lines;
-    const line = lines.find((l) => /^OT Approved After Lock — Sep 2026: 28 min$/.test(l.label));
-    assert.ok(line, JSON.stringify(lines.map((l) => l.label)));
-    assert.equal(Number(line.amount), 56.68);
-    assert.ok(!lines.some((l) => /^Prior-Month OT/.test(l.label)));
+    const line = lines.find((l) => l.key === "ot_amount");
+    assert.equal(line.label, "Overtime (OT)");
+    const own = Number((await row(OT, 9)).ot_amount || 0);
+    assert.equal(Number(line.amount), Math.round((own + 56.68) * 100) / 100);
+    assert.equal(Number(slip.payslip.snapshot.attendance.ot_amount), Number(line.amount));
+    assert.ok(!lines.some((l) => /^Prior-Month OT|After Lock/.test(l.label)), JSON.stringify(lines.map((l) => l.label)));
   });
 });

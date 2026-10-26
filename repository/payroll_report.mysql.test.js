@@ -91,6 +91,9 @@ describe("payroll reports over real SQL", { skip: !URL && "ATTENDANCE_TEST_MYSQL
     await q("SET FOREIGN_KEY_CHECKS = 1");
     for (const sql of STAND_INS) await q(sql);
     for (const file of MIGRATIONS) await q(fs.readFileSync(path.join(SQLS, file), "utf8"));
+    // The two Prior-Month OT columns of `20261126120000-attendance-ot-late-settlement`
+    // (its tables need the attendance approval schema this suite does not build).
+    await q("ALTER TABLE payrun_employee_calculation ADD COLUMN prior_month_ot_amount DECIMAL(12,2) NULL, ADD COLUMN prior_month_ot JSON NULL");
     // The migration is guarded: running it twice changes nothing.
     await q(fs.readFileSync(path.join(SQLS, "20261123120000-payroll-reports-up.sql"), "utf8"));
 

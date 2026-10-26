@@ -225,4 +225,28 @@ describe("payroll reports on an engine-calculated, completed month", { skip: !UR
   it("opening reports and generating files changed NO payrun figure", async () => {
     assert.deepEqual(await payrun(), totals);
   });
+
+  it("OT APPROVED AFTER LOCK is reported inside OT Amount and OT minutes, not as Prior-Month OT", async () => {
+    const before = await report("PAYROLL_REGISTER", ["employee_id", "ot_amount", "approved_ot_minutes", "prior_month_ot_amount"]);
+    const row1 = before.rows.find((r) => r.employee_id === 1);
+    const items = [
+      { source_year: YEAR, source_month: MONTH, approved_ot_minutes: 20, amount: "22.27" },
+      { source_year: YEAR, source_month: MONTH, approved_ot_minutes: 10, amount: "11.13" },
+      { source_year: YEAR, source_month: MONTH - 1, approved_ot_minutes: 60, amount: "70.00" },
+    ];
+    await q(
+      pool,
+      `UPDATE payrun_employee_calculation c JOIN payrun_employee pe ON pe.payrun_employee_id = c.payrun_employee_id
+          SET c.prior_month_ot = ?, c.prior_month_ot_amount = 103.40
+        WHERE pe.employee_id = 1 AND pe.period_year = ? AND pe.period_month = ?`,
+      [JSON.stringify(items), YEAR, MONTH]
+    );
+    const p = await report("PAYROLL_REGISTER", ["employee_id", "ot_amount", "approved_ot_minutes", "prior_month_ot_amount"]);
+    const r = p.rows.find((x) => x.employee_id === 1);
+    assert.equal(r.ot_amount, Math.round(((row1.ot_amount || 0) + 33.4) * 100) / 100);
+    assert.equal(r.approved_ot_minutes, (row1.approved_ot_minutes || 0) + 30);
+    assert.equal(r.prior_month_ot_amount, 70);
+    assert.equal(p.totals.ot_amount, Math.round(((before.totals.ot_amount || 0) + 33.4) * 100) / 100);
+    assert.equal(p.rows.find((x) => x.employee_id === 2).prior_month_ot_amount, null);
+  });
 });

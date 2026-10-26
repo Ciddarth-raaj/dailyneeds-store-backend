@@ -129,6 +129,21 @@ const earnedComponent = (index) => (v) => {
   return asAmount(money(split.parts[index]));
 };
 
+/**
+ * The stored Prior-Month OT items (`c.prior_month_ot`), split exactly as the
+ * payslip splits them: an item whose SOURCE month is the report's own month
+ * (approved while this month was locked, paid here once it was unlocked) is
+ * this month's OT and is added into the OT figures; every other item is
+ * Prior-Month OT. The stored `prior_month_ot_amount` total holds both.
+ */
+const lateOt = (column, ownMonth) =>
+  `(SELECT COALESCE(SUM(lot.${column}), 0) FROM JSON_TABLE(COALESCE(c.prior_month_ot, JSON_ARRAY()), '$[*]' COLUMNS (` +
+  "source_year INT PATH '$.source_year', source_month INT PATH '$.source_month', " +
+  "approved_ot_minutes INT PATH '$.approved_ot_minutes', amount DECIMAL(12,2) PATH '$.amount')) lot " +
+  `WHERE ${ownMonth ? "" : "NOT "}(lot.source_year = pe.period_year AND lot.source_month = pe.period_month))`;
+/** A stored OT figure plus this month's own after-lock OT; NULL stays NULL. */
+const withOwnLateOt = (stored, column) => `(${stored} + ${lateOt(column, true)})`;
+
 const f = (key, label, group, spec) => ({
   key,
   label,
@@ -261,16 +276,25 @@ const PAYROLL_FIELDS = [
     select: "(COALESCE(c.extra_day_amount, 0) + COALESCE(c.bonus, 0) + COALESCE(c.arrears, 0))",
     type: TYPE.AMOUNT, transform: asAmount, note: "Extra Days + Bonus + Arrears.",
   }),
-  f("approved_ot_hours", "OT Hours (approved)", G.EARNINGS, { select: "c.approved_ot_hours", type: TYPE.NUMBER, transform: asNumber }),
-  f("approved_ot_minutes", "OT Minutes (approved)", G.EARNINGS, { select: "c.approved_ot_minutes", type: TYPE.NUMBER, transform: asNumber }),
+  f("approved_ot_hours", "OT Hours (approved)", G.EARNINGS, {
+    select: `ROUND(c.approved_ot_hours + ${lateOt("approved_ot_minutes", true)} / 60, 4)`, type: TYPE.NUMBER, transform: asNumber,
+    note: "Includes this month's OT approved after the month was locked.",
+  }),
+  f("approved_ot_minutes", "OT Minutes (approved)", G.EARNINGS, {
+    select: withOwnLateOt("c.approved_ot_minutes", "approved_ot_minutes"), type: TYPE.NUMBER, transform: asNumber,
+    note: "Includes this month's OT approved after the month was locked.",
+  }),
   f("ot_hourly_rate", "OT Rate (per hour)", G.EARNINGS, {
     select: "c.ot_hourly_rate", type: TYPE.AMOUNT, transform: asAmount,
     note: "Blank when the month was priced at more than one rate (see the payslip's OT breakup).",
   }),
-  f("ot_amount", "OT Amount", G.EARNINGS, { select: "c.ot_amount", type: TYPE.AMOUNT, transform: asAmount }),
+  f("ot_amount", "OT Amount", G.EARNINGS, {
+    select: withOwnLateOt("c.ot_amount", "amount"), type: TYPE.AMOUNT, transform: asAmount,
+    note: "Includes this month's OT approved after the month was locked, as on the payslip.",
+  }),
   f("prior_month_ot_amount", "Prior-Month OT", G.EARNINGS, {
-    select: "c.prior_month_ot_amount", type: TYPE.AMOUNT, transform: asAmount,
-    note: "OT approved after its own month was locked, settled in this month (see the payslip for each source month).",
+    select: `IF(c.prior_month_ot_amount IS NULL, NULL, NULLIF(${lateOt("amount", false)}, 0))`, type: TYPE.AMOUNT, transform: asAmount,
+    note: "OT of an earlier month, approved after that month was locked, settled in this month (see the payslip for each source month).",
   }),
   f("gross_salary", "Gross Salary", G.EARNINGS, { select: "c.total_earnings", type: TYPE.AMOUNT, transform: asAmount }),
 

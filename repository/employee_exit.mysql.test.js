@@ -548,14 +548,17 @@ describe("full & final settlement over real SQL", { skip: !URL && "ATTENDANCE_TE
     assert.equal((await act("UNLOCK", [6])).unlocked_count, 1);
     const recalc = await calcUsecase.calculate({ year: YEAR, month: MONTH, employee_ids: [6], mode: "RECALCULATE", actor: ACTOR });
     assert.equal(recalc.results[0].result, "RECALCULATED", JSON.stringify(recalc.results));
-    const calcRow = (await q(pool, "SELECT payrun_calculation_id, prior_month_ot_amount, prior_month_ot FROM payrun_employee_calculation WHERE employee_id = 6"))[0];
+    const calcRow = (await q(pool, "SELECT payrun_calculation_id, ot_amount, prior_month_ot_amount, prior_month_ot FROM payrun_employee_calculation WHERE employee_id = 6"))[0];
     assert.equal(Number(calcRow.prior_month_ot_amount), 96.16);
     const paid = JSON.parse(typeof calcRow.prior_month_ot === "string" ? calcRow.prior_month_ot : JSON.stringify(calcRow.prior_month_ot));
     assert.deepEqual(paid.map((i) => i.attendance_date), ["2026-08-12"], "the cancelled item is not paid");
     assert.equal((await calcUsecase.approve({ year: YEAR, month: MONTH, employee_ids: [6], actor: ACTOR })).approved_count, 1);
     assert.equal((await act("PUBLISH", [6])).published_count, 1);
     const snap = JSON.parse((await q(pool, "SELECT snapshot_json FROM payrun_payslip WHERE employee_id = 6 AND status = 'ACTIVE'"))[0].snapshot_json);
-    assert.ok(snap.earnings.lines.some((l) => /OT Approved After Lock/.test(l.label) && l.amount === "96.16"), JSON.stringify(snap.earnings.lines));
+    // August's own OT approved after August locked: paid inside the one OT line.
+    const otLine = snap.earnings.lines.find((l) => l.key === "ot_amount");
+    assert.equal(Number(otLine.amount), Math.round((Number(calcRow.ot_amount || 0) + 96.16) * 100) / 100, JSON.stringify(snap.earnings.lines));
+    assert.ok(!snap.earnings.lines.some((l) => /After Lock|Prior-Month OT/.test(l.label)), JSON.stringify(snap.earnings.lines));
     const items = await q(pool, "SELECT attendance_date, settlement_status, settlement_payrun_calculation_id FROM attendance_ot_late_settlement WHERE employee_id = 6 ORDER BY attendance_date");
     assert.deepEqual(items.map((i) => [i.settlement_status, i.settlement_payrun_calculation_id]), [
       ["SETTLED", calcRow.payrun_calculation_id],

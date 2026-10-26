@@ -418,3 +418,39 @@ describe("an exit month published as an ordinary payslip PRINTS as the F&F", () 
     assert.equal(view.fnf.actual_monthly_gross, "26013.37");
   });
 });
+
+describe("OT approved after the month was locked", () => {
+  // 30 min of September's own OT (approved while September was locked) and
+  // 60 min of August's OT, both settled in September: 100.00 more earnings.
+  const LATE = {
+    prior_month_ot_amount: "100.00",
+    prior_month_ot: JSON.stringify([
+      { attendance_approval_request_id: 1, attendance_date: "2026-09-10", source_year: 2026, source_month: 9, approved_ot_minutes: 30, ot_hourly_rate: "125.06", amount: "62.53" },
+      { attendance_approval_request_id: 2, attendance_date: "2026-08-20", source_year: 2026, source_month: 8, approved_ot_minutes: 18, ot_hourly_rate: "125.82", amount: "37.47" },
+    ]),
+    total_earnings: "27926.42",
+    net_pay: "24934.00",
+  };
+
+  it("this month's own late OT is added into the one Overtime (OT) line; an earlier month's stays Prior-Month OT", () => {
+    const snap = build(LATE);
+    const labels = snap.earnings.lines.map((l) => l.label);
+    assert.ok(!labels.some((l) => /After Lock/.test(l)), JSON.stringify(labels));
+    assert.equal(snap.earnings.lines.find((l) => l.key === "ot_amount").amount, "375.18");
+    assert.deepEqual(
+      snap.earnings.lines.filter((l) => /^Prior-Month OT/.test(l.label)).map((l) => [l.label, l.amount]),
+      [["Prior-Month OT — Aug 2026: 18 min", "37.47"]]
+    );
+    assert.equal(sumPaise(snap.earnings.lines), s.toPaise(snap.earnings.total));
+    assert.deepEqual(
+      [snap.attendance.ot_amount, snap.attendance.approved_ot_hours, snap.attendance.ot_hourly_rate, snap.attendance.prior_month_ot_amount],
+      ["375.18", 3, "125.06", "37.47"]
+    );
+  });
+
+  it("a different rate for the late OT leaves no single hourly rate", () => {
+    const items = JSON.parse(LATE.prior_month_ot);
+    items[0].ot_hourly_rate = "120.00";
+    assert.equal(build({ ...LATE, prior_month_ot: JSON.stringify(items) }).attendance.ot_hourly_rate, null);
+  });
+});

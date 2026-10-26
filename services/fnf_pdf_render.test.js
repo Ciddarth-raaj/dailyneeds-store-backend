@@ -120,7 +120,7 @@ describe("the F&F statement, rendered with the production renderer", { skip }, (
 
   it("carries the ordinary payroll lines, the exit facts and the statutory numbers that apply - and no F&F-only component", () => {
     const { text } = out.full;
-    for (const label of ["Advance Recovery", "OT Approved After Lock"]) {
+    for (const label of ["Advance Recovery", "Overtime (OT)", "128.37"]) {
       assert.ok(text.includes(label), label);
     }
     // No F&F-only LINE: gratuity / leave encashment / notice are not payroll lines...
