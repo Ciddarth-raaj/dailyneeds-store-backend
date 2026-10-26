@@ -523,6 +523,11 @@ class EmployeeSalaryRepository {
    * any depth, so that name would make the figure vanish for callers without
    * `view_employee_sensitive` - silently, with no error and no 403.
    *
+   * THE CURRENT WORK SHIFT is `new_employee.default_work_shift_id` - the same
+   * column the employee profile reads - with its distinct working-day in/out
+   * times, so an approver can see what hours the proposed pay is for. No
+   * parameters: it adds nothing to the bound-value order below.
+   *
    * THE EMPLOYEE COLUMNS ARE THE FOUR THE QUEUE SHOWS: id, name, outlet and
    * designation. Not the bank account, not the PAN, not the Aadhaar and not the
    * legacy `salary` column - deciding a pay revision is not a reason to read
@@ -566,6 +571,16 @@ class EmployeeSalaryRepository {
              o.\`outlet_name\`,
              o.\`outlet_nickname\`,
              d.\`designation_name\`,
+             ws.\`shift_code\`     AS \`work_shift_code\`,
+             ws.\`shift_name\`     AS \`work_shift_name\`,
+             (SELECT GROUP_CONCAT(DISTINCT CONCAT(TIME_FORMAT(wss.\`in_time\`, '%H:%i'), '-',
+                                                  TIME_FORMAT(wss.\`out_time\`, '%H:%i'))
+                                  ORDER BY wss.\`in_time\`, wss.\`out_time\` SEPARATOR ', ')
+                FROM \`work_shift_weekly_schedule\` wss
+               WHERE wss.\`work_shift_id\` = ne.\`default_work_shift_id\`
+                 AND wss.\`is_working_day\` = 1
+                 AND wss.\`in_time\` IS NOT NULL
+                 AND wss.\`out_time\` IS NOT NULL) AS \`work_shift_timings\`,
              cur.\`salary_id\`      AS \`current_salary_id\`,
              cur.\`monthly_gross\`  AS \`current_monthly_gross\`,
              cur.\`effective_from\` AS \`current_effective_from\`
@@ -573,6 +588,7 @@ class EmployeeSalaryRepository {
         JOIN \`new_employee\` ne ON ne.\`employee_id\` = s.\`employee_id\`
         LEFT JOIN \`outlets\` o     ON o.\`outlet_id\` = ne.\`store_id\`
         LEFT JOIN \`designation\` d ON d.\`designation_id\` = ne.\`designation_id\`
+        LEFT JOIN \`work_shift\` ws ON ws.\`work_shift_id\` = ne.\`default_work_shift_id\`
         LEFT JOIN \`employee_salary\` cur ON cur.\`salary_id\` = (
                SELECT c.\`salary_id\`
                  FROM \`employee_salary\` c

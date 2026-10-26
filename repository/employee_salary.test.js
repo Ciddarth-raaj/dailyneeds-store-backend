@@ -478,6 +478,18 @@ describe("M4 — the pending approval queue", () => {
     );
   });
 
+  it("returns the employee's CURRENT work shift and its timings, unbound", async () => {
+    // The same column the employee profile reads, and no new parameters - so
+    // the bound-value order above is unchanged.
+    const db = makeDb([]);
+    await buildRepo(db).getPendingQueue(FILTERS);
+    const { sql, params } = db.calls[0];
+    assert.ok(sql.includes("ws.`work_shift_id` = ne.`default_work_shift_id`"));
+    assert.ok(sql.includes("AS `work_shift_name`"));
+    assert.ok(sql.includes("AS `work_shift_timings`"));
+    assert.deepEqual(params, ["APPROVED", FILTERS.as_of, "PENDING", 500], "no new bound values");
+  });
+
   it("is ONE query, not one per row", async () => {
     // The whole reason this method exists: the alternative is listing the
     // employees and reading each one's history.
