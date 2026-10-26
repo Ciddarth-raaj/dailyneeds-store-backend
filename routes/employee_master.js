@@ -1156,6 +1156,49 @@ class EmployeeMasterRoutes {
     );
 
     /**
+     * Check ANY bank account, for the standalone "Check bank account" screen.
+     *
+     * Not under `/employee/:id`: it takes no employee and writes nothing to
+     * the employee master. The account number travels in the BODY, never the
+     * URL, so it cannot end up in an access log.
+     *
+     * Same permissions as an employee verification - it spends the same paid
+     * Penny-Less call and returns the same sensitive answer - plus
+     * `edit_employee_sensitive`, because `ifsc` in the body is a B3 sensitive
+     * key and `guardWrite` would refuse the request without it anyway.
+     */
+    router.post(
+      "/bank/check",
+      this.permissions.requireAll(P.VERIFY_EMPLOYEE_BANK, P.VIEW_EMPLOYEE_SENSITIVE, P.EDIT_EMPLOYEE_SENSITIVE),
+      async (req, res) => {
+        try {
+          if (!this.bank) {
+            res.json({ code: 503, msg: "Bank verification is not configured on this server" });
+            res.end();
+            return;
+          }
+          const isValid = Joi.validate(req.body || {}, {
+            account_number: Joi.string().required(),
+            ifsc: Joi.string().required(),
+            expected_name: Joi.string().allow("", null).optional(),
+          });
+          if (isValid.error !== null) throw isValid.error;
+
+          const body = req.body || {};
+          res.json(
+            await this.bank.checkAccount(
+              { accountNumber: body.account_number, ifsc: body.ifsc, expectedName: body.expected_name },
+              { actorEmployeeId: this._actor(req) }
+            )
+          );
+        } catch (err) {
+          this._fail(res, err);
+        }
+        res.end();
+      }
+    );
+
+    /**
      * Resolve an IFSC to its bank and branch name, for the Bank Details form.
      *
      * NOT a verification, and deliberately not under `/employee/:id`: it takes

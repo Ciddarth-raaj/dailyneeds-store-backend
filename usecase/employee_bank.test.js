@@ -528,12 +528,14 @@ describe("60/61. the provider is called only when asked", () => {
     assert.equal(provider.calls.length, 0);
   });
 
-  it("only one method in the usecase calls the provider at all", () => {
+  it("only the two explicit-request methods call the provider at all", () => {
     const src = fs.readFileSync(path.join(__dirname, "employee_bank.js"), "utf8");
     const hits = src.match(/this\.provider\.pennyLessVerify/g) || [];
-    assert.equal(hits.length, 1, "one provider call site");
-    const verifyBlock = src.slice(src.indexOf("async verify("), src.indexOf("async confirmNameMismatch"));
+    assert.equal(hits.length, 2, "two provider call sites: verify and checkAccount");
+    const verifyBlock = src.slice(src.indexOf("async verify("), src.indexOf("async checkAccount("));
     assert.match(verifyBlock, /this\.provider\.pennyLessVerify/);
+    const checkBlock = src.slice(src.indexOf("async checkAccount("), src.indexOf("async overrideDuplicate("));
+    assert.match(checkBlock, /this\.provider\.pennyLessVerify/);
   });
 });
 
@@ -999,5 +1001,52 @@ describe("bank verification does not depend on Aadhaar", () => {
       assert.match(out, /BANK_FINGERPRINT_KEY/, `key ${JSON.stringify(value)} must be refused by name`);
       assert.ok(!out.includes(value) || value === "", "the refusal must not echo the key");
     }
+  });
+});
+
+/* ================================== the standalone account check ======== */
+describe("checking any account, outside an employee", () => {
+  it("reports what the bank said and touches no employee record", async () => {
+    const { store, provider, uc } = build();
+    const out = await uc.checkAccount({ accountNumber: OTHER_ACCOUNT, ifsc: "hdfc0001234" });
+    assert.equal(out.code, 200);
+    assert.equal(out.account_exists, true);
+    assert.equal(out.name_at_bank, "RAMESH KUMAR");
+    assert.equal(out.ifsc, IFSC);
+    assert.equal(out.account_last4, "4321");
+    assert.equal(out.name_match, null);
+    assert.deepEqual(provider.calls, [{ account_number: OTHER_ACCOUNT, ifsc: IFSC }]);
+    assert.equal(store.verification, null);
+    assert.equal(store.attempts.length, 0);
+    assert.ok(!JSON.stringify(out).includes(OTHER_ACCOUNT), "the full account number must not appear");
+  });
+
+  it("compares an expected name when one is given", async () => {
+    const { uc } = build();
+    const match = await uc.checkAccount({ accountNumber: ACCOUNT, ifsc: IFSC, expectedName: "Ramesh Kumar" });
+    assert.equal(match.name_match.verdict, "MATCH");
+    const other = await uc.checkAccount({ accountNumber: ACCOUNT, ifsc: IFSC, expectedName: "Suresh Iyer" });
+    assert.equal(other.name_match.verdict, "MISMATCH");
+  });
+
+  it("an account the bank does not know is a result, not an error", async () => {
+    const { provider, uc } = build();
+    provider.nextResult = { account_exists: false, name_at_bank: null, provider_status: "not_found", transaction_id: null };
+    const out = await uc.checkAccount({ accountNumber: ACCOUNT, ifsc: IFSC, expectedName: "Ramesh Kumar" });
+    assert.equal(out.account_exists, false);
+    assert.equal(out.name_at_bank, null);
+    assert.equal(out.name_match, null);
+  });
+
+  it("refuses a malformed IFSC before spending a call", async () => {
+    const { provider, uc } = build();
+    await assert.rejects(() => uc.checkAccount({ accountNumber: ACCOUNT, ifsc: "HDFC123" }), /not a valid IFSC/);
+    assert.equal(provider.calls.length, 0);
+  });
+
+  it("refuses when the provider is not configured", async () => {
+    const { provider, uc } = build();
+    provider.enabled = false;
+    await assert.rejects(() => uc.checkAccount({ accountNumber: ACCOUNT, ifsc: IFSC }), (e) => e.httpCode === 503);
   });
 });

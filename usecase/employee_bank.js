@@ -491,6 +491,80 @@ class EmployeeBankUsecase {
   }
 
   /**
+   * A one-off check of ANY account, for the standalone "Check bank account"
+   * screen. Spends one Penny-Less call and reports what the bank said.
+   *
+   * Deliberately NOT tied to an employee: nothing is read from or written to
+   * the employee master, no verification row is created, and no employee's
+   * status changes. It answers "does this account exist, and whose is it?"
+   * before anybody types it into a profile.
+   *
+   * `expectedName` is optional. When given, the bank's name is compared with
+   * it using the same matcher the employee verification uses.
+   *
+   * The full account number is never returned or logged - only its last four.
+   */
+  async checkAccount({ accountNumber, ifsc, expectedName = null } = {}, { actorEmployeeId = null } = {}) {
+    if (!this.provider || !this.provider.isEnabled()) {
+      throw new SandboxError(
+        FAILURE.NOT_CONFIGURED,
+        "Bank verification is not available: the Sandbox provider is not configured on this server",
+        503
+      );
+    }
+
+    const clean = this.provider.constructor.normalise({ account_number: accountNumber, ifsc });
+    const accountLast4 = last4(clean.account_number);
+    const name = expectedName === undefined || expectedName === null ? "" : String(expectedName).trim();
+
+    let result;
+    try {
+      result = await this.provider.pennyLessVerify(clean);
+    } catch (err) {
+      const category = err instanceof SandboxError ? err.category : "provider_error";
+      this._log(logger.LEVEL.ERROR, "CHECK-FAILED", `account check: ${category}`, {
+        category,
+        ifsc: clean.ifsc,
+        account_last4: accountLast4,
+        actorEmployeeId,
+      });
+      throw err;
+    }
+
+    const nameMatch =
+      result.account_exists && name !== "" ? compareNameAtBank(result.name_at_bank, { employeeName: name }) : null;
+
+    this._log(logger.LEVEL.INFO, "CHECKED", `account check: exists=${Boolean(result.account_exists)}`, {
+      ifsc: clean.ifsc,
+      account_last4: accountLast4,
+      verdict: nameMatch ? nameMatch.verdict : null,
+      actorEmployeeId,
+    });
+
+    return {
+      code: 200,
+      masked_account: maskAccount(clean.account_number),
+      account_last4: accountLast4,
+      ifsc: clean.ifsc,
+      account_exists: Boolean(result.account_exists),
+      name_at_bank: result.account_exists ? result.name_at_bank : null,
+      name_match: nameMatch,
+      provider_status: result.provider_status || null,
+      transaction_id: result.transaction_id || null,
+      checked_at: new Date().toISOString(),
+      message: !result.account_exists
+        ? "The bank reports no such account. Check the account number and IFSC."
+        : !nameMatch
+        ? "The account exists."
+        : nameMatch.verdict === "MATCH"
+        ? "The account exists and the name matches."
+        : nameMatch.verdict === "REVIEW"
+        ? "The account exists and the name is close but not identical."
+        : "The account exists, but the name at the bank does not match.",
+    };
+  }
+
+  /**
    * An administrator allowing a genuinely shared account.
    *
    * Rare but real: a spouse's account, or a worker with no account of their
