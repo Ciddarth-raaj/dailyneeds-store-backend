@@ -24,6 +24,13 @@ const IFSC_PATTERN = /^[A-Z]{4}0[A-Z0-9]{6}$/;
 /** Account numbers vary by bank; this rejects only what cannot be one. */
 const ACCOUNT_PATTERN = /^[0-9]{6,20}$/;
 
+/**
+ * Virtual / collection accounts (e.g. a company's "TMPL353030" at a bank's
+ * collection hub) carry letters. Accepted only by the standalone account
+ * check; employee salary accounts stay digits-only.
+ */
+const ALPHANUMERIC_ACCOUNT_PATTERN = /^[A-Z0-9]{6,20}$/;
+
 class SandboxBankService {
   constructor(client) {
     this.client = client;
@@ -40,15 +47,22 @@ class SandboxBankService {
    * a round trip - to be told so is waste. The error names the field and
    * never the account number.
    */
-  static normalise({ account_number, ifsc }) {
+  static normalise({ account_number, ifsc }, { alphanumeric = false } = {}) {
     const acc = String(account_number === undefined || account_number === null ? "" : account_number)
-      .replace(/[\s-]/g, "");
+      .replace(/[\s-]/g, "")
+      .toUpperCase();
     const code = String(ifsc === undefined || ifsc === null ? "" : ifsc).replace(/\s/g, "").toUpperCase();
 
     if (acc === "") throw new SandboxError(FAILURE.INVALID_REQUEST, "account_number is required", 422);
     if (code === "") throw new SandboxError(FAILURE.INVALID_REQUEST, "ifsc is required", 422);
-    if (!ACCOUNT_PATTERN.test(acc)) {
-      throw new SandboxError(FAILURE.INVALID_REQUEST, "account_number must be 6 to 20 digits", 422);
+    if (alphanumeric ? !ALPHANUMERIC_ACCOUNT_PATTERN.test(acc) : !ACCOUNT_PATTERN.test(acc)) {
+      throw new SandboxError(
+        FAILURE.INVALID_REQUEST,
+        alphanumeric
+          ? "account_number must be 6 to 20 letters or digits"
+          : "account_number must be 6 to 20 digits",
+        422
+      );
     }
     if (!IFSC_PATTERN.test(code)) {
       throw new SandboxError(
@@ -68,8 +82,8 @@ class SandboxBankService {
    * a reason, rather than having to distinguish that from the provider being
    * down.
    */
-  async pennyLessVerify({ account_number, ifsc }) {
-    const clean = SandboxBankService.normalise({ account_number, ifsc });
+  async pennyLessVerify({ account_number, ifsc }, { alphanumeric = false } = {}) {
+    const clean = SandboxBankService.normalise({ account_number, ifsc }, { alphanumeric });
 
     const path = kycConfig.bank.pennyLessPathTemplate
       .replace("{ifsc}", encodeURIComponent(clean.ifsc))
@@ -209,3 +223,4 @@ module.exports = (client) => new SandboxBankService(client);
 module.exports.SandboxBankService = SandboxBankService;
 module.exports.IFSC_PATTERN = IFSC_PATTERN;
 module.exports.ACCOUNT_PATTERN = ACCOUNT_PATTERN;
+module.exports.ALPHANUMERIC_ACCOUNT_PATTERN = ALPHANUMERIC_ACCOUNT_PATTERN;

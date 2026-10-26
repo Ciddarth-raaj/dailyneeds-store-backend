@@ -513,13 +513,14 @@ class EmployeeBankUsecase {
       );
     }
 
-    const clean = this.provider.constructor.normalise({ account_number: accountNumber, ifsc });
+    // Letters allowed here only: virtual / collection accounts carry them.
+    const clean = this.provider.constructor.normalise({ account_number: accountNumber, ifsc }, { alphanumeric: true });
     const accountLast4 = last4(clean.account_number);
     const name = expectedName === undefined || expectedName === null ? "" : String(expectedName).trim();
 
     let result;
     try {
-      result = await this.provider.pennyLessVerify(clean);
+      result = await this.provider.pennyLessVerify(clean, { alphanumeric: true });
     } catch (err) {
       const category = err instanceof SandboxError ? err.category : "provider_error";
       this._log(logger.LEVEL.ERROR, "CHECK-FAILED", `account check: ${category}`, {

@@ -1038,6 +1038,21 @@ describe("checking any account, outside an employee", () => {
     assert.equal(out.name_match, null);
   });
 
+  it("accepts a virtual account number with letters, upper-cased", async () => {
+    const { provider, uc } = build();
+    const out = await uc.checkAccount({ accountNumber: "tmpl353030", ifsc: "UTIB0CCH274" });
+    assert.equal(out.code, 200);
+    assert.equal(out.account_last4, "3030");
+    assert.deepEqual(provider.calls, [{ account_number: "TMPL353030", ifsc: "UTIB0CCH274" }]);
+  });
+
+  it("an employee verification still refuses letters in the account number", () => {
+    assert.throws(
+      () => SandboxBankService.normalise({ account_number: "TMPL353030", ifsc: IFSC }),
+      /must be 6 to 20 digits/
+    );
+  });
+
   it("refuses a malformed IFSC before spending a call", async () => {
     const { provider, uc } = build();
     await assert.rejects(() => uc.checkAccount({ accountNumber: ACCOUNT, ifsc: "HDFC123" }), /not a valid IFSC/);
