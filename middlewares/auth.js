@@ -263,7 +263,8 @@ const unProtectedRoutes = {
   // for `/pdf` only, a two-minute pdf-link token minted under that session).
   "/telegram/payslips": { methods: { get: true } },
   "/telegram/payslips/detail": { methods: { get: true } },
-  "/telegram/payslips/pdf": { methods: { get: true } },
+  // HEAD: Telegram's downloader may probe the link before fetching it.
+  "/telegram/payslips/pdf": { methods: { get: true, head: true } },
   "/telegram/payslips/pdf-link": { methods: { post: true } },
 
   "/purchase-tally": { methods: { post: true } },

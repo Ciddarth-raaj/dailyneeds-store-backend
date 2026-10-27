@@ -258,7 +258,7 @@ describe("the PDF, on demand", () => {
     assert.equal(rendered[0].final.net_pay, "24834.00", "the PDF and the detail read the same snapshot");
   });
 
-  it("the iOS fallback link: owner-only, one payslip, opaque (not a JWT), not a session, and SINGLE-USE", async () => {
+  it("the downloader link: owner-only, one payslip, opaque (not a JWT), not a session, and FEW-USE", async () => {
     const asA = await tokenFor(5001);
     const link = await (await post("/telegram/payslips/pdf-link", { ref: A_AUG.payslip_ref }, asA)).json();
     assert.equal(link.code, 200);
@@ -274,8 +274,25 @@ describe("the PDF, on demand", () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("referrer-policy"), "no-referrer");
     assert.ok(Buffer.from(await res.arrayBuffer()).toString().includes("23000.00"));
-    // ... and only once
+    // ... a second fetch too (Telegram's downloader sizes, then saves) ...
+    assert.equal((await get(link.path)).status, 200);
+    assert.equal((await get(link.path)).status, 200);
+    // ... and then it is spent
     assert.equal((await get(link.path)).status, 401);
+  });
+
+  it("a HEAD probe answers the headers and spends nothing", async () => {
+    const asA = await tokenFor(5001);
+    const link = await (await post("/telegram/payslips/pdf-link", { ref: A_AUG.payslip_ref }, asA)).json();
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const head = await fetch(`${base}${link.path}`, { method: "HEAD" });
+      assert.equal(head.status, 200);
+      assert.equal(head.headers.get("content-type"), "application/pdf");
+      assert.match(head.headers.get("content-disposition"), /^attachment; filename=/);
+    }
+    assert.equal((await get(link.path)).status, 200);
+    assert.equal((await fetch(`${base}/telegram/payslips/pdf?t=forged`, { method: "HEAD" })).status, 401);
   });
 
   it("the link expires after 60 seconds", async () => {
@@ -298,7 +315,7 @@ describe("the PDF, on demand", () => {
     assert.equal((await get(`/telegram/payslips/pdf?t=${encodeURIComponent(asA["x-telegram-session"].slice(0, 60))}`)).status, 401);
     assert.equal((await get("/telegram/payslips/pdf?t=forged")).status, 401);
     assert.equal((await get("/telegram/payslips/pdf?token=anything")).status, 400, "the old parameter is gone");
-    // the untampered one still works once - a bad guess does not burn it
+    // the untampered one still works - a bad guess does not burn it
     assert.equal((await get(link.path)).status, 200);
   });
 

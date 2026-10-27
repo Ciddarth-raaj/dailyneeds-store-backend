@@ -8,7 +8,7 @@ const respondError = require("../utils/http");
  *   GET  /telegram/payslips               the employee's own published payslips
  *   GET  /telegram/payslips/detail?ref=    one of them (records the view)
  *   GET  /telegram/payslips/pdf?ref=       the PDF, with the session header (normal path)
- *   POST /telegram/payslips/pdf-link       fallback: a single-use, 60-second link
+ *   POST /telegram/payslips/pdf-link       Telegram's downloader: a few-use, 60-second link
  *   GET  /telegram/payslips/pdf?t=         the PDF, spending that link
  *
  * THE SAME GATE AS THE ATTENDANCE MINI APP. A Mini App has no dnds.co.in
@@ -102,6 +102,28 @@ class TelegramPayslipRoutes {
         const isValid = Joi.validate(req.body || {}, { ref });
         if (isValid.error !== null) throw isValid.error;
         res.json(await this.payslips.pdfLink(req.miniApp.employee_id, req.body.ref));
+      } catch (err) {
+        TelegramPayslipRoutes._respond(res, err);
+      }
+    });
+
+    /**
+     * A HEAD probe of a link (Telegram's downloader sizing the file before
+     * its popup) answers the headers and spends nothing. A HEAD with `ref`
+     * falls through to the GET below, which Express answers without a body.
+     */
+    r.head("/telegram/payslips/pdf", async (req, res, next) => {
+      if (!req.query || !req.query.t) return next();
+      try {
+        const { filename } = await this.payslips.checkToken(String(req.query.t));
+        res.set({
+          "Content-Type": "application/pdf",
+          "Content-Disposition": `attachment; filename="${filename}"`,
+          "Cache-Control": "no-store, private, max-age=0",
+          "X-Content-Type-Options": "nosniff",
+          "Referrer-Policy": "no-referrer",
+        });
+        res.status(200).end();
       } catch (err) {
         TelegramPayslipRoutes._respond(res, err);
       }

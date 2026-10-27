@@ -34,14 +34,17 @@ const { monthLabel, PDF_LINK_TTL_SECONDS } = require("../constants/payslip");
  * header. `pdfLink` issues an OPAQUE random token (32 bytes) that:
  *   - names ONE payslip of ONE employee (both re-checked when it is spent);
  *   - lives PDF_LINK_TTL_SECONDS (60 s);
- *   - is SINGLE-USE - removed from the store on its first presentation,
- *     whatever the outcome;
+ *   - is spent after MAX_LINK_USES downloads (a HEAD probe spends nothing):
+ *     Telegram's downloader, on Android especially, may fetch the URL once
+ *     to size the file for its confirmation popup and again to save it, so
+ *     a strictly single-use link failed the real download;
  *   - is not a JWT and not signed with the session key: it is meaningless to
  *     the session gate and to the login middleware;
  *   - is kept in this process's memory ONLY AS ITS SHA-256 - a restart
  *     invalidates every outstanding link (fail closed).
  */
 const REF_RE = /^[0-9a-f]{32}$/;
+const MAX_LINK_USES = 3;
 
 function notFound() {
   const err = new Error("Payslip not found");
@@ -150,7 +153,7 @@ module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), 
     return { buffer, filename: payslipFilename(snapshot) };
   };
 
-  /** A one-minute, single-use, single-payslip link for Telegram's own downloader. */
+  /** A one-minute, few-use, single-payslip link for Telegram's own downloader. */
   const pdfLink = async (employeeId, payslipRef) => {
     const { snapshot } = await ownPublished(employeeId, payslipRef);
     prune();
@@ -164,17 +167,36 @@ module.exports = ({ payslipRepo, renderPdf, log = null, now = () => Date.now(), 
     };
   };
 
-  /** Spend a link token: once, before it expires, for its own employee and payslip. */
-  const pdfByToken = async (token) => {
-    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw linkInvalid();
+  const liveGrant = (token) => {
+    if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
     const key = hash(token);
     const grant = links.get(key);
-    links.delete(key); // single use: gone on first presentation, whatever happens next
-    if (!grant || grant.expires_at <= now()) throw linkInvalid();
-    return pdf(grant.employee_id, grant.ref);
+    if (!grant) return null;
+    if (grant.expires_at <= now()) {
+      links.delete(key);
+      return null;
+    }
+    return { key, grant };
   };
 
-  return { list, detail, pdf, pdfLink, pdfByToken };
+  /** Spend one use of a link token, before it expires, for its own employee and payslip. */
+  const pdfByToken = async (token) => {
+    const live = liveGrant(token);
+    if (!live) throw linkInvalid();
+    live.grant.uses = (live.grant.uses || 0) + 1;
+    if (live.grant.uses >= MAX_LINK_USES) links.delete(live.key);
+    return pdf(live.grant.employee_id, live.grant.ref);
+  };
+
+  /** A HEAD probe: is the link live? Spends nothing. */
+  const checkToken = async (token) => {
+    const live = liveGrant(token);
+    if (!live) throw linkInvalid();
+    const { snapshot } = await ownPublished(live.grant.employee_id, live.grant.ref);
+    return { filename: payslipFilename(snapshot) };
+  };
+
+  return { list, detail, pdf, pdfLink, pdfByToken, checkToken };
 };
 module.exports.REF_RE = REF_RE;
 module.exports.employeeView = employeeView;
