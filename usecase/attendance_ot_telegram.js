@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { callbackQueryOf, replyToOf, messageIdOf } = require("../utils/telegram_update");
 
 /**
  * OT APPROVAL ON TELEGRAM - the same OT record DnDS decides, from a chat.
@@ -307,14 +308,14 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
   };
 
   const handleCallback = async (update) => {
-    const query = update.callback_query;
+    const query = callbackQueryOf(update);
     const match = CALLBACK_PATTERN.exec(String(query.data || ""));
     if (!match) return { handled: false };
     const requestId = Number(match[1]);
     const decision = match[2] === "A" ? "APPROVED" : "REJECTED";
     const expectedMinutes = match[3] === undefined ? null : Number(match[3]);
     const chatId = query.message && query.message.chat ? query.message.chat.id : null;
-    const messageId = query.message ? query.message.message_id : null;
+    const messageId = messageIdOf(query.message);
 
     const answer = async (text) => {
       try {
@@ -355,7 +356,7 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
 
   const claimsRejectReply = (update) => {
     const message = update && update.message;
-    const repliedTo = message && message.reply_to_message;
+    const repliedTo = replyToOf(message);
     return Boolean(
       message &&
         typeof message.text === "string" &&
@@ -367,7 +368,7 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
 
   const handleRejectReply = async (update) => {
     const message = update.message;
-    const requestId = Number(REJECT_PROMPT_PATTERN.exec(message.reply_to_message.text)[1]);
+    const requestId = Number(REJECT_PROMPT_PATTERN.exec(replyToOf(message).text)[1]);
     const chatId = message.chat ? message.chat.id : null;
     const reason = String(message.text || "").trim();
     const reply = (text) => say(chatId, text);
@@ -459,12 +460,12 @@ module.exports = ({ regularizationUsecase, employeeTelegramRepo, telegram, webBa
     /** Claims its own callbacks, its own reject prompt's replies, and `/ot`. Nothing else. */
     claims: (update) =>
       Boolean(
-        (update && update.callback_query && CALLBACK_PATTERN.test(String(update.callback_query.data || ""))) ||
+        (callbackQueryOf(update) && CALLBACK_PATTERN.test(String(callbackQueryOf(update).data || ""))) ||
           claimsRejectReply(update) ||
           claimsCommand(update)
       ),
     handle: async (update) => {
-      if (update && update.callback_query) return handleCallback(update);
+      if (callbackQueryOf(update)) return handleCallback(update);
       if (claimsRejectReply(update)) return handleRejectReply(update);
       if (claimsCommand(update)) return handleCommand(update);
       return { handled: false };

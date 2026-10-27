@@ -129,6 +129,9 @@ const UPDATE_TYPE_ALIASES = Object.freeze({
   chat_join_request: ["chatJoinRequest", "chat_join_request"],
   chat_member: ["chatMember", "chat_member"],
   my_chat_member: ["myChatMember", "my_chat_member"],
+  // Inline button taps (OT and shift approvals). Without this entry
+  // `register` silently dropped "callback_query" and no tap reached a handler.
+  callback_query: ["callbackQuery", "callback_query"],
 });
 
 /** The order types are tested in. One update carries exactly one of them. */

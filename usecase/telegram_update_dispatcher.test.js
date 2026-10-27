@@ -132,11 +132,13 @@ describe("snake_case and camelCase are the same update", () => {
   });
 
   it("names both spellings for every routable type", () => {
-    assert.deepEqual(UPDATE_TYPES, ["message", "chat_join_request", "chat_member", "my_chat_member"]);
+    assert.deepEqual(UPDATE_TYPES, ["message", "chat_join_request", "chat_member", "my_chat_member", "callback_query"]);
     assert.equal(updateType({ chatMember: {} }), "chat_member");
     assert.equal(updateType({ chat_member: {} }), "chat_member");
     assert.equal(updateType({ myChatMember: {} }), "my_chat_member");
     assert.equal(updateType({ my_chat_member: {} }), "my_chat_member");
+    assert.equal(updateType({ callbackQuery: {} }), "callback_query");
+    assert.equal(updateType({ callback_query: {} }), "callback_query");
   });
 
   it("registering an unknown update type is refused rather than silently ignored", () => {

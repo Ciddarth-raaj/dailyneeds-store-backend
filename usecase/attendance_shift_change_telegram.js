@@ -1,4 +1,5 @@
 const logger = require("../utils/logger");
+const { callbackQueryOf, replyToOf, messageIdOf } = require("../utils/telegram_update");
 
 /**
  * THE ONE-DAY SHIFT REQUEST ON TELEGRAM.
@@ -191,7 +192,7 @@ module.exports = ({
    * already been sent to them by the time this returns.
    */
   const handleCallback = async (update) => {
-    const query = update && update.callback_query;
+    const query = callbackQueryOf(update);
     if (!query || !query.data) return { handled: false };
 
     const match = /^sc:(\d+):([AR])$/.exec(String(query.data));
@@ -200,7 +201,7 @@ module.exports = ({
     const requestId = Number(match[1]);
     const decision = match[2] === "A" ? "APPROVED" : "REJECTED";
     const chatId = query.message && query.message.chat ? query.message.chat.id : null;
-    const messageId = query.message ? query.message.message_id : null;
+    const messageId = messageIdOf(query.message);
 
     const answer = async (text) => {
       try {
@@ -242,7 +243,7 @@ module.exports = ({
    */
   const claimsRejectReply = (update) => {
     const message = update && update.message;
-    const repliedTo = message && message.reply_to_message;
+    const repliedTo = replyToOf(message);
     return Boolean(
       message &&
         typeof message.text === "string" &&
@@ -254,7 +255,7 @@ module.exports = ({
 
   const handleRejectReply = async (update) => {
     const message = update.message;
-    const requestId = Number(REJECT_PROMPT_PATTERN.exec(message.reply_to_message.text)[1]);
+    const requestId = Number(REJECT_PROMPT_PATTERN.exec(replyToOf(message).text)[1]);
     const chatId = message.chat ? message.chat.id : null;
     const reason = String(message.text || "").trim();
 
@@ -344,11 +345,11 @@ module.exports = ({
      */
     claims: (update) =>
       Boolean(
-        (update && update.callback_query && /^sc:\d+:[AR]$/.test(String(update.callback_query.data || ""))) ||
+        (callbackQueryOf(update) && /^sc:\d+:[AR]$/.test(String(callbackQueryOf(update).data || ""))) ||
           claimsRejectReply(update)
       ),
     handle: async (update) => {
-      if (update && update.callback_query) return handleCallback(update);
+      if (callbackQueryOf(update)) return handleCallback(update);
       if (claimsRejectReply(update)) return handleRejectReply(update);
       return { handled: false };
     },
