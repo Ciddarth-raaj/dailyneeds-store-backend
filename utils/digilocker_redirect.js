@@ -17,7 +17,10 @@ function digilockerRedirectUrl(req) {
   if (kycConfig.aadhaar.redirectUrl) return kycConfig.aadhaar.redirectUrl;
   const forwarded = req && req.get ? req.get("x-forwarded-host") : null;
   const host = String((forwarded || (req && req.get ? req.get("host") : "") || "").split(",")[0]).trim();
-  if (!host) return null;
+  // A loopback, bare IP or dotless host means a proxy did not pass the public
+  // name through; DigiLocker could never reach it, so say so instead.
+  const name = host.replace(/:\d+$/, "");
+  if (!name.includes(".") || /^[\d.]+$/.test(name) || /^localhost$/i.test(name)) return null;
   return `https://${host}/digilocker/done.html`;
 }
 
