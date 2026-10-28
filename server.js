@@ -2180,7 +2180,7 @@ class Server {
     // Mounted after it, these two endpoints would be refused by that guard -
     // for carrying the very Aadhaar number they exist to verify - before ever
     // being reached. It claims only
-    // /hr/employee/:id/aadhaar/initiate and /hr/employee/:id/aadhaar/verify-otp,
+    // /hr/employee/:id/aadhaar/initiate and /hr/employee/:id/aadhaar/complete,
     // neither of which any other /hr router defines, so nothing else changes.
     app.use("/hr", employeeAadhaarVerificationRouter.getRouter());
     // Stage 0C / C2. Mounted at /hr so the lifecycle actions do not collide

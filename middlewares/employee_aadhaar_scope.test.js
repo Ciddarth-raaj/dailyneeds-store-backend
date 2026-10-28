@@ -168,7 +168,7 @@ const aadhaarUsecase = {
   async initiate(body, opts) {
     return { code: 200, verification_token: "tok", masked: "XXXX XXXX " + LAST4 };
   },
-  async verifyOtp(body, opts) {
+  async complete(body, opts) {
     otpVerified = { body, opts };
     return { code: 200, verification_id: 55, next_action: "create" };
   },
@@ -299,11 +299,11 @@ describe("a store manager, in their own branch", () => {
     assert.equal(initiated.status, 200, initiated.text);
 
     otpVerified = null;
-    const verified = await post("/hr/aadhaar/verify-otp", CALLERS.onboarder(), {
-      verification_token: "tok", otp: "123456",
+    const verified = await post("/hr/aadhaar/complete", CALLERS.onboarder(), {
+      verification_token: "tok",
     });
     assert.equal(verified.status, 200, verified.text);
-    assert.ok(otpVerified, "the OTP step still reaches the usecase");
+    assert.ok(otpVerified, "the complete step still reaches the usecase");
   });
 });
 

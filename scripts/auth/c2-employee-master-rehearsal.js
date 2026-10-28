@@ -129,7 +129,7 @@ const STORE = 4242; // a store id no production employee uses
 /* ------------------------------------------------------- the fake provider --
  * NO EXTERNAL CALL IS MADE BY THIS SCRIPT.
  *
- * What is being rehearsed is our side: the OTP session state machine, the
+ * What is being rehearsed is our side: the DigiLocker session state machine, the
  * fingerprint that invalidates a stale verification, the transaction
  * boundaries - all of it against REAL MySQL and the real constraints. The
  * provider itself is a stand-in for `services/sandbox_client.js`, so
@@ -146,12 +146,24 @@ function makeStubClient(state) {
   return {
     isEnabled: () => true,
     async request({ path: p }) {
-      if (p === kycConfig.aadhaar.generateOtpPath) {
+      if (p === kycConfig.aadhaar.sessionInitPath) {
         state.otpsSent += 1;
-        return { data: { reference_id: `REF-REHEARSAL-${state.otpsSent}` }, transaction_id: "TXN-OTP" };
+        return {
+          data: {
+            session_id: `REF-REHEARSAL-${state.otpsSent}`,
+            authorization_url: "https://digilocker.example/authorize",
+          },
+          transaction_id: "TXN-SESSION",
+        };
       }
-      if (p === kycConfig.aadhaar.verifyOtpPath) {
-        return { data: { status: "VALID", ...state.demographics }, transaction_id: "TXN-VERIFY" };
+      if (/\/status$/.test(p)) {
+        return { data: { status: "succeeded", documents_consented: ["aadhaar"] }, transaction_id: "TXN-STATUS" };
+      }
+      if (/\/documents\/aadhaar$/.test(p)) {
+        return {
+          data: { files: [{ url: "https://storage.example/aadhaar.xml", metadata: { ContentType: "application/xml" } }] },
+          transaction_id: "TXN-VERIFY",
+        };
       }
       if (/penniless-verify$/.test(p)) {
         state.bankPaths.push(p);
@@ -163,6 +175,17 @@ function makeStubClient(state) {
         return { data: next, transaction_id: "TXN-BANK" };
       }
       throw new Error(`the rehearsal stub was asked for an unexpected path: ${p}`);
+    },
+    /** The DigiLocker Aadhaar XML, for the number the last session was opened for. */
+    async download() {
+      const d = state.demographics;
+      const a = d.address;
+      return (
+        `<Certificate><CertificateData><KycRes><UidData uid="xxxxxxxx${state.aadhaarLast4}">` +
+        `<Poi dob="${d.date_of_birth}" gender="${d.gender}" name="${d.name}"/>` +
+        `<Poa house="${a.house}" street="${a.street}" dist="${a.district}" state="${a.state}" pc="${a.pincode}"/>` +
+        `</UidData></KycRes></CertificateData></Certificate>`
+      );
     },
   };
 }
@@ -238,7 +261,7 @@ async function main() {
       demographics: {
         name: "C2 Aadhaar Subject",
         date_of_birth: "01-02-1990",
-        gender: "MALE",
+        gender: "M",
         address: { house: "9", street: "Test Road", district: "Chennai", state: "TN", pincode: "600001" },
       },
       bankResponse: { account_exists: true, name_at_bank: "C2 AADHAAR SUBJECT" },
@@ -285,16 +308,17 @@ async function main() {
     /** A second Aadhaar, for the attach-after-creation case. */
     let withCheckDigitLater = null;
 
-    /** Runs the real two-step OTP flow against the stub provider. */
+    /** Runs the real two-step DigiLocker flow against the stub provider. */
     const verifyAadhaar = async (aadhaarNumber, opts = {}) => {
+      provider.aadhaarLast4 = String(aadhaarNumber).slice(-4);
       const started = await aadhaar.initiate(
         { aadhaar_number: aadhaarNumber, consent_given: true },
-        { actorEmployeeId: opts.actorEmployeeId || null, ip: "127.0.0.1" }
+        { actorEmployeeId: opts.actorEmployeeId || null, ip: "127.0.0.1", redirectUrl: "https://api.example/digilocker/done.html" }
       );
       return {
         started,
-        decision: await aadhaar.verifyOtp(
-          { verification_token: started.verification_token, otp: "123456" },
+        decision: await aadhaar.complete(
+          { verification_token: started.verification_token },
           { actorEmployeeId: opts.actorEmployeeId || null }
         ),
       };
@@ -506,7 +530,7 @@ async function main() {
       const first = await verifyAadhaar(AADHAAR);
       const v1 = first.decision;
       eq("initiate returns an opaque 64-hex session token", /^[0-9a-f]{64}$/.test(first.started.verification_token), true);
-      eq("and the OTP went out exactly once", provider.otpsSent, 1);
+      eq("and one DigiLocker session was opened", provider.otpsSent, 1);
       eq(
         "the session row is stored against that token",
         Number(
@@ -624,7 +648,7 @@ async function main() {
         refusedBad = /checksum/.test(err.message);
       }
       eq("a checksum failure is refused", refusedBad, true);
-      eq("and no OTP was sent for it", provider.otpsSent, otpsBefore);
+      eq("and no DigiLocker session was opened for it", provider.otpsSent, otpsBefore);
       eq(
         "and wrote no verification row",
         Number(await scalar("SELECT COUNT(*) c FROM employee_aadhaar_verification")),

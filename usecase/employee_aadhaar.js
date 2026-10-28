@@ -38,10 +38,10 @@ const { SandboxError, FAILURE } = require("../services/sandbox_client");
  * about a person.
  */
 const DEMOGRAPHIC_MAP = {
-  // Sandbox's field names, verbatim, so the mapping needs no translation
-  // layer in between to get out of step. `date_of_birth` is what the OKYC
-  // verify response actually carries; `dob` is accepted too because the
-  // manual path uses the column name.
+  // The provider's field names, verbatim, so the mapping needs no translation
+  // layer in between to get out of step. `date_of_birth` is what the
+  // DigiLocker Aadhaar read carries; `dob` is accepted too because the manual
+  // path uses the column name.
   name: "employee_name",
   date_of_birth: "dob",
   dob: "dob",
@@ -50,7 +50,7 @@ const DEMOGRAPHIC_MAP = {
 };
 
 /** Gender comes back spelled several ways; the column holds one letter. */
-const GENDER = { M: "M", MALE: "M", F: "F", FEMALE: "F", O: "O", OTHER: "O", TRANSGENDER: "O" };
+const GENDER = { M: "M", MALE: "M", F: "F", FEMALE: "F", O: "O", OTHER: "O", T: "O", TRANSGENDER: "O" };
 
 class ValidationError extends Error {
   constructor(message, httpCode = 422) {
@@ -80,7 +80,7 @@ const isoDate = (value) => {
 class EmployeeAadhaarUsecase {
   /**
    * `sandboxAadhaar` is the provider boundary. When it is absent or disabled
-   * the OTP flow refuses rather than falling back to anything: a Sandbox
+   * the DigiLocker flow refuses rather than falling back to anything: a Sandbox
    * outage must never quietly become a manual attestation.
    */
   constructor(aadhaarRepo, sandboxAadhaar) {
@@ -104,14 +104,20 @@ class EmployeeAadhaarUsecase {
   }
 
   /**
-   * Step 1. Sends an OTP to the mobile registered against the Aadhaar and
-   * opens a local session.
+   * Step 1. Opens a DigiLocker session for the employee to consent on, and a
+   * local session to track it.
+   *
+   * HR still enters the Aadhaar number. DigiLocker returns only a MASKED
+   * number (last four digits), and the full number is what the duplicate-
+   * person fingerprint and PF / ESI filing need - so the number is entered
+   * here and DigiLocker's last four must match it before anything is marked
+   * verified.
    *
    * The number is validated and checksummed BEFORE the provider is called, so
    * a typo costs nothing, and is reduced to fingerprint + ciphertext + last
    * four immediately afterwards. Nothing downstream holds it.
    */
-  async initiate(input, { actorEmployeeId = null, ip = null, targetEmployeeId = null } = {}) {
+  async initiate(input, { actorEmployeeId = null, ip = null, targetEmployeeId = null, redirectUrl = null } = {}) {
     this.assertEnabled();
     this._assertProvider();
 
@@ -127,7 +133,7 @@ class EmployeeAadhaarUsecase {
 
     // The provider call happens before anything is written, so a refusal
     // leaves no half-open session behind.
-    const started = await this.provider.generateOtp(digits);
+    const started = await this.provider.startSession({ redirectUrl });
 
     const expiresAt = new Date(Date.now() + config.verificationTtlMinutes * 60 * 1000);
     const sessionToken = EmployeeAadhaarUsecase.newSessionToken();
@@ -160,7 +166,7 @@ class EmployeeAadhaarUsecase {
 
     this._log(
       logger.LEVEL.INFO,
-      "OTP-SENT",
+      "DIGILOCKER-STARTED",
       `verification ${verificationId} initiated for Aadhaar ending ${derived.last4}`,
       { verificationId, last4: derived.last4, actorEmployeeId }
     );
@@ -171,39 +177,39 @@ class EmployeeAadhaarUsecase {
       aadhaar_last4: derived.last4,
       masked_aadhaar: crypto.mask(digits),
       status: "initiated",
+      // The DigiLocker page the EMPLOYEE opens. Not stored: it is only a
+      // link, and the session id it carries is already on our row.
+      authorization_url: started.authorization_url,
       expires_at: expiresAt.toISOString(),
-      message: "An OTP has been sent to the mobile number registered against this Aadhaar.",
+      message:
+        "Open the DigiLocker link, log in with the OTP sent to the Aadhaar-linked mobile, and allow Aadhaar to be shared.",
     };
   }
 
   /**
-   * Step 2. Exchanges the OTP for verified demographics, and only then
-   * answers the duplicate question.
+   * Step 2. Asks DigiLocker whether the employee has finished, and once they
+   * have, reads their Aadhaar and only then answers the duplicate question.
    *
-   * THE OTP IS NEVER STORED, NEVER LOGGED AND NEVER ECHOED. It exists as an
-   * argument to one provider call and nowhere else - not on the session row,
-   * not in an error message, not in a log line.
+   * Safe to call repeatedly: while the employee is still on DigiLocker this
+   * answers `status: "pending"` and changes nothing but the check counter.
    */
-  async verifyOtp(input, { actorEmployeeId = null, targetEmployeeId = null } = {}) {
+  async complete(input, { actorEmployeeId = null, targetEmployeeId = null } = {}) {
     this.assertEnabled();
     this._assertProvider();
 
     const token = String(input.verification_token || "").trim();
     if (!/^[0-9a-f]{64}$/.test(token)) throw new ValidationError("verification_token is required");
-    if (input.otp === undefined || input.otp === null || String(input.otp).trim() === "") {
-      throw new ValidationError("otp is required");
-    }
 
     const session = await this.repo.findVerificationByToken(token);
     if (!session) throw new ValidationError("that verification session does not exist", 404);
 
     // THE TARGET BINDING, AND IT IS CHECKED FIRST.
     //
-    // Before the status, before the expiry, before the attempt counter and a
+    // Before the status, before the expiry, before the check counter and a
     // long way before the provider: a token presented against the wrong
     // employee must cost nothing and disclose nothing. In particular it must
-    // NOT burn an OTP attempt, or one employee's verification could be
-    // exhausted by aiming it at another.
+    // NOT spend a check, or one employee's verification could be exhausted
+    // by aiming it at another.
     EmployeeAadhaarUsecase.assertTargetMatches(session.target_employee_id, targetEmployeeId);
 
     if (session.status !== "initiated") {
@@ -225,37 +231,76 @@ class EmployeeAadhaarUsecase {
     ) {
       throw new ConflictError("that verification session was started by another user");
     }
-    if (Number(session.otp_attempts) >= 5) {
+    // `otp_attempts` is the column's historical name; it counts status checks.
+    if (Number(session.otp_attempts) >= kycConfig.aadhaar.maxStatusChecks) {
       await this.repo.updateVerification(session.verification_id, "initiated", {
         status: "failed",
-        failure_category: "too_many_otp_attempts",
+        failure_category: "too_many_status_checks",
       });
-      throw new ValidationError("too many OTP attempts; start the verification again");
+      throw new ValidationError("too many checks on this verification; start the verification again");
     }
 
     await this.repo.incrementOtpAttempts(session.verification_id);
 
-    let verified;
-    try {
-      verified = await this.provider.verifyOtp(session.provider_reference_id, String(input.otp).trim());
-    } catch (err) {
-      const category = err instanceof SandboxError ? err.category : "provider_error";
-      // A failure is recorded but the session is only CLOSED when it cannot
-      // be retried; a wrong digit should let HR try again.
-      const terminal = category !== FAILURE.INVALID_REQUEST;
-      if (terminal) {
-        await this.repo.updateVerification(session.verification_id, "initiated", {
-          status: "failed",
-          failure_category: category,
-        });
-      }
+    const fail = async (category) => {
+      await this.repo.updateVerification(session.verification_id, "initiated", {
+        status: "failed",
+        failure_category: category,
+      });
       this._log(
         logger.LEVEL.ERROR,
-        "OTP-VERIFY-FAILED",
+        "DIGILOCKER-FAILED",
         `verification ${session.verification_id} failed: ${category}`,
         { verificationId: session.verification_id, category, actorEmployeeId }
       );
+    };
+
+    let verified;
+    try {
+      verified = await this.provider.fetchAadhaar(session.provider_reference_id);
+    } catch (err) {
+      const category = err instanceof SandboxError ? err.category : "provider_error";
+      // A provider hiccup leaves the DigiLocker session usable, so HR can
+      // simply check again; anything else closes this session.
+      const retryable = [FAILURE.TIMEOUT, FAILURE.UNAVAILABLE, FAILURE.RATE_LIMITED].includes(category);
+      if (retryable) {
+        this._log(
+          logger.LEVEL.ERROR,
+          "DIGILOCKER-CHECK-FAILED",
+          `verification ${session.verification_id} check failed: ${category}`,
+          { verificationId: session.verification_id, category, actorEmployeeId }
+        );
+      } else {
+        await fail(category);
+      }
       throw err;
+    }
+
+    if (verified.state === "pending") {
+      return {
+        code: 200,
+        status: "pending",
+        aadhaar_last4: session.aadhaar_last4,
+        message: "DigiLocker consent is not complete yet. Finish on DigiLocker, then check again.",
+      };
+    }
+    if (verified.state !== "verified") {
+      await fail(verified.state === "expired" ? "digilocker_session_expired" : "digilocker_consent_failed");
+      throw new ValidationError(
+        "DigiLocker consent was not completed (declined, failed or expired). Start the verification again."
+      );
+    }
+
+    // THE DIGILOCKER AADHAAR MUST BE THE ONE HR ENTERED. DigiLocker returns a
+    // masked number, so the last four digits are what can be compared; a
+    // different Aadhaar (somebody else's DigiLocker account) never verifies
+    // the number on this session.
+    if (String(verified.aadhaar_last4) !== String(session.aadhaar_last4)) {
+      await fail("aadhaar_mismatch");
+      throw new ValidationError(
+        `The Aadhaar in this DigiLocker account (ending ${verified.aadhaar_last4}) does not match the ` +
+          `number entered (ending ${session.aadhaar_last4}). Check the number and start again.`
+      );
     }
 
     const demographics = EmployeeAadhaarUsecase.stripAadhaarKeys(verified.demographics);
@@ -433,8 +478,8 @@ class EmployeeAadhaarUsecase {
     this.assertEnabled();
     if (!kycConfig.allowManualAadhaar) {
       throw new ValidationError(
-        "Manual Aadhaar attestation is disabled on this server. Use the Sandbox OTP flow: " +
-          "POST /hr/aadhaar/initiate then POST /hr/aadhaar/verify-otp.",
+        "Manual Aadhaar attestation is disabled on this server. Use the DigiLocker flow: " +
+          "POST /hr/aadhaar/initiate then POST /hr/aadhaar/complete.",
         409
       );
     }

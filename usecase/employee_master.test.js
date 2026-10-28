@@ -1046,16 +1046,21 @@ describe("Create with a verified Aadhaar", () => {
         return 1;
       },
     };
-    // A stand-in for services/sandbox_aadhaar.js. No HTTP, no OTP delivery -
+    // A stand-in for services/sandbox_aadhaar.js. No HTTP, no DigiLocker -
     // what is under test here is the create, not the provider.
     const provider = {
       isEnabled: () => true,
       demographics: { name: "Verified Person", date_of_birth: "01-02-1990", gender: "MALE", address: "12 Main Road" },
-      async generateOtp() {
-        return { reference_id: "REF-TEST", transaction_id: "TXN-TEST" };
+      async startSession() {
+        return { reference_id: "REF-TEST", transaction_id: "TXN-TEST", authorization_url: "https://digilocker.example/a" };
       },
-      async verifyOtp() {
-        return { transaction_id: "TXN-TEST", demographics: this.demographics };
+      async fetchAadhaar() {
+        return {
+          state: "verified",
+          transaction_id: "TXN-TEST",
+          aadhaar_last4: AADHAAR.slice(-4),
+          demographics: this.demographics,
+        };
       },
     };
     return aadhaarUsecaseFactory(repo, provider);
@@ -1073,15 +1078,15 @@ describe("Create with a verified Aadhaar", () => {
   const VERIFY = { aadhaar_number: AADHAAR, consent_given: true };
 
   /**
-   * A verification produced the way production produces one: OTP out, OTP
-   * back. The manual attestation path is off by default now, so a test that
+   * A verification produced the way production produces one: a DigiLocker
+   * session out, the employee's consent back. The manual attestation path is off by default now, so a test that
    * used it would be testing something no deployment runs.
    */
   const verified = async (aadhaar, { actorEmployeeId, demographics } = {}) => {
     if (demographics) aadhaar.provider.demographics = demographics;
     const started = await aadhaar.initiate(VERIFY, { actorEmployeeId });
-    return aadhaar.verifyOtp(
-      { verification_token: started.verification_token, otp: "123456" },
+    return aadhaar.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId }
     );
   };

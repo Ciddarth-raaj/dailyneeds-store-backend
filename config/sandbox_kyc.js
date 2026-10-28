@@ -6,12 +6,15 @@ require("dotenv").config();
  * The endpoint paths, entity strings and header names below are taken from
  * Sandbox's own API reference:
  *
- *   Aadhaar OKYC generate OTP
- *     POST {base}/kyc/aadhaar/okyc/otp
- *     https://developer.sandbox.co.in/api-reference/kyc/aadhaar/endpoints/generate_otp
- *   Aadhaar OKYC verify OTP
- *     POST {base}/kyc/aadhaar/okyc/otp/verify
- *     https://developer.sandbox.co.in/api-reference/kyc/aadhaar/endpoints/verify_otp
+ *   DigiLocker initiate session
+ *     POST {base}/kyc/digilocker/sessions/init
+ *     https://developer.sandbox.co.in/api-reference/kyc/digilocker/endpoints/initiate_session
+ *   DigiLocker session status
+ *     GET  {base}/kyc/digilocker/sessions/{session_id}/status
+ *     https://developer.sandbox.co.in/api-reference/kyc/digilocker/endpoints/session_status
+ *   DigiLocker fetch document
+ *     GET  {base}/kyc/digilocker/sessions/{session_id}/documents/{doc_type}
+ *     https://developer.sandbox.co.in/api-reference/kyc/digilocker/endpoints/fetch_document
  *   Bank account verification (Penny-Less)
  *     GET  {base}/bank/{ifsc}/accounts/{account_number}/penniless-verify
  *     https://developer.sandbox.co.in/api-reference/kyc/bank/endpoints/penny_less
@@ -50,18 +53,50 @@ module.exports = {
   /** How long to wait on a provider call before giving up. */
   timeoutMs: int("SANDBOX_KYC_TIMEOUT_MS", 30000),
 
+  /**
+   * Aadhaar through DigiLocker.
+   *
+   * Aadhaar OKYC (the OTP-to-the-Aadhaar-mobile flow) was discontinued by
+   * UIDAI; Sandbox's OKYC pages now say "this endpoint no longer works" and
+   * point to DigiLocker. DigiLocker is consent-based: the employee opens a
+   * DigiLocker link, logs in with their own Aadhaar OTP, and allows their
+   * Aadhaar to be shared. We then fetch the signed Aadhaar XML.
+   */
   aadhaar: {
-    generateOtpPath: str("SANDBOX_AADHAAR_OTP_PATH", "/kyc/aadhaar/okyc/otp"),
-    verifyOtpPath: str("SANDBOX_AADHAAR_OTP_VERIFY_PATH", "/kyc/aadhaar/okyc/otp/verify"),
-    generateOtpEntity: str("SANDBOX_AADHAAR_OTP_ENTITY", "in.co.sandbox.kyc.aadhaar.okyc.otp.request"),
-    verifyOtpEntity: str("SANDBOX_AADHAAR_OTP_VERIFY_ENTITY", "in.co.sandbox.kyc.aadhaar.okyc.request"),
+    sessionInitPath: str("SANDBOX_DIGILOCKER_SESSION_PATH", "/kyc/digilocker/sessions/init"),
+    sessionInitEntity: str("SANDBOX_DIGILOCKER_SESSION_ENTITY", "in.co.sandbox.kyc.digilocker.session.request"),
+    /** `{session_id}` is substituted, URL-encoded. */
+    sessionStatusPathTemplate: str(
+      "SANDBOX_DIGILOCKER_STATUS_PATH",
+      "/kyc/digilocker/sessions/{session_id}/status"
+    ),
+    /** `{session_id}` and `{doc_type}` are substituted, URL-encoded. */
+    documentPathTemplate: str(
+      "SANDBOX_DIGILOCKER_DOCUMENT_PATH",
+      "/kyc/digilocker/sessions/{session_id}/documents/{doc_type}"
+    ),
     /**
-     * Sent to Sandbox as the stated purpose of the check. It is recorded on
-     * their side, so it says what this actually is.
+     * Which DigiLocker screen the employee lands on: `signin` for an existing
+     * DigiLocker account (it links to sign-up for those without one), or
+     * `signup`.
      */
-    reason: str("SANDBOX_AADHAAR_REASON", "Employment onboarding KYC"),
-    /** Sandbox takes consent as a flag on the request; we record ours locally too. */
-    consentValue: str("SANDBOX_AADHAAR_CONSENT_VALUE", "y"),
+    flow: str("SANDBOX_DIGILOCKER_FLOW", "signin"),
+    /**
+     * Shown to the employee on DigiLocker's consent screen. DigiLocker accepts
+     * letters, digits, spaces and underscores only.
+     */
+    purpose: str("SANDBOX_DIGILOCKER_PURPOSE", "Employment onboarding KYC"),
+    /**
+     * Where DigiLocker sends the employee after they allow or deny consent.
+     * Must be a public HTTPS URL. When unset, the route builds one from the
+     * request's own host: this server's `/digilocker/done.html` page.
+     */
+    redirectUrl: str("SANDBOX_DIGILOCKER_REDIRECT_URL", ""),
+    /**
+     * How many times HR may ask "is it done yet?" on one session. Each check
+     * is a provider call; a waiting employee needs a handful, not hundreds.
+     */
+    maxStatusChecks: int("SANDBOX_DIGILOCKER_MAX_STATUS_CHECKS", 30),
   },
 
   bank: {

@@ -10,7 +10,7 @@
  * ============================== THE DEFECT THIS FIXES =====================
  *
  * The Verify now button on the employee profile called the ONBOARDING
- * endpoints - `POST /hr/aadhaar/initiate` and `/hr/aadhaar/verify-otp` - which
+ * endpoints - `POST /hr/aadhaar/initiate` and `/hr/aadhaar/complete` - which
  * require `employee_create` AND, because the initiate body carries
  * `aadhaar_number`, `edit_employee_sensitive` through B3's `guardWrite`. A
  * store manager holds neither, so the modal ended in "You do not have
@@ -128,7 +128,7 @@ const GRANTS = {
 
 let calls;
 const resetCalls = () => {
-  calls = { initiate: [], verifyOtp: [], attach: [], reveal: [], edit: [], create: [] };
+  calls = { initiate: [], complete: [], attach: [], reveal: [], edit: [], create: [] };
 };
 resetCalls();
 
@@ -187,8 +187,8 @@ const aadhaarUsecase = {
       masked_aadhaar: "XXXX XXXX " + LAST4, status: "initiated",
     };
   },
-  async verifyOtp(body, opts) {
-    calls.verifyOtp.push({ body, opts });
+  async complete(body, opts) {
+    calls.complete.push({ body, opts });
     return { code: 200, verification_id: 55, aadhaar_last4: LAST4, next_action: "create" };
   },
   async revealFullNumber(employeeId, opts) {
@@ -300,9 +300,9 @@ const refused = (res, what) =>
   );
 
 const initiateUrl = (id) => `/hr/employee/${id}/aadhaar/initiate`;
-const otpUrl = (id) => `/hr/employee/${id}/aadhaar/verify-otp`;
+const completeUrl = (id) => `/hr/employee/${id}/aadhaar/complete`;
 const INITIATE_BODY = { aadhaar_number: FAKE_AADHAAR, consent_given: true };
-const OTP_BODY = { verification_token: "f".repeat(64), otp: FAKE_OTP };
+const COMPLETE_BODY = { verification_token: "f".repeat(64) };
 
 /* ===================================================================== */
 /*  1-7. THE NEW PATH                                                    */
@@ -343,7 +343,7 @@ describe("the existing-employee verification path", () => {
   it("5. an ALREADY VERIFIED Aadhaar cannot be re-verified or replaced", async () => {
     for (const [what, res] of [
       ["initiate", await post(initiateUrl(OWN_VERIFIED), CALLERS.verifier(), INITIATE_BODY)],
-      ["verify-otp", await post(otpUrl(OWN_VERIFIED), CALLERS.verifier(), OTP_BODY)],
+      ["complete", await post(completeUrl(OWN_VERIFIED), CALLERS.verifier(), COMPLETE_BODY)],
       // Not even HR or an administrator: this path is PENDING-only by design.
       ["initiate as HR", await post(initiateUrl(OWN_VERIFIED), CALLERS.hr(), INITIATE_BODY)],
       ["initiate as admin", await post(initiateUrl(OWN_VERIFIED), CALLERS.admin(), INITIATE_BODY)],
@@ -351,16 +351,16 @@ describe("the existing-employee verification path", () => {
       assert.equal(res.body && res.body.code, 409, `${what} on a VERIFIED employee must be refused`);
     }
     assert.equal(calls.initiate.length, 0, "no provider call for a verified employee");
-    assert.equal(calls.verifyOtp.length, 0);
+    assert.equal(calls.complete.length, 0);
   });
 
-  it("6. the OTP step requires the SAME narrow permission, branch and state", async () => {
-    ok(await post(otpUrl(OWN_PENDING), CALLERS.verifier(), OTP_BODY), "otp in own branch");
-    assert.equal(calls.verifyOtp.length, 1);
+  it("6. the complete step requires the SAME narrow permission, branch and state", async () => {
+    ok(await post(completeUrl(OWN_PENDING), CALLERS.verifier(), COMPLETE_BODY), "complete in own branch");
+    assert.equal(calls.complete.length, 1);
 
-    refused(await post(otpUrl(OWN_PENDING), CALLERS.manager(), OTP_BODY), "otp without the key");
-    refused(await post(otpUrl(OTHER_PENDING), CALLERS.verifier(), OTP_BODY), "otp out of branch");
-    assert.equal(calls.verifyOtp.length, 1, "neither refusal reached the provider");
+    refused(await post(completeUrl(OWN_PENDING), CALLERS.manager(), COMPLETE_BODY), "complete without the key");
+    refused(await post(completeUrl(OTHER_PENDING), CALLERS.verifier(), COMPLETE_BODY), "complete out of branch");
+    assert.equal(calls.complete.length, 1, "neither refusal reached the provider");
   });
 
   it("7. edit_employee_sensitive is NOT required - and is NOT a substitute", async () => {
@@ -431,7 +431,7 @@ describe("the existing paths are untouched", () => {
     // The onboarding designation - employee_create + edit_employee_sensitive,
     // and NOT the new key - still reaches the onboarding endpoints.
     ok(await post("/hr/aadhaar/initiate", CALLERS.onboarder(), INITIATE_BODY), "onboarding initiate");
-    ok(await post("/hr/aadhaar/verify-otp", CALLERS.onboarder(), OTP_BODY), "onboarding verify-otp");
+    ok(await post("/hr/aadhaar/complete", CALLERS.onboarder(), COMPLETE_BODY), "onboarding complete");
     assert.equal(calls.initiate.length, 1);
 
     // And its rules have not been relaxed: without edit_employee_sensitive,
@@ -504,21 +504,21 @@ describe("the session is bound to the route's employee", () => {
       const res = await post(initiateUrl(OWN_PENDING), CALLERS.verifier(), smuggled);
       assert.equal(res.body && res.body.code, 422, "an unknown field is refused");
     }
-    const otp = await post(otpUrl(OWN_PENDING), CALLERS.verifier(), {
-      ...OTP_BODY,
+    const completed = await post(completeUrl(OWN_PENDING), CALLERS.verifier(), {
+      ...COMPLETE_BODY,
       target_employee_id: OTHER_PENDING,
     });
-    assert.equal(otp.body && otp.body.code, 422);
+    assert.equal(completed.body && completed.body.code, 422);
     assert.equal(calls.initiate.length, 0, "nothing reached the provider");
-    assert.equal(calls.verifyOtp.length, 0);
+    assert.equal(calls.complete.length, 0);
   });
 
-  it("verify-otp passes the same route-derived target", async () => {
-    const res = await post(otpUrl(OWN_PENDING), CALLERS.verifier(), OTP_BODY);
-    ok(res, "verify-otp");
-    assert.equal(calls.verifyOtp.length, 1);
-    assert.equal(calls.verifyOtp[0].opts.targetEmployeeId, OWN_PENDING);
-    assert.deepEqual(Object.keys(calls.verifyOtp[0].body).sort(), ["otp", "verification_token"]);
+  it("complete passes the same route-derived target", async () => {
+    const res = await post(completeUrl(OWN_PENDING), CALLERS.verifier(), COMPLETE_BODY);
+    ok(res, "complete");
+    assert.equal(calls.complete.length, 1);
+    assert.equal(calls.complete[0].opts.targetEmployeeId, OWN_PENDING);
+    assert.deepEqual(Object.keys(calls.complete[0].body).sort(), ["verification_token"]);
   });
 
   it("the ONBOARDING routes pass no target at all", async () => {
@@ -529,8 +529,8 @@ describe("the session is bound to the route's employee", () => {
       undefined,
       "there is no employee yet, so the session stays unbound"
     );
-    ok(await post("/hr/aadhaar/verify-otp", CALLERS.onboarder(), OTP_BODY), "onboarding verify-otp");
-    assert.equal(calls.verifyOtp[0].opts.targetEmployeeId, undefined);
+    ok(await post("/hr/aadhaar/complete", CALLERS.onboarder(), COMPLETE_BODY), "onboarding complete");
+    assert.equal(calls.complete[0].opts.targetEmployeeId, undefined);
   });
 });
 
@@ -548,7 +548,7 @@ describe("audit and logging", () => {
     };
     try {
       await post(initiateUrl(OWN_PENDING), CALLERS.verifier(), INITIATE_BODY);
-      await post(otpUrl(OWN_PENDING), CALLERS.verifier(), OTP_BODY);
+      await post(completeUrl(OWN_PENDING), CALLERS.verifier(), COMPLETE_BODY);
       refused(await post(initiateUrl(OTHER_PENDING), CALLERS.verifier(), INITIATE_BODY), "refusal");
     } finally {
       logger.Log = original;

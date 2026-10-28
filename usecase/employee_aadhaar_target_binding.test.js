@@ -8,7 +8,7 @@
  * The existing-employee flow bound a session to the ACTING USER
  * (`initiated_by_employee_id`) and to nothing else, so a direct API caller
  * holding `verify_employee_aadhaar` could initiate for employee A, complete
- * the OTP against employee B in the same branch, and attach A's Aadhaar to B.
+ * the verification against employee B in the same branch, and attach A's Aadhaar to B.
  * Every other check passed: same caller, same branch, both PENDING. The UI
  * would not do it; authorization must not depend on the UI not doing it.
  *
@@ -43,7 +43,6 @@ const withCheckDigit = (eleven) => {
 };
 const AADHAAR_A = withCheckDigit("22222222222");
 const AADHAAR_B = withCheckDigit("33333333333");
-const OTP = "000000";
 
 /** Two employees in the SAME branch, both PENDING - the attack's best case. */
 const A = 301;
@@ -112,21 +111,27 @@ const makeRepo = (store) => ({
   },
 });
 
-const makeProvider = () => {
+const makeProvider = (store) => {
   const calls = [];
   const provider = {
     calls,
     isEnabled: () => true,
-    async generateOtp(number) {
-      calls.push(["generateOtp", number]);
-      return { reference_id: "REF-" + calls.length, transaction_id: "TXN-" + calls.length };
-    },
-    async verifyOtp(referenceId, otp) {
-      calls.push(["verifyOtp", referenceId, otp]);
+    async startSession(opts) {
+      calls.push(["startSession", opts]);
       return {
+        reference_id: "REF-" + calls.length,
+        transaction_id: "TXN-" + calls.length,
+        authorization_url: "https://digilocker.example/authorize",
+      };
+    },
+    async fetchAadhaar(referenceId) {
+      calls.push(["fetchAadhaar", referenceId]);
+      const session = store.verifications.find((v) => v.provider_reference_id === referenceId);
+      return {
+        state: "verified",
         transaction_id: "TXN-V",
         reference_id: referenceId,
-        provider_status: "valid",
+        aadhaar_last4: session && session.aadhaar_last4,
         demographics: { name: "Verified Person", date_of_birth: "01-02-1990", gender: "M" },
       };
     },
@@ -136,7 +141,7 @@ const makeProvider = () => {
 
 const build = () => {
   const store = makeStore();
-  const provider = makeProvider();
+  const provider = makeProvider(store);
   return { store, provider, uc: aadhaarUsecase(makeRepo(store), provider) };
 };
 
@@ -164,7 +169,7 @@ const refusal = async (fn, what) => {
 };
 
 /* ===================================================================== */
-/*  1-5. INITIATE AND OTP                                                */
+/*  1-5. INITIATE AND COMPLETE                                             */
 /* ===================================================================== */
 
 describe("the session is bound at initiation", () => {
@@ -179,24 +184,24 @@ describe("the session is bound at initiation", () => {
     assert.ok(!v.employee_id, "a session that has not been consumed names no employee_id");
   });
 
-  it("2. the OTP step against the SAME employee succeeds", async () => {
+  it("2. the complete step against the SAME employee succeeds", async () => {
     const { uc, store } = build();
     const started = await initiateFor(uc, A);
-    const res = await uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    const res = await uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 101, targetEmployeeId: A }
     );
     assert.equal(res.code, 200);
     assert.equal(row(store, res.verification_id).status, "verified");
   });
 
-  it("3. the OTP step against employee B - same branch, same caller - is refused", async () => {
+  it("3. the complete step against employee B - same branch, same caller - is refused", async () => {
     const { uc } = build();
     const started = await initiateFor(uc, A);
     const err = await refusal(
       () =>
-        uc.verifyOtp(
-          { verification_token: started.verification_token, otp: OTP },
+        uc.complete(
+          { verification_token: started.verification_token },
           { actorEmployeeId: 101, targetEmployeeId: B }
         ),
       "A's token aimed at B"
@@ -211,23 +216,23 @@ describe("the session is bound at initiation", () => {
     }
   });
 
-  it("4. a wrong-target OTP never reaches the provider", async () => {
+  it("4. a wrong-target complete never reaches the provider", async () => {
     const { uc, provider } = build();
     const started = await initiateFor(uc, A);
     const before = provider.calls.length;
     await refusal(
       () =>
-        uc.verifyOtp(
-          { verification_token: started.verification_token, otp: OTP },
+        uc.complete(
+          { verification_token: started.verification_token },
           { actorEmployeeId: 101, targetEmployeeId: B }
         ),
       "wrong target"
     );
     assert.equal(provider.calls.length, before, "no provider call was made");
-    assert.ok(!provider.calls.some(([m]) => m === "verifyOtp"), "and certainly not verifyOtp");
+    assert.ok(!provider.calls.some(([m]) => m === "fetchAadhaar"), "and certainly not fetchAadhaar");
   });
 
-  it("5. a wrong-target OTP never spends an attempt, and never closes the session", async () => {
+  it("5. a wrong-target complete never spends a check, and never closes the session", async () => {
     const { uc, store } = build();
     const started = await initiateFor(uc, A);
     const v = store.verifications.find((x) => x.session_token === started.verification_token);
@@ -236,8 +241,8 @@ describe("the session is bound at initiation", () => {
     for (let i = 0; i < 6; i += 1) {
       await refusal(
         () =>
-          uc.verifyOtp(
-            { verification_token: started.verification_token, otp: OTP },
+          uc.complete(
+            { verification_token: started.verification_token },
             { actorEmployeeId: 101, targetEmployeeId: B }
           ),
         "wrong target"
@@ -250,8 +255,8 @@ describe("the session is bound at initiation", () => {
     assert.equal(v.status, "initiated", "and the session is not failed or expired");
 
     // A's own verification still works afterwards.
-    const res = await uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    const res = await uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 101, targetEmployeeId: A }
     );
     assert.equal(res.code, 200);
@@ -265,8 +270,8 @@ describe("the session is bound at initiation", () => {
 describe("only the target employee may consume the session", () => {
   const verifiedFor = async (uc, target) => {
     const started = await initiateFor(uc, target);
-    return uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    return uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 101, targetEmployeeId: target }
     );
   };
@@ -334,23 +339,23 @@ describe("onboarding keeps its unbound semantics", () => {
     assert.equal(v.target_employee_id, null, "there is no employee yet to bind to");
   });
 
-  it("13. onboarding OTP verification still works", async () => {
+  it("13. onboarding verification still works", async () => {
     const { uc, provider } = build();
     const started = await initiateOnboarding(uc);
-    const res = await uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    const res = await uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 100 }
     );
     assert.equal(res.code, 200);
     assert.equal(res.next_action, "create");
-    assert.ok(provider.calls.some(([m]) => m === "verifyOtp"), "the provider was reached");
+    assert.ok(provider.calls.some(([m]) => m === "fetchAadhaar"), "the provider was reached");
   });
 
   it("14. Create Employee can still consume a NULL-target verification", async () => {
     const { uc, store } = build();
     const started = await initiateOnboarding(uc);
-    const decision = await uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    const decision = await uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 100 }
     );
     // The employee_id is invented by the create, and was never on the session.
@@ -368,8 +373,8 @@ describe("onboarding keeps its unbound semantics", () => {
     const v = store.verifications.find((x) => x.session_token === started.verification_token);
     delete v.target_employee_id;
 
-    const decision = await uc.verifyOtp(
-      { verification_token: started.verification_token, otp: OTP },
+    const decision = await uc.complete(
+      { verification_token: started.verification_token },
       { actorEmployeeId: 100 }
     );
     assert.equal(decision.code, 200);
@@ -383,8 +388,8 @@ describe("onboarding keeps its unbound semantics", () => {
     const other = await initiateOnboarding(uc, AADHAAR_A);
     await refusal(
       () =>
-        uc.verifyOtp(
-          { verification_token: other.verification_token, otp: OTP },
+        uc.complete(
+          { verification_token: other.verification_token },
           { actorEmployeeId: 101, targetEmployeeId: A }
         ),
       "an unbound session on the bound path"
@@ -397,7 +402,7 @@ describe("onboarding keeps its unbound semantics", () => {
 /* ===================================================================== */
 
 describe("logging", () => {
-  it("16. no full Aadhaar number and no OTP is logged, on success or refusal", async () => {
+  it("16. no full Aadhaar number is logged, on success or refusal", async () => {
     const written = [];
     const original = logger.Log;
     logger.Log = (entry) => {
@@ -408,14 +413,14 @@ describe("logging", () => {
       const started = await initiateFor(uc, A);
       await refusal(
         () =>
-          uc.verifyOtp(
-            { verification_token: started.verification_token, otp: OTP },
+          uc.complete(
+            { verification_token: started.verification_token },
             { actorEmployeeId: 101, targetEmployeeId: B }
           ),
         "wrong target"
       );
-      const decision = await uc.verifyOtp(
-        { verification_token: started.verification_token, otp: OTP },
+      const decision = await uc.complete(
+        { verification_token: started.verification_token },
         { actorEmployeeId: 101, targetEmployeeId: A }
       );
       await refusal(
@@ -428,7 +433,7 @@ describe("logging", () => {
     }
     const all = written.join("\n");
     assert.ok(written.length > 0, "the flow does log - so the assertion below means something");
-    for (const secret of [AADHAAR_A, AADHAAR_B, OTP, "ciphertext", "fingerprint"]) {
+    for (const secret of [AADHAAR_A, AADHAAR_B, "ciphertext", "fingerprint"]) {
       assert.ok(!all.includes(secret), `${secret} must never be logged`);
     }
   });

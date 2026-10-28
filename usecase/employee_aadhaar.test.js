@@ -126,35 +126,54 @@ const makeRepo = (store) => ({
  * Stands in for services/sandbox_aadhaar.js. Every provider behaviour the
  * usecase must handle is a switch on this object, so none of these tests
  * touches the network.
+ *
+ * `fetchAadhaar` answers with the last four digits of the number the session
+ * was opened for - a DigiLocker account that belongs to the same person -
+ * unless a test sets `nextLast4` to stand in for somebody else's account.
  */
-const makeProvider = () => {
+const makeProvider = (store) => {
   const calls = [];
   const provider = {
     calls,
     enabled: true,
     nextGenerate: null,
     nextVerify: null,
+    nextState: null,
+    nextLast4: null,
     isEnabled: () => provider.enabled,
-    async generateOtp(aadhaarNumber) {
-      calls.push(["generateOtp", aadhaarNumber]);
+    async startSession(opts) {
+      calls.push(["startSession", opts]);
       if (provider.nextGenerate) {
         const e = provider.nextGenerate;
         provider.nextGenerate = null;
         throw e;
       }
-      return { reference_id: "REF-" + calls.length, transaction_id: "TXN-" + calls.length };
+      return {
+        reference_id: "REF-" + calls.length,
+        transaction_id: "TXN-" + calls.length,
+        authorization_url: "https://digilocker.example/authorize",
+      };
     },
-    async verifyOtp(referenceId, otp) {
-      calls.push(["verifyOtp", referenceId, otp]);
+    async fetchAadhaar(referenceId) {
+      calls.push(["fetchAadhaar", referenceId]);
       if (provider.nextVerify) {
         const e = provider.nextVerify;
         provider.nextVerify = null;
         throw e;
       }
+      if (provider.nextState) {
+        const state = provider.nextState;
+        provider.nextState = null;
+        return { state };
+      }
+      const session = store.verifications.find((v) => v.provider_reference_id === referenceId);
+      const last4 = provider.nextLast4 || (session && session.aadhaar_last4);
+      provider.nextLast4 = null;
       return {
+        state: "verified",
         transaction_id: "TXN-V",
         reference_id: referenceId,
-        provider_status: "valid",
+        aadhaar_last4: last4,
         demographics: {
           name: "Verified Person",
           date_of_birth: "01-02-1990",
@@ -169,14 +188,14 @@ const makeProvider = () => {
 
 const build = () => {
   const store = new Store();
-  const provider = makeProvider();
+  const provider = makeProvider(store);
   return { store, provider, uc: aadhaarUsecase(makeRepo(store), provider) };
 };
 
-/** initiate + verify-otp, which is what "verify this Aadhaar" now means. */
+/** initiate + complete, which is what "verify this Aadhaar" now means. */
 const runFlow = async (uc, input, opts = {}) => {
-  const started = await uc.initiate(input, opts);
-  return uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }, opts);
+  const started = await uc.initiate(input, { redirectUrl: "https://api.example/digilocker/done.html", ...opts });
+  return uc.complete({ verification_token: started.verification_token }, opts);
 };
 
 const VERIFY = { aadhaar_number: AADHAAR_A, consent_given: true };
@@ -310,7 +329,7 @@ describe("verify", () => {
     await runFlow(uc, VERIFY);
     const v = store.verifications[0];
     assert.equal(v.provider, "sandbox");
-    assert.ok(v.provider_reference_id, "Sandbox's OTP reference is stored, not returned");
+    assert.ok(v.provider_reference_id, "Sandbox's DigiLocker session id is stored, not returned");
     assert.ok(v.provider_transaction_id);
     assert.ok(v.verified_at);
     assert.ok(v.expires_at);
@@ -345,8 +364,8 @@ describe("verify", () => {
 
   it("strips any Aadhaar-looking key from the demographics payload", async () => {
     const { store, uc, provider } = build();
-    provider.verifyOtp = async () => ({
-      transaction_id: "T", reference_id: "R", provider_status: "valid",
+    provider.fetchAadhaar = async () => ({
+      state: "verified", transaction_id: "T", reference_id: "R", aadhaar_last4: AADHAAR_A.slice(-4),
       demographics: { name: "X", aadhaar_number: AADHAAR_A, uid: AADHAAR_A, aadhaar: AADHAAR_A },
     });
     await runFlow(uc, VERIFY);
@@ -515,8 +534,8 @@ describe("the number never escapes", () => {
   });
 });
 
-/* ============================================== the OTP session ========= */
-describe("the Sandbox OTP flow", () => {
+/* ======================================= the DigiLocker session ========= */
+describe("the Sandbox DigiLocker flow", () => {
   const { SandboxError, FAILURE } = require("../services/sandbox_client");
 
   it("3/5. an invalid Verhoeff number is rejected BEFORE the provider is called", async () => {
@@ -549,26 +568,22 @@ describe("the Sandbox OTP flow", () => {
     assert.ok(!text.includes(store.verifications[0].provider_reference_id));
   });
 
-  it("8/9. the OTP is never stored, and never appears in a log line or an error", async () => {
-    const OTP = "987654";
-    const { store, uc } = build();
-    const started = await uc.initiate(VERIFY);
-    await uc.verifyOtp({ verification_token: started.verification_token, otp: OTP });
-    assert.ok(!JSON.stringify(store.verifications).includes(OTP), "no OTP on the session row");
+  it("8/9. the provider module cannot log, and returns the DigiLocker link to open", async () => {
+    const { uc, provider } = build();
+    const started = await uc.initiate(VERIFY, { redirectUrl: "https://api.example/digilocker/done.html" });
+    assert.match(started.authorization_url, /^https:\/\//);
+    assert.deepEqual(provider.calls[0], ["startSession", { redirectUrl: "https://api.example/digilocker/done.html" }]);
 
-    // And the source cannot log it: the provider module has no logger, and
-    // the usecase never puts the OTP into a message.
+    // The provider module reads a whole Aadhaar XML; it has no logger, so
+    // none of it can be written down.
     const providerSrc = fs
       .readFileSync(path.join(__dirname, "..", "services/sandbox_aadhaar.js"), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "")
       .replace(/^\s*\/\/.*$/gm, "");
     assert.ok(!/logger|console\./.test(providerSrc), "the provider module cannot log: it has no logger");
-    const ucSrc = fs.readFileSync(path.join(__dirname, "employee_aadhaar.js"), "utf8");
-    const verifyBlock = ucSrc.slice(ucSrc.indexOf("async verifyOtp"), ucSrc.indexOf("static stripAadhaarKeys"));
-    assert.ok(!/\$\{[^}]*otp[^}]*\}/i.test(verifyBlock), "no OTP interpolated into any string");
   });
 
-  it("10. a successful OTP produces verified demographics and the create decision", async () => {
+  it("10. a completed DigiLocker consent produces verified demographics and the create decision", async () => {
     const { store, uc } = build();
     const res = await runFlow(uc, VERIFY);
     assert.equal(res.status, "verified");
@@ -582,35 +597,64 @@ describe("the Sandbox OTP flow", () => {
     assert.equal(store.verifications[0].status, "verified");
   });
 
-  it("11. a rejected OTP cannot mark the session verified, and can be retried", async () => {
+  it("11. while the employee is still on DigiLocker the answer is pending, and the session stays open", async () => {
     const { store, uc, provider } = build();
     const started = await uc.initiate(VERIFY);
-    provider.nextVerify = new SandboxError(FAILURE.INVALID_REQUEST, "The OTP could not be verified", 422);
-    await assert.rejects(
-      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "000000" }),
-      /could not be verified/
-    );
-    assert.equal(store.verifications[0].status, "initiated", "a wrong digit leaves the session open");
+    provider.nextState = "pending";
+    const pending = await uc.complete({ verification_token: started.verification_token });
+    assert.equal(pending.status, "pending");
+    assert.equal(pending.duplicate, undefined, "nothing is decided before DigiLocker answers");
+    assert.equal(store.verifications[0].status, "initiated");
     assert.equal(store.verifications[0].otp_attempts, 1);
 
-    // and the right one still works
-    const res = await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    const res = await uc.complete({ verification_token: started.verification_token });
     assert.equal(res.status, "verified");
   });
 
-  it("11. repeated wrong OTPs close the session rather than allowing forever", async () => {
+  it("11. a declined or expired DigiLocker consent closes the session", async () => {
+    for (const [state, category] of [
+      ["failed", "digilocker_consent_failed"],
+      ["expired", "digilocker_session_expired"],
+    ]) {
+      const { store, uc, provider } = build();
+      const started = await uc.initiate(VERIFY);
+      provider.nextState = state;
+      await assert.rejects(
+        () => uc.complete({ verification_token: started.verification_token }),
+        /DigiLocker consent was not completed/
+      );
+      assert.equal(store.verifications[0].status, "failed");
+      assert.equal(store.verifications[0].failure_category, category);
+    }
+  });
+
+  it("11. a DigiLocker Aadhaar that is not the number entered never verifies it", async () => {
     const { store, uc, provider } = build();
     const started = await uc.initiate(VERIFY);
-    for (let i = 0; i < 5; i++) {
-      provider.nextVerify = new SandboxError(FAILURE.INVALID_REQUEST, "The OTP could not be verified", 422);
-      await assert.rejects(() => uc.verifyOtp({ verification_token: started.verification_token, otp: "000000" }));
-    }
+    provider.nextLast4 = AADHAAR_A.slice(-4) === "0000" ? "1111" : "0000";
     await assert.rejects(
-      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
-      /too many OTP attempts/
+      () => uc.complete({ verification_token: started.verification_token }),
+      /does not match the number entered/
     );
     assert.equal(store.verifications[0].status, "failed");
-    assert.equal(store.verifications[0].failure_category, "too_many_otp_attempts");
+    assert.equal(store.verifications[0].failure_category, "aadhaar_mismatch");
+    assert.equal(store.verifications[0].demographics_json, undefined, "no demographics are kept");
+  });
+
+  it("11. endless status checks close the session rather than allowing forever", async () => {
+    const { store, uc, provider } = build();
+    const started = await uc.initiate(VERIFY);
+    const max = require("../config/sandbox_kyc").aadhaar.maxStatusChecks;
+    for (let i = 0; i < max; i++) {
+      provider.nextState = "pending";
+      await uc.complete({ verification_token: started.verification_token });
+    }
+    await assert.rejects(
+      () => uc.complete({ verification_token: started.verification_token }),
+      /too many checks/
+    );
+    assert.equal(store.verifications[0].status, "failed");
+    assert.equal(store.verifications[0].failure_category, "too_many_status_checks");
   });
 
   it("12. an expired session is refused and marked expired", async () => {
@@ -618,15 +662,28 @@ describe("the Sandbox OTP flow", () => {
     const started = await uc.initiate(VERIFY);
     store.verifications[0].expires_at = new Date(Date.now() - 1000);
     await assert.rejects(
-      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+      () => uc.complete({ verification_token: started.verification_token }),
       /has expired/
     );
     assert.equal(store.verifications[0].status, "expired");
   });
 
-  it("13/14/15. provider timeout, auth failure and missing entitlement each fail closed", async () => {
+  it("13. a provider timeout or outage leaves the session open to check again", async () => {
+    for (const category of [FAILURE.TIMEOUT, FAILURE.UNAVAILABLE, FAILURE.RATE_LIMITED]) {
+      const { store, uc, provider } = build();
+      const started = await uc.initiate(VERIFY);
+      const { SAFE_MESSAGE } = require("../services/sandbox_client");
+      provider.nextVerify = new SandboxError(category, SAFE_MESSAGE[category]);
+      await assert.rejects(() => uc.complete({ verification_token: started.verification_token }));
+      assert.equal(store.verifications[0].status, "initiated", `${category} must not close the session`);
+      const res = await uc.complete({ verification_token: started.verification_token });
+      assert.equal(res.status, "verified");
+    }
+  });
+
+  it("14/15. auth failure, missing entitlement and an unreadable document each fail closed", async () => {
     for (const [category, pattern] of [
-      [FAILURE.TIMEOUT, /did not respond in time/],
+      [FAILURE.UNEXPECTED, /unexpected response/],
       [FAILURE.AUTH_FAILED, /rejected our credentials/],
       [FAILURE.NOT_ENTITLED, /not enabled on the provider account/],
     ]) {
@@ -635,7 +692,7 @@ describe("the Sandbox OTP flow", () => {
       const { SAFE_MESSAGE } = require("../services/sandbox_client");
       provider.nextVerify = new SandboxError(category, SAFE_MESSAGE[category]);
       await assert.rejects(
-        () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+        () => uc.complete({ verification_token: started.verification_token }),
         pattern
       );
       assert.equal(store.verifications[0].status, "failed", `${category} must not verify`);
@@ -654,7 +711,7 @@ describe("the Sandbox OTP flow", () => {
     const { uc } = build();
     const started = await uc.initiate(VERIFY, { actorEmployeeId: 7 });
     await assert.rejects(
-      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }, { actorEmployeeId: 9 }),
+      () => uc.complete({ verification_token: started.verification_token }, { actorEmployeeId: 9 }),
       /started by another user/
     );
   });
@@ -662,17 +719,17 @@ describe("the Sandbox OTP flow", () => {
   it("a session can only be verified once", async () => {
     const { uc } = build();
     const started = await uc.initiate(VERIFY);
-    await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    await uc.complete({ verification_token: started.verification_token });
     await assert.rejects(
-      () => uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" }),
+      () => uc.complete({ verification_token: started.verification_token }),
       /already been verified/
     );
   });
 
   it("an unknown token is refused", async () => {
     const { uc } = build();
-    await assert.rejects(() => uc.verifyOtp({ verification_token: "f".repeat(64), otp: "1" }), /does not exist/);
-    await assert.rejects(() => uc.verifyOtp({ verification_token: "short", otp: "1" }), /verification_token is required/);
+    await assert.rejects(() => uc.complete({ verification_token: "f".repeat(64) }), /does not exist/);
+    await assert.rejects(() => uc.complete({ verification_token: "short" }), /verification_token is required/);
   });
 
   it("24. the duplicate answer exists only after a successful verification", async () => {
@@ -691,7 +748,7 @@ describe("the Sandbox OTP flow", () => {
     assert.equal(started.next_action, undefined);
     assert.equal(started.employee_id, undefined);
 
-    const res = await uc.verifyOtp({ verification_token: started.verification_token, otp: "123456" });
+    const res = await uc.complete({ verification_token: started.verification_token });
     assert.equal(res.duplicate, true);
     assert.equal(res.next_action, "rejoin");
     assert.equal(res.employee_id, 412);

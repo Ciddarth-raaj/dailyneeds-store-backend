@@ -202,6 +202,48 @@ class SandboxClient {
     };
   }
 
+  /**
+   * Downloads a file Sandbox handed us a link to - the DigiLocker Aadhaar
+   * XML, which Sandbox serves from a short-lived pre-signed URL.
+   *
+   * NO SANDBOX CREDENTIALS ARE SENT. The URL is already signed for exactly
+   * this one object, and sending our token and API key to a storage host
+   * would only be handing them to somebody else. HTTPS only, for the same
+   * reason. The URL itself is never logged: its query string is the
+   * signature.
+   */
+  async download(url, { logRef = {} } = {}) {
+    this._assertEnabled();
+    if (!/^https:\/\//i.test(String(url || ""))) {
+      this._log(FAILURE.UNEXPECTED, "document download", logRef);
+      throw new SandboxError(FAILURE.UNEXPECTED, SAFE_MESSAGE[FAILURE.UNEXPECTED]);
+    }
+    let res;
+    try {
+      res = await this.http({
+        method: "GET",
+        url,
+        responseType: "text",
+        // Keep the body as text: this is XML, and axios must not try to
+        // parse it as JSON.
+        transformResponse: [(data) => data],
+        timeout: kycConfig.timeoutMs,
+        validateStatus: () => true,
+      });
+    } catch (err) {
+      const timedOut = err && (err.code === "ECONNABORTED" || /timeout/i.test(err.message || ""));
+      const category = timedOut ? FAILURE.TIMEOUT : FAILURE.UNAVAILABLE;
+      this._log(category, "document download", logRef);
+      throw new SandboxError(category, SAFE_MESSAGE[category]);
+    }
+    if (res.status !== 200 || typeof res.data !== "string" || res.data.trim() === "") {
+      const category = res.status === 403 || res.status === 404 ? FAILURE.NOT_FOUND : FAILURE.UNAVAILABLE;
+      this._log(category, "document download", { ...logRef, http_status: res.status });
+      throw new SandboxError(category, SAFE_MESSAGE[category]);
+    }
+    return res.data;
+  }
+
   /** Category, path and safe ids. Never a payload. */
   _log(category, path, ref) {
     logger.Log({

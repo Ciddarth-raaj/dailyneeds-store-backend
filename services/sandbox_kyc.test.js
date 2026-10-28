@@ -9,8 +9,9 @@
  * becomes a stable internal category rather than a leaked payload, and that
  * the request shapes match the endpoints these were written against:
  *
- *   POST /kyc/aadhaar/okyc/otp          generate OTP
- *   POST /kyc/aadhaar/okyc/otp/verify   verify OTP
+ *   POST /kyc/digilocker/sessions/init                       DigiLocker session
+ *   GET  /kyc/digilocker/sessions/{id}/status                session status
+ *   GET  /kyc/digilocker/sessions/{id}/documents/aadhaar     Aadhaar XML link
  *   GET  /bank/{ifsc}/accounts/{account_number}/penniless-verify
  */
 const { describe, it } = require("node:test");
@@ -226,80 +227,170 @@ describe("the shared client", () => {
   });
 });
 
-/* ======================================================== Aadhaar OKYC == */
-describe("the Aadhaar OKYC service", () => {
-  const AADHAAR = "222222222229";
+/* =================================================== Aadhaar DigiLocker == */
+describe("the Aadhaar DigiLocker service", () => {
+  const REDIRECT = "https://api.example.in/digilocker/done.html";
+  const XML_URL = "https://in-co-sandbox-kyc-digilocker.s3.amazonaws.com/x/in.gov.uidai-ADHAR-1.xml?X-Amz-Signature=abc";
+  const XML = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Certificate><CertificateData>
+  <KycRes code="c" ret="Y" ts="2026-01-15T12:00:00.000+05:30" ttl="2027-01-15T12:00:00" txn="UKC:1">
+    <UidData tkn="" uid="xxxxxxxx2229">
+      <Poi dob="01-02-1990" gender="M" name="RAMESH KUMAR"/>
+      <Poa co="C/O SAMPLE GUARDIAN" country="India" dist="Chennai" house="12" lm="Nr Temple"
+           loc="T Nagar" pc="600017" po="T Nagar" state="Tamil Nadu" subdist="" vtc="Chennai &amp; Suburbs"/>
+      <LData name="local" house="local"/>
+      <Pht>BASE64PHOTO</Pht>
+    </UidData>
+  </KycRes>
+</CertificateData><Signature xmlns="http://www.w3.org/2000/09/xmldsig#"/></Certificate>`;
+  const docBody = () =>
+    okBody({
+      files: [
+        {
+          "@entity": "org.quicko.drive.file",
+          url: XML_URL,
+          size: 1000,
+          metadata: { ContentType: "application/xml", issuer_id: "in.gov.uidai", description: "Aadhaar Card" },
+        },
+      ],
+    });
 
-  it("posts the documented generate-OTP shape", async () => {
+  it("posts the documented initiate-session shape, asking for the Aadhaar only", async () => {
     const client = buildClient(makeSandbox());
     const service = buildAadhaar(client);
-    const a = withAxios([okBody({ reference_id: "REF-77", message: "OTP sent successfully" })], client);
+    const a = withAxios(
+      [okBody({ "@entity": "in.co.sandbox.kyc.digilocker.session.response", session_id: "S-1", authorization_url: "https://digilocker.meripehchaan.gov.in/public/oauth2/1/authorize?x=1" })],
+      client
+    );
     try {
-      const res = await service.generateOtp(AADHAAR);
-      assert.equal(res.reference_id, "REF-77");
+      const res = await service.startSession({ redirectUrl: REDIRECT });
+      assert.equal(res.reference_id, "S-1");
+      assert.match(res.authorization_url, /^https:\/\/digilocker/);
       const body = a.calls[0].data;
-      assert.equal(a.calls[0].url, "https://test-api.sandbox.co.in/kyc/aadhaar/okyc/otp");
+      assert.equal(a.calls[0].url, "https://test-api.sandbox.co.in/kyc/digilocker/sessions/init");
       assert.equal(a.calls[0].method, "POST");
-      assert.equal(body["@entity"], "in.co.sandbox.kyc.aadhaar.okyc.otp.request");
-      assert.equal(body.aadhaar_number, AADHAAR);
-      assert.equal(body.consent, "y");
-      assert.ok(body.reason, "a stated purpose is sent");
+      assert.equal(body["@entity"], "in.co.sandbox.kyc.digilocker.session.request");
+      assert.equal(body.flow, "signin");
+      assert.equal(body.redirect_url, REDIRECT);
+      assert.deepEqual(body.doc_types, ["aadhaar"]);
+      assert.match(body.purpose, /^[A-Za-z0-9_ ]+$/, "DigiLocker accepts letters, digits, spaces and underscores only");
     } finally {
       a.restore();
     }
   });
 
-  it("posts the documented verify-OTP shape and returns only mapped demographics", async () => {
+  it("refuses to start without a public HTTPS return address, before any provider call", async () => {
     const client = buildClient(makeSandbox());
     const service = buildAadhaar(client);
-    const a = withAxios([
-      okBody({
-        reference_id: "REF-77",
-        status: "VALID",
-        name: "Ramesh Kumar",
+    const a = withAxios([], client);
+    try {
+      await assert.rejects(() => service.startSession({ redirectUrl: "http://localhost/done" }), /HTTPS return address/);
+      await assert.rejects(() => service.startSession({}), /HTTPS return address/);
+      assert.equal(a.calls.length, 0);
+    } finally {
+      a.restore();
+    }
+  });
+
+  it("a session the employee has not finished is pending, and no document is fetched", async () => {
+    const client = buildClient(makeSandbox());
+    const service = buildAadhaar(client);
+    const a = withAxios([okBody({ id: "S-1", status: "created" })], client);
+    try {
+      assert.deepEqual(await service.fetchAadhaar("S-1"), { state: "pending" });
+      assert.equal(a.calls.length, 1);
+      assert.equal(a.calls[0].url, "https://test-api.sandbox.co.in/kyc/digilocker/sessions/S-1/status");
+      assert.equal(a.calls[0].method, "GET");
+    } finally {
+      a.restore();
+    }
+  });
+
+  it("a failed or expired session says so, and no document is fetched", async () => {
+    for (const state of ["failed", "expired"]) {
+      const client = buildClient(makeSandbox());
+      const service = buildAadhaar(client);
+      const a = withAxios([okBody({ id: "S-1", status: state })], client);
+      try {
+        assert.deepEqual(await service.fetchAadhaar("S-1"), { state });
+        assert.equal(a.calls.length, 1);
+      } finally {
+        a.restore();
+      }
+    }
+  });
+
+  it("a succeeded session fetches the Aadhaar XML and returns only the mapped demographics", async () => {
+    const client = buildClient(makeSandbox());
+    const service = buildAadhaar(client);
+    const a = withAxios(
+      [
+        okBody({ id: "S-1", status: "succeeded", documents_consented: ["aadhaar"] }),
+        docBody(),
+        { status: 200, data: XML },
+      ],
+      client
+    );
+    try {
+      const res = await service.fetchAadhaar("S-1");
+      assert.equal(a.calls[1].url, "https://test-api.sandbox.co.in/kyc/digilocker/sessions/S-1/documents/aadhaar");
+      // The pre-signed link gets NO Sandbox credentials.
+      assert.equal(a.calls[2].url, XML_URL);
+      assert.equal(a.calls[2].headers, undefined, "no token or API key is sent to the storage host");
+
+      assert.equal(res.state, "verified");
+      assert.equal(res.aadhaar_last4, "2229");
+      assert.deepEqual(res.demographics, {
+        name: "RAMESH KUMAR",
         date_of_birth: "01-02-1990",
         gender: "M",
-        year_of_birth: "1990",
-        address: { house: "12", street: "Main Road", district: "Chennai", state: "TN", pincode: "600001", country: "India" },
-        photo: "BASE64IMAGEDATA",
-      }),
-    ], client);
-    try {
-      const res = await service.verifyOtp("REF-77", "123456");
-      const body = a.calls[0].data;
-      assert.equal(a.calls[0].url, "https://test-api.sandbox.co.in/kyc/aadhaar/okyc/otp/verify");
-      assert.equal(body["@entity"], "in.co.sandbox.kyc.aadhaar.okyc.request");
-      assert.equal(body.reference_id, "REF-77");
-      assert.equal(body.otp, "123456");
-
-      assert.equal(res.demographics.name, "Ramesh Kumar");
-      assert.equal(res.demographics.date_of_birth, "01-02-1990");
-      assert.equal(res.demographics.address, "12, Main Road, Chennai, TN, 600001, India");
-      // The photo is deliberately dropped: nothing uses it, and storing a
-      // face nobody asked for is not a decision to make by accident.
-      assert.equal(res.demographics.photo, undefined);
+        address: "12, Nr Temple, T Nagar, Chennai & Suburbs, Chennai, Tamil Nadu, 600017, India",
+      });
+      // The photograph and the local-language copy are never read.
+      assert.ok(!JSON.stringify(res).includes("BASE64PHOTO"));
+      assert.ok(!JSON.stringify(res).includes("local"));
     } finally {
       a.restore();
     }
   });
 
-  it("a status Sandbox does not call successful is a failure, never a pass", async () => {
+  it("Aadhaar not shared on the consent screen is a clear refusal", async () => {
     const client = buildClient(makeSandbox());
     const service = buildAadhaar(client);
-    const a = withAxios([okBody({ reference_id: "R", status: "INVALID_OTP" })], client);
+    const a = withAxios([okBody({ id: "S-1", status: "succeeded", documents_consented: ["pan"] })], client);
     try {
-      await assert.rejects(() => service.verifyOtp("R", "000000"), /could not be verified/);
+      await assert.rejects(() => service.fetchAadhaar("S-1"), /Aadhaar was not shared/);
     } finally {
       a.restore();
     }
   });
 
-  it("a generate-OTP response with no reference is an unexpected response", async () => {
+  it("DigiLocker holding no Aadhaar is a clear refusal", async () => {
     const client = buildClient(makeSandbox());
     const service = buildAadhaar(client);
-    const a = withAxios([okBody({ message: "ok but nothing useful" })], client);
+    const a = withAxios(
+      [
+        okBody({ id: "S-1", status: "succeeded" }),
+        { status: 404, data: { code: 404, message: "Doctype not found", transaction_id: "T" } },
+      ],
+      client
+    );
     try {
-      await assert.rejects(() => service.generateOtp(AADHAAR), /did not return a reference/);
+      await assert.rejects(() => service.fetchAadhaar("S-1"), /could not provide an Aadhaar/);
+    } finally {
+      a.restore();
+    }
+  });
+
+  it("an XML with no Aadhaar or no name is never a pass", async () => {
+    const client = buildClient(makeSandbox());
+    const service = buildAadhaar(client);
+    const a = withAxios(
+      [okBody({ id: "S-1", status: "succeeded" }), docBody(), { status: 200, data: "<Certificate/>" }],
+      client
+    );
+    try {
+      await assert.rejects(() => service.fetchAadhaar("S-1"), /could not be read/);
     } finally {
       a.restore();
     }
@@ -397,14 +488,17 @@ describe("the Penny-Less bank service", () => {
 /* ================================================= documented contracts = */
 describe("the endpoint contracts are written down, not hard-coded in logic", () => {
   it("every path and entity string is configurable", () => {
-    assert.equal(kycConfig.aadhaar.generateOtpPath, "/kyc/aadhaar/okyc/otp");
-    assert.equal(kycConfig.aadhaar.verifyOtpPath, "/kyc/aadhaar/okyc/otp/verify");
-    assert.equal(kycConfig.aadhaar.generateOtpEntity, "in.co.sandbox.kyc.aadhaar.okyc.otp.request");
-    assert.equal(kycConfig.aadhaar.verifyOtpEntity, "in.co.sandbox.kyc.aadhaar.okyc.request");
+    assert.equal(kycConfig.aadhaar.sessionInitPath, "/kyc/digilocker/sessions/init");
+    assert.equal(kycConfig.aadhaar.sessionInitEntity, "in.co.sandbox.kyc.digilocker.session.request");
+    assert.equal(kycConfig.aadhaar.sessionStatusPathTemplate, "/kyc/digilocker/sessions/{session_id}/status");
+    assert.equal(
+      kycConfig.aadhaar.documentPathTemplate,
+      "/kyc/digilocker/sessions/{session_id}/documents/{doc_type}"
+    );
     assert.equal(kycConfig.bank.pennyLessPathTemplate, "/bank/{ifsc}/accounts/{account_number}/penniless-verify");
     const src = fs.readFileSync(path.join(__dirname, "..", "config/sandbox_kyc.js"), "utf8");
     for (const v of [
-      "SANDBOX_AADHAAR_OTP_PATH", "SANDBOX_AADHAAR_OTP_VERIFY_PATH",
+      "SANDBOX_DIGILOCKER_SESSION_PATH", "SANDBOX_DIGILOCKER_STATUS_PATH", "SANDBOX_DIGILOCKER_DOCUMENT_PATH",
       "SANDBOX_BANK_PENNYLESS_PATH", "SANDBOX_KYC_API_VERSION",
     ]) {
       assert.match(src, new RegExp(v), `${v} must be overridable`);
@@ -413,8 +507,9 @@ describe("the endpoint contracts are written down, not hard-coded in logic", () 
 
   it("and the doc URLs they came from are recorded next to them", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "config/sandbox_kyc.js"), "utf8");
-    assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/aadhaar\/endpoints\/generate_otp/);
-    assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/aadhaar\/endpoints\/verify_otp/);
+    assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/digilocker\/endpoints\/initiate_session/);
+    assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/digilocker\/endpoints\/session_status/);
+    assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/digilocker\/endpoints\/fetch_document/);
     assert.match(src, /developer\.sandbox\.co\.in\/api-reference\/kyc\/bank\/endpoints\/penny_less/);
   });
 });

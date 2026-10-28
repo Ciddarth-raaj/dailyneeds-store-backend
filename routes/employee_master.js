@@ -4,6 +4,7 @@ const P = require("../constants/hr_permissions");
 const { EDITABLE_FIELDS } = require("../repository/employee_master");
 const { DIRECTORY_POPULATION, populationFromQuery } = require("../repository/employee_scope");
 const { getClientIp } = require("../utils/ip");
+const { digilockerRedirectUrl } = require("../utils/digilocker_redirect");
 const { requireAdmin } = require("../middlewares/admin_only");
 const { EMPLOYMENT_TYPES, GRADES } = require("../utils/employment_classification");
 const { MAX_EXTRA_BREAK_HOURS } = require("../utils/employee_extra_break");
@@ -829,7 +830,8 @@ class EmployeeMasterRoutes {
 
     /* ------------------------------------------------------------ Aadhaar */
     /**
-     * Step 1: send the OTP.
+     * Step 1: open a DigiLocker session. Returns the DigiLocker link the
+     * employee opens to consent.
      *
      * Gated on `employee_create` at the route, and on `edit_employee_sensitive`
      * by B3 - the body carries `aadhaar_number`, which is a sensitive field,
@@ -854,6 +856,7 @@ class EmployeeMasterRoutes {
           await this.aadhaar.initiate(req.body, {
             actorEmployeeId: this._actor(req),
             ip: getClientIp(req),
+            redirectUrl: digilockerRedirectUrl(req),
           })
         );
       } catch (err) {
@@ -863,11 +866,11 @@ class EmployeeMasterRoutes {
     });
 
     /**
-     * Step 2: exchange the OTP for verified demographics and the duplicate
-     * decision. The OTP is an argument to one provider call and is never
-     * stored, logged or echoed.
+     * Step 2: has the employee finished on DigiLocker? `status: "pending"`
+     * until they have; then the verified demographics and the duplicate
+     * decision. Safe to call repeatedly.
      */
-    router.post("/aadhaar/verify-otp", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
+    router.post("/aadhaar/complete", this.permissions.require(P.EMPLOYEE_CREATE), async (req, res) => {
       try {
         if (!this.aadhaar) {
           res.json({ code: 503, msg: "Aadhaar verification is not configured on this server" });
@@ -876,12 +879,11 @@ class EmployeeMasterRoutes {
         }
         const schema = {
           verification_token: Joi.string().required(),
-          otp: Joi.string().required(),
         };
         const isValid = Joi.validate(req.body, schema);
         if (isValid.error !== null) throw isValid.error;
 
-        res.json(await this.aadhaar.verifyOtp(req.body, { actorEmployeeId: this._actor(req) }));
+        res.json(await this.aadhaar.complete(req.body, { actorEmployeeId: this._actor(req) }));
       } catch (err) {
         this._fail(res, err);
       }

@@ -135,8 +135,8 @@ const aadhaarUsecase = {
     aadhaarCalls.push(["initiate", input, opts]);
     return { code: 200, verification_token: "a".repeat(64), aadhaar_last4: "2229", expires_in_seconds: 600 };
   },
-  verifyOtp: async (input, opts) => {
-    aadhaarCalls.push(["verify-otp", input, opts]);
+  complete: async (input, opts) => {
+    aadhaarCalls.push(["complete", input, opts]);
     return {
       code: 200,
       verification_id: 55,
@@ -492,7 +492,7 @@ describe("the Aadhaar surface", () => {
   it("is refused to an anonymous caller, at both steps", async () => {
     for (const [p, body] of [
       ["/hr/aadhaar/initiate", INITIATE_BODY],
-      ["/hr/aadhaar/verify-otp", { verification_token: TOKEN, otp: "123456" }],
+      ["/hr/aadhaar/complete", { verification_token: TOKEN }],
     ]) {
       const r = await call("POST", p, null, body);
       assert.equal(r.body.code, 403, p);
@@ -536,31 +536,33 @@ describe("the Aadhaar surface", () => {
     assert.equal(r.body.code, 422);
   });
 
-  it("verify-otp needs both the session token and the OTP", async () => {
+  it("complete needs the session token, and nothing else", async () => {
     const token = tokenFor({ userType: 2 });
-    assert.equal((await call("POST", "/hr/aadhaar/verify-otp", token, { otp: "123456" })).body.code, 422);
-    assert.equal((await call("POST", "/hr/aadhaar/verify-otp", token, { verification_token: TOKEN })).body.code, 422);
+    assert.equal((await call("POST", "/hr/aadhaar/complete", token, {})).body.code, 422);
+    assert.equal(
+      (await call("POST", "/hr/aadhaar/complete", token, { verification_token: TOKEN, otp: "123456" })).body.code,
+      422
+    );
   });
 
-  it("verify-otp returns the demographics and the duplicate decision, and no OTP", async () => {
+  it("complete returns the demographics and the duplicate decision", async () => {
     aadhaarCalls.length = 0;
-    const r = await call("POST", "/hr/aadhaar/verify-otp", tokenFor({ userType: 2 }), {
+    const r = await call("POST", "/hr/aadhaar/complete", tokenFor({ userType: 2 }), {
       verification_token: TOKEN,
-      otp: "123456",
     });
     assert.equal(r.body.code, 200);
     assert.equal(r.body.verification_id, 55);
     assert.equal(r.body.next_action, "create");
     assert.equal(r.body.demographics.employee_name, "Ramesh Kumar");
-    assert.ok(!/"otp"/.test(r.text), "the OTP is never echoed back");
-    const call_ = aadhaarCalls.find((c) => c[0] === "verify-otp");
-    assert.equal(call_[2].actorEmployeeId, EMPLOYEE_ID, "who exchanged the OTP is recorded");
+    const call_ = aadhaarCalls.find((c) => c[0] === "complete");
+    assert.equal(call_[2].actorEmployeeId, EMPLOYEE_ID, "who completed the verification is recorded");
   });
 
-  it("the OTP is never written to the route's log line", () => {
+  it("the request body is never written to the route's log line", () => {
     const src = fs.readFileSync(path.join(__dirname, "employee_master.js"), "utf8");
-    const route = src.slice(src.indexOf('router.post("/aadhaar/verify-otp"'), src.indexOf('router.get(\n      "/employee/:employee_id/aadhaar"'));
-    assert.ok(!/logger|console\.log\(req\.body/.test(route), "no logging of the OTP body");
+    const route = src.slice(src.indexOf('router.post("/aadhaar/complete"'), src.indexOf('router.get(\n      "/employee/:employee_id/aadhaar"'));
+    assert.ok(route.length > 0);
+    assert.ok(!/logger|console\.log\(req\.body/.test(route), "no logging of the body");
   });
 
   it("the status record is available to HR and carries no number", async () => {
@@ -1082,18 +1084,17 @@ describe("permission layering after the C2 bank grant", () => {
     assert.equal((await call("GET", "/hr/lifecycle/review", hr())).status, 200);
   });
 
-  it("9. and the Aadhaar flow: initiate, verify OTP, and the masked record", async () => {
+  it("9. and the Aadhaar flow: initiate, complete, and the masked record", async () => {
     const AADHAAR = "222222222229";
     const initiate = await call("POST", "/hr/aadhaar/initiate", hr(), {
       aadhaar_number: AADHAAR,
       consent_given: true,
     });
     assert.equal(initiate.body.code, 200, "edit_employee_sensitive lets the body through B3");
-    const otp = await call("POST", "/hr/aadhaar/verify-otp", hr(), {
+    const completed = await call("POST", "/hr/aadhaar/complete", hr(), {
       verification_token: initiate.body.verification_token,
-      otp: "123456",
     });
-    assert.equal(otp.body.code, 200);
+    assert.equal(completed.body.code, 200);
 
     const masked = await call("GET", "/hr/employee/9/aadhaar", hr());
     assert.equal(masked.status, 200);
@@ -1118,7 +1119,7 @@ describe("permission layering after the C2 bank grant", () => {
         ["POST", "/hr/employee/9/bank/confirm-name", {}],
         ["GET", "/hr/employee/9/bank/verification", null],
         ["POST", "/hr/aadhaar/initiate", { aadhaar_number: "222222222229", consent_given: true }],
-        ["POST", "/hr/aadhaar/verify-otp", { verification_token: "a".repeat(64), otp: "123456" }],
+        ["POST", "/hr/aadhaar/complete", { verification_token: "a".repeat(64) }],
         ["GET", "/hr/employee/9/aadhaar", null],
         ["GET", "/hr/employee/9/aadhaar/full", null],
         ["POST", "/hr/employee", CREATE_BODY],

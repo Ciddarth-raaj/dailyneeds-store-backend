@@ -2,19 +2,20 @@ const express = require("express");
 const Joi = require("@hapi/joi");
 const P = require("../constants/hr_permissions");
 const { getClientIp } = require("../utils/ip");
+const { digilockerRedirectUrl } = require("../utils/digilocker_redirect");
 
 /**
  * THE EXISTING-EMPLOYEE AADHAAR VERIFICATION PATH.
  *
  *   POST /hr/employee/:employee_id/aadhaar/initiate
- *   POST /hr/employee/:employee_id/aadhaar/verify-otp
+ *   POST /hr/employee/:employee_id/aadhaar/complete
  *
  * ============================== THE DEFECT THIS FIXES =====================
  *
  * Roughly six hundred employees predate Aadhaar verification and carry no
  * identity. The "Verify now" button on the employee profile called the
- * ONBOARDING endpoints - `POST /hr/aadhaar/initiate` and
- * `/hr/aadhaar/verify-otp` - which are gated on `employee_create` and, because
+ * ONBOARDING endpoints - `POST /hr/aadhaar/initiate` and its second step
+ * (now `/hr/aadhaar/complete`) - which are gated on `employee_create` and, because
  * the initiate body carries `aadhaar_number`, on `edit_employee_sensitive`
  * through B3's `guardWrite`. A store manager holds neither, so the modal ended
  * in "You do not have permission to perform this action" for an employee they
@@ -24,7 +25,7 @@ const { getClientIp } = require("../utils/ip");
  * PF and ESI writes to fix an Aadhaar badge. So instead the EXISTING-employee
  * case gets its own path, its own key, and its own narrower rules. THE
  * ONBOARDING PATH IS UNTOUCHED: `/hr/aadhaar/initiate` and
- * `/hr/aadhaar/verify-otp` keep `employee_create` + B3 exactly as they are,
+ * `/hr/aadhaar/complete` keep `employee_create` + B3 exactly as they are,
  * and creating an employee never requires the new key.
  *
  * ========================= WHY THIS ROUTER IS NOT UNDER `guardWrite` ======
@@ -46,7 +47,7 @@ const { getClientIp } = require("../utils/ip");
  *      and handed to the provider, then reduced immediately to fingerprint +
  *      ciphertext + last four on the verification session row. No employee
  *      column is touched by either endpoint - `usecase.initiate` and
- *      `usecase.verifyOtp` write only `employee_aadhaar_verification`.
+ *      `usecase.complete` write only `employee_aadhaar_verification`.
  *
  *   2. A NARROWER, SPECIFIC AUTHORIZATION RUNS FIRST, AND ALWAYS BEFORE THE
  *      PROVIDER CALL. In order, per request: authentication (`auth`, mounted
@@ -56,7 +57,7 @@ const { getClientIp } = require("../utils/ip");
  *      replaced by a stricter rule, not by no rule.
  *
  *   3. IT CANNOT REACH A SECOND FIELD. The Joi schemas are exact
- *      (`aadhaar_number` + `consent_given`; `verification_token` + `otp`), so
+ *      (`aadhaar_number` + `consent_given`; `verification_token`), so
  *      there is no body shape here that could carry a salary or a bank account
  *      the way an employee-edit body can. That is what makes the narrow
  *      exemption safe: the route accepts one sensitive field, for one purpose,
@@ -74,9 +75,9 @@ const { getClientIp } = require("../utils/ip");
  * ================================ THE TARGET BINDING ======================
  *
  * A session raised here is stamped with `target_employee_id` = the route's
- * `:employee_id`, server-derived and never read from the body. The OTP step
- * refuses a session raised for anybody else - before the provider call and
- * before an OTP attempt is spent - and `attachToEmployee` refuses to consume
+ * `:employee_id`, server-derived and never read from the body. The complete
+ * step refuses a session raised for anybody else - before the provider call
+ * and before a status check is spent - and `attachToEmployee` refuses to consume
  * one for anybody else, under the row lock, whatever route asked. Without that
  * a caller could initiate for employee A and complete and attach against
  * employee B in the same branch: same caller, same branch, both PENDING, every
@@ -92,7 +93,7 @@ const { getClientIp } = require("../utils/ip");
  *
  * ==================================== AND WHAT IS NOT LOGGED ==============
  *
- * No Aadhaar number, OTP, ciphertext or fingerprint is logged here or by the
+ * No Aadhaar number, ciphertext, fingerprint or DigiLocker payload is logged here or by the
  * usecase - only employee ids, the verification id and the last four digits.
  */
 class EmployeeAadhaarVerificationRoutes {
@@ -187,7 +188,7 @@ class EmployeeAadhaarVerificationRoutes {
     }
 
     /**
-     * Step 1: send the OTP for an employee who already exists.
+     * Step 1: open a DigiLocker session for an employee who already exists.
      *
      * The Aadhaar number is accepted only here, only after the guards above,
      * and is never written to the employee record by this route.
@@ -222,6 +223,7 @@ class EmployeeAadhaarVerificationRoutes {
                 // authorized this caller for - never from the body, which a
                 // caller controls.
                 targetEmployeeId: Number(req.params.employee_id),
+                redirectUrl: digilockerRedirectUrl(req),
               }
             )
           );
@@ -233,15 +235,15 @@ class EmployeeAadhaarVerificationRoutes {
     );
 
     /**
-     * Step 2: exchange the OTP for verified demographics.
+     * Step 2: has the employee finished on DigiLocker? `status: "pending"`
+     * until they have; then the verified demographics.
      *
      * The same narrow authorization as step 1 - a caller must not be able to
      * finish a verification they were not allowed to start, and the employee
-     * must still be PENDING when the OTP comes back. The OTP is an argument to
-     * one provider call and is never stored, logged or echoed.
+     * must still be PENDING when DigiLocker comes back.
      */
     router.post(
-      "/employee/:employee_id/aadhaar/verify-otp",
+      "/employee/:employee_id/aadhaar/complete",
       ...this._guards(),
       async (req, res) => {
         try {
@@ -252,18 +254,17 @@ class EmployeeAadhaarVerificationRoutes {
           }
           const isValid = Joi.validate(req.body || {}, {
             verification_token: Joi.string().required(),
-            otp: Joi.string().required(),
           });
           if (isValid.error !== null) throw isValid.error;
 
           res.json(
-            await this.aadhaar.verifyOtp(
-              { verification_token: req.body.verification_token, otp: req.body.otp },
+            await this.aadhaar.complete(
+              { verification_token: req.body.verification_token },
               {
                 actorEmployeeId: this._actor(req),
                 // The session must have been raised for THIS employee. The
-                // usecase refuses before the provider is called and before an
-                // OTP attempt is spent.
+                // usecase refuses before the provider is called and before a
+                // status check is spent.
                 targetEmployeeId: Number(req.params.employee_id),
               }
             )
