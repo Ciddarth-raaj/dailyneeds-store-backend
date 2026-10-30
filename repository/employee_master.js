@@ -292,6 +292,32 @@ class EmployeeMasterRepository {
   }
 
   /**
+   * What is still waiting on a decision for this employee: every PENDING
+   * attendance request (regularisation, OT, shift change, permission) and a
+   * PENDING salary proposal. Resign refuses while any exists - once somebody
+   * is inactive these drop out of the approvers' queues and nobody can
+   * settle them. One row per kind, with the dates involved.
+   */
+  async findResignBlockers(tx, employeeId) {
+    return tx.query(
+      `SELECT request_type AS kind, COUNT(*) AS n,
+              DATE_FORMAT(MIN(attendance_date), '%Y-%m-%d') AS first_date,
+              DATE_FORMAT(MAX(attendance_date), '%Y-%m-%d') AS last_date
+         FROM attendance_approval_request
+        WHERE requested_for_employee_id = ? AND status = 'PENDING'
+        GROUP BY request_type
+       UNION ALL
+       SELECT 'SALARY' AS kind, COUNT(*) AS n,
+              DATE_FORMAT(MIN(effective_from), '%Y-%m-%d') AS first_date,
+              DATE_FORMAT(MAX(effective_from), '%Y-%m-%d') AS last_date
+         FROM employee_salary
+        WHERE employee_id = ? AND status = 'PENDING'
+       HAVING COUNT(*) > 0`,
+      [employeeId, employeeId]
+    );
+  }
+
+  /**
    * Marks the employee as employed again, and moves `date_of_joining` to the
    * rejoin date - that column describes the CURRENT spell, which is now the
    * new one. The historical value is not lost: it is already recorded on the

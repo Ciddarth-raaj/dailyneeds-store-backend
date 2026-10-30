@@ -43,6 +43,7 @@ class World {
     this.nextEventId = 1;
     this.nextResignationId = 1;
     this.resignations = [];
+    this.pending = []; // { employee_id, kind, n, first_date, last_date }
     this.inserts = [];
     this.failNextEvent = false;
     this.failNextReconcile = false;
@@ -126,6 +127,9 @@ function makeMasterRepo(world) {
       e.date_of_joining = joinedOn;
       record(tx, () => world.employees.set(Number(id), before));
       return 1;
+    },
+    async findResignBlockers(_tx, id) {
+      return world.pending.filter((b) => b.employee_id === Number(id));
     },
     async markResigned(tx, id, endedOn) {
       const e = world.employees.get(Number(id));
@@ -659,6 +663,51 @@ describe("Resign", () => {
     );
     assert.equal(JSON.stringify(world.periods), before, "nothing was written");
     assert.equal(world.employees.get(employee_id).status, 1, "still employed");
+  });
+
+  it("is refused while anything is pending, naming each kind and its dates, and writes nothing", async () => {
+    const { world, uc } = build();
+    const { employee_id } = await uc.createEmployee({ ...VALID });
+    world.pending.push(
+      { employee_id, kind: "SALARY", n: 1, first_date: "2024-06-01", last_date: "2024-06-01" },
+      { employee_id, kind: "REGULARIZATION", n: 2, first_date: "2024-05-12", last_date: "2024-05-14" },
+      { employee_id, kind: "OT", n: 1, first_date: "2024-05-13", last_date: "2024-05-13" },
+      { employee_id, kind: "SHIFT_CHANGE", n: 1, first_date: "2024-05-20", last_date: "2024-05-20" },
+      { employee_id, kind: "PERMISSION", n: 1, first_date: "2024-05-21", last_date: "2024-05-21" }
+    );
+    const before = world.snapshot();
+    const err = await uc
+      .resignEmployee(employee_id, { resignation_date: "2024-05-31", reason_type: "personal" })
+      .then(() => null, (e) => e);
+    assert.ok(err, "refused");
+    assert.equal(err.httpCode, 409);
+    assert.equal(
+      err.message,
+      `Employee ${employee_id} cannot be resigned while requests are pending: ` +
+        "2 attendance regularisation (2024-05-12 to 2024-05-14), 1 OT approval (2024-05-13), " +
+        "1 shift change (2024-05-20), 1 permission (2024-05-21), 1 salary revision (2024-06-01). " +
+        "Approve, reject or cancel them first."
+    );
+    assert.equal(world.snapshot(), before, "nothing was written");
+    assert.equal(world.employees.get(employee_id).status, 1, "still employed");
+  });
+
+  it("goes through once nothing is pending any more", async () => {
+    const { world, uc } = build();
+    const { employee_id } = await uc.createEmployee({ ...VALID });
+    world.pending.push({ employee_id, kind: "OT", n: 1, first_date: "2024-05-13", last_date: "2024-05-13" });
+    await assert.rejects(() => uc.resignEmployee(employee_id, { resignation_date: "2024-05-31" }), /OT approval/);
+    world.pending = [];
+    const res = await uc.resignEmployee(employee_id, { resignation_date: "2024-05-31" });
+    assert.equal(res.code, 200);
+    assert.equal(world.employees.get(employee_id).status, 0);
+  });
+
+  it("the blocker query reads PENDING attendance requests and PENDING salary for this employee only", () => {
+    const repoSrc = fs.readFileSync(path.join(__dirname, "..", "repository", "employee_master.js"), "utf8");
+    const body = repoSrc.slice(repoSrc.indexOf("async findResignBlockers"), repoSrc.indexOf("async markRejoined"));
+    assert.match(body, /FROM attendance_approval_request\s+WHERE requested_for_employee_id = \? AND status = 'PENDING'/);
+    assert.match(body, /FROM employee_salary\s+WHERE employee_id = \? AND status = 'PENDING'/);
   });
 
   it("a future resignation date is refused, not applied now", async () => {

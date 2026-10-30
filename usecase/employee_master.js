@@ -119,6 +119,41 @@ function effectiveDate(value, label) {
 /** Today in UTC, used only to reject a future date - never as a date itself. */
 const todayUtc = () => new Date().toISOString().slice(0, 10);
 
+/** What each pending kind is called on screen, in the order it is listed. */
+const RESIGN_BLOCKER_LABELS = Object.freeze({
+  REGULARIZATION: "attendance regularisation",
+  REGULARIZATION_WITH_OT: "regularisation with OT",
+  OT: "OT approval",
+  SHIFT_CHANGE: "shift change",
+  PERMISSION: "permission",
+  SALARY: "salary revision",
+});
+
+/**
+ * "Employee 2308 cannot be resigned while requests are pending: 2 attendance
+ * regularisation (2026-10-12 to 2026-10-14), 1 salary revision (2026-11-01).
+ * Approve, reject or cancel them first."
+ */
+function resignBlockedMessage(employeeId, blockers) {
+  const order = Object.keys(RESIGN_BLOCKER_LABELS);
+  const parts = [...blockers]
+    .sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))
+    .map((b) => {
+      const label = RESIGN_BLOCKER_LABELS[b.kind] || String(b.kind).toLowerCase();
+      const dates =
+        b.first_date && b.last_date && b.first_date !== b.last_date
+          ? ` (${b.first_date} to ${b.last_date})`
+          : b.first_date
+            ? ` (${b.first_date})`
+            : "";
+      return `${Number(b.n)} ${label}${dates}`;
+    });
+  return (
+    `Employee ${employeeId} cannot be resigned while requests are pending: ${parts.join(", ")}. ` +
+    `Approve, reject or cancel them first.`
+  );
+}
+
 /**
  * C2 has no scheduler. A transition dated in the future would either have to
  * be applied now - which would be a lie - or held somewhere until it came
@@ -935,6 +970,17 @@ class EmployeeMasterUsecase {
         throw new ValidationError(
           `resignation_date '${endedOn}' precedes the current period's joining date '${joinedOn}'`
         );
+      }
+
+      // NOTHING MAY BE LEFT PENDING. Once inactive, the employee's open
+      // requests leave the approvers' queues and can no longer be decided.
+      if (typeof this.repo.findResignBlockers === "function") {
+        const blockers = await this.repo.findResignBlockers(tx, employeeId);
+        if (blockers && blockers.length > 0) {
+          const err = new ConflictError(resignBlockedMessage(employeeId, blockers));
+          err.detail = { error: "RESIGN_BLOCKED_PENDING" };
+          throw err;
+        }
       }
 
       const affected = await this.repo.markResigned(tx, employeeId, endedOn);
