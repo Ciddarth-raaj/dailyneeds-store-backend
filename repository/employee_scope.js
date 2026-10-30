@@ -160,23 +160,19 @@ function lookupFilters(filters = {}) {
  *                      anything else gets this, unchanged - the shared
  *                      employee pickers, the HR Onboarding queue, and any
  *                      future caller that forgets to choose.
- *   INCLUDE_RESIGNED   the resigned-name exclusion is lifted for employees who
- *                      are NOT active, and only for them. Asked for by HR ->
- *                      Employee Master only, whose "Resigned" view filters
- *                      `Number(status) !== 1` in the browser over this list.
- *                      With the exclusion in place, everybody whose
- *                      resignation was RECORDED (legacy screen or HR Resign,
- *                      both write a `resignation` row) was missing from that
- *                      view, while leavers with no row were shown.
- *
- *                      ACTIVE ROWS KEEP TODAY'S RULE, deliberately. Lifting
- *                      it for them too would change the ACTIVE view - an
- *                      active namesake of a leaver, or somebody rejoined
- *                      after a recorded resignation, would start appearing -
- *                      which is a separate decision, not part of restoring
- *                      the Resigned view. `NOT (status <=> 1)` treats a NULL
- *                      status as not active, exactly as the browser's
- *                      `Number(status) !== 1` does.
+ *   INCLUDE_RESIGNED   no resigned-name exclusion at all. Asked for by HR ->
+ *                      Employee Master only, which splits Active / Resigned
+ *                      itself on `status` in the browser, so the name rule
+ *                      has nothing left to do there except hide people.
+ *                      With it in place, everybody whose resignation was
+ *                      RECORDED (legacy screen or HR Resign, both write a
+ *                      `resignation` row) was missing from the Resigned view,
+ *                      and - because the row survives a Rejoin and is keyed
+ *                      by name - every REJOINED employee and every active
+ *                      NAMESAKE of a leaver was missing from the Active view
+ *                      (reported as employee 2308 missing from the master).
+ *                      `status` is what C2's Resign / Rejoin maintain, so it
+ *                      is the rule this screen follows.
  *
  * NEITHER OPTION TOUCHES AUTHORIZATION. The branch restriction (`accessScope`)
  * and the caller's outlet / designation filters are applied identically in
@@ -199,20 +195,12 @@ function populationFromQuery(value) {
 }
 
 /**
- * The INCLUDE_RESIGNED population: the same exclusion as `directoryPopulation`,
- * except that it never removes a row that is not active.
+ * The INCLUDE_RESIGNED population: nobody is removed by name. The screen that
+ * asks for it filters on `status`, which Resign and Rejoin keep correct; a
+ * name-keyed `resignation` row is not evidence that an active employee left.
  */
-function resignedInclusivePopulation(resignedNames) {
-  const names = Array.isArray(resignedNames) ? resignedNames : [];
-  if (names.length === 0) {
-    return { conditions: [], params: [] };
-  }
-  return {
-    conditions: [
-      "(new_employee.employee_name NOT IN (?) OR NOT (new_employee.status <=> 1))",
-    ],
-    params: [names],
-  };
+function resignedInclusivePopulation() {
+  return { conditions: [], params: [] };
 }
 
 /** Join parts in order into one clause, keeping parameter order with it. */

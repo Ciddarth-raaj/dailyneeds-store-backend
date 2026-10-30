@@ -260,10 +260,10 @@ test("INCLUDE_RESIGNED changes ONLY the population clause - scope and filters ar
   assert.strictEqual(
     norm(incl.where),
     "WHERE new_employee.store_id IN (?) " +
-      "AND (new_employee.employee_name NOT IN (?) OR NOT (new_employee.status <=> 1)) " +
       "AND new_employee.store_id IN (?) AND new_employee.designation_id IN (?)"
   );
-  assert.deepStrictEqual(incl.params, today.params, "same parameters, same order");
+  // Same scope and filter parameters, in order - only the names are gone.
+  assert.deepStrictEqual(incl.params, [today.params[0], ...today.params.slice(2)]);
 });
 
 test("INCLUDE_RESIGNED never removes the branch restriction, including fail-closed", () => {

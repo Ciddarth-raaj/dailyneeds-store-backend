@@ -264,13 +264,11 @@ describe("Employee Master Resigned view, over real SQL", {
   });
 
   /* ==================================== 4. the Active view is unchanged == */
-  it("4. the Active view is identical with and without the flag", async () => {
-    for (const caller of [CALLERS.hr, CALLERS.admin, CALLERS.moolaManager, CALLERS.kathManager]) {
-      const before = (await get(LIST, caller())).body;
-      const after = (await get(INCLUSIVE, caller())).body;
-      assert.deepEqual(view(after, "active"), view(before, "active"));
-    }
-    assert.deepEqual(view((await get(INCLUSIVE, CALLERS.hr())).body, "active"), ACTIVE_ALL);
+  it("4. the Active view with the flag is every active employee - a resignation row by name hides nobody", async () => {
+    const active = (await q("SELECT employee_id FROM new_employee WHERE status <=> 1 ORDER BY employee_id"))
+      .map((r) => Number(r.employee_id));
+    assert.deepEqual(view((await get(INCLUSIVE, CALLERS.hr())).body, "active"), active);
+    assert.deepEqual(active, [...ACTIVE_ALL, 1542, 1544].sort((a, b) => a - b));
   });
 
   /* ======================== 5 & 6. pickers and onboarding queue ========= */
@@ -284,19 +282,19 @@ describe("Employee Master Resigned view, over real SQL", {
   });
 
   /* ========================================= 7. namesakes stay safe ===== */
-  it("7. a namesake pair: the leaver appears in Resigned, the active namesake's Active row is unchanged", async () => {
+  it("7. a namesake pair: the leaver appears in Resigned, the active namesake in Active", async () => {
     const after = (await get(INCLUSIVE, CALLERS.hr())).body;
     assert.ok(view(after, "resigned").includes(1543), "the Kathirkamam leaver named Kumar S");
-    assert.ok(!ids({ body: after, text: "" }).includes(1542), "the active Kumar S is hidden exactly as before");
+    assert.ok(view(after, "active").includes(1542), "the active Kumar S is no longer hidden by the leaver's row");
     // And the leaver is still Kathirkamam's, not Moolakulam's.
     assert.ok(!ids(await get(INCLUSIVE, CALLERS.moolaManager())).includes(1543));
   });
 
   /* ===================================== 8. voided resignation rows ===== */
-  it("8. voided rows follow today's rule (they still count by name): inactive shown, active unchanged", async () => {
+  it("8. voided rows hide nobody: inactive in Resigned, active (rejoined) in Active", async () => {
     const after = ids(await get(INCLUSIVE, CALLERS.hr()));
     assert.ok(after.includes(1545), "inactive with a voided row: in Resigned");
-    assert.ok(!after.includes(1544), "active with a voided row: the Active view is untouched");
+    assert.ok(after.includes(1544), "active with a voided row - a rejoin - is in the master again");
   });
 
   /* ======================================== 9. outlet security ========== */
