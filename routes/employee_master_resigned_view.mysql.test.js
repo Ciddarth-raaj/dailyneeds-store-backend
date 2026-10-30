@@ -135,7 +135,9 @@ const SCHEMA = `
 `;
 
 const ACTIVE_ALL = [100, 101, 102, 103, 105, 1540, 1541];
-const TODAY_HR = [100, 101, 102, 103, 105, 1533, 1540, 1541]; // the list before the fix
+// The list without the flag: every active employee (a resignation row by name
+// hides only the inactive), plus the leaver who has no resignation row.
+const TODAY_HR = [100, 101, 102, 103, 105, 1533, 1540, 1541, 1542, 1544];
 
 describe("Employee Master Resigned view, over real SQL", {
   skip: !URL && "EMPLOYEE_DIRECTORY_TEST_MYSQL is not set",
@@ -244,10 +246,10 @@ describe("Employee Master Resigned view, over real SQL", {
   });
 
   /* =========================================== 2. no flag, no change ===== */
-  it("2. without the flag the response is exactly today's population", async () => {
+  it("2. without the flag: every active employee, rejoined and namesakes included", async () => {
     assert.deepEqual(ids(await get(LIST, CALLERS.hr())), TODAY_HR);
     assert.deepEqual(ids(await get(`${LIST}?include_resigned=0`, CALLERS.hr())), TODAY_HR);
-    assert.deepEqual(ids(await get(LIST, CALLERS.moolaManager())), [101, 103, 1533, 1540]);
+    assert.deepEqual(ids(await get(LIST, CALLERS.moolaManager())), [101, 103, 1533, 1540, 1542, 1544]);
   });
 
   /* ====================================== 3. every recorded leaver ======= */
@@ -272,11 +274,11 @@ describe("Employee Master Resigned view, over real SQL", {
   });
 
   /* ======================== 5 & 6. pickers and onboarding queue ========= */
-  it("5/6. callers that send no flag - the pickers and the onboarding queue - get the same rows as before", async () => {
+  it("5/6. callers that send no flag - the pickers and the onboarding queue - see rejoined staff too", async () => {
     // Pickers call the list with outlet / designation filters and no flag;
     // the onboarding queue calls the list and the status summary with none.
     const pick = await get(`${LIST}?store_ids[]=${MOOLAKULAM}&designation_ids[]=${D.CASHIER}`, CALLERS.hr());
-    assert.deepEqual(ids(pick), [103, 1533, 1540]);
+    assert.deepEqual(ids(pick), [103, 1533, 1540, 1542, 1544]);
     const summary = await get("/hr/employees/status-summary", CALLERS.hr());
     assert.deepEqual(ids(summary), TODAY_HR);
   });

@@ -114,6 +114,12 @@ function accessScope(actor, { alias = "new_employee" } = {}) {
  * MySQL rejects with ER_OPERAND_COLUMNS (1241). Nothing needs the second arm:
  * when there is nobody to exclude, the predicate is simply omitted.
  *
+ * IT NEVER HIDES AN ACTIVE EMPLOYEE. A `resignation` row survives a Rejoin and
+ * is keyed by name, so excluding by name alone removed every rejoined
+ * employee, and every active namesake of a leaver, from the shared employee
+ * pickers. `status` is what Resign and Rejoin maintain; an active row stays.
+ * `status <=> 1` treats NULL as not active, as the browser's checks do.
+ *
  * The `employee_name` keying is deliberately left alone - see KNOWN DEBT.
  */
 function directoryPopulation(resignedNames) {
@@ -122,7 +128,7 @@ function directoryPopulation(resignedNames) {
     return { conditions: [], params: [] };
   }
   return {
-    conditions: ["new_employee.employee_name NOT IN (?)"],
+    conditions: ["(new_employee.employee_name NOT IN (?) OR new_employee.status <=> 1)"],
     params: [names],
   };
 }
@@ -155,8 +161,8 @@ function lookupFilters(filters = {}) {
  * place that decides whether the resigned-name rule applies is the builder
  * below - not a conditional scattered through a route or a query.
  *
- *   DEFAULT            the directory as it has always been: the resigned-name
- *                      exclusion applies. Every caller that does not ask for
+ *   DEFAULT            the resigned-name exclusion applies to employees who
+ *                      are NOT active (see `directoryPopulation`). Every caller that does not ask for
  *                      anything else gets this, unchanged - the shared
  *                      employee pickers, the HR Onboarding queue, and any
  *                      future caller that forgets to choose.
