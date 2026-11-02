@@ -26,7 +26,9 @@ const LIMITS = {
  * FREIGHT and any other invoice_type are left out. The supplier name is the
  * vendor's trade name, falling back to its registered name. fy is the
  * financial year (its first calendar year) of the seq series the bill is
- * numbered in, and entered_at when it was entered in RetailPilot.
+ * numbered in, and entered_at when it was entered in RetailPilot;
+ * entered_day is that day in India time - the MRC (GRN) date, as on the GRN
+ * pages. The bill date is the supplier's invoice date.
  *
  * {days} must be a non-negative integer. `CURRENT_DATE - <int>`, not
  * `INTERVAL '<n> days'`: SPECTRA parameterises the literal and Postgres
@@ -55,6 +57,7 @@ SELECT
   h.seq                                     AS mrc_no,
   h.fy                                      AS fy,
   h.created_at                              AS entered_at,
+  CAST((h.created_at AT TIME ZONE 'Asia/Kolkata')::date AS TEXT) AS entered_day,
   h.store_id,
   h.supplier_id,
   COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS supplier_name,
@@ -187,8 +190,10 @@ function mapPurchases(rows, storeMap) {
       skip(`RetailPilot store ${str(h.store_id) || "(blank)"} is not set as the RetailPilot ID of any branch in Branch Master`);
       continue;
     }
-    const mrcDate = dateOnly(h.received_date);
-    const billDate = dateOnly(h.invoice_date) || mrcDate;
+    // MRC date: the day the bill was entered (GRN'd) in RetailPilot, India
+    // time - not the invoice date, which made the two always the same.
+    const mrcDate = dateOnly(h.entered_day) || dateOnly(h.received_date);
+    const billDate = dateOnly(h.invoice_date) || dateOnly(h.received_date) || mrcDate;
     if (!mrcDate) {
       skip("no received/invoice date");
       continue;
@@ -281,7 +286,7 @@ function mapPurchases(rows, storeMap) {
     payload.ROUND_OFF = roundOffFor(payload).round_off;
     const fy = Number(h.fy);
     payload.FY = Number.isInteger(fy) && fy > 2000 ? fy : null;
-    payload.ENTERED_AT = dateOnly(h.entered_at);
+    payload.ENTERED_AT = dateOnly(h.entered_day) || dateOnly(h.entered_at);
     payload.TS = contentTs(payload);
     purchases.push(payload);
   }
