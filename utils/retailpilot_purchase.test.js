@@ -166,6 +166,14 @@ describe("mapPurchases", () => {
     assert.equal(p.MRC_DATE, "2026-10-15");
   });
 
+  it("MRC date is the day the bill was entered (India time), bill date the invoice date", () => {
+    const p = mapPurchases([row({ entered_day: "2026-10-17", received_date: "2026-10-14", invoice_date: "2026-10-14" })], STORE_MAP).purchases[0];
+    assert.equal(p.MRC_DATE, "2026-10-17");
+    assert.equal(p.DIST_BILL_DT, "2026-10-14");
+    assert.equal(p.ENTERED_AT, "2026-10-17");
+    assert.match(buildPurchaseQuery(3), /CAST\(\(h\.created_at AT TIME ZONE 'Asia\/Kolkata'\)::date AS TEXT\) AS entered_day/);
+  });
+
   it("TS changes when the purchase changes, and only then", () => {
     const a = mapPurchases([row()], STORE_MAP).purchases[0];
     const b = mapPurchases([row()], STORE_MAP).purchases[0];
