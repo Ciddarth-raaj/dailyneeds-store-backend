@@ -1808,6 +1808,11 @@ class Server {
       }),
       this.permissions
     );
+    // OT Auto-Approval: the switch and daily cap the five-minute sweep reads.
+    const attendanceOtAutoApprovalRouter = require("./routes/attendance_ot_auto_approval")(
+      this.attendanceRegularizationUsecase,
+      this.permissions
+    );
     const attendanceRegularizationRouter = require("./routes/attendance_regularization")(
       this.attendanceRegularizationUsecase,
       this.permissions,
@@ -2231,6 +2236,7 @@ class Server {
     app.use("/", attendanceShiftChangeReportRouter.getRouter());
     app.use("/", attendanceShiftChangeBlockRouter.getRouter());
     app.use("/", attendanceOtHistoricalReviewRouter.getRouter());
+    app.use("/", attendanceOtAutoApprovalRouter.getRouter());
     app.use("/", attendanceRegularizationRouter.getRouter());
     app.use("/", attendancePermissionRouter.getRouter());
     app.use("/", attendanceApproverSetupRouter.getRouter());

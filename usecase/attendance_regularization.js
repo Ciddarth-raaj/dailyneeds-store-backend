@@ -3557,6 +3557,42 @@ module.exports = (
     }
   };
 
+  /** The OT Auto-Approval screen: the setting as it stands. */
+  const getOtAutoApproval = async () => {
+    const setting =
+      typeof attendanceRegularizationRepo.getAutoOtSetting === "function"
+        ? await attendanceRegularizationRepo.getAutoOtSetting()
+        : null;
+    if (!setting) return { code: 200, available: false };
+    const cap = setting.auto_approve_max_minutes;
+    return {
+      code: 200,
+      available: setting.auto_approve !== undefined,
+      // The automatic raising of OT itself (the older kill switch).
+      automation_enabled: tinyBool(setting.enabled),
+      auto_approve: tinyBool(setting.auto_approve),
+      max_minutes: cap === null || cap === undefined ? null : Number(cap),
+      updated_by_employee_id: setting.auto_approve_updated_by ? Number(setting.auto_approve_updated_by) : null,
+      updated_at: setting.updated_at || null,
+    };
+  };
+
+  /** Switch auto-approval on or off; a cap of null means none. Takes effect on the next sweep. */
+  const setOtAutoApproval = async ({ auto_approve, max_minutes = null, actor }) => {
+    if (max_minutes !== null && !(Number.isInteger(Number(max_minutes)) && Number(max_minutes) >= 1 && Number(max_minutes) <= 1440)) {
+      throw validationError("The daily cap must be a whole number of minutes from 1 to 1440, or empty for no cap");
+    }
+    const saved = await attendanceRegularizationRepo.setOtAutoApproval({
+      auto_approve: Boolean(auto_approve),
+      max_minutes: max_minutes === null ? null : Number(max_minutes),
+      employee_id: actor && actor.employee_id ? Number(actor.employee_id) : null,
+    });
+    if (!saved.updated) throw validationError("The automatic-OT setting row is missing - nothing was changed");
+    // Requests backed off under the old setting are looked at again at once.
+    autoApproveBackoff.clear();
+    return getOtAutoApproval();
+  };
+
   // Requests the sweep could not approve are retried after this long, so a
   // locked month's or a corrected day's OT does not crowd out the rest.
   const AUTO_APPROVE_RETRY_MS = 60 * 60 * 1000;
@@ -4525,6 +4561,8 @@ module.exports = (
     syncAutoOtSafely,
     autoApproveOt,
     autoApprovePendingOt,
+    getOtAutoApproval,
+    setOtAutoApproval,
     resolveDeferredOt,
     previewOtApprovalChain,
     previewApprovalIdentity,
