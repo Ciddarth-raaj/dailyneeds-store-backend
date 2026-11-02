@@ -2526,6 +2526,14 @@ class Server {
       }
     );
 
+    // EVERY FIVE MINUTES - OT auto-approval. With
+    // `attendance_ot_auto_pending_setting.auto_approve` on, pending OT is
+    // approved by the system (never in a payroll-locked month); off, the tick
+    // reads one setting row and stops.
+    this.cronService.register("attendance_ot_auto_approve", "*/5 * * * *", async () => {
+      await this.attendanceRegularizationUsecase.autoApprovePendingOt();
+    });
+
     // EVERY THREE SECONDS - pick up `/start <token>` messages sent to the
     // Telegram bot and finish linking. Polling rather than a webhook, so the
     // API does not have to be reachable from the internet over HTTPS.

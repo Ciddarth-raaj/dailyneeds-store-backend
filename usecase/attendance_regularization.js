@@ -1737,7 +1737,14 @@ module.exports = (
     // Optional: the request type this surface decides (Telegram's OT buttons
     // pass "OT"), so a crafted callback cannot decide another type here.
     require_request_type = null,
+    // INTERNAL ONLY (`autoApproveOt`): the system approves OT itself when the
+    // auto-approve setting is on. No actor, no authority check; every other
+    // rule (correction pending, incomplete or open day, the clamp) applies.
+    system_approval = false,
   }) => {
+    if (system_approval && (decision !== STEP_DECISION.APPROVED || require_request_type !== REQUEST_TYPE.OT)) {
+      throw validationError("A system decision only approves OT");
+    }
     if (decision !== STEP_DECISION.APPROVED && decision !== STEP_DECISION.REJECTED) {
       throw validationError("decision must be APPROVED or REJECTED");
     }
@@ -1852,17 +1859,19 @@ module.exports = (
     );
     if (!step) throw validationError("This request has no current stage - it is already finished");
 
-    const identity = await resolveIdentity(actor.employee_id);
-    const verdict = canApprove(
-      step,
-      {
-        employee_id: identity.employee_id,
-        user_type: actor.user_type,
-        outlet_id: identity.outlet_id,
-        approver_roles: identity.approver_roles,
-      },
-      request
-    );
+    const identity = system_approval ? { employee_id: null } : await resolveIdentity(actor.employee_id);
+    const verdict = system_approval
+      ? { allowed: true, as_admin_override: false }
+      : canApprove(
+          step,
+          {
+            employee_id: identity.employee_id,
+            user_type: actor.user_type,
+            outlet_id: identity.outlet_id,
+            approver_roles: identity.approver_roles,
+          },
+          request
+        );
     if (!verdict.allowed) {
       const err = new Error(verdict.reason);
       err.name = "ForbiddenError";
@@ -1917,6 +1926,17 @@ module.exports = (
         { employee_id: request.requested_for_employee_id, attendance_date: request.attendance_date },
       ]);
       if (locked.length > 0) {
+        // A locked month's OT is paid as Prior-Month OT: a person decides it.
+        if (system_approval) {
+          return {
+            code: 409,
+            payroll_locked: true,
+            status: request.status,
+            attendance_approval_request_id: Number(request_id),
+            attendance_date: request.attendance_date,
+            msg: "The payroll month is locked - this OT is left for an approver",
+          };
+        }
         if (request.request_type === REQUEST_TYPE.OT) lateOtMode = true;
         else if (decision === STEP_DECISION.APPROVED) throw payrollLockedActionError(locked, "This approval");
       }
@@ -2132,7 +2152,7 @@ module.exports = (
         request.request_type === REQUEST_TYPE.OT
           ? { employee_id: Number(request.requested_for_employee_id), attendance_date: toDateOnly(request.attendance_date) }
           : null,
-      decisionSource: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
+      decisionSource: system_approval ? "SYSTEM" : source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       // THE APPROVED SHIFT BECOMES EFFECTIVE HERE AND NOWHERE ELSE, in the
       // same transaction as the decision and the recalculated day. It is an
       // ordinary `attendance_date_shift_override` row - the same table, the
@@ -2226,7 +2246,7 @@ module.exports = (
       finalization_state: saved.finalization_state,
       approved_ot_minutes: approvedOt,
       attendance_date: request.attendance_date,
-      decision_source: source === "TELEGRAM" ? "TELEGRAM" : "WEB",
+      decision_source: system_approval ? null : source === "TELEGRAM" ? "TELEGRAM" : "WEB",
       attendance_date_shift_override_id:
         saved.attendance_date_shift_override_id === undefined
           ? null
@@ -2788,6 +2808,7 @@ module.exports = (
         : null;
     if (!setting || !tinyBool(setting.enabled) || !setting.auto_pending_from_date) return result;
     result.enabled = true;
+    const autoApproveOn = tinyBool(setting.auto_approve);
     const cutover = toDateOnly(setting.auto_pending_from_date);
 
     // The business date: the one pinned, else the date of the run's own
@@ -3300,7 +3321,9 @@ module.exports = (
           // if approved, it is settled forward as Prior-Month OT.
           source_payroll_locked: Boolean(lockedException),
         };
-        if (notify) {
+        // AUTO-APPROVE ON: the sweep approves it within minutes, so no
+        // approver is asked about it (the card would only go stale).
+        if (notify && !autoApproveOn) {
           entry.telegram = await notifyOtApprover(
             otContextFor(day, who, {
               attendance_approval_request_id: newId,
@@ -3468,6 +3491,116 @@ module.exports = (
         ref: { employee_id: input && input.employee_id, source: input && input.source },
       });
       return { employee_id: input && input.employee_id, enabled: null, error: err && err.message ? err.message : String(err) };
+    }
+  };
+
+  /*
+   * OT AUTO-APPROVAL (`attendance_ot_auto_pending_setting.auto_approve`).
+   *
+   * When it is on, nobody decides OT: the sweep below approves every PENDING
+   * OT through `decide` itself, as the system, stage after stage. Every rule
+   * a person's approval obeys still holds - a pending correction or an
+   * incomplete or open day leaves it pending (or withdraws it), and the
+   * approved minutes are clamped to the engine's eligible OT. The one thing
+   * the system never does is approve OT in a payroll-LOCKED month: that pays
+   * as Prior-Month OT, so it is left for a person.
+   *
+   * `auto_approve_max_minutes` (NULL = no cap): longer OT stays with approvers.
+   */
+  const AUTO_APPROVE_REMARKS = "Auto-approved by the system: OT does not require approval";
+  const autoApproveSetting = async () => {
+    const setting =
+      typeof attendanceRegularizationRepo.getAutoOtSetting === "function"
+        ? await attendanceRegularizationRepo.getAutoOtSetting()
+        : null;
+    if (!setting || !tinyBool(setting.enabled) || !tinyBool(setting.auto_approve)) return null;
+    const cap = setting.auto_approve_max_minutes;
+    return { max_minutes: cap === null || cap === undefined ? null : Math.max(0, Math.trunc(Number(cap) || 0)) };
+  };
+
+  /** Approve one PENDING OT as the system, all its remaining stages. Never throws. */
+  const autoApproveOt = async (requestId, { now = null, maxMinutes = null } = {}) => {
+    try {
+      const request = await attendanceRegularizationRepo.getRequest(requestId);
+      if (!request || request.status !== REQUEST_STATUS.PENDING || request.request_type !== REQUEST_TYPE.OT) {
+        return { approved: false, reason: "NOT_PENDING_OT" };
+      }
+      const minutes = Math.max(0, Math.trunc(Number(request.candidate_ot_minutes) || 0));
+      if (maxMinutes !== null && minutes > maxMinutes) return { approved: false, reason: "OVER_CAP", minutes };
+      const stages = Math.max(1, Number(request.total_stages) || (request.steps || []).length || 1);
+      for (let i = 0; i < stages; i += 1) {
+        /* eslint-disable no-await-in-loop */
+        const result = await decide({
+          actor: null,
+          request_id: requestId,
+          decision: STEP_DECISION.APPROVED,
+          remarks: AUTO_APPROVE_REMARKS,
+          source: "SYSTEM",
+          now,
+          require_request_type: REQUEST_TYPE.OT,
+          system_approval: true,
+        });
+        /* eslint-enable no-await-in-loop */
+        if (!result || result.code !== 200) {
+          return { approved: false, reason: (result && result.msg) || "REFUSED", ...(result && result.payroll_locked ? { payroll_locked: true } : {}) };
+        }
+        if (result.status === REQUEST_STATUS.APPROVED) {
+          return { approved: true, approved_ot_minutes: result.approved_ot_minutes, attendance_date: result.attendance_date };
+        }
+        if (result.status !== REQUEST_STATUS.PENDING) return { approved: false, reason: result.status };
+      }
+      return { approved: false, reason: "STAGES_LEFT" };
+    } catch (err) {
+      // A rule refusing it (a day still open, ...) is not a failure.
+      const refused = err && (err.name === "ValidationError" || err.name === "ForbiddenError" || err.code === "ATTENDANCE_DAY_OPEN");
+      return { approved: false, reason: err && err.message ? err.message : String(err), error: !refused };
+    }
+  };
+
+  // Requests the sweep could not approve are retried after this long, so a
+  // locked month's or a corrected day's OT does not crowd out the rest.
+  const AUTO_APPROVE_RETRY_MS = 60 * 60 * 1000;
+  const autoApproveBackoff = new Map();
+  let autoApproveRunning = false;
+
+  /** The sweep (cron): approve pending OT while the setting is on. */
+  const autoApprovePendingOt = async ({ now = null, limit = 100 } = {}) => {
+    const summary = { enabled: false, approved: 0, left: 0, skipped: "" };
+    if (autoApproveRunning) return { ...summary, skipped: "in_progress" };
+    autoApproveRunning = true;
+    try {
+      const setting = await autoApproveSetting();
+      if (!setting) return summary;
+      summary.enabled = true;
+      const clock = Date.now();
+      for (const [id, until] of autoApproveBackoff) if (until <= clock) autoApproveBackoff.delete(id);
+      const ids =
+        typeof attendanceRegularizationRepo.listPendingOtForAutoApproval === "function"
+          ? await attendanceRegularizationRepo.listPendingOtForAutoApproval({ limit, exclude: [...autoApproveBackoff.keys()] })
+          : [];
+      for (const id of ids) {
+        /* eslint-disable-next-line no-await-in-loop */
+        const outcome = await autoApproveOt(id, { now, maxMinutes: setting.max_minutes });
+        if (outcome.approved) {
+          summary.approved += 1;
+        } else {
+          summary.left += 1;
+          autoApproveBackoff.set(id, Date.now() + AUTO_APPROVE_RETRY_MS);
+          if (outcome.error) {
+            logger.Log({
+              level: logger.LEVEL.ERROR,
+              component: "USECASE.ATTENDANCE_REGULARIZATION",
+              code: "USECASE.ATTENDANCE_REGULARIZATION.OT-AUTO-APPROVE",
+              description: outcome.reason,
+              category: "",
+              ref: { request_id: id },
+            });
+          }
+        }
+      }
+      return summary;
+    } finally {
+      autoApproveRunning = false;
     }
   };
 
@@ -4390,6 +4523,8 @@ module.exports = (
     setOtNotifier,
     syncAutoOt,
     syncAutoOtSafely,
+    autoApproveOt,
+    autoApprovePendingOt,
     resolveDeferredOt,
     previewOtApprovalChain,
     previewApprovalIdentity,

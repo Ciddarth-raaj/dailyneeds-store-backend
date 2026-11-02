@@ -2690,3 +2690,83 @@ describe("HISTORICAL OT REVIEW: a controlled backfill of calculated OT dated bef
     assert.equal(otOf(w, 44).length, 0);
   });
 });
+
+/* ======================================================= auto-approval */
+
+describe("OT auto-approval (attendance_ot_auto_pending_setting.auto_approve)", () => {
+  const AUTO = { enabled: 1, auto_pending_from_date: "2026-09-01", auto_approve: 1, auto_approve_max_minutes: null };
+  const withSweepList = (w) => {
+    w.regRepo.listPendingOtForAutoApproval = async ({ exclude = [] } = {}) =>
+      w.store.requests
+        .filter((r) => r.status === "PENDING" && r.request_type === "OT" && !exclude.includes(r.attendance_approval_request_id))
+        .map((r) => r.attendance_approval_request_id);
+    return w;
+  };
+  const stepsOf = (w, id) => w.store.steps.filter((s) => s.attendance_approval_request_id === id);
+
+  it("approves a three-stage role-chain OT in full, as the system, and messages no approver", async () => {
+    const w = withSweepList(build({ rawPunches: day(42, DATE), setting: AUTO }));
+    await recalc(w, 42);
+    const [ot] = otOf(w, 42);
+    assert.equal(ot.status, "PENDING", "raised as usual");
+    assert.equal(w.telegramLog.sent.length, 0, "no approver card while auto-approve is on");
+
+    const out = await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.deepEqual({ enabled: out.enabled, approved: out.approved, left: out.left }, { enabled: true, approved: 1, left: 0 });
+    assert.equal(ot.status, "APPROVED");
+    assert.equal(ot.approved_ot_minutes, ot.candidate_ot_minutes);
+    const steps = stepsOf(w, ot.attendance_approval_request_id);
+    assert.equal(steps.length, 3);
+    assert.ok(steps.every((s) => s.decision === "APPROVED"), "every stage decided");
+    assert.ok(steps.every((s) => s.decided_by_employee_id === null || s.decided_by_employee_id === undefined), "no person decided it");
+    assert.equal(lastStored(w, 42).approved_ot_minutes, ot.candidate_ot_minutes, "the day is stored with the approved OT");
+  });
+
+  it("clears OT that was already pending before it was switched on", async () => {
+    const w = withSweepList(build({ rawPunches: day(43, DATE) }));
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    assert.equal(ot.status, "PENDING");
+    assert.equal((await w.regularization.autoApprovePendingOt({ now: NOW })).enabled, false, "off: the sweep does nothing");
+    assert.equal(ot.status, "PENDING");
+    w.regRepo.getAutoOtSetting = async () => AUTO;
+    await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.equal(ot.status, "APPROVED");
+  });
+
+  it("leaves a payroll-locked month's OT for a person, and does not retry it every tick", async () => {
+    const w = withSweepList(build({ rawPunches: day(43, DATE), setting: AUTO }));
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    w.lockedMonths.add("43:2026-9");
+    const first = await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.deepEqual({ approved: first.approved, left: first.left }, { approved: 0, left: 1 });
+    assert.equal(ot.status, "PENDING");
+    assert.equal(w.store.settlements.length, 0, "no Prior-Month OT settlement by the system");
+    const second = await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.equal(second.left, 0, "backed off");
+  });
+
+  it("respects a cap: longer OT stays with approvers", async () => {
+    const w = withSweepList(build({ rawPunches: day(43, DATE), setting: { ...AUTO, auto_approve_max_minutes: 10 } }));
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    assert.ok(ot.candidate_ot_minutes > 10);
+    await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.equal(ot.status, "PENDING");
+  });
+
+  it("a system decision cannot reject, or decide anything but OT", async () => {
+    const w = build({ rawPunches: day(43, DATE), setting: AUTO });
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    await assert.rejects(
+      w.regularization.decide({ actor: null, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.REJECTED, remarks: "nope nope", system_approval: true, require_request_type: "OT" }),
+      /only approves OT/
+    );
+    await assert.rejects(
+      w.regularization.decide({ actor: null, request_id: ot.attendance_approval_request_id, decision: STEP_DECISION.APPROVED, system_approval: true }),
+      /only approves OT/
+    );
+  });
+});

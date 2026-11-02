@@ -1198,7 +1198,9 @@ class AttendanceRegularizationRepository {
         [
           decision,
           actorId,
-          decisionSource === "TELEGRAM" ? "TELEGRAM" : "WEB",
+          // SYSTEM (OT auto-approval) is NULL, like a shift's auto-approved
+          // regularization: no person decided it, and the remarks say so.
+          decisionSource === "SYSTEM" ? null : decisionSource === "TELEGRAM" ? "TELEGRAM" : "WEB",
           remarks || null,
           adminOverride ? 1 : 0,
           requestId,
@@ -2225,7 +2227,8 @@ class AttendanceRegularizationRepository {
     try {
       const rows = await queryAsync(
         this.db,
-        `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date
+        `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date,
+                auto_approve, auto_approve_max_minutes
            FROM attendance_ot_auto_pending_setting
           WHERE setting_id = 1`,
         []
@@ -2233,7 +2236,43 @@ class AttendanceRegularizationRepository {
       return rows && rows[0] ? rows[0] : null;
     } catch (err) {
       if (err && err.code === "ER_NO_SUCH_TABLE") return null;
+      // Before the auto-approve migration: the setting without it (off).
+      if (err && err.code === "ER_BAD_FIELD_ERROR") {
+        const rows = await queryAsync(
+          this.db,
+          `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date
+             FROM attendance_ot_auto_pending_setting
+            WHERE setting_id = 1`,
+          []
+        );
+        return rows && rows[0] ? rows[0] : null;
+      }
       this._log("GET-AUTO-OT-SETTING", err);
+      throw err;
+    }
+  }
+
+  /**
+   * PENDING OT requests for the auto-approval sweep, oldest date first,
+   * leaving out the ids the sweep is backing off from.
+   */
+  async listPendingOtForAutoApproval({ limit = 100, exclude = [] } = {}) {
+    try {
+      const ids = (exclude || []).map(Number).filter((n) => Number.isInteger(n) && n > 0);
+      const rows = await queryAsync(
+        this.db,
+        `SELECT attendance_approval_request_id
+           FROM attendance_approval_request
+          WHERE status = 'PENDING'
+            AND request_type = 'OT'
+            ${ids.length ? "AND attendance_approval_request_id NOT IN (?)" : ""}
+          ORDER BY attendance_date, attendance_approval_request_id
+          LIMIT ?`,
+        ids.length ? [ids, Number(limit)] : [Number(limit)]
+      );
+      return (rows || []).map((r) => Number(r.attendance_approval_request_id));
+    } catch (err) {
+      this._log("LIST-PENDING-OT-AUTO-APPROVAL", err);
       throw err;
     }
   }
