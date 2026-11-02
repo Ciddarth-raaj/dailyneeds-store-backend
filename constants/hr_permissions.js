@@ -779,6 +779,10 @@ module.exports = {
   // Approving the OT is still the employee's ordinary chain. GRANTED TO
   // NOBODY: administrators hold it through the user_type 2 bypass.
   ATTENDANCE_OT_HISTORICAL_REVIEW: "attendance_ot_historical_review",
+  // Attendance -> OT Auto-Approval: switch the system's approval of pending
+  // OT on or off, and set its daily cap. GRANTED TO NOBODY: administrators
+  // hold it through the user_type 2 bypass.
+  MANAGE_OT_AUTO_APPROVAL: "manage_ot_auto_approval",
 
   // ================================ FULL & FINAL SETTLEMENT / EXIT ========
   //

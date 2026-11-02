@@ -2228,7 +2228,8 @@ class AttendanceRegularizationRepository {
       const rows = await queryAsync(
         this.db,
         `SELECT enabled, DATE_FORMAT(auto_pending_from_date, '%Y-%m-%d') AS auto_pending_from_date,
-                auto_approve, auto_approve_max_minutes
+                auto_approve, auto_approve_max_minutes, auto_approve_updated_by,
+                DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') AS updated_at
            FROM attendance_ot_auto_pending_setting
           WHERE setting_id = 1`,
         []
@@ -2248,6 +2249,23 @@ class AttendanceRegularizationRepository {
         return rows && rows[0] ? rows[0] : null;
       }
       this._log("GET-AUTO-OT-SETTING", err);
+      throw err;
+    }
+  }
+
+  /** The OT Auto-Approval screen's save: the switch, the cap, and who set them. */
+  async setOtAutoApproval({ auto_approve, max_minutes, employee_id }) {
+    try {
+      const result = await queryAsync(
+        this.db,
+        `UPDATE attendance_ot_auto_pending_setting
+            SET auto_approve = ?, auto_approve_max_minutes = ?, auto_approve_updated_by = ?
+          WHERE setting_id = 1`,
+        [auto_approve ? 1 : 0, max_minutes === null || max_minutes === undefined ? null : Number(max_minutes), employee_id || null]
+      );
+      return { updated: Boolean(result && Number(result.affectedRows) === 1) };
+    } catch (err) {
+      this._log("SET-OT-AUTO-APPROVAL", err);
       throw err;
     }
   }

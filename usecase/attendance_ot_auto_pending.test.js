@@ -2770,3 +2770,36 @@ describe("OT auto-approval (attendance_ot_auto_pending_setting.auto_approve)", (
     );
   });
 });
+
+describe("OT Auto-Approval as a screen setting", () => {
+  it("reads the setting, saves the switch and cap with who saved it, and the sweep follows it", async () => {
+    let setting = { enabled: 1, auto_pending_from_date: "2026-09-01", auto_approve: 1, auto_approve_max_minutes: null };
+    const w = build({ rawPunches: day(43, DATE) });
+    w.regRepo.getAutoOtSetting = async () => setting;
+    w.regRepo.setOtAutoApproval = async ({ auto_approve, max_minutes, employee_id }) => {
+      setting = { ...setting, auto_approve: auto_approve ? 1 : 0, auto_approve_max_minutes: max_minutes, auto_approve_updated_by: employee_id };
+      return { updated: true };
+    };
+    w.regRepo.listPendingOtForAutoApproval = async () =>
+      w.store.requests.filter((r) => r.status === "PENDING" && r.request_type === "OT").map((r) => r.attendance_approval_request_id);
+
+    assert.deepEqual(
+      (({ auto_approve, max_minutes }) => ({ auto_approve, max_minutes }))(await w.regularization.getOtAutoApproval()),
+      { auto_approve: true, max_minutes: null }
+    );
+    const off = await w.regularization.setOtAutoApproval({ auto_approve: false, max_minutes: null, actor: { employee_id: 8 } });
+    assert.equal(off.auto_approve, false);
+    assert.equal(off.updated_by_employee_id, 8);
+
+    await recalc(w, 43);
+    const [ot] = otOf(w, 43);
+    assert.equal((await w.regularization.autoApprovePendingOt({ now: NOW })).enabled, false);
+    assert.equal(ot.status, "PENDING", "off: nothing approved");
+
+    await w.regularization.setOtAutoApproval({ auto_approve: true, max_minutes: 600, actor: { employee_id: 8 } });
+    await w.regularization.autoApprovePendingOt({ now: NOW });
+    assert.equal(ot.status, "APPROVED", "on again: approved within the cap");
+
+    await assert.rejects(w.regularization.setOtAutoApproval({ auto_approve: true, max_minutes: 0, actor: { employee_id: 8 } }), /1 to 1440/);
+  });
+});
