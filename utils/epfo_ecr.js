@@ -42,6 +42,20 @@ const wholeRupee = (value) => {
   return sign * Math.floor((Math.abs(p) + 50) / 100);
 };
 
+/**
+ * GROSS WAGES FOR PF: the month's gross earnings WITHOUT Bonus, Incentive,
+ * OT (this month's and prior-month OT settled here) and Extra Days amount -
+ * i.e. what was earned for the month's paid days, plus arrears. Null when the
+ * gross itself is unknown.
+ */
+const PF_GROSS_EXCLUDED = ["bonus", "incentive", "ot_amount", "prior_month_ot_amount", "extra_day_amount"];
+function pfGrossWages(calculation) {
+  const total = toPaise(calculation && calculation.total_earnings);
+  if (total === null) return null;
+  const excluded = PF_GROSS_EXCLUDED.reduce((sum, key) => sum + (toPaise(calculation[key]) || 0), 0);
+  return Math.max(0, total - excluded) / 100;
+}
+
 /** The member name as the ECR wants it: one line, no separator characters. */
 function cleanName(name) {
   return String(name || "")
@@ -115,7 +129,7 @@ function buildEcr({ rows = [], require_approved = true } = {}) {
         employee_id: id,
         uan,
         member_name: cleanName(name),
-        gross_wages: wholeRupee(calculation.total_earnings),
+        gross_wages: wholeRupee(pfGrossWages(calculation)),
         epf_wages: wholeRupee(calculation.pf_wage),
         eps_wages: wholeRupee(calculation.eps_wage),
         edli_wages: wholeRupee(calculation.edli_wage),
@@ -185,4 +199,4 @@ function validateEcrMember(member, rates = { employee: 12, eps: 8.33 }) {
   return problems;
 }
 
-module.exports = { buildEcr, validateEcrMember, cleanName, SEP };
+module.exports = { buildEcr, validateEcrMember, cleanName, pfGrossWages, PF_GROSS_EXCLUDED, SEP };

@@ -40,7 +40,7 @@ const REPORT_TYPES = {
     population: "IF(c.payrun_calculation_id IS NULL, COALESCE(pe.pf_applicable, 0) = 1, COALESCE(c.pf_status, '') <> 'NOT_APPLICABLE')",
     statutory_file: "ECR",
     default_fields: [
-      "employee_id", "employee_name", "uan", "pf_member_id", "gross_salary", "epf_wages", "eps_wages",
+      "employee_id", "employee_name", "uan", "pf_member_id", "pf_gross_salary", "epf_wages", "eps_wages",
       "edli_wages", "employee_pf", "employer_eps", "employer_epf", "ncp_days", "eps_status", "epf_validation",
     ],
   },

@@ -297,6 +297,13 @@ const PAYROLL_FIELDS = [
     note: "OT of an earlier month, approved after that month was locked, settled in this month (see the payslip for each source month).",
   }),
   f("gross_salary", "Gross Salary", G.EARNINGS, { select: "c.total_earnings", type: TYPE.AMOUNT, transform: asAmount }),
+  f("pf_gross_salary", "Gross Salary (PF)", G.STATUTORY, {
+    select:
+      "IF(c.total_earnings IS NULL, NULL, GREATEST(0, c.total_earnings - COALESCE(c.bonus, 0) - COALESCE(c.incentive, 0) " +
+      "- COALESCE(c.ot_amount, 0) - COALESCE(c.prior_month_ot_amount, 0) - COALESCE(c.extra_day_amount, 0)))",
+    type: TYPE.AMOUNT, transform: asAmount,
+    note: "Gross Salary excluding Bonus, Incentive, OT and Extra Days - the GROSS WAGES filed in the ECR.",
+  }),
 
   /* ----------------------------------------------------------- deductions */
   f("employee_pf", "PF (Employee)", G.DEDUCTIONS, { select: "c.employee_pf", type: TYPE.AMOUNT, transform: asAmount }),
