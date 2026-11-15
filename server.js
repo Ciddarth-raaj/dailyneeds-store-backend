@@ -1332,6 +1332,12 @@ class Server {
       this.debitNoteTallyRepo
     );
     this.debitNoteUsecase = require("./usecase/debit_note")(this.debitNoteRepo);
+    this.retailPilotDebitNoteSyncUsecase = require("./usecase/retailpilot_debit_note_sync")(
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      this.debitNoteRepo,
+      retailPilotConfig,
+      () => this.outletUsecase.getRetailPilotStoreMap()
+    );
     this.tallyUsecase = require("./usecase/tally")(
       this.tallyRepo,
       this.purchaseUsecase,
@@ -1976,7 +1982,9 @@ class Server {
       this.gstTallyPurchaseUsecase
     );
     const debitNoteRouter = require("./routes/debit_note")(
-      this.debitNoteUsecase
+      this.debitNoteUsecase,
+      this.retailPilotDebitNoteSyncUsecase,
+      this.permissions
     );
     // Add materials router
     const materialsRouter = require("./routes/materials")(
@@ -2114,6 +2122,7 @@ class Server {
         stock: () => this.retailPilotStockSyncUsecase.running,
         products: () => this.retailPilotArticleSyncUsecase.running,
         purchases: () => this.retailPilotPurchaseSyncUsecase.running,
+        debit_notes: () => this.retailPilotDebitNoteSyncUsecase.running,
         grn: () => this.retailPilotGrnSyncUsecase.running,
         article_store_master: () => Boolean(this.articleStoreMasterUsecase.running),
       },
@@ -2386,6 +2395,29 @@ class Server {
               runRetailPilotPurchaseSync
             )
           : runRetailPilotPurchaseSync,
+        { preventOverlap: true }
+      );
+    }
+
+    // 9:00 AM, 2:00 PM AND 5:00 PM (Asia/Kolkata) - pull debit notes from
+    // RetailPilot into the Debit Note screen (replaces the GoFrugal
+    // POST /debit-note/bulk import). Each run re-reads the look-back window
+    // (RETAILPILOT_DEBIT_NOTE_LOOKBACK_DAYS, default 3). On unless
+    // RETAILPILOT_DEBIT_NOTE_SYNC_ENABLED=false; POST /debit-note/retailpilot-sync
+    // runs it by hand either way.
+    if (require("./config/retailpilot").debitNoteSyncEnabled) {
+      const runRetailPilotDebitNoteSync = async () =>
+        await this.retailPilotDebitNoteSyncUsecase.run();
+      this.cronService.register(
+        "retailpilot_debit_note_sync",
+        "0 9,14,17 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron(
+              "retailpilot_debit_note_sync",
+              "/debit-note/retailpilot-sync",
+              runRetailPilotDebitNoteSync
+            )
+          : runRetailPilotDebitNoteSync,
         { preventOverlap: true }
       );
     }

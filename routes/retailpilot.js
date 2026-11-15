@@ -4,8 +4,9 @@ const respondError = require("../utils/http");
 /**
  * The RetailPilot Sync page: when each RetailPilot sync last ran, whether it
  * is running now, and manual starts for the stock & price sync, the GRN
- * sync and the Article Store Master build. The product and purchase syncs keep their own endpoints
- * (POST /product/sync, POST /purchase/retailpilot-sync).
+ * sync and the Article Store Master build. The product, purchase and debit
+ * note syncs keep their own endpoints (POST /product/sync,
+ * POST /purchase/retailpilot-sync, POST /debit-note/retailpilot-sync).
  */
 const SYNCS = [
   {
@@ -38,6 +39,14 @@ const SYNCS = [
     label: "Purchases",
     description: "Purchase invoices into the Purchase screen",
     schedule: (c) => (c.purchaseSyncEnabled ? "Daily 9:00 AM, 2:00 PM, 5:00 PM" : "Not scheduled"),
+    permission: "sync_retailpilot_purchases",
+  },
+  {
+    key: "debit_notes",
+    log_type: "retailpilot_debit_note_sync",
+    label: "Debit Notes",
+    description: "Debit notes into the Debit Note screen",
+    schedule: (c) => (c.debitNoteSyncEnabled ? "Daily 9:00 AM, 2:00 PM, 5:00 PM" : "Not scheduled"),
     permission: "sync_retailpilot_purchases",
   },
   {

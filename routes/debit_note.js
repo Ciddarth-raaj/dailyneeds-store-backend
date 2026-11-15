@@ -1,9 +1,14 @@
 const router = require("express").Router();
 const Joi = require("@hapi/joi");
 
+/** Who may run the RetailPilot debit note sync by hand (admins always may). */
+const RETAILPILOT_SYNC_PERMISSION = "sync_retailpilot_purchases";
+
 class DebitNoteRoutes {
-  constructor(debitNoteUsecase) {
+  constructor(debitNoteUsecase, retailPilotDebitNoteSync, permissions) {
     this.debitNoteUsecase = debitNoteUsecase;
+    this.retailPilotDebitNoteSync = retailPilotDebitNoteSync;
+    this.permissions = permissions;
     this.init();
   }
 
@@ -46,6 +51,36 @@ class DebitNoteRoutes {
         }
 
         const result = await this.debitNoteUsecase.create(value);
+        res.json(result);
+      } catch (err) {
+        console.log(err);
+        res.json({ code: 500, msg: err.message });
+      }
+    });
+
+    // Pull debit notes from RetailPilot now. Body (all optional):
+    // { days: 0-90 look-back, dry_run: true to return the mapped debit notes
+    // without saving them }. Admins, and designations granted
+    // sync_retailpilot_purchases. Each call is recorded in the API Sync Log.
+    const requireSyncPermission = this.permissions
+      ? this.permissions.require(RETAILPILOT_SYNC_PERMISSION)
+      : (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    router.post("/retailpilot-sync", requireSyncPermission, async (req, res) => {
+      try {
+        if (!this.retailPilotDebitNoteSync) {
+          return res.json({ code: 503, msg: "RetailPilot sync is not available" });
+        }
+        const { error, value } = Joi.object({
+          days: Joi.number().integer().min(0).max(90).optional(),
+          dry_run: Joi.boolean().default(false),
+        }).validate(req.body || {});
+        if (error) {
+          return res.json({ code: 422, msg: error.toString() });
+        }
+        const result = await this.retailPilotDebitNoteSync.run({
+          days: value.days,
+          dryRun: value.dry_run,
+        });
         res.json(result);
       } catch (err) {
         console.log(err);
@@ -173,7 +208,8 @@ class DebitNoteRoutes {
           mprh_dist_code: Joi.string().max(20).required(),
           supplier_id: Joi.string().max(20).required(),
           supplier_name: Joi.string().max(100).required(),
-          supplier_gstn: Joi.string().max(20).required(),
+          // Blank for a RetailPilot stock return whose supplier has no GSTIN.
+          supplier_gstn: Joi.string().max(20).allow("").required(),
           tot_sgst_amt: Joi.number().precision(2).required(),
           tot_cgst_amt: Joi.number().precision(2).required(),
           tot_igst_amt: Joi.number().precision(2).required(),
@@ -269,6 +305,6 @@ class DebitNoteRoutes {
   }
 }
 
-module.exports = (debitNoteUsecase) => {
-  return new DebitNoteRoutes(debitNoteUsecase);
+module.exports = (debitNoteUsecase, retailPilotDebitNoteSync, permissions) => {
+  return new DebitNoteRoutes(debitNoteUsecase, retailPilotDebitNoteSync, permissions);
 };
