@@ -64,20 +64,34 @@ class WarehouseFlow {
    * a stage whose source fails says so and the others still show.
    */
   async getFlow({ refresh = false, store_ids = null } = {}) {
-    const [branches, passes, inspections, vendors] = await Promise.all([
+    const [branches, passes, inspections, documents, vendors] = await Promise.all([
       this.loadBranches(),
       this._read("gate_passes", "gate_passes:open", W.buildOpenGatePassesQuery(), refresh),
       this._read("inspections", "inspections:active", W.buildActiveInspectionsQuery(), refresh),
+      this._read("documents", "documents:active", W.buildDocumentsQuery(), refresh),
       this._read("vendors", "vendors", W.buildVendorNamesQuery(), false),
     ]);
     const { resolve, stores } = storeResolver(branches);
     const at = passes.fetched_at ? Date.parse(passes.fetched_at) : this.now();
     const lists = W.classifyFlow(
       W.mapGatePassRows(passes.rows, vendors.rows, resolve, at),
-      W.mapInspectionRows(inspections.rows, vendors.rows, resolve)
+      W.mapInspectionRows(inspections.rows, vendors.rows, resolve),
+      W.mapDocumentRows(documents.rows, vendors.rows, resolve)
     );
     // Which read each list depends on, so a failure is reported where it shows.
-    const source = { gate_pass: passes, inspection: inspections, grn: passes.ok ? inspections : passes, written_off: inspections };
+    // A list is only as good as every read it is built from: the first that
+    // failed is what it reports.
+    const needs = {
+      gate_pass: [passes, documents],
+      inspection: [inspections],
+      grn: [documents, passes],
+      no_invoice: [passes, documents],
+      written_off: [inspections],
+    };
+    const source = {};
+    Object.keys(needs).forEach((k) => {
+      source[k] = needs[k].find((r) => !r.ok) || needs[k][0];
+    });
     const section = (def) => {
       const src = source[def.key];
       return {
@@ -140,6 +154,10 @@ class WarehouseFlow {
     const [gp] = scopeRows(W.mapGatePassRows(pass.rows, vendors.rows, resolve, this.now()), store_ids, stores);
     // Not found and not yours read the same: the answer never says a pass exists elsewhere.
     if (!gp) return { code: 404, msg: "Gate pass not found" };
+
+    const docs = await this._read("gate_pass_documents", `gate_pass_documents:${s}`, W.buildGatePassDocumentsQuery(s), true);
+    gp.documents = docs.ok ? W.mapDocumentRows(docs.rows, vendors.rows, resolve).filter((d) => !d.dropped) : [];
+    gp.documents_error = docs.ok ? null : docs.error;
 
     let totalsError = null;
     const q = W.buildInspectionTotalsQuery(gp.inspections.map((i) => i.slug));

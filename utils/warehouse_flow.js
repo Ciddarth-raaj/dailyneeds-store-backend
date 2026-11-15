@@ -237,38 +237,109 @@ function mapInspectionRows(rows, vendorRows, resolve) {
 
 const finished = (state) => DONE_STATES.includes(String(state || "").toUpperCase());
 
+// Invoice document states (public.invoice_documents.state). `digitized` is
+// the GRN done; cancelled and duplicate ones never become a GRN.
+const DOC_DONE = "digitized";
+const DOC_DROPPED = ["cancelled", "duplicate_invoice"];
+const DOC_NOT_STARTED = "no_template";
+
+/**
+ * The supplier invoices (RetailPilot's invoice documents) the flow needs:
+ * every one not yet GRN'd, and every one on a gate pass still OPEN (so a
+ * pass whose invoices are all done is known to be done). Named columns only:
+ * the document's scanned data is large and not needed.
+ */
+function buildDocumentsQuery() {
+  return `
+SELECT d.slug, d.state, d.store_id, d.supplier_id, d.document_id, d.document_date,
+  d.uploaded_at, d.state_updated_at, d.gatepass_slug, d.error_message, d.invoice_slug
+FROM public.invoice_documents d
+LEFT JOIN public.gate_passes g ON g.slug = d.gatepass_slug
+WHERE d.state NOT IN ('digitized', 'cancelled', 'duplicate_invoice')
+   OR g.status = 'OPEN'
+ORDER BY d.uploaded_at, d.slug`;
+}
+
+/** One gate pass's invoices, whatever their state. */
+function buildGatePassDocumentsQuery(gatePassSlug) {
+  const s = validSlug(gatePassSlug);
+  if (!s) throw new Error("Invalid gate pass");
+  return `
+SELECT d.slug, d.state, d.store_id, d.supplier_id, d.document_id, d.document_date,
+  d.uploaded_at, d.state_updated_at, d.gatepass_slug, d.error_message, d.invoice_slug
+FROM public.invoice_documents d
+WHERE d.gatepass_slug = '${s}'
+ORDER BY d.uploaded_at, d.slug`;
+}
+
+/** Document rows -> [{ slug, state, store, supplier, invoice_no, dates, gate_pass, ... }]. */
+function mapDocumentRows(rows, vendorRows, resolve) {
+  const vendors = new Map((vendorRows || []).map((v) => [clean(v.id), clean(v.name)]));
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const slug = clean(r.slug);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const state = clean(r.state).toLowerCase() || null;
+    out.push({
+      slug,
+      state,
+      done: state === DOC_DONE,
+      dropped: DOC_DROPPED.includes(state),
+      grn_started: state !== DOC_NOT_STARTED,
+      store: resolve(r.store_id, null).key,
+      supplier_id: clean(r.supplier_id) || null,
+      supplier_name: vendors.get(clean(r.supplier_id)) || null,
+      invoice_no: clean(r.document_id) || null,
+      invoice_date: iso(r.document_date),
+      uploaded_at: iso(r.uploaded_at),
+      state_updated_at: iso(r.state_updated_at),
+      gate_pass: clean(r.gatepass_slug) || null,
+      message: clean(r.error_message) || null,
+      grn_ref: clean(r.invoice_slug) || null,
+    });
+  }
+  return out;
+}
+
+const pendingDocs = (docs) => (docs || []).filter((d) => !d.done && !d.dropped);
+const earliest = (values) => values.filter(Boolean).sort()[0] || null;
+
 /**
  * Where each consignment is, by what has happened to it:
  *
- *   gate_pass    gate pass OPEN, no inspection yet (waiting, or a direct purchase)
+ *   gate_pass    gate pass OPEN, no inspection and no invoice uploaded yet
  *   inspection   an inspection not yet COMPLETED or WRITTEN_OFF
- *   grn          inspection COMPLETED and the GRN not done: the gate pass is
- *                still OPEN (it closes when the GRN is done), or there is no
- *                gate pass and no GRN started. `grn_started` says whether the
- *                GRN has begun (the inspection has an invoice_id).
+ *   grn          one row per supplier invoice not yet GRN'd (digitized), with
+ *                its gate pass when it has one - with or without an
+ *                inspection (direct purchases have none). An invoice is
+ *                "started" once it is past no_template. This is what
+ *                RetailPilot's invoice screen lists.
+ *   no_invoice   gate pass OPEN, inspection COMPLETED, but no invoice uploaded
  *   written_off  inspections written off in the last 30 days
  *
- * Each row: { ref, kind: "gate_pass" | "inspection", gate_pass, inspection,
- * store, supplier_id, supplier_name, vehicle_number, since, state, grn_started,
- * invoices, invoices_grn_started, invoice_amount }.
- * `since` is when it entered this stage, as near as RetailPilot records it.
+ * Each row: { ref, kind: "gate_pass" | "inspection" | "document", gate_pass,
+ * inspection, store, supplier_id, supplier_name, vehicle_number, since,
+ * state, grn_started, invoices, invoices_grn_started, invoice_amount,
+ * documents }. `since` is when it entered this step, as near as RetailPilot
+ * records it; `documents` are the invoices still waiting for their GRN.
  */
-/**
- * A consignment's invoices. Each inspection is one supplier invoice (it
- * carries the invoice number and amount); a written-off one is not counted.
- */
-function invoiceTotals(inspections) {
-  const live = (inspections || []).filter((i) => String(i.state || "").toUpperCase() !== "WRITTEN_OFF");
-  const amounts = live.map((i) => i.invoice_amount).filter((a) => a !== null && a !== undefined);
-  return {
-    invoices: live.length,
-    invoices_grn_started: live.filter((i) => i.grn_started).length,
-    invoice_amount: amounts.length ? Math.round(amounts.reduce((t, a) => t + Number(a), 0) * 100) / 100 : null,
-  };
-}
-
-function classifyFlow(passes, inspections) {
-  const fromPass = (p, since) => ({
+function classifyFlow(passes, inspections, documents) {
+  const docsByPass = new Map();
+  for (const d of documents || []) {
+    if (!d.gate_pass) continue;
+    if (!docsByPass.has(d.gate_pass)) docsByPass.set(d.gate_pass, []);
+    docsByPass.get(d.gate_pass).push(d);
+  }
+  const grnFields = (waiting) => ({
+    grn_started: waiting.some((d) => d.grn_started),
+    invoices: waiting.length,
+    invoices_grn_started: waiting.filter((d) => d.grn_started).length,
+    invoice_amount: null,
+    documents: waiting,
+  });
+  const fromPass = (p, since, extra) => ({
     ref: p.slug,
     kind: "gate_pass",
     gate_pass: p.slug,
@@ -279,8 +350,12 @@ function classifyFlow(passes, inspections) {
     vehicle_number: p.vehicle_number,
     since,
     state: p.inspections.length ? p.inspections.map((i) => i.state).join(", ") : null,
-    grn_started: p.inspections.some((i) => i.grn_started),
-    ...invoiceTotals(p.inspections),
+    grn_started: false,
+    invoices: 0,
+    invoices_grn_started: 0,
+    invoice_amount: null,
+    documents: [],
+    ...extra,
   });
   const fromInspection = (i, since) => ({
     ref: i.slug,
@@ -293,25 +368,62 @@ function classifyFlow(passes, inspections) {
     vehicle_number: i.vehicle_number,
     since,
     state: i.state,
-    grn_started: i.grn_started,
-    ...invoiceTotals([i]),
+    grn_started: false,
+    invoices: 0,
+    invoices_grn_started: 0,
+    invoice_amount: null,
+    documents: [],
   });
-  const latest = (list, key) => list.map((i) => i[key]).filter(Boolean).sort().pop() || null;
+  const fromDocument = (d, p) => ({
+    ref: d.slug,
+    kind: "document",
+    gate_pass: d.gate_pass,
+    inspection: p && p.inspections.length ? p.inspections[p.inspections.length - 1].slug : null,
+    store: d.store,
+    supplier_id: d.supplier_id || (p && p.supplier_id) || null,
+    supplier_name: d.supplier_name || (p && p.supplier_name) || null,
+    vehicle_number: p ? p.vehicle_number : null,
+    invoice_no: d.invoice_no,
+    doc_state: d.state,
+    since: d.uploaded_at,
+    state: d.state,
+    ...grnFields([d]),
+  });
 
   const gate_pass = [];
   const grn = [];
+  const no_invoice = [];
+  const listedPasses = new Set();
   for (const p of passes || []) {
     if (p.status && p.status !== "OPEN") continue;
-    if (!p.inspections.length) {
+    const docs = docsByPass.get(p.slug) || [];
+    const waiting = pendingDocs(docs);
+    // Still being inspected: it shows under Inspection, from the inspection itself.
+    if (p.inspections.some((i) => !finished(i.state))) continue;
+    if (waiting.length) {
+      // One row per invoice, not per gate pass: a vehicle with three
+      // invoices is three GRNs to do.
+      waiting.forEach((d) => grn.push(fromDocument(d, p)));
+      listedPasses.add(p.slug);
+      continue;
+    }
+    const liveDocs = docs.filter((d) => !d.dropped);
+    if (!p.inspections.length && !liveDocs.length) {
       gate_pass.push(fromPass(p, p.entry_time));
       continue;
     }
-    // Still being inspected: it shows under Inspection, from the inspection itself.
-    if (p.inspections.some((i) => !finished(i.state))) continue;
     const completed = p.inspections.filter((i) => i.state === "COMPLETED");
-    // Every inspection written off: rejected, listed under Written off.
-    if (!completed.length) continue;
-    grn.push(fromPass(p, latest(completed, "updated_at") || latest(completed, "created_at") || p.entry_time));
+    // Inspected, but nothing uploaded to GRN against this pass.
+    if (completed.length && !liveDocs.length) {
+      no_invoice.push(fromPass(p, earliest(completed.map((i) => i.updated_at || i.created_at)) || p.entry_time));
+    }
+    // Otherwise every invoice is GRN'd (the pass just was not closed yet) or
+    // every inspection was written off: nothing waits here.
+  }
+  // Invoices waiting for a GRN with no open gate pass to carry them.
+  for (const d of pendingDocs(documents)) {
+    if (d.gate_pass && listedPasses.has(d.gate_pass)) continue;
+    grn.push(fromDocument(d));
   }
 
   const inspection = [];
@@ -319,30 +431,30 @@ function classifyFlow(passes, inspections) {
   for (const i of inspections || []) {
     if (!finished(i.state)) inspection.push(fromInspection(i, i.created_at));
     else if (i.state === "WRITTEN_OFF") written_off.push(fromInspection(i, i.updated_at || i.created_at));
-    // GRN not started and no open gate pass to carry it (an open pass is listed above).
-    else if (i.state === "COMPLETED" && !i.grn_started && i.gate_status !== "OPEN") {
-      grn.push(fromInspection(i, i.updated_at || i.created_at));
-    }
   }
-  return { gate_pass, inspection, grn, written_off };
+  return { gate_pass, inspection, grn, no_invoice, written_off };
 }
 
 /** The stages, in order. Only `built` stages are read. */
 const STAGES = [
-  { key: "gate_pass", label: "Gate pass", built: true, hint: "Waiting for inspection, or going direct to purchase" },
+  { key: "gate_pass", label: "Gate pass", built: true, hint: "In through the gate; not inspected and no invoice uploaded yet" },
   { key: "inspection", label: "Inspection", built: true, hint: "Being inspected" },
-  { key: "grn", label: "GRN", built: true, hint: "Inspected, GRN not done (the gate pass closes when it is)" },
+  { key: "grn", label: "GRN", built: true, hint: "Supplier invoices waiting for their GRN" },
   { key: "allocation", label: "Allocation", built: false },
   { key: "ready_to_dispatch", label: "Ready to dispatch", built: false },
 ];
 
 /** Lists outside the flow that need somebody to act. */
 const ATTENTION = [
+  { key: "no_invoice", label: "Inspected, invoice not uploaded", hint: "Inspection done, but no supplier invoice uploaded for the GRN" },
   { key: "written_off", label: "Written off", hint: `Inspections written off in the last ${WRITTEN_OFF_DAYS} days` },
 ];
 
 module.exports = {
   STAGES,
+  buildDocumentsQuery,
+  buildGatePassDocumentsQuery,
+  mapDocumentRows,
   ATTENTION,
   WRITTEN_OFF_DAYS,
   buildActiveInspectionsQuery,

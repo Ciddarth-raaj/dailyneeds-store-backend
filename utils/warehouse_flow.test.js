@@ -31,6 +31,11 @@ const INSPECTION_ROWS = [
   { slug: "IN-7", state: "WRITTEN_OFF", store_id: "wh", supplier_id: "9", created_at: "2026-11-10T05:00:00Z", updated_at: "2026-11-10T06:00:00Z" },
 ];
 
+const DOCUMENT_ROWS = [
+  { slug: "doc-1", state: "no_template", store_id: "kathir", supplier_id: "9", document_id: "INV-77", gatepass_slug: "GP-2", uploaded_at: "2026-11-15T05:00:00Z" },
+  { slug: "doc-2", state: "pricing_review_pending", store_id: "kathir", supplier_id: "9", document_id: "INV-78", gatepass_slug: null, uploaded_at: "2026-11-14T05:00:00Z" },
+];
+
 const fakeSpectra = (handler) => ({
   isConfigured: () => true,
   queries: [],
@@ -43,6 +48,7 @@ const fakeSpectra = (handler) => ({
 const runway = () =>
   fakeSpectra((q) => {
     if (/masterhub\.vendors/.test(q)) return [{ id: "42", name: "Acme Foods" }];
+    if (/invoice_documents/.test(q)) return DOCUMENT_ROWS.filter((d) => !/gatepass_slug = '/.test(q) || q.includes(`'${d.gatepass_slug}'`));
     if (/grn_inspection_details/.test(q)) return [{ grn_inspection_id: "IN-1", lines: 12, invoice_qty: 100, inspected_qty: 96, free_qty: 4, rejected_qty: 2 }];
     if (/g\.slug = 'GP-1'/.test(q)) return PASS_ROWS.slice(0, 2);
     if (/g\.slug = 'GP-2'/.test(q)) return PASS_ROWS.slice(2);
@@ -93,53 +99,85 @@ describe("mapping", () => {
 
 describe("classifyFlow", () => {
   const pass = (slug, inspections, status = "OPEN") => ({ slug, status, store: "outlet:2", inspections, entry_time: "2026-11-14T06:00:00Z" });
-  const insp = (slug, state, grn_started, extra = {}) => ({ slug, state, grn_started, store: "outlet:2", created_at: "2026-11-14T07:00:00Z", updated_at: "2026-11-14T09:00:00Z", ...extra });
-  it("places by what happened; an open pass with a finished inspection is a GRN not yet done", () => {
+  const insp = (slug, state, extra = {}) => ({ slug, state, store: "outlet:2", created_at: "2026-11-14T07:00:00Z", updated_at: "2026-11-14T09:00:00Z", ...extra });
+  const doc = (slug, state, gate_pass, extra = {}) => ({
+    slug,
+    state,
+    gate_pass,
+    store: "outlet:2",
+    uploaded_at: "2026-11-14T10:00:00Z",
+    done: state === "digitized",
+    dropped: ["cancelled", "duplicate_invoice"].includes(state),
+    grn_started: state !== "no_template",
+    ...extra,
+  });
+
+  it("places by what happened; GRN is one row per invoice waiting", () => {
     const out = W.classifyFlow(
       [
         pass("GP-wait", []),
-        pass("GP-doing", [insp("A", "IN_PROGRESS", false)]),
-        pass("GP-grn-pending", [insp("B", "COMPLETED", false)]),
-        pass("GP-grn-started", [insp("C", "COMPLETED", true)]),
-        pass("GP-rejected", [insp("E", "WRITTEN_OFF", false)]),
-        pass("GP-closed", [insp("F", "COMPLETED", true)], "CLOSED"),
+        pass("GP-direct", []),
+        pass("GP-doing", [insp("A", "IN_PROGRESS")]),
+        pass("GP-3inv", [insp("B", "COMPLETED")]),
+        pass("GP-no-invoice", [insp("C", "COMPLETED")]),
+        pass("GP-all-done", [insp("D", "COMPLETED")]),
+        pass("GP-rejected", [insp("E", "WRITTEN_OFF")]),
+        pass("GP-closed", [], "CLOSED"),
       ],
+      [insp("A", "IN_PROGRESS", { gate_pass: "GP-doing" }), insp("E", "WRITTEN_OFF", { gate_pass: "GP-rejected" })],
       [
-        insp("A", "IN_PROGRESS", false, { gate_pass: "GP-doing", gate_status: "OPEN" }),
-        insp("B", "COMPLETED", false, { gate_pass: "GP-grn-pending", gate_status: "OPEN" }),
-        insp("G", "COMPLETED", false, { gate_pass: "GP-old", gate_status: "CLOSED" }),
-        insp("E", "WRITTEN_OFF", false, { gate_pass: "GP-rejected", gate_status: "OPEN" }),
+        doc("d1", "no_template", "GP-direct"),
+        doc("d2", "no_template", "GP-3inv", { uploaded_at: "2026-11-14T08:00:00Z" }),
+        doc("d3", "cost_qc_failed", "GP-3inv"),
+        doc("d4", "pricing_review_pending", "GP-3inv"),
+        doc("d5", "digitized", "GP-3inv"),
+        doc("d6", "digitized", "GP-all-done"),
+        doc("d7", "cancelled", "GP-no-invoice"),
+        doc("d8", "manual_entry_started", "GP-closed"),
+        doc("d9", "no_template", null),
       ]
     );
     const refs = (k) => out[k].map((r) => r.ref);
     assert.deepEqual(refs("gate_pass"), ["GP-wait"]);
     assert.deepEqual(refs("inspection"), ["A"]);
-    assert.deepEqual(refs("grn"), ["GP-grn-pending", "GP-grn-started", "G"], "B once, via its open pass");
-    assert.deepEqual(out.grn.map((r) => r.grn_started), [false, true, false]);
+    assert.deepEqual(refs("grn"), ["d1", "d2", "d3", "d4", "d8", "d9"], "each invoice; the GRN'd one is gone");
+    assert.deepEqual(
+      out.grn.map((r) => [r.gate_pass, r.grn_started]),
+      [["GP-direct", false], ["GP-3inv", false], ["GP-3inv", true], ["GP-3inv", true], ["GP-closed", true], [null, false]]
+    );
+    assert.deepEqual([out.grn[1].since, out.grn[1].invoices, out.grn[1].inspection], ["2026-11-14T08:00:00Z", 1, "B"]);
+    assert.deepEqual(refs("no_invoice"), ["GP-no-invoice"]);
     assert.deepEqual(refs("written_off"), ["E"]);
-    assert.equal(out.grn[0].since, "2026-11-14T09:00:00Z");
-    assert.equal(out.not_closed, undefined);
   });
 
-  it("each consignment counts its invoices (one per inspection, write-offs aside)", () => {
-    const out = W.classifyFlow(
+  it("documents map their state to started / done / dropped", () => {
+    const { resolve } = storeResolver(BRANCHES);
+    const [a, b, c, d] = W.mapDocumentRows(
       [
-        pass("GP-3inv", [
-          insp("X1", "COMPLETED", true, { invoice_amount: 1000 }),
-          insp("X2", "COMPLETED", false, { invoice_amount: 250.5 }),
-          insp("X3", "WRITTEN_OFF", false, { invoice_amount: 99 }),
-          insp("X4", "COMPLETED", true, { invoice_amount: null }),
-        ]),
-        pass("GP-none", []),
+        { slug: "x1", state: "no_template", store_id: "wh", document_id: "GST/405", gatepass_slug: "GP-1", uploaded_at: "2026-11-14T10:00:00+05:30" },
+        { slug: "x2", state: "cost_qc_failed", store_id: "wh" },
+        { slug: "x3", state: "digitized", store_id: "wh" },
+        { slug: "x4", state: "cancelled", store_id: "wh" },
       ],
-      []
+      [],
+      resolve
     );
-    assert.deepEqual(
-      [out.grn[0].invoices, out.grn[0].invoices_grn_started, out.grn[0].invoice_amount],
-      [3, 2, 1250.5]
-    );
-    assert.deepEqual([out.gate_pass[0].invoices, out.gate_pass[0].invoice_amount], [0, null]);
+    assert.deepEqual([a.grn_started, a.invoice_no, a.gate_pass, a.store, a.uploaded_at], [false, "GST/405", "GP-1", "outlet:2", "2026-11-14T04:30:00.000Z"]);
+    assert.deepEqual([b.grn_started, b.done], [true, false]);
+    assert.deepEqual([c.done, d.dropped], [true, true]);
   });
+
+  it("the documents query names its columns and takes waiting ones and those on open passes", () => {
+    const q = W.buildDocumentsQuery();
+    assert.doesNotMatch(q, /SELECT \*/);
+    assert.doesNotMatch(q, /extracted_data/);
+    assert.match(q, /d\.state NOT IN \('digitized', 'cancelled', 'duplicate_invoice'\)/);
+    assert.match(q, /OR g\.status = 'OPEN'/);
+    assert.doesNotMatch(q, /GROUP BY/);
+    assert.match(W.buildGatePassDocumentsQuery("GP-1"), /d\.gatepass_slug = 'GP-1'/);
+    assert.throws(() => W.buildGatePassDocumentsQuery("x' OR 1=1"));
+  });
+
   it("the inspections query takes unfinished, GRN-pending and recent write-offs", () => {
     const q = W.buildActiveInspectionsQuery();
     assert.match(q, /i\.state NOT IN \('COMPLETED', 'WRITTEN_OFF'\)/);
@@ -161,12 +199,15 @@ describe("usecase", () => {
       ["allocation", false],
       ["ready_to_dispatch", false],
     ]);
-    assert.deepEqual(rows("gate_pass"), ["GP-2"], "only the open pass with no inspection");
+    assert.deepEqual(rows("gate_pass"), [], "GP-2 has its invoice uploaded, so it is at GRN");
     assert.deepEqual(rows("inspection"), ["IN-1"]);
-    assert.deepEqual(rows("grn"), ["IN-9"]);
-    assert.deepEqual(all.data.attention.map((x) => [x.key, x.rows.map((r) => r.ref)]), [["written_off", ["IN-7"]]]);
+    assert.deepEqual(rows("grn"), ["doc-1", "doc-2"], "one row per invoice, with or without a gate pass");
+    assert.deepEqual(all.data.attention.map((x) => [x.key, x.rows.map((r) => r.ref)]), [
+      ["no_invoice", []],
+      ["written_off", ["IN-7"]],
+    ]);
     const own = await uc.getFlow({ store_ids: [3] });
-    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [["GP-2"], [], ["IN-9"], [], []]);
+    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [[], [], ["doc-1", "doc-2"], [], []]);
     assert.deepEqual(own.data.stores.map((x) => x.key), ["outlet:3"]);
   });
 
@@ -179,6 +220,14 @@ describe("usecase", () => {
     assert.equal(r.data.inspections[1].totals, null);
     assert.equal((await uc.getGatePass({ slug: "GP-1", store_ids: [3] })).code, 404);
     assert.equal((await uc.getGatePass({ slug: "bad slug!" })).code, 422);
+  });
+
+  it("a gate pass's detail lists its invoices", async () => {
+    const uc = usecaseFactory(runway(), async () => BRANCHES);
+    const r = await uc.getGatePass({ slug: "GP-2", store_ids: null });
+    assert.equal(r.code, 200);
+    assert.deepEqual(r.data.documents.map((d) => [d.invoice_no, d.state, d.grn_started]), [["INV-77", "no_template", false]]);
+    assert.equal(r.data.documents_error, null);
   });
 
   it("one inspection, in scope only", async () => {
@@ -234,7 +283,7 @@ describe("routes", () => {
     try {
       const flow = await get(server, "/warehouse-flow/flow");
       assert.equal(flow.status, 200);
-      assert.deepEqual(flow.body.data.stages[0].rows.map((r) => r.ref), ["GP-2"]);
+      assert.deepEqual(flow.body.data.stages[2].rows.map((r) => r.ref), ["doc-1", "doc-2"]);
       assert.equal(flow.body.dashboard_scope.kind, "OWN_STORE");
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-1")).status, 404);
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-2")).status, 200);
