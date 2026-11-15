@@ -276,6 +276,72 @@ function mapStockRows(rows, resolve) {
 }
 
 /**
+ * Gate passes OPEN right now (runway public.gate_passes: OPEN until the
+ * vehicle exits and the pass is CLOSED), oldest first, with any GRN
+ * inspection started against each (grn_inspection_header.gatepass_slug) -
+ * a pass with none is a vehicle still waiting to be unloaded. Not for a date
+ * range: open is open, whenever the vehicle came in.
+ */
+function buildOpenGatePassQuery() {
+  return `
+SELECT g.slug, g.store_id, g.supplier_id, g.vehicle_number, g.driver_name, g.driver_phone,
+  g.entry_time, g.created_by,
+  i.slug AS inspection_slug, i.state AS inspection_state
+FROM public.gate_passes g
+LEFT JOIN public.grn_inspection_header i ON i.gatepass_slug = g.slug
+WHERE g.status = 'OPEN'
+ORDER BY g.entry_time, g.slug`;
+}
+
+/**
+ * Supplier names, read on their own rather than joined: a join on ids of
+ * two different column types would fail the whole gate pass query.
+ */
+function buildVendorNamesQuery() {
+  return `
+SELECT CAST(v.id AS TEXT) AS id, COALESCE(NULLIF(TRIM(v.trade_name), ''), v.name) AS name
+FROM masterhub.vendors v
+ORDER BY v.id`;
+}
+
+/**
+ * Gate pass rows (one per inspection, or one with none) -> one per pass:
+ * [{ slug, store, supplier_id, supplier_name, vehicle_number, driver_name,
+ *    driver_phone, entry_time, open_hours, inspections: [{ slug, state }] }].
+ */
+function mapGatePassRows(rows, vendorRows, resolve, nowMs = Date.now()) {
+  const vendors = new Map((vendorRows || []).map((v) => [clean(v.id), clean(v.name)]));
+  const passes = new Map();
+  for (const r of rows || []) {
+    const slug = clean(r.slug);
+    if (!slug) continue;
+    let p = passes.get(slug);
+    if (!p) {
+      const entered = Date.parse(r.entry_time);
+      p = {
+        slug,
+        store: resolve(r.store_id, null).key,
+        supplier_id: clean(r.supplier_id) || null,
+        supplier_name: vendors.get(clean(r.supplier_id)) || null,
+        vehicle_number: clean(r.vehicle_number) || null,
+        driver_name: clean(r.driver_name) || null,
+        driver_phone: clean(r.driver_phone) || null,
+        created_by: clean(r.created_by) || null,
+        entry_time: Number.isFinite(entered) ? new Date(entered).toISOString() : null,
+        open_hours: Number.isFinite(entered) ? Math.max(0, Math.round(((nowMs - entered) / 3600000) * 10) / 10) : null,
+        inspections: [],
+      };
+      passes.set(slug, p);
+    }
+    const insp = clean(r.inspection_slug);
+    if (insp && !p.inspections.some((x) => x.slug === insp)) {
+      p.inspections.push({ slug: insp, state: clean(r.inspection_state) || null });
+    }
+  }
+  return [...passes.values()];
+}
+
+/**
  * Keeps only what the caller's store scope allows. `storeIds` null = every
  * store (including stores not in Branch Master); a list = those branches only.
  */
@@ -296,6 +362,9 @@ module.exports = {
   buildPurchaseRangeQuery,
   buildStockSummaryQuery,
   buildMarginRangeQuery,
+  buildOpenGatePassQuery,
+  buildVendorNamesQuery,
+  mapGatePassRows,
   mapMarginRows,
   invoiceTypeKind,
   storeResolver,

@@ -66,12 +66,14 @@ class BusinessDashboard {
     if (range.error) return { code: 422, msg: range.error };
     const { from, to } = range;
 
-    const [branches, sales, purchases, stock, margin] = await Promise.all([
+    const [branches, sales, purchases, stock, margin, gatePasses, vendors] = await Promise.all([
       this.loadBranches(),
       this._section("sales", this.salesSpectra, `sales|${from}|${to}`, B.buildSalesRangeQuery(from, to), refresh),
       this._section("purchases", this.runwaySpectra, `purchases|${from}|${to}`, B.buildPurchaseRangeQuery(from, to), refresh),
       this._section("stock", this.runwaySpectra, "stock", B.buildStockSummaryQuery(), refresh),
       this._section("margin", this.salesSpectra, `margin|${from}|${to}`, B.buildMarginRangeQuery(from, to), refresh),
+      this._section("gate_passes", this.runwaySpectra, "gate_passes", B.buildOpenGatePassQuery(), refresh),
+      this._section("vendors", this.runwaySpectra, "vendors", B.buildVendorNamesQuery(), refresh),
     ]);
 
     const { resolve, stores } = B.storeResolver(branches);
@@ -79,6 +81,10 @@ class BusinessDashboard {
     const purchaseMapped = B.mapPurchaseRows(purchases.rows, resolve);
     const stockRows = B.mapStockRows(stock.rows, resolve);
     const marginRows = B.mapMarginRows(margin.rows, resolve);
+    // Ages are from when the gate pass list was read, not this request, so a
+    // cached list does not show passes younger than they are.
+    const gatePassAt = gatePasses.fetched_at ? Date.parse(gatePasses.fetched_at) : this.now();
+    const gatePassRows = B.mapGatePassRows(gatePasses.rows, vendors.rows, resolve, gatePassAt);
 
     const scoped = (rows) => B.scopeRows(rows, store_ids, stores);
     const visibleStores = [...stores.values()].filter((s) =>
@@ -104,6 +110,12 @@ class BusinessDashboard {
           purchase_return_found: hasReturnType,
         },
         stock: { ok: stock.ok, error: stock.error || null, fetched_at: stock.fetched_at || null, rows: scoped(stockRows) },
+        gate_passes: {
+          ok: gatePasses.ok,
+          error: gatePasses.error || null,
+          fetched_at: gatePasses.fetched_at || null,
+          rows: scoped(gatePassRows),
+        },
         margin: { ok: margin.ok, error: margin.error || null, fetched_at: margin.fetched_at || null, rows: scoped(marginRows) },
       },
     };
