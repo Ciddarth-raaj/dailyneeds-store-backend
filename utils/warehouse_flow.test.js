@@ -120,6 +120,26 @@ describe("classifyFlow", () => {
     assert.equal(out.grn[0].since, "2026-11-14T09:00:00Z");
     assert.equal(out.not_closed, undefined);
   });
+
+  it("each consignment counts its invoices (one per inspection, write-offs aside)", () => {
+    const out = W.classifyFlow(
+      [
+        pass("GP-3inv", [
+          insp("X1", "COMPLETED", true, { invoice_amount: 1000 }),
+          insp("X2", "COMPLETED", false, { invoice_amount: 250.5 }),
+          insp("X3", "WRITTEN_OFF", false, { invoice_amount: 99 }),
+          insp("X4", "COMPLETED", true, { invoice_amount: null }),
+        ]),
+        pass("GP-none", []),
+      ],
+      []
+    );
+    assert.deepEqual(
+      [out.grn[0].invoices, out.grn[0].invoices_grn_started, out.grn[0].invoice_amount],
+      [3, 2, 1250.5]
+    );
+    assert.deepEqual([out.gate_pass[0].invoices, out.gate_pass[0].invoice_amount], [0, null]);
+  });
   it("the inspections query takes unfinished, GRN-pending and recent write-offs", () => {
     const q = W.buildActiveInspectionsQuery();
     assert.match(q, /i\.state NOT IN \('COMPLETED', 'WRITTEN_OFF'\)/);

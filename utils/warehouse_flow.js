@@ -249,9 +249,24 @@ const finished = (state) => DONE_STATES.includes(String(state || "").toUpperCase
  *   written_off  inspections written off in the last 30 days
  *
  * Each row: { ref, kind: "gate_pass" | "inspection", gate_pass, inspection,
- * store, supplier_id, supplier_name, vehicle_number, since, state, grn_started }.
+ * store, supplier_id, supplier_name, vehicle_number, since, state, grn_started,
+ * invoices, invoices_grn_started, invoice_amount }.
  * `since` is when it entered this stage, as near as RetailPilot records it.
  */
+/**
+ * A consignment's invoices. Each inspection is one supplier invoice (it
+ * carries the invoice number and amount); a written-off one is not counted.
+ */
+function invoiceTotals(inspections) {
+  const live = (inspections || []).filter((i) => String(i.state || "").toUpperCase() !== "WRITTEN_OFF");
+  const amounts = live.map((i) => i.invoice_amount).filter((a) => a !== null && a !== undefined);
+  return {
+    invoices: live.length,
+    invoices_grn_started: live.filter((i) => i.grn_started).length,
+    invoice_amount: amounts.length ? Math.round(amounts.reduce((t, a) => t + Number(a), 0) * 100) / 100 : null,
+  };
+}
+
 function classifyFlow(passes, inspections) {
   const fromPass = (p, since) => ({
     ref: p.slug,
@@ -265,6 +280,7 @@ function classifyFlow(passes, inspections) {
     since,
     state: p.inspections.length ? p.inspections.map((i) => i.state).join(", ") : null,
     grn_started: p.inspections.some((i) => i.grn_started),
+    ...invoiceTotals(p.inspections),
   });
   const fromInspection = (i, since) => ({
     ref: i.slug,
@@ -278,6 +294,7 @@ function classifyFlow(passes, inspections) {
     since,
     state: i.state,
     grn_started: i.grn_started,
+    ...invoiceTotals([i]),
   });
   const latest = (list, key) => list.map((i) => i[key]).filter(Boolean).sort().pop() || null;
 
