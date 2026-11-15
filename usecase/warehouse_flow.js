@@ -64,14 +64,12 @@ class WarehouseFlow {
    * a stage whose source fails says so and the others still show.
    */
   async getFlow({ refresh = false, store_ids = null } = {}) {
-    const [branches, passes, inspections, documents, vendors, transfers, shortLines] = await Promise.all([
+    const [branches, passes, inspections, documents, vendors] = await Promise.all([
       this.loadBranches(),
       this._read("gate_passes", "gate_passes:open", W.buildOpenGatePassesQuery(), refresh),
       this._read("inspections", "inspections:active", W.buildActiveInspectionsQuery(), refresh),
       this._read("documents", "documents:active", W.buildDocumentsQuery(), refresh),
       this._read("vendors", "vendors", W.buildVendorNamesQuery(), false),
-      this._read("transfers", "transfers:active", W.buildTransfersQuery(), refresh),
-      this._read("short_lines", "transfer_lines:short", W.buildShortLinesQuery(), refresh),
     ]);
     const { resolve, stores } = storeResolver(branches);
     const at = passes.fetched_at ? Date.parse(passes.fetched_at) : this.now();
@@ -80,7 +78,6 @@ class WarehouseFlow {
       W.mapInspectionRows(inspections.rows, vendors.rows, resolve),
       W.mapDocumentRows(documents.rows, vendors.rows, resolve)
     );
-    Object.assign(lists, W.classifyTransfers(W.mapTransferRows(transfers.rows, shortLines.rows, resolve)));
     // Which read each list depends on, so a failure is reported where it shows.
     // A list is only as good as every read it is built from: the first that
     // failed is what it reports.
@@ -90,8 +87,6 @@ class WarehouseFlow {
       grn: [documents, passes],
       no_invoice: [passes, documents],
       written_off: [inspections],
-      in_transit: [transfers],
-      short_received: [transfers, shortLines],
     };
     const source = {};
     Object.keys(needs).forEach((k) => {

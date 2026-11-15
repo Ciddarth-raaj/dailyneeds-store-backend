@@ -36,13 +36,6 @@ const DOCUMENT_ROWS = [
   { slug: "doc-2", state: "pricing_review_pending", store_id: "kathir", supplier_id: "9", document_id: "INV-78", gatepass_slug: null, uploaded_at: "2026-11-14T05:00:00Z" },
 ];
 
-const TRANSFER_ROWS = [
-  { slug: "tA", job_type: "MIXED", origin_store: "wh", destination_store: "kathir", status: "IN_TRANSIT", dispatched_at: "2026-11-15T04:56:55Z", box_count: 12, stage_ids: ["INV-aaa", "INV-bbb", "ADA-ccc", "staSlug1"] },
-  { slug: "tB", job_type: "GRN", origin_store: "wh", destination_store: "wh", status: "PARTIALLY_RECEIVED", dispatched_at: "2026-11-15T04:16:00Z", stage_ids: "{INV-x}" },
-  { slug: "tC", job_type: "GRN", origin_store: "wh", destination_store: "kathir", status: "RECEIVED", dispatched_at: "2026-11-14T10:00:00Z", received_at: "2026-11-14T12:00:00Z", stage_ids: "['INV-y', 'INV-z']" },
-];
-const SHORT_ROWS = [{ transfer_slug: "tC", short_lines: 2, qty: 240, returned_qty: 4, returned_value: 380.5, returned_at: "2026-11-14T13:00:00Z" }];
-
 const fakeSpectra = (handler) => ({
   isConfigured: () => true,
   queries: [],
@@ -55,8 +48,6 @@ const fakeSpectra = (handler) => ({
 const runway = () =>
   fakeSpectra((q) => {
     if (/masterhub\.vendors/.test(q)) return [{ id: "42", name: "Acme Foods" }];
-    if (/stock_transfer_lines/.test(q)) return SHORT_ROWS;
-    if (/stock_transfers/.test(q)) return TRANSFER_ROWS;
     if (/invoice_documents/.test(q)) return DOCUMENT_ROWS.filter((d) => !/gatepass_slug = '/.test(q) || q.includes(`'${d.gatepass_slug}'`));
     if (/grn_inspection_details/.test(q)) return [{ grn_inspection_id: "IN-1", lines: 12, invoice_qty: 100, inspected_qty: 96, free_qty: 4, rejected_qty: 2 }];
     if (/g\.slug = 'GP-1'/.test(q)) return PASS_ROWS.slice(0, 2);
@@ -196,38 +187,6 @@ describe("classifyFlow", () => {
   });
 });
 
-describe("transfers", () => {
-  it("stage ids read however they arrive, and split into invoices, ad-hoc and STA", () => {
-    assert.deepEqual(W.parseIds(["INV-a", " b "]), ["INV-a", "b"]);
-    assert.deepEqual(W.parseIds("{INV-a,ADA-b,c}"), ["INV-a", "ADA-b", "c"]);
-    assert.deepEqual(W.parseIds("['INV-a', 'ADA-b']"), ["INV-a", "ADA-b"]);
-    assert.deepEqual(W.parseIds(null), []);
-    assert.deepEqual(W.documentMix(["INV-a", "INV-b", "ADA-c", "xyz"]), { invoices: 2, adhoc: 1, sta: 1 });
-  });
-
-  it("on the road is In transit; a store's shortfall is Short on receiving", () => {
-    const { resolve } = storeResolver(BRANCHES);
-    const out = W.classifyTransfers(W.mapTransferRows(TRANSFER_ROWS, SHORT_ROWS, resolve));
-    assert.deepEqual(out.in_transit.map((t) => [t.ref, t.status, t.store, t.since]), [
-      ["tA", "IN_TRANSIT", "outlet:3", "2026-11-15T04:56:55.000Z"],
-      ["tB", "PARTIALLY_RECEIVED", "outlet:2", "2026-11-15T04:16:00.000Z"],
-    ]);
-    assert.deepEqual(out.in_transit[0].documents_mix, { invoices: 2, adhoc: 1, sta: 1 });
-    assert.deepEqual(out.short_received.map((t) => [t.ref, t.short.returned_qty, t.short.returned_value, t.since]), [
-      ["tC", 4, 380.5, "2026-11-14T13:00:00.000Z"],
-    ]);
-  });
-
-  it("the queries read picknpack, recent shortfalls only, no GROUP BY on an expression", () => {
-    assert.match(W.buildTransfersQuery(), /FROM picknpack\.stock_transfers t/);
-    assert.match(W.buildTransfersQuery(), /t\.status IN \('IN_TRANSIT', 'PARTIALLY_RECEIVED'\)/);
-    const q = W.buildShortLinesQuery();
-    assert.match(q, /FROM picknpack\.stock_transfer_lines l/);
-    assert.match(q, /l\.returned_qty > 0/);
-    assert.match(q, /GROUP BY l\.transfer_slug$/);
-  });
-});
-
 describe("usecase", () => {
   it("each stage holds what has happened to it, in scope", async () => {
     const uc = usecaseFactory(runway(), async () => BRANCHES);
@@ -239,23 +198,16 @@ describe("usecase", () => {
       ["grn", true],
       ["allocation", false],
       ["ready_to_dispatch", false],
-      ["in_transit", true],
     ]);
     assert.deepEqual(rows("gate_pass"), [], "GP-2 has its invoice uploaded, so it is at GRN");
     assert.deepEqual(rows("inspection"), ["IN-1"]);
     assert.deepEqual(rows("grn"), ["doc-1", "doc-2"], "one row per invoice, with or without a gate pass");
     assert.deepEqual(all.data.attention.map((x) => [x.key, x.rows.map((r) => r.ref)]), [
-      ["short_received", ["tC"]],
       ["no_invoice", []],
       ["written_off", ["IN-7"]],
     ]);
-    assert.deepEqual(rows("in_transit"), ["tA", "tB"]);
-    assert.deepEqual(
-      all.data.attention.find((x) => x.key === "short_received").rows.map((r) => r.ref),
-      ["tC"]
-    );
     const own = await uc.getFlow({ store_ids: [3] });
-    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [[], [], ["doc-1", "doc-2"], [], [], ["tA"]]);
+    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [[], [], ["doc-1", "doc-2"], [], []]);
     assert.deepEqual(own.data.stores.map((x) => x.key), ["outlet:3"]);
   });
 
