@@ -1308,6 +1308,17 @@ class Server {
         product: retailPilotConfig.salesProduct,
       })
     );
+    // Business Dashboard: bills on the sales key, invoices and stock on runway.
+    this.businessDashboardUsecase = require("./usecase/business_dashboard")(
+      require("./services/retailpilot_spectra")({
+        ...retailPilotConfig,
+        baseUrl: retailPilotConfig.salesBaseUrl,
+        apiKey: retailPilotConfig.salesApiKey,
+        product: retailPilotConfig.salesProduct,
+      }),
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      () => this.outletRepo.getRetailPilotIds()
+    );
     this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       this.retailPilotGrnRepo,
@@ -2138,6 +2149,10 @@ class Server {
     const productSalesRouter = require("./routes/product_sales")(
       this.productSalesUsecase
     );
+    const businessDashboardRouter = require("./routes/business_dashboard")(
+      this.businessDashboardUsecase,
+      this.dashboardScope
+    );
     const salesDashboardRouter = require("./routes/sales_dashboard")(
       this.salesDashboardUsecase
     );
@@ -2309,6 +2324,7 @@ class Server {
     app.use("/retailpilot", retailPilotRouter.getRouter());
     app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
+    app.use("/business-dashboard", businessDashboardRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
