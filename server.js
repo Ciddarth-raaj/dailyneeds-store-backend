@@ -1319,6 +1319,10 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
     );
+    this.transfersUsecase = require("./usecase/transfers")(
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      () => this.outletRepo.getRetailPilotIds()
+    );
     this.warehouseFlowUsecase = require("./usecase/warehouse_flow")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
@@ -2157,6 +2161,7 @@ class Server {
       this.businessDashboardUsecase,
       this.dashboardScope
     );
+    const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
     const warehouseFlowRouter = require("./routes/warehouse_flow")(
       this.warehouseFlowUsecase,
       this.dashboardScope
@@ -2334,6 +2339,7 @@ class Server {
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/business-dashboard", businessDashboardRouter.getRouter());
     app.use("/warehouse-flow", warehouseFlowRouter.getRouter());
+    app.use("/transfers", transfersRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
