@@ -69,17 +69,22 @@ GROUP BY b.bill_date, b.store_slug, st.name
 ORDER BY b.bill_date, b.store_slug`;
 }
 
+/**
+ * One row per invoice, folded per day per store per type in mapPurchaseRows.
+ * Not grouped in SQL: SPECTRA turns every literal into a parameter, so a
+ * GROUP BY on the India-time day ('Asia/Kolkata' becoming $n) no longer
+ * matches the same expression in the SELECT and Postgres refuses the query.
+ * The day filter is the GRN pages' own, which runs.
+ */
 function buildPurchaseRangeQuery(fromDay, toDay) {
   const { from, to } = checkedRange(fromDay, toDay);
   return `
-SELECT CAST((h.created_at AT TIME ZONE 'Asia/Kolkata')::date AS TEXT) AS day,
-  h.store_id, h.invoice_type,
-  COALESCE(SUM(h.total_net), 0) AS amount,
-  COUNT(*) AS invoices
+SELECT CAST(((h.created_at AT TIME ZONE 'Asia/Kolkata')::date) AS TEXT) AS day,
+  h.store_id, h.invoice_type, h.total_net AS amount
 FROM public.invoice_headers h
-WHERE (h.created_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN DATE '${from}' AND DATE '${to}'
-GROUP BY CAST((h.created_at AT TIME ZONE 'Asia/Kolkata')::date AS TEXT), h.store_id, h.invoice_type
-ORDER BY 1, h.store_id, h.invoice_type`;
+WHERE ((h.created_at AT TIME ZONE 'Asia/Kolkata')::date) >= DATE '${from}'
+  AND ((h.created_at AT TIME ZONE 'Asia/Kolkata')::date) <= DATE '${to}'
+ORDER BY h.slug`;
 }
 
 function buildStockSummaryQuery() {
@@ -175,7 +180,7 @@ function mapPurchaseRows(rows, resolve) {
     const type = clean(r.invoice_type) || "(blank)";
     const kind = invoiceTypeKind(r.invoice_type);
     const amount = round2(r.amount);
-    const invoices = int(r.invoices);
+    const invoices = r.invoices == null ? 1 : int(r.invoices);
     const t = types.get(type) || { type, counted_as: kind, invoices: 0, amount: 0 };
     t.invoices += invoices;
     t.amount = round2(t.amount + amount);

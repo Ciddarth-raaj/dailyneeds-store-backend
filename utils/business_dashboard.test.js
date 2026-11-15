@@ -30,7 +30,10 @@ describe("the range", () => {
     assert.match(q, /FROM public\.bills/);
     assert.throws(() => B.buildSalesRangeQuery("2026-11-01", "x"));
     assert.throws(() => B.buildPurchaseRangeQuery("2026-11-15", "2026-11-01"));
-    assert.doesNotMatch(B.buildPurchaseRangeQuery("2026-11-01", "2026-11-15"), /invoice_type = /);
+    const pq = B.buildPurchaseRangeQuery("2026-11-01", "2026-11-15");
+    assert.doesNotMatch(pq, /invoice_type = /);
+    // SPECTRA parameterises literals: no GROUP BY on the time-zone expression.
+    assert.doesNotMatch(pq, /GROUP BY/);
   });
 });
 
@@ -50,11 +53,12 @@ describe("invoice types", () => {
         { day: "2026-11-02", store_id: "kathir-slug", invoice_type: "PURCHASE", amount: "1000.50", invoices: 2 },
         { day: "2026-11-02", store_id: "kathir-slug", invoice_type: "PURCHASE_RETURN", amount: "-200", invoices: 1 },
         { day: "2026-11-02", store_id: "kathir-slug", invoice_type: "FREIGHT", amount: "50", invoices: 1 },
+        { day: "2026-11-02", store_id: "kathir-slug", invoice_type: "PURCHASE", amount: "99.50" },
       ],
       resolve
     );
     assert.deepEqual(out.rows, [
-      { day: "2026-11-02", store: "outlet:3", purchase: 1000.5, purchase_invoices: 2, purchase_return: 200, purchase_return_invoices: 1 },
+      { day: "2026-11-02", store: "outlet:3", purchase: 1100, purchase_invoices: 3, purchase_return: 200, purchase_return_invoices: 1 },
     ]);
     assert.deepEqual(out.invoice_types.map((t) => [t.type, t.counted_as]), [
       ["PURCHASE", "purchase"],
