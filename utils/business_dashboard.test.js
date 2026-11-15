@@ -68,6 +68,26 @@ describe("invoice types", () => {
   });
 });
 
+describe("margin", () => {
+  it("the query reads bill lines, signs returns, and keeps no-cost lines out of the margin", () => {
+    const q = B.buildMarginRangeQuery("2026-11-01", "2026-11-15");
+    assert.match(q, /FROM public\.bill_details d/);
+    assert.match(q, /\(d\.line_payable - d\.total_tax\) \* b\.sign/);
+    assert.match(q, /FILTER \(WHERE d\.total_landing_without_tax > 0\)/);
+    assert.match(q, /BETWEEN DATE '2026-11-01' AND DATE '2026-11-15'/);
+    assert.throws(() => B.buildMarginRangeQuery("2026-11-15", "2026-11-01"));
+  });
+
+  it("margin is costed sales minus cost; uncosted sales are reported apart", () => {
+    const { resolve } = B.storeResolver(BRANCHES);
+    const [m] = B.mapMarginRows(
+      [{ day: "2026-11-02", store_slug: "kathir-slug", store_name: "Kathirkamam", sales_ex_tax: "1100", costed_sales: "1000", cost: "820.5", uncosted_sales: "100" }],
+      resolve
+    );
+    assert.deepEqual(m, { day: "2026-11-02", store: "outlet:3", sales_ex_tax: 1100, costed_sales: 1000, cost: 820.5, margin: 179.5, uncosted_sales: 100 });
+  });
+});
+
 describe("stores", () => {
   it("matches by RetailPilot ID, else by branch name, else keeps the store unmapped", () => {
     const { resolve } = B.storeResolver(BRANCHES);
@@ -124,7 +144,7 @@ describe("the summary", () => {
     assert.ok(r.data.stores.some((s) => s.key === "rp:mystery" && !s.mapped));
     assert.equal(r.data.purchases.invoice_types.length, 1);
     assert.equal(r.data.purchases.purchase_return_found, false);
-    assert.equal(r.data.margin.ok, false);
+    assert.equal(r.data.margin.ok, true);
   });
 
   it("Own Store sees its branch only, and no company-wide invoice type totals", async () => {
@@ -154,14 +174,15 @@ describe("the summary", () => {
     const s = sales();
     const uc = usecaseFactory(s, runway(), async () => BRANCHES, () => t);
     const args = { from_date: "2026-11-01", to_date: "2026-11-02", store_ids: null };
+    // The sales key answers two queries per summary: bills and bill lines (margin).
     await uc.getSummary(args);
     await uc.getSummary(args);
-    assert.equal(s.calls, 1);
-    await uc.getSummary({ ...args, refresh: true });
     assert.equal(s.calls, 2);
+    await uc.getSummary({ ...args, refresh: true });
+    assert.equal(s.calls, 4);
     t = 6 * 60 * 1000;
     await uc.getSummary(args);
-    assert.equal(s.calls, 3);
+    assert.equal(s.calls, 6);
   });
 
   it("a bad range is a 422", async () => {

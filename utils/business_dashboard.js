@@ -87,6 +87,36 @@ WHERE ((h.created_at AT TIME ZONE 'Asia/Kolkata')::date) >= DATE '${from}'
 ORDER BY h.slug`;
 }
 
+/**
+ * Margin, per bill day per store, from public.bill_details (Mandapam, the
+ * sales key). Every amount on a line is tax-inclusive and positive; bills.sign
+ * makes a return line count against the day.
+ *
+ *   sales_ex_tax   line_payable - total_tax: what the customer paid, before tax
+ *   cost           total_landing_without_tax: batch basic cost x quantity
+ *
+ * A line whose cost is unknown has total_landing_without_tax 0; counting it
+ * would show its whole value as margin. So margin is taken only over lines
+ * with a cost (costed_sales, cost), and the sales of the others are reported
+ * (uncosted_sales) so the screen can say how much of sales the margin covers.
+ * Service-charge lines (article_id 0) are never stock and have no cost.
+ */
+function buildMarginRangeQuery(fromDay, toDay) {
+  const { from, to } = checkedRange(fromDay, toDay);
+  return `
+SELECT b.bill_date AS day, d.store_slug, st.name AS store_name,
+  COALESCE(SUM((d.line_payable - d.total_tax) * b.sign), 0) AS sales_ex_tax,
+  COALESCE(SUM((d.line_payable - d.total_tax) * b.sign) FILTER (WHERE d.total_landing_without_tax > 0), 0) AS costed_sales,
+  COALESCE(SUM(d.total_landing_without_tax * b.sign) FILTER (WHERE d.total_landing_without_tax > 0), 0) AS cost,
+  COALESCE(SUM((d.line_payable - d.total_tax) * b.sign) FILTER (WHERE d.total_landing_without_tax <= 0 AND d.article_id <> 0), 0) AS uncosted_sales
+FROM public.bill_details d
+JOIN public.bills b ON b.bill_no = d.bill_no
+LEFT JOIN peti.stores st ON st.slug = d.store_slug
+WHERE b.bill_date BETWEEN DATE '${from}' AND DATE '${to}'
+GROUP BY b.bill_date, d.store_slug, st.name
+ORDER BY b.bill_date, d.store_slug`;
+}
+
 function buildStockSummaryQuery() {
   return `
 SELECT p.store_id, p.stock_location,
@@ -208,6 +238,23 @@ function mapPurchaseRows(rows, resolve) {
 // The selling location; damaged, dock, GRN-holding and production stock is not on the shelf.
 const SELLABLE_LOCATION = "main";
 
+/** bill_details rows -> [{ day, store, sales_ex_tax, costed_sales, cost, margin, uncosted_sales }]. */
+function mapMarginRows(rows, resolve) {
+  return (rows || []).map((r) => {
+    const costed = round2(r.costed_sales);
+    const cost = round2(r.cost);
+    return {
+      day: dayOf(r.day),
+      store: resolve(r.store_slug, r.store_name).key,
+      sales_ex_tax: round2(r.sales_ex_tax),
+      costed_sales: costed,
+      cost,
+      margin: round2(costed - cost),
+      uncosted_sales: round2(r.uncosted_sales),
+    };
+  });
+}
+
 /** Stock rows -> [{ store, quantity, cost_value, mrp_value, sellable_cost_value, articles, locations }]. */
 function mapStockRows(rows, resolve) {
   const out = new Map();
@@ -248,6 +295,8 @@ module.exports = {
   buildSalesRangeQuery,
   buildPurchaseRangeQuery,
   buildStockSummaryQuery,
+  buildMarginRangeQuery,
+  mapMarginRows,
   invoiceTypeKind,
   storeResolver,
   mapSalesRows,

@@ -5,9 +5,6 @@ const B = require("../utils/business_dashboard");
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const CACHE_MAX = 50;
 
-const MARGIN_PENDING =
-  "Margin needs RetailPilot's bill line items with their cost, which no RetailPilot table read by this app has yet.";
-
 /**
  * Business Dashboard: Purchase, Sales, Sales Return, Purchase Return and
  * Stock per store, live from RetailPilot (utils/business_dashboard.js).
@@ -69,17 +66,19 @@ class BusinessDashboard {
     if (range.error) return { code: 422, msg: range.error };
     const { from, to } = range;
 
-    const [branches, sales, purchases, stock] = await Promise.all([
+    const [branches, sales, purchases, stock, margin] = await Promise.all([
       this.loadBranches(),
       this._section("sales", this.salesSpectra, `sales|${from}|${to}`, B.buildSalesRangeQuery(from, to), refresh),
       this._section("purchases", this.runwaySpectra, `purchases|${from}|${to}`, B.buildPurchaseRangeQuery(from, to), refresh),
       this._section("stock", this.runwaySpectra, "stock", B.buildStockSummaryQuery(), refresh),
+      this._section("margin", this.salesSpectra, `margin|${from}|${to}`, B.buildMarginRangeQuery(from, to), refresh),
     ]);
 
     const { resolve, stores } = B.storeResolver(branches);
     const salesRows = B.mapSalesRows(sales.rows, resolve);
     const purchaseMapped = B.mapPurchaseRows(purchases.rows, resolve);
     const stockRows = B.mapStockRows(stock.rows, resolve);
+    const marginRows = B.mapMarginRows(margin.rows, resolve);
 
     const scoped = (rows) => B.scopeRows(rows, store_ids, stores);
     const visibleStores = [...stores.values()].filter((s) =>
@@ -105,7 +104,7 @@ class BusinessDashboard {
           purchase_return_found: hasReturnType,
         },
         stock: { ok: stock.ok, error: stock.error || null, fetched_at: stock.fetched_at || null, rows: scoped(stockRows) },
-        margin: { ok: false, pending: MARGIN_PENDING },
+        margin: { ok: margin.ok, error: margin.error || null, fetched_at: margin.fetched_at || null, rows: scoped(marginRows) },
       },
     };
   }
