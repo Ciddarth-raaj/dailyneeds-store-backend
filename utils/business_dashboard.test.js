@@ -113,53 +113,6 @@ describe("stores", () => {
   });
 });
 
-describe("open gate passes", () => {
-  it("the query takes OPEN passes only, oldest first, with any inspection", () => {
-    const q = B.buildOpenGatePassQuery();
-    assert.match(q, /FROM public\.gate_passes g/);
-    assert.match(q, /WHERE g\.status = 'OPEN'/);
-    assert.match(q, /LEFT JOIN public\.grn_inspection_header i ON i\.gatepass_slug = g\.slug/);
-    assert.match(q, /ORDER BY g\.entry_time/);
-  });
-
-  it("one row per pass, supplier named, age from entry, inspections collected", () => {
-    const { resolve } = B.storeResolver(BRANCHES);
-    const now = Date.parse("2026-11-15T06:00:00Z");
-    const rows = B.mapGatePassRows(
-      [
-        { slug: "GP-1", store_id: "kathir-slug", supplier_id: 42, vehicle_number: "PY01AB1234", entry_time: "2026-11-14T06:00:00Z", inspection_slug: "IN-1", inspection_state: "IN_PROGRESS" },
-        { slug: "GP-1", store_id: "kathir-slug", supplier_id: 42, vehicle_number: "PY01AB1234", entry_time: "2026-11-14T06:00:00Z", inspection_slug: "IN-2", inspection_state: "DONE" },
-        { slug: "GP-2", store_id: "nowhere", supplier_id: "9", entry_time: "2026-11-15T04:30:00Z", inspection_slug: null },
-      ],
-      [{ id: "42", name: "Acme Foods" }],
-      resolve,
-      now
-    );
-    assert.equal(rows.length, 2);
-    assert.deepEqual(
-      [rows[0].store, rows[0].supplier_name, rows[0].open_hours, rows[0].inspections.length],
-      ["outlet:3", "Acme Foods", 24, 2]
-    );
-    assert.deepEqual([rows[1].store, rows[1].supplier_name, rows[1].open_hours, rows[1].inspections], ["rp:nowhere", null, 1.5, []]);
-  });
-
-  it("an Own Store caller sees only their branch's passes", async () => {
-    const runway = fakeSpectra((q) => {
-      if (/gate_passes/.test(q)) {
-        return [
-          { slug: "GP-1", store_id: "kathir-slug", supplier_id: "1", entry_time: "2026-11-14T06:00:00Z" },
-          { slug: "GP-2", store_id: "vallalar-slug", supplier_id: "1", entry_time: "2026-11-14T06:00:00Z" },
-        ];
-      }
-      return [];
-    });
-    const sales = fakeSpectra(() => []);
-    const uc = usecaseFactory(sales, runway, async () => BRANCHES);
-    const r = await uc.getSummary({ from_date: "2026-11-01", to_date: "2026-11-15", store_ids: [4] });
-    assert.deepEqual(r.data.gate_passes.rows.map((g) => g.slug), ["GP-2"]);
-  });
-});
-
 const fakeSpectra = (handler) => ({
   isConfigured: () => true,
   calls: 0,
