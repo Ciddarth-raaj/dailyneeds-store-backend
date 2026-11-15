@@ -435,6 +435,136 @@ function classifyFlow(passes, inspections, documents) {
   return { gate_pass, inspection, grn, no_invoice, written_off };
 }
 
+// ---------------------------------------------------------------- dispatch
+//
+// picknpack.stock_transfers: one row per dispatch (one truck trip to one
+// store), raised at Finish Loading. IN_TRANSIT until the store unloads a
+// box, PARTIALLY_RECEIVED while some boxes are still on the truck, RECEIVED
+// when every line is in. stage_ids are the documents behind the boxes:
+// INV-... supplier invoices (cross-dock GRN), ADA-... ad-hoc allocations,
+// anything else a stock transfer advice (STA).
+// picknpack.stock_transfer_lines: one row per batch per box; returned_qty is
+// what the receiving store's verification sent back (it found the box short).
+
+const SHORT_DAYS = 7;
+
+/** Transfers still on the road, and every one dispatched lately (for shortfalls). */
+function buildTransfersQuery() {
+  return `
+SELECT t.slug, t.job_type, t.origin_store, t.destination_store, t.status,
+  t.dispatched_at, t.received_at, t.truck_id, t.box_count, t.article_count,
+  t.total_qty, t.total_landing_cost, t.total_mrp_value, t.eway_bill_no, t.stage_ids
+FROM picknpack.stock_transfers t
+WHERE t.status IN ('IN_TRANSIT', 'PARTIALLY_RECEIVED')
+   OR t.dispatched_at >= CURRENT_DATE - ${SHORT_DAYS}
+ORDER BY t.dispatched_at, t.slug`;
+}
+
+/** Per transfer, what its receiving store's verification sent back lately. */
+function buildShortLinesQuery() {
+  return `
+SELECT l.transfer_slug,
+  COUNT(*) AS short_lines,
+  COALESCE(SUM(l.qty), 0) AS qty,
+  COALESCE(SUM(l.returned_qty), 0) AS returned_qty,
+  COALESCE(SUM(l.returned_qty * l.landing_cost), 0) AS returned_value,
+  MAX(l.returned_at) AS returned_at
+FROM picknpack.stock_transfer_lines l
+WHERE l.returned_qty > 0
+  AND l.returned_at >= CURRENT_DATE - ${SHORT_DAYS}
+GROUP BY l.transfer_slug`;
+}
+
+/** stage_ids arrive as an array, or as text such as "{a,b}" or "['a', 'b']". */
+function parseIds(value) {
+  if (Array.isArray(value)) return value.map(clean).filter(Boolean);
+  const text = clean(value);
+  if (!text) return [];
+  return text
+    .replace(/^[[{]|[\]}]$/g, "")
+    .split(",")
+    .map((v) => v.replace(/^[\s'"]+|[\s'"]+$/g, ""))
+    .filter(Boolean);
+}
+
+/** What a transfer carries: supplier invoices, ad-hoc allocations, STAs. */
+function documentMix(ids) {
+  const mix = { invoices: 0, adhoc: 0, sta: 0 };
+  ids.forEach((id) => {
+    if (/^INV-/i.test(id)) mix.invoices += 1;
+    else if (/^ADA-/i.test(id)) mix.adhoc += 1;
+    else mix.sta += 1;
+  });
+  return mix;
+}
+
+/** Transfer rows (+ shortfalls by transfer) -> rows the flow lists. */
+function mapTransferRows(rows, shortRows, resolve) {
+  const short = new Map(
+    (shortRows || []).map((r) => [
+      clean(r.transfer_slug),
+      {
+        short_lines: num(r.short_lines) || 0,
+        line_qty: num(r.qty) || 0,
+        returned_qty: num(r.returned_qty) || 0,
+        returned_value: num(r.returned_value) || 0,
+        returned_at: iso(r.returned_at),
+      },
+    ])
+  );
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const slug = clean(r.slug);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const ids = parseIds(r.stage_ids);
+    const to = resolve(r.destination_store, null);
+    const from = resolve(r.origin_store, null);
+    out.push({
+      ref: slug,
+      kind: "transfer",
+      transfer: slug,
+      status: clean(r.status).toUpperCase() || null,
+      job_type: clean(r.job_type).toUpperCase() || null,
+      store: to.key,
+      origin: from.key,
+      dispatched_at: iso(r.dispatched_at),
+      received_at: iso(r.received_at),
+      truck_id: clean(r.truck_id) || null,
+      box_count: num(r.box_count) || 0,
+      article_count: num(r.article_count) || 0,
+      total_qty: num(r.total_qty) || 0,
+      total_landing_cost: num(r.total_landing_cost),
+      total_mrp_value: num(r.total_mrp_value),
+      eway_bill_no: clean(r.eway_bill_no) || null,
+      documents_mix: documentMix(ids),
+      invoice_refs: ids.filter((id) => /^INV-/i.test(id)),
+      short: short.get(slug) || null,
+    });
+  }
+  return out;
+}
+
+/**
+ * in_transit      dispatched, not every box received yet (since: dispatched)
+ * short_received  received lately, and the store's verification sent units
+ *                 back (since: when the last return was recorded)
+ */
+function classifyTransfers(transfers) {
+  const in_transit = [];
+  const short_received = [];
+  for (const t of transfers || []) {
+    if (t.status === "IN_TRANSIT" || t.status === "PARTIALLY_RECEIVED") {
+      in_transit.push({ ...t, since: t.dispatched_at });
+    }
+    if (t.short && t.short.returned_qty > 0) {
+      short_received.push({ ...t, since: t.short.returned_at || t.received_at || t.dispatched_at });
+    }
+  }
+  return { in_transit, short_received };
+}
+
 /** The stages, in order. Only `built` stages are read. */
 const STAGES = [
   { key: "gate_pass", label: "Gate pass", built: true, hint: "In through the gate; not inspected and no invoice uploaded yet" },
@@ -442,16 +572,25 @@ const STAGES = [
   { key: "grn", label: "GRN", built: true, hint: "Supplier invoices waiting for their GRN" },
   { key: "allocation", label: "Allocation", built: false },
   { key: "ready_to_dispatch", label: "Ready to dispatch", built: false },
+  { key: "in_transit", label: "In transit", built: true, hint: "Dispatched to a store, not every box received yet" },
 ];
 
 /** Lists outside the flow that need somebody to act. */
 const ATTENTION = [
+  { key: "short_received", label: "Short on receiving", hint: `Store verification sent units back, last ${SHORT_DAYS} days` },
   { key: "no_invoice", label: "Inspected, invoice not uploaded", hint: "Inspection done, but no supplier invoice uploaded for the GRN" },
   { key: "written_off", label: "Written off", hint: `Inspections written off in the last ${WRITTEN_OFF_DAYS} days` },
 ];
 
 module.exports = {
   STAGES,
+  SHORT_DAYS,
+  buildTransfersQuery,
+  buildShortLinesQuery,
+  parseIds,
+  documentMix,
+  mapTransferRows,
+  classifyTransfers,
   buildDocumentsQuery,
   buildGatePassDocumentsQuery,
   mapDocumentRows,
