@@ -8,6 +8,7 @@ const respondError = require("../utils/http");
  *
  *   GET /flow                 every stage and what is in it now
  *   GET /gate-pass/:slug      one gate pass with its inspections
+ *   GET /inspection/:slug     one inspection with its gate pass
  */
 class WarehouseFlowRoutes {
   constructor(usecase, dashboards) {
@@ -32,6 +33,14 @@ class WarehouseFlowRoutes {
           store_ids: this.dashboards.storeIdsFor(req),
         });
         send(res, result, { dashboard_scope: scopeForClient(req.dashboardScope) });
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.get("/inspection/:slug", guard, async (req, res) => {
+      try {
+        send(res, await this.usecase.getInspection({ slug: req.params.slug, store_ids: this.dashboards.storeIdsFor(req) }));
       } catch (err) {
         respondError(res, err);
       }

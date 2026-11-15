@@ -58,27 +58,70 @@ class WarehouseFlow {
       .sort((a, b) => Number(b.mapped) - Number(a.mapped) || a.name.localeCompare(b.name));
   }
 
-  /** Every stage with what is in it now. Only built stages are read. */
+  /**
+   * Every stage with what is in it now (utils/warehouse_flow.js classifyFlow),
+   * plus the lists that need somebody to act. Each source is read on its own:
+   * a stage whose source fails says so and the others still show.
+   */
   async getFlow({ refresh = false, store_ids = null } = {}) {
-    const [branches, passes, vendors] = await Promise.all([
+    const [branches, passes, inspections, vendors] = await Promise.all([
       this.loadBranches(),
       this._read("gate_passes", "gate_passes:open", W.buildOpenGatePassesQuery(), refresh),
+      this._read("inspections", "inspections:active", W.buildActiveInspectionsQuery(), refresh),
       this._read("vendors", "vendors", W.buildVendorNamesQuery(), false),
     ]);
     const { resolve, stores } = storeResolver(branches);
-    // Ages run from when the list was read, so a cached list is not younger than it is.
     const at = passes.fetched_at ? Date.parse(passes.fetched_at) : this.now();
-    const gateRows = scopeRows(W.mapGatePassRows(passes.rows, vendors.rows, resolve, at), store_ids, stores);
+    const lists = W.classifyFlow(
+      W.mapGatePassRows(passes.rows, vendors.rows, resolve, at),
+      W.mapInspectionRows(inspections.rows, vendors.rows, resolve)
+    );
+    // Which read each list depends on, so a failure is reported where it shows.
+    const source = { gate_pass: passes, inspection: inspections, grn: passes.ok ? inspections : passes, written_off: inspections };
+    const section = (def) => {
+      const src = source[def.key];
+      return {
+        ...def,
+        ok: src.ok,
+        error: src.error || null,
+        fetched_at: src.fetched_at || null,
+        rows: scopeRows(lists[def.key] || [], store_ids, stores),
+      };
+    };
 
     return {
       code: 200,
       data: {
         stores: this._visibleStores(stores, store_ids),
-        stages: W.STAGES.map((s) =>
-          s.key === "gate_pass"
-            ? { ...s, ok: passes.ok, error: passes.error || null, fetched_at: passes.fetched_at || null, rows: gateRows }
-            : { ...s, ok: false, error: null, rows: [] }
-        ),
+        stages: W.STAGES.map((def) => (def.built ? section(def) : { ...def, ok: false, error: null, rows: [] })),
+        attention: W.ATTENTION.map(section),
+      },
+    };
+  }
+
+  /** One inspection, with its line totals and its gate pass when it has one. */
+  async getInspection({ slug, store_ids = null }) {
+    const s = W.validSlug(slug);
+    if (!s) return { code: 422, msg: "Invalid inspection" };
+    const [branches, insp, vendors] = await Promise.all([
+      this.loadBranches(),
+      this._read("inspection", `inspection:${s}`, W.buildInspectionQuery(s), true),
+      this._read("vendors", "vendors", W.buildVendorNamesQuery(), false),
+    ]);
+    if (!insp.ok) return { code: 502, msg: `RetailPilot: ${insp.error}` };
+    const { resolve, stores } = storeResolver(branches);
+    const [row] = scopeRows(W.mapInspectionRows(insp.rows, vendors.rows, resolve), store_ids, stores);
+    if (!row) return { code: 404, msg: "Inspection not found" };
+
+    const totals = await this._read("inspection_totals", `inspection_totals:i:${s}`, W.buildInspectionTotalsQuery([s]), true);
+    const store = stores.get(row.store);
+    return {
+      code: 200,
+      data: {
+        ...row,
+        store_name: store ? store.name : row.store,
+        totals: totals.ok ? W.mapInspectionTotals(totals.rows).get(s) || null : null,
+        inspection_totals_error: totals.ok ? null : totals.error,
       },
     };
   }

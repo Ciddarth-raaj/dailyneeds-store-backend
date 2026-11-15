@@ -25,6 +25,12 @@ const PASS_ROWS = [
   { slug: "GP-2", status: "OPEN", store_id: "kathir", supplier_id: "9", entry_time: "2026-11-15T04:30:00Z", inspection_slug: null },
 ];
 
+const INSPECTION_ROWS = [
+  { slug: "IN-1", state: "IN_PROGRESS", store_id: "wh", supplier_id: 42, created_at: "2026-11-15T05:00:00Z", gatepass_slug: "GP-1", gate_status: "OPEN" },
+  { slug: "IN-9", state: "COMPLETED", store_id: "kathir", supplier_id: "9", created_at: "2026-11-14T05:00:00Z", updated_at: "2026-11-14T08:00:00Z", invoice_id: null },
+  { slug: "IN-7", state: "WRITTEN_OFF", store_id: "wh", supplier_id: "9", created_at: "2026-11-10T05:00:00Z", updated_at: "2026-11-10T06:00:00Z" },
+];
+
 const fakeSpectra = (handler) => ({
   isConfigured: () => true,
   queries: [],
@@ -40,6 +46,8 @@ const runway = () =>
     if (/grn_inspection_details/.test(q)) return [{ grn_inspection_id: "IN-1", lines: 12, invoice_qty: 100, inspected_qty: 96, free_qty: 4, rejected_qty: 2 }];
     if (/g\.slug = 'GP-1'/.test(q)) return PASS_ROWS.slice(0, 2);
     if (/g\.slug = 'GP-2'/.test(q)) return PASS_ROWS.slice(2);
+    if (/i\.slug = 'IN-9'/.test(q)) return INSPECTION_ROWS.slice(1, 2);
+    if (/i\.state NOT IN/.test(q)) return INSPECTION_ROWS;
     if (/g\.status = 'OPEN'/.test(q)) return PASS_ROWS;
     return [];
   });
@@ -83,21 +91,62 @@ describe("mapping", () => {
   });
 });
 
+describe("classifyFlow", () => {
+  const pass = (slug, inspections, status = "OPEN") => ({ slug, status, store: "outlet:2", inspections, entry_time: "2026-11-14T06:00:00Z" });
+  const insp = (slug, state, grn_started, extra = {}) => ({ slug, state, grn_started, store: "outlet:2", created_at: "2026-11-14T07:00:00Z", updated_at: "2026-11-14T09:00:00Z", ...extra });
+  it("places by what happened; an open pass with a finished inspection is a GRN not yet done", () => {
+    const out = W.classifyFlow(
+      [
+        pass("GP-wait", []),
+        pass("GP-doing", [insp("A", "IN_PROGRESS", false)]),
+        pass("GP-grn-pending", [insp("B", "COMPLETED", false)]),
+        pass("GP-grn-started", [insp("C", "COMPLETED", true)]),
+        pass("GP-rejected", [insp("E", "WRITTEN_OFF", false)]),
+        pass("GP-closed", [insp("F", "COMPLETED", true)], "CLOSED"),
+      ],
+      [
+        insp("A", "IN_PROGRESS", false, { gate_pass: "GP-doing", gate_status: "OPEN" }),
+        insp("B", "COMPLETED", false, { gate_pass: "GP-grn-pending", gate_status: "OPEN" }),
+        insp("G", "COMPLETED", false, { gate_pass: "GP-old", gate_status: "CLOSED" }),
+        insp("E", "WRITTEN_OFF", false, { gate_pass: "GP-rejected", gate_status: "OPEN" }),
+      ]
+    );
+    const refs = (k) => out[k].map((r) => r.ref);
+    assert.deepEqual(refs("gate_pass"), ["GP-wait"]);
+    assert.deepEqual(refs("inspection"), ["A"]);
+    assert.deepEqual(refs("grn"), ["GP-grn-pending", "GP-grn-started", "G"], "B once, via its open pass");
+    assert.deepEqual(out.grn.map((r) => r.grn_started), [false, true, false]);
+    assert.deepEqual(refs("written_off"), ["E"]);
+    assert.equal(out.grn[0].since, "2026-11-14T09:00:00Z");
+    assert.equal(out.not_closed, undefined);
+  });
+  it("the inspections query takes unfinished, GRN-pending and recent write-offs", () => {
+    const q = W.buildActiveInspectionsQuery();
+    assert.match(q, /i\.state NOT IN \('COMPLETED', 'WRITTEN_OFF'\)/);
+    assert.match(q, /i\.state = 'COMPLETED' AND i\.invoice_id IS NULL/);
+    assert.match(q, /CURRENT_DATE - 30/);
+    assert.doesNotMatch(q, /GROUP BY/);
+  });
+});
+
 describe("usecase", () => {
-  it("the flow lists stage 1 in scope; the other stages are not read", async () => {
-    const s = runway();
-    const uc = usecaseFactory(s, async () => BRANCHES);
+  it("each stage holds what has happened to it, in scope", async () => {
+    const uc = usecaseFactory(runway(), async () => BRANCHES);
     const all = await uc.getFlow({ store_ids: null });
+    const rows = (key) => all.data.stages.find((x) => x.key === key).rows.map((r) => r.ref);
     assert.deepEqual(all.data.stages.map((x) => [x.key, x.built]), [
       ["gate_pass", true],
-      ["inspection", false],
-      ["grn", false],
+      ["inspection", true],
+      ["grn", true],
       ["allocation", false],
       ["ready_to_dispatch", false],
     ]);
-    assert.deepEqual(all.data.stages[0].rows.map((r) => r.slug), ["GP-1", "GP-2"]);
+    assert.deepEqual(rows("gate_pass"), ["GP-2"], "only the open pass with no inspection");
+    assert.deepEqual(rows("inspection"), ["IN-1"]);
+    assert.deepEqual(rows("grn"), ["IN-9"]);
+    assert.deepEqual(all.data.attention.map((x) => [x.key, x.rows.map((r) => r.ref)]), [["written_off", ["IN-7"]]]);
     const own = await uc.getFlow({ store_ids: [3] });
-    assert.deepEqual(own.data.stages[0].rows.map((r) => r.slug), ["GP-2"]);
+    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [["GP-2"], [], ["IN-9"], [], []]);
     assert.deepEqual(own.data.stores.map((x) => x.key), ["outlet:3"]);
   });
 
@@ -110,6 +159,15 @@ describe("usecase", () => {
     assert.equal(r.data.inspections[1].totals, null);
     assert.equal((await uc.getGatePass({ slug: "GP-1", store_ids: [3] })).code, 404);
     assert.equal((await uc.getGatePass({ slug: "bad slug!" })).code, 422);
+  });
+
+  it("one inspection, in scope only", async () => {
+    const uc = usecaseFactory(runway(), async () => BRANCHES);
+    const r = await uc.getInspection({ slug: "IN-9", store_ids: [3] });
+    assert.equal(r.code, 200);
+    assert.deepEqual([r.data.state, r.data.store_name, r.data.grn_started], ["COMPLETED", "Kathirkamam", false]);
+    assert.equal((await uc.getInspection({ slug: "IN-9", store_ids: [2] })).code, 404);
+    assert.equal((await uc.getInspection({ slug: "x y" })).code, 422);
   });
 
   it("RetailPilot refusing the list is reported, not thrown", async () => {
@@ -156,7 +214,7 @@ describe("routes", () => {
     try {
       const flow = await get(server, "/warehouse-flow/flow");
       assert.equal(flow.status, 200);
-      assert.deepEqual(flow.body.data.stages[0].rows.map((r) => r.slug), ["GP-2"]);
+      assert.deepEqual(flow.body.data.stages[0].rows.map((r) => r.ref), ["GP-2"]);
       assert.equal(flow.body.dashboard_scope.kind, "OWN_STORE");
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-1")).status, 404);
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-2")).status, 200);
