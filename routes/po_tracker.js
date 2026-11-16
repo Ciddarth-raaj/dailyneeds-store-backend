@@ -2,7 +2,7 @@ const respondError = require("../utils/http");
 
 /**
  * PO Tracker (/po-tracker), live from RetailPilot. Read-only, for buyers:
- * behind `view_purchase_order`.
+ * behind `view_po_tracker`.
  *
  *   GET /po-tracker?refresh=1   latest POs per store and supplier
  */
@@ -16,7 +16,7 @@ class PoTrackerRoutes {
 
   init() {
     const guard = this.permissions
-      ? this.permissions.require("view_purchase_order")
+      ? this.permissions.require("view_po_tracker")
       : (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
 
     this.router.get("/", guard, async (req, res) => {
