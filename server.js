@@ -1319,10 +1319,20 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
     );
+    this.poFollowupRepo = require("./repository/po_followup")(this.mysql.connection);
     this.poTrackerUsecase = require("./usecase/po_tracker")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
-      require("./repository/po_followup")(this.mysql.connection)
+      this.poFollowupRepo
     );
+    // The 7 pm PO follow-up summary on Telegram (cron below) and its
+    // "send me now" button on the PO Tracker.
+    this.poDailySummary = require("./usecase/po_daily_summary")({
+      poTracker: this.poTrackerUsecase,
+      followupRepo: this.poFollowupRepo,
+      summaryRepo: require("./repository/po_daily_summary")(this.mysql.connection),
+      telegramService: require("./services/telegram")(),
+      trackerUrl: process.env.PO_TRACKER_URL || "https://dnds.co.in/purchase-order/tracker",
+    });
     this.transfersUsecase = require("./usecase/transfers")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
@@ -2165,7 +2175,7 @@ class Server {
       this.businessDashboardUsecase,
       this.dashboardScope
     );
-    const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions);
+    const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions, this.poDailySummary);
     const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
     const warehouseFlowRouter = require("./routes/warehouse_flow")(
       this.warehouseFlowUsecase,
@@ -2874,6 +2884,35 @@ class Server {
      * wrapper below catches anything that escapes so a cron tick can never
      * take the process down.
      */
+    // PO FOLLOW-UP SUMMARY - 7 pm IST, Monday to Saturday: chased / not
+    // chased of the POs due a follow-up today, privately to everyone holding
+    // receive_po_daily_summary. ON unless PO_DAILY_SUMMARY_TELEGRAM_ENABLED is
+    // "false". One send per person per day (po_daily_summary_sends).
+    this.cronService.register(
+      "po_daily_summary_telegram",
+      "0 19 * * 1-6",
+      async () => {
+        if (String(process.env.PO_DAILY_SUMMARY_TELEGRAM_ENABLED || "").toLowerCase() === "false") {
+          console.log("[CRON] po_daily_summary_telegram - PO_DAILY_SUMMARY_TELEGRAM_ENABLED is 'false'; nothing sent");
+          return;
+        }
+        try {
+          const r = await this.poDailySummary.run();
+          console.log(`[CRON] po_daily_summary_telegram ${r.date}: ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "CRON.PO_DAILY_SUMMARY_TELEGRAM",
+            code: "CRON.PO_DAILY_SUMMARY_TELEGRAM.RUN",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+        }
+      },
+      { preventOverlap: true }
+    );
+
     this.cronService.register("attendance_missing_telegram", "0 7 * * *", async () => {
       if (String(process.env.ATTENDANCE_MISSING_TELEGRAM_ENABLED || "").toLowerCase() !== "true") {
         console.log(

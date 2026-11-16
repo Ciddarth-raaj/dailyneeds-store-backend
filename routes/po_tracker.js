@@ -9,6 +9,7 @@ const { CHANNELS } = require("../utils/po_tracker");
  *   GET  /po-tracker?refresh=1        latest POs per store and supplier, with each one's last remark   view_po_tracker
  *   GET  /po-tracker/:slug/followups  one PO's remarks + the supplier's on its other POs              view_po_tracker
  *   POST /po-tracker/:slug/followups  add a remark                                                     add_po_followup
+ *   POST /po-tracker/daily-summary/send-me   today's follow-up summary so far, to my own Telegram      receive_po_daily_summary
  */
 const day = Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).allow(null, "").optional();
 const followupSchema = Joi.object({
@@ -19,9 +20,10 @@ const followupSchema = Joi.object({
 });
 
 class PoTrackerRoutes {
-  constructor(usecase, permissions) {
+  constructor(usecase, permissions, dailySummary = null) {
     this.usecase = usecase;
     this.permissions = permissions;
+    this.dailySummary = dailySummary;
     this.router = require("express").Router();
     this.init();
   }
@@ -37,6 +39,15 @@ class PoTrackerRoutes {
     this.router.get("/", need("view_po_tracker"), async (req, res) => {
       try {
         send(res, await this.usecase.list({ refresh: String(req.query.refresh || "") === "1" }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/daily-summary/send-me", need("receive_po_daily_summary"), async (req, res) => {
+      try {
+        if (!this.dailySummary) return res.status(400).json({ code: 400, msg: "Daily summary is not set up" });
+        send(res, await this.dailySummary.sendToMe((req.decoded && req.decoded.employee_id) || null));
       } catch (err) {
         respondError(res, err);
       }
@@ -73,4 +84,4 @@ class PoTrackerRoutes {
   }
 }
 
-module.exports = (usecase, permissions) => new PoTrackerRoutes(usecase, permissions);
+module.exports = (usecase, permissions, dailySummary) => new PoTrackerRoutes(usecase, permissions, dailySummary);

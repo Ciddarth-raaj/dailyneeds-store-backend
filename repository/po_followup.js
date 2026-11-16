@@ -82,6 +82,29 @@ class PoFollowupRepository {
     );
   }
 
+  /** The POs with at least one remark written in [from, to). */
+  async chasedBetween(from, to) {
+    const rows = await this.run(
+      "CHASED_BETWEEN",
+      "SELECT DISTINCT po_slug FROM po_followups WHERE created_at >= ? AND created_at < ?",
+      [from, to]
+    );
+    return rows.map((r) => r.po_slug);
+  }
+
+  /** The latest remark written before `before` on each of `slugs`. */
+  async latestBefore(slugs, before) {
+    if (!slugs || !slugs.length) return [];
+    return this.run(
+      "LATEST_BEFORE",
+      `SELECT ${COLUMNS}${FROM}
+       JOIN (SELECT po_slug, MAX(po_followup_id) AS last_id
+               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) AND created_at < ? GROUP BY po_slug) c
+         ON c.last_id = f.po_followup_id`,
+      [...slugs, before]
+    );
+  }
+
   /** The latest remark on each of `slugs`, with how many each PO has. */
   async latestFor(slugs) {
     if (!slugs || !slugs.length) return [];

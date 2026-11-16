@@ -48,4 +48,14 @@ describe("po_followup repository", { skip: !URL && "PO_TEST_MYSQL not set" }, ()
     assert.deepEqual((await repo.forSupplier("9", "p1")).map((r) => r.remark), ["Old PO"]);
     assert.deepEqual(await repo.latestFor([]), []);
   });
+
+  it("finds POs chased in a window and the last remark before it", async () => {
+    await q("UPDATE po_followups SET created_at = '2026-11-15 10:00:00' WHERE remark = 'No answer'");
+    await q("UPDATE po_followups SET created_at = '2026-11-16 10:00:00' WHERE remark <> 'No answer'");
+    const start = new Date(2026, 10, 16);
+    const end = new Date(2026, 10, 17);
+    assert.deepEqual((await repo.chasedBetween(start, end)).sort(), ["p0", "p1"]);
+    const before = await repo.latestBefore(["p1", "p0"], start);
+    assert.deepEqual(before.map((r) => [r.po_slug, r.remark]), [["p1", "No answer"]]);
+  });
 });
