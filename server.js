@@ -1320,7 +1320,8 @@ class Server {
       () => this.outletRepo.getRetailPilotIds()
     );
     this.poTrackerUsecase = require("./usecase/po_tracker")(
-      require("./services/retailpilot_spectra")(retailPilotConfig)
+      require("./services/retailpilot_spectra")(retailPilotConfig),
+      require("./repository/po_followup")(this.mysql.connection)
     );
     this.transfersUsecase = require("./usecase/transfers")(
       require("./services/retailpilot_spectra")(retailPilotConfig),

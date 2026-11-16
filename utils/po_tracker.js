@@ -130,4 +130,51 @@ function mapPurchaseOrders(rows) {
   return [...out.values()];
 }
 
-module.exports = { PO_TRACKER_QUERY, mapPurchaseOrders };
+/* ------------------------------------------------------------------ */
+/* Follow-ups                                                          */
+/* ------------------------------------------------------------------ */
+
+const CHANNELS = ["CALL", "WHATSAPP", "EMAIL", "VISIT"];
+/** Days after the PO date before it needs chasing, and between chases. */
+const FOLLOW_UP_AFTER_DAYS = 2;
+const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_\/-]{0,99}$/;
+
+const validSlug = (value) => {
+  const s = clean(value);
+  return SLUG_PATTERN.test(s) ? s : null;
+};
+
+const addDays = (isoDay, n) => {
+  const d = new Date(`${isoDay}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+/**
+ * Does this PO need chasing today? Only approved POs with nothing received
+ * (Awaiting delivery and Expired), at least FOLLOW_UP_AFTER_DAYS past the
+ * PO date, and either never followed up, due by the next follow-up date set
+ * on the last remark, or - with no such date - last chased that many days
+ * ago or more.
+ *
+ * @param po      a mapped PO (mapPurchaseOrders)
+ * @param last    its latest follow-up, or null; last.created_day is the IST day it was written
+ * @param today   IST day, YYYY-MM-DD
+ */
+function needsFollowUp(po, last, today) {
+  if (!po || po.status !== "APPROVED" || !po.po_date) return false;
+  if (po.po_date > addDays(today, -FOLLOW_UP_AFTER_DAYS)) return false;
+  if (!last) return true;
+  if (last.next_follow_up_date) return last.next_follow_up_date <= today;
+  return !last.created_day || last.created_day <= addDays(today, -FOLLOW_UP_AFTER_DAYS);
+}
+
+module.exports = {
+  PO_TRACKER_QUERY,
+  mapPurchaseOrders,
+  CHANNELS,
+  FOLLOW_UP_AFTER_DAYS,
+  validSlug,
+  addDays,
+  needsFollowUp,
+};

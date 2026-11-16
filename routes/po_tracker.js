@@ -1,11 +1,23 @@
+const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
+const { CHANNELS } = require("../utils/po_tracker");
 
 /**
- * PO Tracker (/po-tracker), live from RetailPilot. Read-only, for buyers:
- * behind `view_po_tracker`.
+ * PO Tracker (/po-tracker): POs live from RetailPilot (read-only) and the
+ * team's supplier follow-up remarks.
  *
- *   GET /po-tracker?refresh=1   latest POs per store and supplier
+ *   GET  /po-tracker?refresh=1        latest POs per store and supplier, with each one's last remark   view_po_tracker
+ *   GET  /po-tracker/:slug/followups  one PO's remarks + the supplier's on its other POs              view_po_tracker
+ *   POST /po-tracker/:slug/followups  add a remark                                                     add_po_followup
  */
+const day = Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).allow(null, "").optional();
+const followupSchema = Joi.object({
+  channel: Joi.string().valid(...CHANNELS).required(),
+  remark: Joi.string().trim().min(1).max(1000).required(),
+  promised_delivery_date: day,
+  next_follow_up_date: day,
+});
+
 class PoTrackerRoutes {
   constructor(usecase, permissions) {
     this.usecase = usecase;
@@ -15,15 +27,41 @@ class PoTrackerRoutes {
   }
 
   init() {
-    const guard = this.permissions
-      ? this.permissions.require("view_po_tracker")
-      : (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    const deny = (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
+    const need = (key) => (this.permissions ? this.permissions.require(key) : deny);
+    const send = (res, result) => {
+      if (result.code === 200) return res.json(result);
+      return res.status([403, 404, 422, 502].includes(result.code) ? result.code : 400).json(result);
+    };
 
-    this.router.get("/", guard, async (req, res) => {
+    this.router.get("/", need("view_po_tracker"), async (req, res) => {
       try {
-        const result = await this.usecase.list({ refresh: String(req.query.refresh || "") === "1" });
-        if (result.code === 200) return res.json(result);
-        return res.status(result.code === 502 ? 502 : 400).json(result);
+        send(res, await this.usecase.list({ refresh: String(req.query.refresh || "") === "1" }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.get("/:slug/followups", need("view_po_tracker"), async (req, res) => {
+      try {
+        send(res, await this.usecase.followups({ slug: req.params.slug }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/:slug/followups", need("add_po_followup"), async (req, res) => {
+      try {
+        const { error, value } = followupSchema.validate(req.body || {});
+        if (error) return res.status(422).json({ code: 422, msg: error.details[0].message });
+        send(
+          res,
+          await this.usecase.addFollowup({
+            slug: req.params.slug,
+            ...value,
+            employee_id: (req.decoded && req.decoded.employee_id) || null,
+          })
+        );
       } catch (err) {
         respondError(res, err);
       }

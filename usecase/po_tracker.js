@@ -1,28 +1,48 @@
 const logger = require("../utils/logger");
 const P = require("../utils/po_tracker");
+const { istToday, istDateOf } = require("../utils/istDate");
 
 /** How long one RetailPilot answer is reused (refresh=1 skips it). */
 const TTL_MS = 2 * 60 * 1000;
 
-/** PO Tracker (utils/po_tracker.js), live from RetailPilot runway. */
+/** A follow-up row as the page sees it. */
+const followupOut = (r) =>
+  r && {
+    id: r.po_followup_id,
+    po_slug: r.po_slug,
+    po_ref: r.po_ref,
+    channel: r.channel,
+    remark: r.remark,
+    promised_delivery_date: r.promised_delivery_date || null,
+    next_follow_up_date: r.next_follow_up_date || null,
+    created_by: r.created_by,
+    created_by_name: r.created_by_name || null,
+    created_at: r.created_at ? new Date(r.created_at).toISOString() : null,
+    created_day: r.created_at ? istDateOf(new Date(r.created_at)) : null,
+    remark_count: r.remark_count === undefined ? undefined : Number(r.remark_count),
+  };
+
+/**
+ * PO Tracker (utils/po_tracker.js): POs live from RetailPilot runway, with
+ * the team's follow-up remarks from our own po_followups table. The
+ * RetailPilot read is cached; remarks are always read fresh.
+ */
 class PoTracker {
-  constructor(spectra, now = () => Date.now()) {
+  constructor(spectra, followups, now = () => Date.now(), today = () => istToday()) {
     this.spectra = spectra;
+    this.followupRepo = followups;
     this.now = now;
+    this.today = today;
     this.cache = null;
   }
 
-  async list({ refresh = false } = {}) {
-    if (!this.spectra || !this.spectra.isConfigured()) {
-      return { code: 502, msg: "RetailPilot is not configured" };
-    }
-    if (!refresh && this.cache && this.now() - this.cache.at < TTL_MS) {
-      return this._answer(this.cache);
-    }
+  async _orders(refresh) {
+    if (!refresh && this.cache && this.now() - this.cache.at < TTL_MS) return this.cache;
+    if (!this.spectra || !this.spectra.isConfigured()) throw Object.assign(new Error("RetailPilot is not configured"), { rp: true });
     try {
       const rows = await this.spectra.queryAll(P.PO_TRACKER_QUERY);
       this.cache = { at: this.now(), orders: P.mapPurchaseOrders(rows) };
-      return this._answer(this.cache);
+      return this.cache;
     } catch (err) {
       logger.Log({
         level: logger.LEVEL.ERROR,
@@ -32,13 +52,84 @@ class PoTracker {
         category: "",
         ref: {},
       });
-      return { code: 502, msg: `RetailPilot: ${err.message}` };
+      throw Object.assign(err, { rp: true });
     }
   }
 
-  _answer({ at, orders }) {
-    return { code: 200, data: { fetched_at: new Date(at).toISOString(), orders } };
+  async list({ refresh = false } = {}) {
+    let cached;
+    try {
+      cached = await this._orders(refresh);
+    } catch (err) {
+      return { code: 502, msg: `RetailPilot: ${err.message}` };
+    }
+    const today = this.today();
+    let latest = new Map();
+    let followupsError = null;
+    if (this.followupRepo) {
+      try {
+        const rows = await this.followupRepo.latestFor(cached.orders.map((o) => o.po_slug));
+        latest = new Map(rows.map((r) => [r.po_slug, followupOut(r)]));
+      } catch (err) {
+        followupsError = "Follow-up remarks could not be read";
+      }
+    }
+    const orders = cached.orders.map((o) => {
+      const last = latest.get(o.po_slug) || null;
+      return { ...o, last_followup: last, needs_followup: followupsError ? false : P.needsFollowUp(o, last, today) };
+    });
+    return {
+      code: 200,
+      data: { fetched_at: new Date(cached.at).toISOString(), today, follow_up_after_days: P.FOLLOW_UP_AFTER_DAYS, followups_error: followupsError, orders },
+    };
+  }
+
+  async _order(slug) {
+    try {
+      const cached = await this._orders(false);
+      return cached.orders.find((o) => o.po_slug === slug) || null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** One PO's remarks, and the supplier's remarks on its other POs. */
+  async followups({ slug }) {
+    const s = P.validSlug(slug);
+    if (!s) return { code: 422, msg: "Invalid purchase order" };
+    const order = await this._order(s);
+    const remarks = await this.followupRepo.forPo(s);
+    const supplierId = (order && order.supplier_id) || (remarks[0] && remarks[0].supplier_id) || null;
+    const supplierRemarks = await this.followupRepo.forSupplier(supplierId, s);
+    return { code: 200, data: { po_slug: s, order, remarks: remarks.map(followupOut), supplier_remarks: supplierRemarks.map(followupOut) } };
+  }
+
+  /** Add one remark. The PO must be on the tracker (the latest PO for its supplier and store). */
+  async addFollowup({ slug, channel, remark, promised_delivery_date, next_follow_up_date, employee_id }) {
+    const s = P.validSlug(slug);
+    if (!s) return { code: 422, msg: "Invalid purchase order" };
+    if (!employee_id) return { code: 403, msg: "Only an employee login can add a follow-up" };
+    const text = String(remark || "").trim();
+    if (!text) return { code: 422, msg: "Remark is required" };
+    if (!P.CHANNELS.includes(channel)) return { code: 422, msg: "Choose how you followed up" };
+    const today = this.today();
+    if (next_follow_up_date && next_follow_up_date < today) return { code: 422, msg: "Next follow-up date cannot be in the past" };
+    const order = await this._order(s);
+    if (!order) return { code: 404, msg: "This PO is not on the PO Tracker. Refresh and try again." };
+    const saved = await this.followupRepo.add({
+      po_slug: s,
+      po_ref: order.po_ref,
+      supplier_id: order.supplier_id,
+      supplier_name: order.supplier,
+      store_id: order.store_id,
+      channel,
+      remark: text,
+      promised_delivery_date: promised_delivery_date || null,
+      next_follow_up_date: next_follow_up_date || null,
+      created_by: employee_id,
+    });
+    return { code: 200, data: followupOut(saved) };
   }
 }
 
-module.exports = (spectra, now) => new PoTracker(spectra, now);
+module.exports = (spectra, followups, now, today) => new PoTracker(spectra, followups, now, today);
