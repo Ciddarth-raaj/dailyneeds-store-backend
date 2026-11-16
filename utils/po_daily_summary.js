@@ -10,27 +10,33 @@ const { needsFollowUp } = require("./po_tracker");
  *                 that was not due yet does not count
  *   not chased  = needs_followup at 7 pm (the PO Tracker's own flag)
  *
+ * Each counted separately for Awaiting delivery and Expired.
+ *
  * Only POs on the tracker now (the latest per supplier and store) count.
  */
+/** Awaiting delivery (still valid) or Expired (past validity), as on the PO Tracker. */
+const groupOf = (o) => (Number(o.days_past_validity) > 0 ? "expired" : "awaiting");
+
+const emptyGroup = () => ({ due: 0, chased: 0, chased_value: 0, not_chased: 0, not_chased_value: 0 });
+
 function buildSummary({ orders, chasedToday, previousBySlug, today }) {
   const chasedSet = new Set(chasedToday || []);
   const prev = previousBySlug || new Map();
-  let chased = 0;
-  let chasedValue = 0;
-  let notChased = 0;
-  let notChasedValue = 0;
+  const groups = { awaiting: emptyGroup(), expired: emptyGroup() };
   for (const o of orders || []) {
+    const g = groups[groupOf(o)];
     if (chasedSet.has(o.po_slug)) {
       if (needsFollowUp(o, prev.get(o.po_slug) || null, today)) {
-        chased += 1;
-        chasedValue += Number(o.pending_value) || 0;
+        g.chased += 1;
+        g.chased_value += Number(o.pending_value) || 0;
       }
     } else if (o.needs_followup) {
-      notChased += 1;
-      notChasedValue += Number(o.pending_value) || 0;
+      g.not_chased += 1;
+      g.not_chased_value += Number(o.pending_value) || 0;
     }
   }
-  return { today, due: chased + notChased, chased, chased_value: chasedValue, not_chased: notChased, not_chased_value: notChasedValue };
+  for (const g of Object.values(groups)) g.due = g.chased + g.not_chased;
+  return { today, due: groups.awaiting.due + groups.expired.due, awaiting: groups.awaiting, expired: groups.expired };
 }
 
 const lakhs = (v) => {
@@ -44,17 +50,22 @@ const pct = (part, whole) => (whole ? Math.round((100 * part) / whole) : 0);
 const dayLabel = (iso) =>
   new Date(`${iso}T00:00:00Z`).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 
+function groupLines(icon, label, g) {
+  if (!g.due) return [`${icon} ${label}: nothing due`];
+  const po = (n) => `${n} / ${g.due}`;
+  const chasedPct = pct(g.chased, g.due);
+  return [
+    `${icon} ${label} (${g.due} due)`,
+    `   ✅ Chased: ${po(g.chased)} (${chasedPct}%)`,
+    `   ⚠️ Not chased: ${po(g.not_chased)} (${100 - chasedPct}%)${g.not_chased ? ` · ${lakhs(g.not_chased_value)} pending` : ""}`,
+  ];
+}
+
 /** Plain text (no Markdown), so no supplier or name can break parsing. */
 function formatMessage(s) {
   const head = `📦 PO Follow-up · ${dayLabel(s.today)}`;
   if (!s.due) return `${head}\n\n✅ Nothing was due for follow-up today.`;
-  const po = (n) => `${n} / ${s.due} PO${s.due === 1 ? "" : "s"}`;
-  return [
-    head,
-    "",
-    `✅ Chased: ${po(s.chased)} (${pct(s.chased, s.due)}%)`,
-    `⚠️ Not chased: ${po(s.not_chased)} (${s.due ? 100 - pct(s.chased, s.due) : 0}%)${s.not_chased ? ` · ${lakhs(s.not_chased_value)} pending` : ""}`,
-  ].join("\n");
+  return [head, "", ...groupLines("🕒", "Awaiting delivery", s.awaiting), "", ...groupLines("🔴", "Expired", s.expired)].join("\n");
 }
 
 function formatFailure(today, error) {

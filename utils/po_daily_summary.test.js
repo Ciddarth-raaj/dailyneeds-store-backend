@@ -18,7 +18,7 @@ describe("buildSummary", () => {
       po("b"), // chased today, chased yesterday -> was not due
       po("c", { po_date: "2026-11-15" }), // chased today, too new -> not due
       po("d", { needs_followup: true, pending_value: 50000 }), // not chased
-      po("e", { needs_followup: true, pending_value: 150000 }), // not chased
+      po("e", { needs_followup: true, pending_value: 150000, days_past_validity: 4 }), // not chased, expired
       po("f"), // nothing
     ];
     const s = S.buildSummary({
@@ -27,11 +27,32 @@ describe("buildSummary", () => {
       previousBySlug: new Map([["b", { created_day: "2026-11-15" }]]),
       today: TODAY,
     });
-    assert.deepEqual([s.chased, s.not_chased, s.due, s.not_chased_value], [1, 2, 3, 200000]);
+    assert.equal(s.due, 3);
+    assert.deepEqual([s.awaiting.chased, s.awaiting.not_chased, s.awaiting.due, s.awaiting.not_chased_value], [1, 1, 2, 50000]);
+    assert.deepEqual([s.expired.chased, s.expired.not_chased, s.expired.due, s.expired.not_chased_value], [0, 1, 1, 150000]);
   });
   it("formats chased / not chased out of the total", () => {
-    const text = S.formatMessage({ today: TODAY, due: 19, chased: 14, not_chased: 5, not_chased_value: 190000 });
-    assert.equal(text, "📦 PO Follow-up · Mon, 16 Nov\n\n✅ Chased: 14 / 19 POs (74%)\n⚠️ Not chased: 5 / 19 POs (26%) · ₹1.9 L pending");
+    const text = S.formatMessage({
+      today: TODAY,
+      due: 19,
+      awaiting: { due: 12, chased: 9, not_chased: 3, not_chased_value: 80000 },
+      expired: { due: 7, chased: 5, not_chased: 2, not_chased_value: 110000 },
+    });
+    assert.equal(
+      text,
+      [
+        "📦 PO Follow-up · Mon, 16 Nov",
+        "",
+        "🕒 Awaiting delivery (12 due)",
+        "   ✅ Chased: 9 / 12 (75%)",
+        "   ⚠️ Not chased: 3 / 12 (25%) · ₹80k pending",
+        "",
+        "🔴 Expired (7 due)",
+        "   ✅ Chased: 5 / 7 (71%)",
+        "   ⚠️ Not chased: 2 / 7 (29%) · ₹1.1 L pending",
+      ].join("\n")
+    );
+    assert.match(S.formatMessage({ today: TODAY, due: 3, awaiting: { due: 3, chased: 3, not_chased: 0 }, expired: { due: 0, chased: 0, not_chased: 0 } }), /🔴 Expired: nothing due/);
     assert.match(S.formatMessage({ today: TODAY, due: 0, chased: 0, not_chased: 0 }), /Nothing was due/);
   });
 });
@@ -73,7 +94,7 @@ describe("sending", () => {
     const r = await uc.run();
     assert.deepEqual([r.sent, r.skipped, r.failed, r.already], [1, 1, 1, 1]);
     assert.equal(messages.length, 1);
-    assert.match(messages[0].text, /Chased: 1 \/ 2 POs \(50%\)/);
+    assert.match(messages[0].text, /Awaiting delivery \(2 due\)\n   ✅ Chased: 1 \/ 2 \(50%\)/);
     assert.equal(messages[0].opts.replyMarkup.inlineKeyboard[0][0].url, "https://example.test/purchase-order/tracker");
     assert.deepEqual(records.map((x) => [x.employee_id, x.status]), [[1, "SENT"], [2, "SKIPPED"], [3, "FAILED"]]);
   });
