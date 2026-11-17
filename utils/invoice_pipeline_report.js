@@ -100,13 +100,13 @@ function byOldest(a, b) {
   return String(a.ref || "").localeCompare(String(b.ref || ""));
 }
 
-/** What a row is called in the report: invoice number, else gate pass, else inspection. */
+/**
+ * What a row is called in the report: its supplier invoice number. A row with
+ * no invoice yet (a gate pass, an inspection) shows its gate pass, else its
+ * inspection - the gate pass is not repeated beside an invoice.
+ */
 function refText(r) {
-  if (r.kind === "allocation" || r.kind === "document") {
-    const parts = [r.invoice_no ? `Inv ${r.invoice_no}` : "Invoice (no number yet)"];
-    if (r.gate_pass) parts.push(r.gate_pass);
-    return parts.join(" · ");
-  }
+  if (r.kind === "allocation" || r.kind === "document") return r.invoice_no || "(number not read yet)";
   if (r.gate_pass) return r.gate_pass;
   return `Inspection ${r.ref}`;
 }
@@ -207,7 +207,7 @@ function tableHtml(stepKey, rows, storeName, nowMs, { withStep = false } = {}) {
     })
     .join("\n");
   return `<table>
-<thead><tr>${withStep ? "<th>Step</th>" : ""}<th>Supplier</th><th>Invoice / gate pass</th><th>Store</th><th>${esc(withStep ? "Since" : SINCE_LABEL[stepKey] || "Since")}</th><th class="num">Waiting</th><th>Status</th></tr></thead>
+<thead><tr>${withStep ? "<th>Step</th>" : ""}<th>Supplier</th><th>Invoice</th><th>Store</th><th>${esc(withStep ? "Since" : SINCE_LABEL[stepKey] || "Since")}</th><th class="num">Waiting</th><th>Status</th></tr></thead>
 <tbody>
 ${body}
 </tbody>
@@ -273,15 +273,16 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   h2 .count { display: inline-block; background: #edf2f7; border-radius: 9px; padding: 0 7px; font-size: 10.5px; color: #4a5568; }
   p.note, p.none { margin: 2px 0 6px; color: #718096; }
   p.note { color: #c05621; }
-  table { width: 100%; border-collapse: collapse; }
-  th { text-align: left; font-size: 9px; text-transform: uppercase; color: #4a5568; border-bottom: 1px solid #cbd5e0; padding: 3px 4px; }
-  td { border-bottom: 1px solid #edf2f7; padding: 3px 4px; vertical-align: top; }
+  /* A clear grid: an outer box, every cell ruled, a shaded header row. */
+  table { width: 100%; border-collapse: collapse; border: 1.5px solid #4a5568; }
+  th { text-align: left; font-size: 9px; text-transform: uppercase; color: #1a202c; background: #e2e8f0; border: 1px solid #718096; padding: 4px 5px; }
+  td { border: 1px solid #a0aec0; padding: 4px 5px; vertical-align: top; }
   tr { page-break-inside: avoid; }
   tr.late td { background: #fffaf0; }
   tr.late td.num { color: #c05621; font-weight: bold; }
   tr.critical td { background: #fff5f5; }
   tr.critical td.num { color: #c53030; font-weight: bold; }
-  .attention { border: 1px solid #feb2b2; border-left: 4px solid #c53030; border-radius: 4px; padding: 2px 8px 8px; margin: 8px 0 4px; }
+  .attention { margin: 10px 0 4px; }
   .attention h2 { color: #c53030; margin-top: 8px; }
   td.step { font-weight: bold; color: #4a5568; }
   .bang { display: inline-block; width: 15px; height: 15px; line-height: 15px; border-radius: 50%; background: #c53030; color: #fff; text-align: center; font-size: 11px; margin-right: 4px; vertical-align: 1px; }
@@ -289,7 +290,7 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   .sw.late { background: #fffaf0; }
   .sw.critical { background: #fff5f5; border-color: #feb2b2; }
   .sup { font-weight: bold; text-transform: capitalize; }
-  .ref { word-break: break-all; }
+  .ref { overflow-wrap: anywhere; }
   .sub { color: #718096; font-size: 9.5px; }
   .nw { white-space: nowrap; }
   .num { text-align: right; }
