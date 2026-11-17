@@ -1,7 +1,8 @@
 /**
- * The end-of-day Invoice pipeline report: the Invoice pipeline (what
- * GET /warehouse-flow/flow returns) as one A4 page set, for the 9 pm PDF sent
- * to the Purchase Telegram group.
+ * The end-of-day Invoice pipeline report: the step tiles and everything
+ * waiting over 48 hours (from what GET /warehouse-flow/flow returns), for the
+ * 9 pm PDF sent to the Purchase Telegram group. The full step lists are on the
+ * Invoice Pipeline page, not in the PDF.
  *
  * PURE: data in, HTML out. No network, no fonts or images fetched - the logo
  * is passed in as a data URI and the font is the system's - so the render
@@ -223,8 +224,6 @@ function buildReport(flow, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const stores = new Map(((flow && flow.stores) || []).map((s) => [s.key, s.name]));
   const storeName = (key) => stores.get(key) || key || "—";
   const sum = summarize(flow, nowMs);
-  const stages = new Map((((flow && flow.stages) || [])).map((s) => [s.key, s]));
-  const attention = new Map((((flow && flow.attention) || [])).map((a) => [a.key, a]));
 
   const card = (label, value, sub, tone = "") =>
     `<div class="card ${tone}"><div class="cl">${esc(label)}</div><div class="cv">${esc(value)}</div>${sub ? `<div class="cs">${sub}</div>` : ""}</div>`;
@@ -246,45 +245,12 @@ function buildReport(flow, { nowMs = Date.now(), logoDataUri = null } = {}) {
     ),
   ].join("");
 
-  const section = (title, stepKey, rows, note) => `
-<h2>${esc(title)} <span class="count">${rows.length}</span></h2>
-${note ? `<p class="note">${esc(note)}</p>` : ""}
-${tableHtml(stepKey, rows, storeName, nowMs)}`;
-
-  const stepRows = (k) => (stages.get(k) && stages.get(k).ok ? stages.get(k).rows || [] : []);
-  const stepNote = (k) => (stages.get(k) && !stages.get(k).ok ? `Could not be read from RetailPilot: ${stages.get(k).error || "unknown error"}` : null);
-  const grnRows = stepRows("grn");
-  const allocRows = stepRows("allocation");
-
-  const grnSections = sum.grn.stages
-    .map((st) =>
-      section(
-        `GRN · ${st.label}`,
-        "grn",
-        grnRows.filter((r) => String(r.doc_state || r.state || "").toLowerCase() === st.state),
-        null
-      )
-    )
-    .join("");
-
   const urgent = attentionRows(flow, nowMs);
   const attentionHtml = `
 <div class="attention">
-<h2>⚠ Attention required — waiting over ${ATTENTION_HOURS}h <span class="count">${urgent.length}</span></h2>
+<h2><span class="bang">!</span> Attention required — waiting over ${ATTENTION_HOURS}h <span class="count">${urgent.length}</span></h2>
 ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: true }) : `<p class="none">Nothing has waited over ${ATTENTION_HOURS} hours.</p>`}
 </div>`;
-
-  const sections = [
-    section("1 · Gate pass — not inspected", "gate_pass", stepRows("gate_pass"), stepNote("gate_pass")),
-    section("2 · Inspection — in progress", "inspection", stepRows("inspection"), stepNote("inspection")),
-    stages.get("grn") && !stages.get("grn").ok ? section("3 · GRN", "grn", [], stepNote("grn")) : grnSections || section("3 · GRN", "grn", [], null),
-    section("4 · Allocation — not allocated", "allocation", allocRows.filter((r) => !r.allocated), stepNote("allocation")),
-    section("4 · Allocation — allocated", "allocation", allocRows.filter((r) => r.allocated), null),
-  ];
-  const noInvoice = attention.get("no_invoice");
-  if (noInvoice && noInvoice.ok && noInvoice.rows.length) {
-    sections.push(section("Inspected, invoice not uploaded", "no_invoice", noInvoice.rows, null));
-  }
 
   const html = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Invoice pipeline — ${esc(istDay(nowMs))}</title>
@@ -318,6 +284,7 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   .attention { border: 1px solid #feb2b2; border-left: 4px solid #c53030; border-radius: 4px; padding: 2px 8px 8px; margin: 8px 0 4px; }
   .attention h2 { color: #c53030; margin-top: 8px; }
   td.step { font-weight: bold; color: #4a5568; }
+  .bang { display: inline-block; width: 15px; height: 15px; line-height: 15px; border-radius: 50%; background: #c53030; color: #fff; text-align: center; font-size: 11px; margin-right: 4px; vertical-align: 1px; }
   .sw { display: inline-block; width: 10px; height: 10px; vertical-align: middle; border: 1px solid #e2e8f0; }
   .sw.late { background: #fffaf0; }
   .sw.critical { background: #fff5f5; border-color: #feb2b2; }
@@ -334,10 +301,9 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   <div class="meta">${esc(istDay(nowMs))}<br>As at ${esc(istTime(new Date(nowMs).toISOString()))} · all stores<br>Live from RetailPilot</div>
 </header>
 <div class="cards">${cards}</div>
-<p class="extra">Inspected, invoice not uploaded: <b>${sum.no_invoice}</b> &nbsp;·&nbsp; Written off (last 30 days): <b>${sum.written_off}</b> &nbsp;·&nbsp; Shaded rows: <span class="sw late"></span> over 24h, <span class="sw critical"></span> over ${ATTENTION_HOURS}h.</p>
+<p class="extra">Inspected, invoice not uploaded: <b>${sum.no_invoice}</b> &nbsp;·&nbsp; Written off (last 30 days): <b>${sum.written_off}</b></p>
 ${attentionHtml}
-${sections.join("\n")}
-<footer>Oldest first in every list. Generated by dnds.co.in from RetailPilot.</footer>
+<footer>Oldest first. The full lists are on dnds.co.in → Dashboard → Invoice Pipeline. Generated from RetailPilot.</footer>
 </body></html>`;
   return { html, summary: sum };
 }

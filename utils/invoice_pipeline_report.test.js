@@ -59,16 +59,21 @@ describe("report", () => {
     assert.deepEqual([s.no_invoice, s.written_off], [1, 2]);
   });
 
-  it("the HTML lists every row oldest first, escapes what it prints, and fetches nothing", () => {
+  it("only the tiles and the attention list: no step lists, nothing fetched, everything escaped", () => {
     const { html } = R.buildReport(FLOW, { nowMs: NOW });
     assert.match(html, /Invoice pipeline — end of day/);
-    assert.match(html, /Acme &lt;Foods&gt;/);
-    assert.doesNotMatch(html, /Acme <Foods>/);
-    assert.doesNotMatch(html, /https?:\/\//, "no external fonts or images");
-    const yet = html.slice(html.indexOf("GRN · Yet to start"));
-    assert.ok(yet.indexOf("X/2") < yet.indexOf("GST/405"), "16 Nov before 17 Nov");
+    assert.match(html, /3 · GRN \(invoices\)/);
+    assert.doesNotMatch(html, /GRN · Yet to start/, "no per-stage lists");
+    assert.doesNotMatch(html, /1 · Gate pass — not inspected/, "no step lists");
+    assert.doesNotMatch(html, /GST\/405/, "rows under 48h are not listed");
+    assert.match(html, /HUL\/9/, "an over-48h row is");
     assert.match(html, /3 retries · ₹48,251/);
-    assert.match(html, /Inspected, invoice not uploaded/);
+    assert.doesNotMatch(html, /⚠/, "no glyph the PDF font may lack");
+    assert.doesNotMatch(html, /https?:\/\//, "no external fonts or images");
+    const tricky = { ...FLOW, stages: FLOW.stages.map((s) => (s.key === "gate_pass" ? { ...s, rows: [{ ...s.rows[0], supplier_name: "Acme <Foods>" }] } : s)) };
+    const out = R.buildReport(tricky, { nowMs: NOW }).html;
+    assert.match(out, /Acme &lt;Foods&gt;/);
+    assert.doesNotMatch(out, /Acme <Foods>/);
   });
 
   it("attention required: everything over 48h from every step, oldest first, at the top", () => {
@@ -80,10 +85,8 @@ describe("report", () => {
     ]);
     assert.equal(R.summarize(FLOW, NOW).attention, 3);
     const { html } = R.buildReport(FLOW, { nowMs: NOW });
-    const att = html.indexOf("Attention required — waiting over 48h");
-    assert.ok(att > 0 && att < html.indexOf("1 · Gate pass — not inspected"), "before the step lists");
+    assert.ok(html.indexOf("Attention required — waiting over 48h") > html.indexOf("4 · Allocation"), "under the tiles");
     assert.match(html, /<tr class="critical">/);
-    assert.match(html, /<tr class="late">/, "24-48h rows stay orange");
   });
 
   it("nothing over 48h says so", () => {
@@ -96,7 +99,7 @@ describe("report", () => {
   it("a step RetailPilot could not read says so instead of showing nothing", () => {
     const broken = { ...FLOW, stages: FLOW.stages.map((s) => (s.key === "grn" ? { ...s, ok: false, error: "whitelist_violation", rows: [] } : s)) };
     const { html } = R.buildReport(broken, { nowMs: NOW });
-    assert.match(html, /Could not be read from RetailPilot: whitelist_violation/);
+    assert.match(html, /3 · GRN \(invoices\)<\/div><div class="cv">0<\/div><div class="cs"><span class="warn">not available<\/span>/);
   });
 
   it("the caption carries the headline numbers within Telegram's limit", () => {
