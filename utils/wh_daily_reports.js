@@ -261,10 +261,10 @@ const VERIFICATION_PAGE_JOB_TYPES = ["GRN", "STA"];
 
 /**
  * The Verification report's write-off as rows for the Pick & Pack
- * Verification page: Short Qty > 0, one row per article and job type with
- * the stores summed (as that page's own import combines them), whole units.
- * Answers { rows, other_job_type_lines } - lines of job types the page has no
- * tab for are counted, not copied.
+ * Verification page: Short Qty > 0, one row per article, job type and store
+ * (so each store gets its own remark), whole units. Answers
+ * { rows, other_job_type_lines } - lines of job types the page has no tab for
+ * are counted, not copied.
  */
 function verificationWriteOffs(rows) {
   const by = new Map();
@@ -276,8 +276,9 @@ function verificationWriteOffs(rows) {
       other += 1;
       continue;
     }
-    const key = `${r.article_id}|${jt}`;
-    const cur = by.get(key) || { product_id: r.article_id, job_type: jt, mismatch_qty: 0 };
+    const store = r.to_store || null;
+    const key = `${r.article_id}|${jt}|${store}`;
+    const cur = by.get(key) || { product_id: r.article_id, job_type: jt, store, mismatch_qty: 0 };
     cur.mismatch_qty += Number(r.short_qty);
     by.set(key, cur);
   }

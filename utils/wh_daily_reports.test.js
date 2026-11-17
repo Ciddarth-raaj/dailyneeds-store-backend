@@ -113,17 +113,19 @@ describe("reconcileBoxes", () => {
 });
 
 describe("verificationWriteOffs", () => {
-  it("sums short per article and job type across stores; skips other job types and no-short rows", () => {
+  it("one row per article, job type and store; skips other job types and no-short rows", () => {
     const r = W.verificationWriteOffs([
       { article_id: 1, job_type: "GRN", to_store: "ecr", short_qty: 2 },
       { article_id: 1, job_type: "GRN", to_store: "kathirkamam", short_qty: 3 },
-      { article_id: 1, job_type: "sta", short_qty: 1 },
-      { article_id: 2, job_type: "GRN", short_qty: 0 },
-      { article_id: 3, job_type: "DAMG", short_qty: 4 },
+      { article_id: 1, job_type: "GRN", to_store: "ecr", short_qty: 1 },
+      { article_id: 1, job_type: "sta", to_store: "ecr", short_qty: 1 },
+      { article_id: 2, job_type: "GRN", to_store: "ecr", short_qty: 0 },
+      { article_id: 3, job_type: "DAMG", to_store: "ecr", short_qty: 4 },
     ]);
     assert.deepEqual(r.rows, [
-      { product_id: 1, job_type: "GRN", mismatch_qty: 5 },
-      { product_id: 1, job_type: "STA", mismatch_qty: 1 },
+      { product_id: 1, job_type: "GRN", store: "ecr", mismatch_qty: 3 },
+      { product_id: 1, job_type: "GRN", store: "kathirkamam", mismatch_qty: 3 },
+      { product_id: 1, job_type: "STA", store: "ecr", mismatch_qty: 1 },
     ]);
     assert.equal(r.other_job_type_lines, 1);
   });
@@ -157,7 +159,7 @@ describe("usecase upload", () => {
     await uc(repo).upload(body());
     assert.equal(repo.saved[0].verificationWriteOffs, null);
     const res = await uc(repo).upload(body({ report_type: "VERIFICATION", file_name: "Verification_Report_2026-11-16_ALL.csv", headers: [...JOB_HEADERS], rows: [job({ "Job Type": "GRN", "Short Qty": "6", "Returned Qty": "6" })] }));
-    assert.deepEqual(repo.saved[1].verificationWriteOffs, [{ product_id: 100073, job_type: "GRN", mismatch_qty: 6 }]);
+    assert.deepEqual(repo.saved[1].verificationWriteOffs, [{ product_id: 100073, job_type: "GRN", store: "vallalar salai", mismatch_qty: 6 }]);
     assert.equal(res.data.summary.verification_page.added, 1);
   });
   it("refuses a file named for another report or day, and future days", async () => {

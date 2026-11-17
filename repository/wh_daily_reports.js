@@ -113,11 +113,19 @@ class WhDailyReportsRepository {
 
   /**
    * Put the Verification report's write-off on the Pick & Pack Verification
-   * page (pick_pack_verifications) for the day, inside the upload's
-   * transaction. Rows already there for the same article and job type keep
-   * their remark: an unverified one takes the new quantity, a verified one is
-   * left alone. Articles not in product_table cannot be added (foreign key)
-   * and are counted.
+   * page (pick_pack_verifications) for the day, one line per article, job
+   * type and store, inside the upload's transaction. The team's work is kept:
+   *
+   *   - a line already there for the same article, job type and store: an
+   *     unverified one takes the new quantity and keeps its remark, a
+   *     verified one is left alone;
+   *   - a line from before stores were kept (store NULL, stores summed) for
+   *     the same article and job type: an unverified one becomes the first
+   *     store's line, keeping its remark; a verified one stands for all the
+   *     article's stores, and none are added;
+   *   - otherwise a new line is added.
+   *
+   * Articles not in product_table cannot be added (foreign key) and are counted.
    */
   async _syncVerificationPage(conn, date, writeOffs) {
     const out = { added: 0, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 0 };
@@ -126,40 +134,62 @@ class WhDailyReportsRepository {
     const known = new Set((await queryAsync(conn, "SELECT product_id FROM product_table WHERE product_id IN (?)", [ids])).map((r) => Number(r.product_id)));
     const existing = await queryAsync(
       conn,
-      `SELECT pick_pack_verification_id, product_id, job_type, mismatch_qty, is_verified
-         FROM pick_pack_verifications WHERE date = ? ORDER BY pick_pack_verification_id DESC`,
+      `SELECT pick_pack_verification_id, product_id, job_type, store, mismatch_qty, is_verified
+         FROM pick_pack_verifications WHERE date = ? ORDER BY pick_pack_verification_id`,
       [date]
     );
-    const byKey = new Map();
+    const byStore = new Map();
+    const legacy = new Map();
     for (const e of existing) {
-      const k = `${Number(e.product_id)}|${e.job_type}`;
-      if (!byKey.has(k)) byKey.set(k, []);
-      byKey.get(k).push(e);
+      const art = `${Number(e.product_id)}|${e.job_type}`;
+      const map = e.store == null || e.store === "" ? legacy : byStore;
+      const k = map === legacy ? art : `${art}|${e.store}`;
+      if (!map.has(k)) map.set(k, []);
+      map.get(k).push(e);
     }
     const inserts = [];
+    const setQty = async (row, qty, store) => {
+      const unchanged = Number(row.mismatch_qty) === qty && (store === undefined || row.store === store);
+      if (unchanged) {
+        out.unchanged += 1;
+        return;
+      }
+      await queryAsync(
+        conn,
+        `UPDATE pick_pack_verifications SET mismatch_qty = ?${store === undefined ? "" : ", store = ?"}, updated_at = CURRENT_TIMESTAMP WHERE pick_pack_verification_id = ?`,
+        store === undefined ? [qty, row.pick_pack_verification_id] : [qty, store, row.pick_pack_verification_id]
+      );
+      out.updated += 1;
+    };
     for (const w of writeOffs) {
       if (!known.has(Number(w.product_id))) {
         out.unknown_articles += 1;
         continue;
       }
-      const rows = byKey.get(`${Number(w.product_id)}|${w.job_type}`) || [];
-      if (!rows.length) {
-        inserts.push([w.product_id, w.mismatch_qty, date, w.job_type, 0]);
+      const art = `${Number(w.product_id)}|${w.job_type}`;
+      const same = (byStore.get(`${art}|${w.store}`) || []).filter((e) => !e.claimed);
+      if (same.length) {
+        same[0].claimed = true;
+        const open = same.find((e) => !Number(e.is_verified));
+        if (!open) out.kept_verified += 1;
+        else await setQty(open, w.mismatch_qty);
         continue;
       }
-      const open = rows.find((e) => !Number(e.is_verified));
-      if (!open) out.kept_verified += 1;
-      else if (Number(open.mismatch_qty) === w.mismatch_qty) out.unchanged += 1;
-      else {
-        await queryAsync(conn, "UPDATE pick_pack_verifications SET mismatch_qty = ?, updated_at = CURRENT_TIMESTAMP WHERE pick_pack_verification_id = ?", [
-          w.mismatch_qty,
-          open.pick_pack_verification_id,
-        ]);
-        out.updated += 1;
+      const old = legacy.get(art) || [];
+      if (old.some((e) => Number(e.is_verified))) {
+        out.kept_verified += 1;
+        continue;
       }
+      const reuse = old.find((e) => !e.claimed);
+      if (reuse) {
+        reuse.claimed = true;
+        await setQty(reuse, w.mismatch_qty, w.store);
+        continue;
+      }
+      inserts.push([w.product_id, w.mismatch_qty, date, w.job_type, w.store, 0]);
     }
     if (inserts.length) {
-      await queryAsync(conn, "INSERT INTO pick_pack_verifications (product_id, mismatch_qty, date, job_type, is_verified) VALUES ?", [inserts]);
+      await queryAsync(conn, "INSERT INTO pick_pack_verifications (product_id, mismatch_qty, date, job_type, store, is_verified) VALUES ?", [inserts]);
       out.added = inserts.length;
     }
     return out;
