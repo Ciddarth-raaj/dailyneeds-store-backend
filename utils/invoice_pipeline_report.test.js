@@ -161,10 +161,33 @@ describe("run", () => {
     assert.equal(failing.sent.length, 0);
   });
 
-  it("a failure in Telegram is reported, not thrown", async () => {
-    const d = deps({ telegram: { sendDocument: async () => { throw new Error("chat not found"); } } });
+  it("a group Telegram cannot find is reported with how to fix it", async () => {
+    const d = deps({ telegram: { sendDocument: async () => { throw new Error("Telegram API - 400 Bad Request: chat not found"); } } });
     const r = await reportFactory(d).run();
-    assert.equal(r.code, 500);
+    assert.equal(r.code, 502);
     assert.match(r.msg, /chat not found/);
+    assert.match(r.msg, /Master → Telegram Groups/);
+    assert.match(r.msg, /Invoice pipeline EOD/);
+  });
+
+  it("sends to the group registered for the EOD report; else the fallback id", async () => {
+    const registry = (rows) => ({ getAll: async ({ is_active }) => (is_active ? rows : []) });
+    const d = deps({
+      registryRepo: registry([
+        { group_name: "Attendance", chat_id: "-1001", used_for: "Daily missing-punch alerts" },
+        { group_name: "Purchase team", chat_id: "-1009988776655", used_for: "Purchase orders + Invoice Pipeline EOD report" },
+      ]),
+    });
+    const r = await reportFactory(d).run();
+    assert.equal(r.code, 200);
+    assert.deepEqual(d.sent.map((x) => x.chat), ["-1009988776655"]);
+    assert.equal(r.msg, "Sent to Purchase team");
+
+    const none = deps({ registryRepo: registry([{ group_name: "Other", chat_id: "-1", used_for: "Something else" }]) });
+    await reportFactory(none).run();
+    assert.deepEqual(none.sent.map((x) => x.chat), [-4668439381], "no registered group: the fixed fallback");
+
+    const broken = deps({ registryRepo: { getAll: async () => { throw new Error("db down"); } } });
+    assert.equal((await reportFactory(broken).run()).code, 200, "a registry failure falls back, it does not stop the send");
   });
 });

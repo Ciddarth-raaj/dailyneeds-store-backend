@@ -1352,6 +1352,7 @@ class Server {
       s3: require("./services/s3"),
       telegram: require("./services/telegram")(),
       chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
+      registryRepo: this.telegramGroupRegistryRepo,
     });
     this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
