@@ -111,8 +111,66 @@ class WhDailyReportsRepository {
     return prices;
   }
 
-  /** Save one report for one day, replacing what was there. Answers the new upload_id. */
-  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows }) {
+  /**
+   * Put the Verification report's write-off on the Pick & Pack Verification
+   * page (pick_pack_verifications) for the day, inside the upload's
+   * transaction. Rows already there for the same article and job type keep
+   * their remark: an unverified one takes the new quantity, a verified one is
+   * left alone. Articles not in product_table cannot be added (foreign key)
+   * and are counted.
+   */
+  async _syncVerificationPage(conn, date, writeOffs) {
+    const out = { added: 0, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 0 };
+    if (!writeOffs.length) return out;
+    const ids = [...new Set(writeOffs.map((w) => w.product_id))];
+    const known = new Set((await queryAsync(conn, "SELECT product_id FROM product_table WHERE product_id IN (?)", [ids])).map((r) => Number(r.product_id)));
+    const existing = await queryAsync(
+      conn,
+      `SELECT pick_pack_verification_id, product_id, job_type, mismatch_qty, is_verified
+         FROM pick_pack_verifications WHERE date = ? ORDER BY pick_pack_verification_id DESC`,
+      [date]
+    );
+    const byKey = new Map();
+    for (const e of existing) {
+      const k = `${Number(e.product_id)}|${e.job_type}`;
+      if (!byKey.has(k)) byKey.set(k, []);
+      byKey.get(k).push(e);
+    }
+    const inserts = [];
+    for (const w of writeOffs) {
+      if (!known.has(Number(w.product_id))) {
+        out.unknown_articles += 1;
+        continue;
+      }
+      const rows = byKey.get(`${Number(w.product_id)}|${w.job_type}`) || [];
+      if (!rows.length) {
+        inserts.push([w.product_id, w.mismatch_qty, date, w.job_type, 0]);
+        continue;
+      }
+      const open = rows.find((e) => !Number(e.is_verified));
+      if (!open) out.kept_verified += 1;
+      else if (Number(open.mismatch_qty) === w.mismatch_qty) out.unchanged += 1;
+      else {
+        await queryAsync(conn, "UPDATE pick_pack_verifications SET mismatch_qty = ?, updated_at = CURRENT_TIMESTAMP WHERE pick_pack_verification_id = ?", [
+          w.mismatch_qty,
+          open.pick_pack_verification_id,
+        ]);
+        out.updated += 1;
+      }
+    }
+    if (inserts.length) {
+      await queryAsync(conn, "INSERT INTO pick_pack_verifications (product_id, mismatch_qty, date, job_type, is_verified) VALUES ?", [inserts]);
+      out.added = inserts.length;
+    }
+    return out;
+  }
+
+  /**
+   * Save one report for one day, replacing what was there. Answers
+   * { upload_id, verification_page } - the second only when
+   * `verificationWriteOffs` is given (the Verification report).
+   */
+  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows, verificationWriteOffs = null }) {
     const conn = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(conn);
@@ -127,8 +185,9 @@ class WhDailyReportsRepository {
       const table = shape === "JOB" ? "wh_report_job_rows" : "wh_report_box_rows";
       const values = rows.map((r) => cols.map((c) => (c === "upload_id" ? uploadId : c === "report_date" ? report_date : r[c] === undefined ? null : r[c])));
       await insertRowsInBatches(conn, `INSERT INTO ${table} (${cols.join(", ")}) VALUES ?`, values, 2000);
+      const verificationPage = verificationWriteOffs ? await this._syncVerificationPage(conn, report_date, verificationWriteOffs) : null;
       await commitAsync(conn);
-      return uploadId;
+      return { upload_id: uploadId, verification_page: verificationPage };
     } catch (err) {
       await rollbackAsync(conn);
       logger.Log({

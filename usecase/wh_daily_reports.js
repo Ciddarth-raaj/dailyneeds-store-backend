@@ -61,13 +61,16 @@ class WhDailyReports {
 
     const before = await this.repo.uploads(report_date, report_date);
     const replaced = before.some((u) => u.report_type === type);
-    const uploadId = await this.repo.replaceUpload({
+    // The Verification report's write-off also goes to the Pick & Pack Verification page.
+    const toPage = type === "VERIFICATION" ? W.verificationWriteOffs(out) : null;
+    const saved = await this.repo.replaceUpload({
       report_type: type,
       report_date,
       file_name: file_name ? String(file_name).slice(0, 255) : null,
       uploaded_by: employee_id,
       shape,
       rows: out,
+      verificationWriteOffs: toPage ? toPage.rows : null,
     });
 
     const summary = { rows: out.length };
@@ -83,7 +86,8 @@ class WhDailyReports {
       summary.trucks = new Set(out.map((r) => r.truck_no).filter(Boolean)).size;
       summary.qty = out.reduce((s, r) => s + r.box_qty, 0);
     }
-    return { code: 200, data: { upload_id: uploadId, report_type: type, report_date, replaced, summary } };
+    if (saved.verification_page) summary.verification_page = { ...saved.verification_page, other_job_type_lines: toPage.other_job_type_lines };
+    return { code: 200, data: { upload_id: saved.upload_id, report_type: type, report_date, replaced, summary } };
   }
 
   /** What was uploaded for each day in the range. */

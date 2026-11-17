@@ -256,6 +256,35 @@ function parseRows(type, headers, rawRows) {
   return { rows, errors };
 }
 
+/** Job types the Pick & Pack Verification page (pick_pack_verifications.job_type) keeps. */
+const VERIFICATION_PAGE_JOB_TYPES = ["GRN", "STA"];
+
+/**
+ * The Verification report's write-off as rows for the Pick & Pack
+ * Verification page: Short Qty > 0, one row per article and job type with
+ * the stores summed (as that page's own import combines them), whole units.
+ * Answers { rows, other_job_type_lines } - lines of job types the page has no
+ * tab for are counted, not copied.
+ */
+function verificationWriteOffs(rows) {
+  const by = new Map();
+  let other = 0;
+  for (const r of rows || []) {
+    if (!(Number(r.short_qty) > 0)) continue;
+    const jt = String(r.job_type || "").toUpperCase();
+    if (!VERIFICATION_PAGE_JOB_TYPES.includes(jt)) {
+      other += 1;
+      continue;
+    }
+    const key = `${r.article_id}|${jt}`;
+    const cur = by.get(key) || { product_id: r.article_id, job_type: jt, mismatch_qty: 0 };
+    cur.mismatch_qty += Number(r.short_qty);
+    by.set(key, cur);
+  }
+  const out = [...by.values()].map((r) => ({ ...r, mismatch_qty: Math.round(r.mismatch_qty) })).filter((r) => r.mismatch_qty > 0);
+  return { rows: out, other_job_type_lines: other };
+}
+
 /** A box going back to the warehouse (damage returns): loaded, but never unloaded at a store. */
 const isReturn = (r) => String(r.job_type || "").toUpperCase() === "DAMG" || (r.planned_to_store && r.planned_to_store === r.from_store);
 
@@ -363,4 +392,6 @@ module.exports = {
   parseRows,
   isReturn,
   reconcileBoxes,
+  VERIFICATION_PAGE_JOB_TYPES,
+  verificationWriteOffs,
 };
