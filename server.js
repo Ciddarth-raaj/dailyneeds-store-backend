@@ -1319,6 +1319,10 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
     );
+    // Warehouse Daily Reports: the five RetailPilot exports uploaded every morning.
+    this.whDailyReportsUsecase = require("./usecase/wh_daily_reports")(
+      require("./repository/wh_daily_reports")(this.mysql.connection)
+    );
     this.poFollowupRepo = require("./repository/po_followup")(this.mysql.connection);
     this.poTrackerUsecase = require("./usecase/po_tracker")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
@@ -2176,6 +2180,7 @@ class Server {
       this.dashboardScope
     );
     const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions, this.poDailySummary);
+    const whDailyReportsRouter = require("./routes/wh_daily_reports")(this.whDailyReportsUsecase, this.permissions);
     const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
     const warehouseFlowRouter = require("./routes/warehouse_flow")(
       this.warehouseFlowUsecase,
@@ -2356,6 +2361,7 @@ class Server {
     app.use("/warehouse-flow", warehouseFlowRouter.getRouter());
     app.use("/transfers", transfersRouter.getRouter());
     app.use("/po-tracker", poTrackerRouter.getRouter());
+    app.use("/wh-daily-reports", whDailyReportsRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
