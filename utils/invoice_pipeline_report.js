@@ -258,10 +258,17 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   @page { size: A4; margin: 10mm; }
   * { box-sizing: border-box; }
   body { font-family: Arial, Helvetica, sans-serif; color: #1a202c; font-size: 10.5px; margin: 0; }
-  header { display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #6b46c1; padding-bottom: 6px; margin-bottom: 10px; }
-  header img { height: 28px; }
-  h1 { font-size: 17px; margin: 0; color: #44337a; }
-  .meta { color: #4a5568; font-size: 10px; text-align: right; }
+  /* Letterhead: logo | title, the report date on the right, a brand rule under. */
+  header { display: flex; justify-content: space-between; align-items: center; padding: 0 0 10px; border-bottom: 3px solid #553c9a; margin-bottom: 12px; }
+  .brand { display: flex; align-items: center; }
+  /* The logo PNG carries wide transparent margins (13% each side): crop them. */
+  .logo { width: 178px; height: 48px; overflow: hidden; flex: none; }
+  .logo img { height: 48px; margin-left: -31px; display: block; }
+  .title { border-left: 1px solid #cbd5e0; margin-left: 14px; padding-left: 14px; }
+  h1 { font-size: 19px; margin: 0; color: #322659; letter-spacing: .01em; }
+  .kicker { font-size: 9.5px; color: #718096; text-transform: uppercase; letter-spacing: .12em; margin-top: 3px; }
+  .meta { text-align: right; font-size: 9.5px; color: #4a5568; line-height: 1.5; }
+  .meta .day { font-size: 13px; font-weight: bold; color: #1a202c; }
   .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 8px; }
   .card { border: 1px solid #e2e8f0; border-left: 4px solid #6b46c1; border-radius: 4px; padding: 6px 8px; }
   .cl { font-size: 9.5px; color: #4a5568; font-weight: bold; text-transform: uppercase; letter-spacing: .02em; }
@@ -298,8 +305,8 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
 </style></head>
 <body>
 <header>
-  <div>${logoDataUri ? `<img src="${esc(logoDataUri)}" alt="Daily Needs">` : ""}<h1>Invoice pipeline — end of day</h1></div>
-  <div class="meta">${esc(istDay(nowMs))}<br>As at ${esc(istTime(new Date(nowMs).toISOString()))} · all stores<br>Live from RetailPilot</div>
+  <div class="brand">${logoDataUri ? `<div class="logo"><img src="${esc(logoDataUri)}" alt="Daily Needs"></div><div class="title">` : `<div>`}<h1>Invoice Pipeline</h1><div class="kicker">End-of-day report · All stores</div></div></div>
+  <div class="meta"><div class="day">${esc(istDay(nowMs))}</div>As at ${esc(istTime(new Date(nowMs).toISOString()))}<br>Source: RetailPilot</div>
 </header>
 <div class="cards">${cards}</div>
 <p class="extra">Inspected, invoice not uploaded: <b>${sum.no_invoice}</b> &nbsp;·&nbsp; Written off (last 30 days): <b>${sum.written_off}</b></p>

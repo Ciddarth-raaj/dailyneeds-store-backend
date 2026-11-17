@@ -61,7 +61,7 @@ describe("report", () => {
 
   it("only the tiles and the attention list: no step lists, nothing fetched, everything escaped", () => {
     const { html } = R.buildReport(FLOW, { nowMs: NOW });
-    assert.match(html, /Invoice pipeline — end of day/);
+    assert.match(html, /<h1>Invoice Pipeline<\/h1><div class="kicker">End-of-day report/);
     assert.match(html, /3 · GRN \(invoices\)/);
     assert.doesNotMatch(html, /GRN · Yet to start/, "no per-stage lists");
     assert.doesNotMatch(html, /1 · Gate pass — not inspected/, "no step lists");
