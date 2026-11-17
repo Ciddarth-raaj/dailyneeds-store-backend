@@ -30,26 +30,37 @@ class PoDailySummaryRepository {
   }
 
   /**
-   * Employees whose designation holds receive_po_daily_summary (switched on),
-   * not resigned before `today`, with their active private chat with the
-   * bot - null when they have not linked Telegram.
+   * Who gets the summary, not resigned before `today`, each with their active
+   * private chat with the bot (null when they have not linked Telegram):
+   *
+   *   - employees whose designation holds receive_po_daily_summary (switched
+   *     on), and
+   *   - every ADMINISTRATOR: an active login with user_type 2 that belongs to
+   *     an employee. Administrators hold every right by user_type, but a
+   *     right held that way is in no designation row, so without this they
+   *     were never on the list. System and service accounts are left out.
    */
   recipients(today) {
     return this.run(
       "RECIPIENTS",
       `SELECT DISTINCT ne.employee_id, ne.employee_name, i.private_chat_id
-         FROM permissions p
-         JOIN new_employee ne ON ne.designation_id = p.designation_id
+         FROM new_employee ne
          LEFT JOIN employee_telegram_identity i
                 ON i.employee_id = ne.employee_id AND i.disconnected_at IS NULL
-        WHERE p.permission_key = 'receive_po_daily_summary'
-          AND p.is_active = 1
+        WHERE (ne.designation_id IN (SELECT p.designation_id FROM permissions p
+                                      WHERE p.permission_key = 'receive_po_daily_summary'
+                                        AND p.is_active = 1)
+               OR ne.employee_id IN (SELECT u.employee_id FROM \`user\` u
+                                      WHERE u.user_type = 2
+                                        AND u.status = 1
+                                        AND u.employee_id IS NOT NULL
+                                        AND COALESCE(u.is_system_account, 0) = 0
+                                        AND COALESCE(u.is_service_account, 0) = 0))
           AND (ne.resignation_date IS NULL OR ne.resignation_date >= ?)
         ORDER BY ne.employee_id`,
       [today]
     );
   }
-
   /** One employee's active private chat with the bot, or null. */
   async chatOf(employeeId) {
     const rows = await this.run(
