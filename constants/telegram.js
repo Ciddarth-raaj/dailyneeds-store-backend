@@ -10,8 +10,12 @@ const ABV_TELEGRAM_CHAT_ID =
 
 // const ALERTS_TELEGRAM_CHAT_ID = -1002722070031;
 
+// "Dn Purchase Group". Telegram upgraded it to a supergroup, which gave it a
+// new id (-100...); the old basic-group id -4668439381 now answers "chat not
+// found", so purchase, debit-note and EOD messages sent to it never arrived.
+// This is the id Master -> Telegram Groups detected for it.
 const PURCHASE_TELEGRAM_CHAT_ID =
-  process.env.IS_TEST === "true" ? TEST_TELEGRAM_CHAT_ID : -4668439381;
+  process.env.IS_TEST === "true" ? TEST_TELEGRAM_CHAT_ID : -1004427754182;
 
 const STOCK_CHECKER_TELEGRAM_CHAT_ID =
   process.env.IS_TEST === "true" ? TEST_TELEGRAM_CHAT_ID : -5293267648;
