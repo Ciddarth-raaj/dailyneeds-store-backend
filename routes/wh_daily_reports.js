@@ -5,7 +5,9 @@ const respondError = require("../utils/http");
  * the team uploads every morning - Picking, Packing, Verification, Loading,
  * Unloading - and their analysis.
  *
- *   GET    /status?from&to                     what was uploaded each day        view_wh_daily_reports
+ *   GET    /status?from&to                     what was uploaded each day        upload_wh_daily_reports (Daily Uploads),
+ *                                                                                    view_wh_daily_reports (Analysis) or
+ *                                                                                    view_pick_pack_verifications (its calendar)
  *   GET    /analysis?from&to&store             write-offs, funnel, boxes, trucks  view_wh_daily_reports
  *   GET    /rows?from&to&report_type&only&store  rows for downloads              view_wh_daily_reports
  *   POST   /upload                             one file as one report for a day   upload_wh_daily_reports
@@ -22,14 +24,16 @@ class WhDailyReportsRoutes {
 
   init() {
     const deny = (req, res) => res.status(403).json({ code: 403, msg: "You do not have permission to perform this action" });
-    const need = (key) => (this.permissions ? this.permissions.require(key) : deny);
+    // Any of the keys.
+    const need = (...keys) => (this.permissions ? this.permissions.require(...keys) : deny);
     const send = (res, result) => {
       if (result.code === 200) return res.json(result);
       return res.status([403, 404, 409, 422].includes(result.code) ? result.code : 400).json(result);
     };
     const q = (req, k) => (req.query[k] == null ? null : String(req.query[k]).trim() || null);
 
-    this.router.get("/status", need("view_wh_daily_reports"), async (req, res) => {
+    // The Pick & Pack Verification calendar reads it to mark days uploaded with no write-off.
+    this.router.get("/status", need("upload_wh_daily_reports", "view_wh_daily_reports", "view_pick_pack_verifications"), async (req, res) => {
       try {
         send(res, await this.usecase.status({ from: q(req, "from"), to: q(req, "to") }));
       } catch (err) {
