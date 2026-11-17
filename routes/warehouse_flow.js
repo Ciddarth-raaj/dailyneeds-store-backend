@@ -6,6 +6,7 @@ const { DASHBOARD_PERMISSION, scopeForClient } = require("../utils/dashboard_sco
  */
 const VIEW_INVOICE_PIPELINE = "view_invoice_pipeline";
 const respondError = require("../utils/http");
+const { requireAdmin } = require("../middlewares/admin_only");
 
 /**
  * Warehouse Flow (/warehouse-flow): the Invoice pipeline, shown on the
@@ -15,11 +16,14 @@ const respondError = require("../utils/http");
  *   GET /flow                 every stage and what is in it now
  *   GET /gate-pass/:slug      one gate pass with its inspections
  *   GET /inspection/:slug     one inspection with its gate pass
+ *   GET  /eod-report.pdf      the end-of-day PDF as it stands now (administrators)
+ *   POST /eod-report/send     send it to the Purchase group now (administrators)
  */
 class WarehouseFlowRoutes {
-  constructor(usecase, dashboards) {
+  constructor(usecase, dashboards, eodReport = null) {
     this.usecase = usecase;
     this.dashboards = dashboards;
+    this.eodReport = eodReport;
     this.router = require("express").Router();
     this.init();
   }
@@ -41,6 +45,31 @@ class WarehouseFlowRoutes {
           store_ids: this.dashboards.storeIdsFor(req),
         });
         send(res, result, { dashboard_scope: scopeForClient(req.dashboardScope) });
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    // The 9 pm report on demand: see it, or send it now. Administrators only -
+    // it is company-wide, and a send reaches a whole Telegram group.
+    this.router.get("/eod-report.pdf", requireAdmin, async (req, res) => {
+      try {
+        if (!this.eodReport) return res.status(503).json({ code: 503, msg: "The end-of-day report is not available" });
+        const r = await this.eodReport.build();
+        if (r.code !== 200) return res.status(502).json(r);
+        res.set("Content-Type", "application/pdf");
+        res.set("Content-Disposition", 'inline; filename="invoice-pipeline-eod.pdf"');
+        res.send(r.pdf);
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/eod-report/send", requireAdmin, async (req, res) => {
+      try {
+        if (!this.eodReport) return res.status(503).json({ code: 503, msg: "The end-of-day report is not available" });
+        const r = await this.eodReport.run({ trigger: "manual" });
+        send(res, r);
       } catch (err) {
         respondError(res, err);
       }
@@ -68,5 +97,5 @@ class WarehouseFlowRoutes {
   }
 }
 
-module.exports = (usecase, dashboards) => new WarehouseFlowRoutes(usecase, dashboards);
+module.exports = (usecase, dashboards, eodReport) => new WarehouseFlowRoutes(usecase, dashboards, eodReport);
 module.exports.VIEW_INVOICE_PIPELINE = VIEW_INVOICE_PIPELINE;

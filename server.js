@@ -1345,6 +1345,14 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
     );
+    // 9 pm end-of-day Invoice pipeline PDF to the Purchase Telegram group.
+    this.invoicePipelineReportUsecase = require("./usecase/invoice_pipeline_report")({
+      flow: this.warehouseFlowUsecase,
+      pdf: require("./services/pdf"),
+      s3: require("./services/s3"),
+      telegram: require("./services/telegram")(),
+      chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
+    });
     this.retailPilotGrnSyncUsecase = require("./usecase/retailpilot_grn_sync")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
       this.retailPilotGrnRepo,
@@ -2184,7 +2192,8 @@ class Server {
     const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
     const warehouseFlowRouter = require("./routes/warehouse_flow")(
       this.warehouseFlowUsecase,
-      this.dashboardScope
+      this.dashboardScope,
+      this.invoicePipelineReportUsecase
     );
     const salesDashboardRouter = require("./routes/sales_dashboard")(
       this.salesDashboardUsecase
@@ -2918,6 +2927,29 @@ class Server {
       },
       { preventOverlap: true }
     );
+
+    // 9PM everyday - the end-of-day Invoice pipeline PDF to the Purchase
+    // Telegram group. ON unless INVOICE_PIPELINE_EOD_TELEGRAM_ENABLED is "false".
+    // Logged to api_sync_log as invoice_pipeline_eod_telegram.
+    {
+      const runInvoicePipelineEod = async () => {
+        if (String(process.env.INVOICE_PIPELINE_EOD_TELEGRAM_ENABLED || "").toLowerCase() === "false") {
+          console.log("[CRON] invoice_pipeline_eod_telegram - INVOICE_PIPELINE_EOD_TELEGRAM_ENABLED is 'false'; nothing sent");
+          return { code: 200, msg: "Disabled" };
+        }
+        const r = await this.invoicePipelineReportUsecase.run({ trigger: "cron" });
+        if (r.code !== 200) throw new Error(r.msg);
+        return r;
+      };
+      this.cronService.register(
+        "invoice_pipeline_eod_telegram",
+        "0 21 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("invoice_pipeline_eod_telegram", "/warehouse-flow/eod-report/send", runInvoicePipelineEod)
+          : runInvoicePipelineEod,
+        { preventOverlap: true }
+      );
+    }
 
     this.cronService.register("attendance_missing_telegram", "0 7 * * *", async () => {
       if (String(process.env.ATTENDANCE_MISSING_TELEGRAM_ENABLED || "").toLowerCase() !== "true") {
