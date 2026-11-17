@@ -71,6 +71,28 @@ describe("report", () => {
     assert.match(html, /Inspected, invoice not uploaded/);
   });
 
+  it("attention required: everything over 48h from every step, oldest first, at the top", () => {
+    const rows = R.attentionRows(FLOW, NOW);
+    assert.deepEqual(rows.map((r) => [r.ref, r.step]), [
+      ["INV-a", "allocation"],
+      ["d2", "grn"],
+      ["GP-1", "gate_pass"],
+    ]);
+    assert.equal(R.summarize(FLOW, NOW).attention, 3);
+    const { html } = R.buildReport(FLOW, { nowMs: NOW });
+    const att = html.indexOf("Attention required — waiting over 48h");
+    assert.ok(att > 0 && att < html.indexOf("1 · Gate pass — not inspected"), "before the step lists");
+    assert.match(html, /<tr class="critical">/);
+    assert.match(html, /<tr class="late">/, "24-48h rows stay orange");
+  });
+
+  it("nothing over 48h says so", () => {
+    const fresh = { ...FLOW, stages: FLOW.stages.map((s) => ({ ...s, rows: (s.rows || []).filter((r) => Date.parse(r.since) > NOW - 47 * 3600000) })) };
+    assert.deepEqual(R.attentionRows(fresh, NOW), []);
+    assert.match(R.buildReport(fresh, { nowMs: NOW }).html, /Nothing has waited over 48 hours/);
+    assert.match(R.captionText(R.summarize(fresh, NOW), NOW), /✅ Nothing waiting over 48h/);
+  });
+
   it("a step RetailPilot could not read says so instead of showing nothing", () => {
     const broken = { ...FLOW, stages: FLOW.stages.map((s) => (s.key === "grn" ? { ...s, ok: false, error: "whitelist_violation", rows: [] } : s)) };
     const { html } = R.buildReport(broken, { nowMs: NOW });
@@ -80,6 +102,7 @@ describe("report", () => {
   it("the caption carries the headline numbers within Telegram's limit", () => {
     const text = R.captionText(R.summarize(FLOW, NOW), NOW);
     assert.match(text, /Invoice pipeline — 17 Nov 2026/);
+    assert.match(text, /⚠️ Attention required: 3 waiting over 48h/);
     assert.match(text, /GRN 3 \(Yet to start 2, Cost variance detected 1\)/);
     assert.match(text, /not allocated 1, allocated 1/);
     assert.ok(text.length <= 1024);

@@ -10,6 +10,17 @@
 
 const STEP_ORDER = ["gate_pass", "inspection", "grn", "allocation"];
 
+/** Waiting this long or more is "attention required". */
+const ATTENTION_HOURS = 48;
+
+const STEP_NAME = {
+  gate_pass: "Gate pass",
+  inspection: "Inspection",
+  grn: "GRN",
+  allocation: "Allocation",
+  no_invoice: "Invoice not uploaded",
+};
+
 // RetailPilot's GRN stages, in the order an invoice moves through them.
 const GRN_STAGES = [
   ["no_template", "Yet to start"],
@@ -121,6 +132,25 @@ const SINCE_LABEL = {
 };
 
 /**
+ * Everything waiting ATTENTION_HOURS or more, from every step (and inspected
+ * passes with no invoice uploaded), oldest first, each tagged with its step.
+ */
+function attentionRows(flow, nowMs) {
+  const out = [];
+  const take = (stepKey, rows) =>
+    (rows || []).forEach((r) => {
+      const h = hoursSince(r.since, nowMs);
+      if (h !== null && h >= ATTENTION_HOURS) out.push({ ...r, step: stepKey });
+    });
+  ((flow && flow.stages) || []).forEach((s) => {
+    if (s.ok && STEP_ORDER.includes(s.key)) take(s.key, s.rows);
+  });
+  const noInvoice = ((flow && flow.attention) || []).find((a) => a.key === "no_invoice");
+  if (noInvoice && noInvoice.ok) take("no_invoice", noInvoice.rows);
+  return out.sort(byOldest);
+}
+
+/**
  * The numbers at the top: per step, how many and how many over 24h; GRN by
  * RetailPilot stage; Allocation not allocated / allocated.
  */
@@ -148,33 +178,35 @@ function summarize(flow, nowMs) {
   out.allocation.allocated = allocRows.filter((r) => r.allocated).length;
   const attention = new Map(((flow && flow.attention) || []).map((a) => [a.key, a]));
   out.no_invoice = (attention.get("no_invoice") && attention.get("no_invoice").rows.length) || 0;
+  out.attention = attentionRows(flow, nowMs).length;
   out.written_off = (attention.get("written_off") && attention.get("written_off").rows.length) || 0;
   return out;
 }
 
-function tableHtml(stepKey, rows, storeName, nowMs) {
+function tableHtml(stepKey, rows, storeName, nowMs, { withStep = false } = {}) {
   if (!rows.length) return `<p class="none">Nothing here.</p>`;
   const body = rows
     .slice()
     .sort(byOldest)
     .map((r) => {
+      const rowStep = withStep ? r.step : stepKey;
       const h = hoursSince(r.since, nowMs);
-      const late = (h || 0) >= 24;
+      const tone = (h || 0) >= ATTENTION_HOURS ? "critical" : (h || 0) >= 24 ? "late" : "";
       const extra = [];
-      if (stepKey === "allocation" && r.retries) extra.push(`${r.retries} retr${r.retries === 1 ? "y" : "ies"}`);
-      if (r.invoice_amount !== null && r.invoice_amount !== undefined && stepKey === "allocation") extra.push(inr(r.invoice_amount));
-      return `<tr class="${late ? "late" : ""}">
+      if (rowStep === "allocation" && r.retries) extra.push(`${r.retries} retr${r.retries === 1 ? "y" : "ies"}`);
+      if (r.invoice_amount !== null && r.invoice_amount !== undefined && rowStep === "allocation") extra.push(inr(r.invoice_amount));
+      return `<tr class="${tone}">${withStep ? `\n  <td class="nw step">${esc(STEP_NAME[rowStep] || rowStep)}</td>` : ""}
   <td class="sup">${esc(r.supplier_name || r.supplier_id || "Unknown supplier")}</td>
   <td class="ref">${esc(refText(r))}${extra.length ? `<div class="sub">${esc(extra.join(" · "))}</div>` : ""}</td>
   <td>${esc(storeName(r.store))}</td>
   <td class="nw">${esc(istTime(r.since))}</td>
   <td class="nw num">${esc(ageText(h))}</td>
-  <td>${esc(statusText(stepKey, r))}</td>
+  <td>${esc(statusText(rowStep, r))}</td>
 </tr>`;
     })
     .join("\n");
   return `<table>
-<thead><tr><th>Supplier</th><th>Invoice / gate pass</th><th>Store</th><th>${esc(SINCE_LABEL[stepKey] || "Since")}</th><th class="num">Waiting</th><th>Status</th></tr></thead>
+<thead><tr>${withStep ? "<th>Step</th>" : ""}<th>Supplier</th><th>Invoice / gate pass</th><th>Store</th><th>${esc(withStep ? "Since" : SINCE_LABEL[stepKey] || "Since")}</th><th class="num">Waiting</th><th>Status</th></tr></thead>
 <tbody>
 ${body}
 </tbody>
@@ -235,6 +267,13 @@ ${tableHtml(stepKey, rows, storeName, nowMs)}`;
     )
     .join("");
 
+  const urgent = attentionRows(flow, nowMs);
+  const attentionHtml = `
+<div class="attention">
+<h2>⚠ Attention required — waiting over ${ATTENTION_HOURS}h <span class="count">${urgent.length}</span></h2>
+${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: true }) : `<p class="none">Nothing has waited over ${ATTENTION_HOURS} hours.</p>`}
+</div>`;
+
   const sections = [
     section("1 · Gate pass — not inspected", "gate_pass", stepRows("gate_pass"), stepNote("gate_pass")),
     section("2 · Inspection — in progress", "inspection", stepRows("inspection"), stepNote("inspection")),
@@ -274,6 +313,14 @@ ${tableHtml(stepKey, rows, storeName, nowMs)}`;
   tr { page-break-inside: avoid; }
   tr.late td { background: #fffaf0; }
   tr.late td.num { color: #c05621; font-weight: bold; }
+  tr.critical td { background: #fff5f5; }
+  tr.critical td.num { color: #c53030; font-weight: bold; }
+  .attention { border: 1px solid #feb2b2; border-left: 4px solid #c53030; border-radius: 4px; padding: 2px 8px 8px; margin: 8px 0 4px; }
+  .attention h2 { color: #c53030; margin-top: 8px; }
+  td.step { font-weight: bold; color: #4a5568; }
+  .sw { display: inline-block; width: 10px; height: 10px; vertical-align: middle; border: 1px solid #e2e8f0; }
+  .sw.late { background: #fffaf0; }
+  .sw.critical { background: #fff5f5; border-color: #feb2b2; }
   .sup { font-weight: bold; text-transform: capitalize; }
   .ref { word-break: break-all; }
   .sub { color: #718096; font-size: 9.5px; }
@@ -287,7 +334,8 @@ ${tableHtml(stepKey, rows, storeName, nowMs)}`;
   <div class="meta">${esc(istDay(nowMs))}<br>As at ${esc(istTime(new Date(nowMs).toISOString()))} · all stores<br>Live from RetailPilot</div>
 </header>
 <div class="cards">${cards}</div>
-<p class="extra">Inspected, invoice not uploaded: <b>${sum.no_invoice}</b> &nbsp;·&nbsp; Written off (last 30 days): <b>${sum.written_off}</b> &nbsp;·&nbsp; Rows waiting over 24h are shaded.</p>
+<p class="extra">Inspected, invoice not uploaded: <b>${sum.no_invoice}</b> &nbsp;·&nbsp; Written off (last 30 days): <b>${sum.written_off}</b> &nbsp;·&nbsp; Shaded rows: <span class="sw late"></span> over 24h, <span class="sw critical"></span> over ${ATTENTION_HOURS}h.</p>
+${attentionHtml}
 ${sections.join("\n")}
 <footer>Oldest first in every list. Generated by dnds.co.in from RetailPilot.</footer>
 </body></html>`;
@@ -300,6 +348,7 @@ function captionText(summary, nowMs) {
   const grn = s.grn.stages.map((st) => `${st.label} ${st.count}`).join(", ");
   return [
     `📦 Invoice pipeline — ${istDay(nowMs)}`,
+    s.attention ? `⚠️ Attention required: ${s.attention} waiting over ${ATTENTION_HOURS}h` : `✅ Nothing waiting over ${ATTENTION_HOURS}h`,
     `Gate pass ${s.gate_pass.count} · Inspection ${s.inspection.count}`,
     `GRN ${s.grn.count}${grn ? ` (${grn})` : ""}`,
     `Allocation: not allocated ${s.allocation.not_allocated}, allocated ${s.allocation.allocated}`,
@@ -309,4 +358,4 @@ function captionText(summary, nowMs) {
     .slice(0, 1000);
 }
 
-module.exports = { buildReport, captionText, summarize, ageText, istTime, istDay, inr, esc };
+module.exports = { ATTENTION_HOURS, attentionRows, buildReport, captionText, summarize, ageText, istTime, istDay, inr, esc };
