@@ -59,7 +59,9 @@ module.exports = (permissions, dashboardScopeRepo) => {
    * currently assigned branch. Each step can only refuse; none can widen.
    *
    * @param {object} req
-   * @param {string} dashboardPermission one of DASHBOARD_PERMISSION
+   * @param {string|string[]} dashboardPermission one of DASHBOARD_PERMISSION,
+   *   or a list of keys of which the caller must hold ANY one (a screen two
+   *   dashboards share). The store scope that follows is the same either way.
    * @returns {Promise<{kind, store_ids, reason, outlet_name, employee_id}>}
    */
   const resolveDashboardScope = async (req, dashboardPermission) => {
@@ -78,7 +80,8 @@ module.exports = (permissions, dashboardScopeRepo) => {
     //    causing a lookup, and the refusal must not differ in timing or shape
     //    depending on whether they happen to have a branch.
     if (dashboardPermission) {
-      const permitted = await permissions.has(req, dashboardPermission);
+      const keys = Array.isArray(dashboardPermission) ? dashboardPermission : [dashboardPermission];
+      const permitted = keys.length > 0 && (await permissions.has(req, ...keys));
       if (!permitted) return refuse(SCOPE_REASON.NO_DASHBOARD_PERMISSION);
     }
 

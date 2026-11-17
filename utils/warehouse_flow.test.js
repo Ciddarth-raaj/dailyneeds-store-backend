@@ -294,7 +294,7 @@ describe("routes", () => {
         .on("error", reject);
     });
 
-  it("are behind the Business Dashboard key and scope", async () => {
+  it("are behind the Business Dashboard key or the Invoice pipeline key, and the scope", async () => {
     const seen = [];
     const dashboards = {
       requireDashboardAccess: (key) => (req, res, next) => {
@@ -313,7 +313,10 @@ describe("routes", () => {
       assert.equal(flow.body.dashboard_scope.kind, "OWN_STORE");
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-1")).status, 404);
       assert.equal((await get(server, "/warehouse-flow/gate-pass/GP-2")).status, 200);
-      assert.ok(seen.every((k) => k === "view_sales_dashboard"));
+      assert.ok(
+        seen.every((k) => Array.isArray(k) && k.includes("view_sales_dashboard") && k.includes("view_invoice_pipeline")),
+        "the Business Dashboard key or the Invoice pipeline's own"
+      );
     } finally {
       server.close();
     }
