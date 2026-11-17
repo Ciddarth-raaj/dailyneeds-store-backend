@@ -64,11 +64,12 @@ class WarehouseFlow {
    * a stage whose source fails says so and the others still show.
    */
   async getFlow({ refresh = false, store_ids = null } = {}) {
-    const [branches, passes, inspections, documents, vendors] = await Promise.all([
+    const [branches, passes, inspections, documents, allocations, vendors] = await Promise.all([
       this.loadBranches(),
       this._read("gate_passes", "gate_passes:open", W.buildOpenGatePassesQuery(), refresh),
       this._read("inspections", "inspections:active", W.buildActiveInspectionsQuery(), refresh),
       this._read("documents", "documents:active", W.buildDocumentsQuery(), refresh),
+      this._read("allocations", "allocations:active", W.buildAllocationQuery(), refresh),
       this._read("vendors", "vendors", W.buildVendorNamesQuery(), false),
     ]);
     const { resolve, stores } = storeResolver(branches);
@@ -78,6 +79,7 @@ class WarehouseFlow {
       W.mapInspectionRows(inspections.rows, vendors.rows, resolve),
       W.mapDocumentRows(documents.rows, vendors.rows, resolve)
     );
+    lists.allocation = W.mapAllocationRows(allocations.rows, vendors.rows, resolve);
     // Which read each list depends on, so a failure is reported where it shows.
     // A list is only as good as every read it is built from: the first that
     // failed is what it reports.
@@ -85,6 +87,7 @@ class WarehouseFlow {
       gate_pass: [passes, documents],
       inspection: [inspections],
       grn: [documents, passes],
+      allocation: [allocations],
       no_invoice: [passes, documents],
       written_off: [inspections],
     };

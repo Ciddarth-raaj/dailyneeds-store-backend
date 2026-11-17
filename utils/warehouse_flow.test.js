@@ -36,6 +36,11 @@ const DOCUMENT_ROWS = [
   { slug: "doc-2", state: "pricing_review_pending", store_id: "kathir", supplier_id: "9", document_id: "INV-78", gatepass_slug: null, uploaded_at: "2026-11-14T05:00:00Z" },
 ];
 
+const ALLOCATION_ROWS = [
+  { slug: "INV-aaa", invoice_id: "HUL/5520", allocation_status: "STAGED", store_id: "wh", supplier_id: 42, created_at: "2026-11-14T06:00:00Z", updated_at: "2026-11-15T06:00:00Z", total_net: "48250.5", alloc_retries: 3 },
+  { slug: "INV-bbb", invoice_id: "AMF/0990", allocation_status: "SYNCED", store_id: "kathir", supplier_id: "9", created_at: "2026-11-15T04:00:00Z", total_net: 1200, alloc_retries: 0, po_slug: "PO-77" },
+];
+
 const fakeSpectra = (handler) => ({
   isConfigured: () => true,
   queries: [],
@@ -48,6 +53,7 @@ const fakeSpectra = (handler) => ({
 const runway = () =>
   fakeSpectra((q) => {
     if (/masterhub\.vendors/.test(q)) return [{ id: "42", name: "Acme Foods" }];
+    if (/allocation_status IN/.test(q)) return ALLOCATION_ROWS;
     if (/invoice_documents/.test(q)) return DOCUMENT_ROWS.filter((d) => !/gatepass_slug = '/.test(q) || q.includes(`'${d.gatepass_slug}'`));
     if (/grn_inspection_details/.test(q)) return [{ grn_inspection_id: "IN-1", lines: 12, invoice_qty: 100, inspected_qty: 96, free_qty: 4, rejected_qty: 2 }];
     if (/g\.slug = 'GP-1'/.test(q)) return PASS_ROWS.slice(0, 2);
@@ -187,6 +193,25 @@ describe("classifyFlow", () => {
   });
 });
 
+describe("allocation", () => {
+  it("one row per invoice: staged is not allocated, synced is allocated", () => {
+    const { resolve } = storeResolver(BRANCHES);
+    const rows = W.mapAllocationRows(ALLOCATION_ROWS, [{ id: "42", name: "Acme Foods" }], resolve);
+    assert.deepEqual(
+      rows.map((r) => [r.ref, r.invoice_no, r.supplier_name, r.store, r.allocated, r.invoices_grn_started, r.retries, r.invoice_amount]),
+      [
+        ["INV-aaa", "HUL/5520", "Acme Foods", "outlet:2", false, 0, 3, 48250.5],
+        ["INV-bbb", "AMF/0990", null, "outlet:3", true, 1, 0, 1200],
+      ]
+    );
+    assert.equal(rows[1].po, "PO-77");
+    const q = W.buildAllocationQuery();
+    assert.match(q, /h\.allocation_status IN \('STAGED', 'SYNCED'\)/);
+    assert.doesNotMatch(q, /SELECT \*/);
+    assert.doesNotMatch(q, /GROUP BY/);
+  });
+});
+
 describe("usecase", () => {
   it("each stage holds what has happened to it, in scope", async () => {
     const uc = usecaseFactory(runway(), async () => BRANCHES);
@@ -196,9 +221,10 @@ describe("usecase", () => {
       ["gate_pass", true],
       ["inspection", true],
       ["grn", true],
-      ["allocation", false],
+      ["allocation", true],
       ["ready_to_dispatch", false],
     ]);
+    assert.deepEqual(rows("allocation"), ["INV-aaa", "INV-bbb"]);
     assert.deepEqual(rows("gate_pass"), [], "GP-2 has its invoice uploaded, so it is at GRN");
     assert.deepEqual(rows("inspection"), ["IN-1"]);
     assert.deepEqual(rows("grn"), ["doc-1", "doc-2"], "one row per invoice, with or without a gate pass");
@@ -207,7 +233,7 @@ describe("usecase", () => {
       ["written_off", ["IN-7"]],
     ]);
     const own = await uc.getFlow({ store_ids: [3] });
-    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [[], [], ["doc-1", "doc-2"], [], []]);
+    assert.deepEqual(own.data.stages.map((x) => x.rows.map((r) => r.ref)), [[], [], ["doc-1", "doc-2"], ["INV-bbb"], []]);
     assert.deepEqual(own.data.stores.map((x) => x.key), ["outlet:3"]);
   });
 

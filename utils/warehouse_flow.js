@@ -435,12 +435,74 @@ function classifyFlow(passes, inspections, documents) {
   return { gate_pass, inspection, grn, no_invoice, written_off };
 }
 
+// -------------------------------------------------------------- allocation
+//
+// public.invoice_headers.allocation_status: STAGED = not yet allocated,
+// SYNCED = allocated. Any other status has left this step.
+
+/** GRN'd invoices waiting for (STAGED) or through (SYNCED) allocation. Named columns only. */
+function buildAllocationQuery() {
+  return `
+SELECT h.slug, h.invoice_id, h.allocation_status, h.store_id, h.supplier_id,
+  h.invoice_date, h.created_at, h.updated_at, h.total_net, h.alloc_retries,
+  h.alloc_mode_override, h.po_slug
+FROM public.invoice_headers h
+WHERE h.allocation_status IN ('STAGED', 'SYNCED')
+ORDER BY h.created_at, h.slug`;
+}
+
+/**
+ * Invoice rows -> one flow row per invoice. `since` is when the GRN was
+ * entered (created_at); `allocated` is SYNCED. The GRN step's split fields
+ * (invoices / invoices_grn_started / grn_started) carry "allocated" here, so
+ * the tile and its Not allocated / Allocated lists work as GRN's do.
+ */
+function mapAllocationRows(rows, vendorRows, resolve) {
+  const vendors = new Map((vendorRows || []).map((v) => [clean(v.id), clean(v.name)]));
+  const seen = new Set();
+  const out = [];
+  for (const r of rows || []) {
+    const slug = clean(r.slug);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const status = clean(r.allocation_status).toUpperCase();
+    const allocated = status === "SYNCED";
+    out.push({
+      ref: slug,
+      kind: "allocation",
+      grn_ref: slug,
+      gate_pass: null,
+      inspection: null,
+      store: resolve(r.store_id, null).key,
+      supplier_id: clean(r.supplier_id) || null,
+      supplier_name: vendors.get(clean(r.supplier_id)) || null,
+      vehicle_number: null,
+      invoice_no: clean(r.invoice_id) || null,
+      invoice_date: iso(r.invoice_date),
+      since: iso(r.created_at),
+      last_attempt: iso(r.updated_at),
+      allocation_status: status || null,
+      allocated,
+      retries: num(r.alloc_retries) || 0,
+      mode_override: clean(r.alloc_mode_override) || null,
+      po: clean(r.po_slug) || null,
+      invoice_amount: num(r.total_net),
+      state: status || null,
+      grn_started: allocated,
+      invoices: 1,
+      invoices_grn_started: allocated ? 1 : 0,
+      documents: [],
+    });
+  }
+  return out;
+}
+
 /** The stages, in order. Only `built` stages are read. */
 const STAGES = [
   { key: "gate_pass", label: "Gate pass", built: true, hint: "In through the gate; not inspected and no invoice uploaded yet" },
   { key: "inspection", label: "Inspection", built: true, hint: "Being inspected" },
   { key: "grn", label: "GRN", built: true, hint: "Supplier invoices waiting for their GRN" },
-  { key: "allocation", label: "Allocation", built: false },
+  { key: "allocation", label: "Allocation", built: true, hint: "GRN'd invoices: not yet allocated (staged) or allocated (synced)" },
   { key: "ready_to_dispatch", label: "Ready to dispatch", built: false },
 ];
 
@@ -452,6 +514,8 @@ const ATTENTION = [
 
 module.exports = {
   STAGES,
+  buildAllocationQuery,
+  mapAllocationRows,
   buildDocumentsQuery,
   buildGatePassDocumentsQuery,
   mapDocumentRows,
