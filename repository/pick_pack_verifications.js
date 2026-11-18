@@ -2,6 +2,18 @@ const logger = require("../utils/logger");
 
 const TABLE = "pick_pack_verifications";
 
+/**
+ * The store a line is for. Lines written before stores were kept (one per
+ * article, stores summed) fall back to the stores in that day's uploaded
+ * Verification report, with each one's short qty: "ecr (2), kathirkamam (3)".
+ */
+const STORES_SQL = `COALESCE(ppr.store, (
+          SELECT GROUP_CONCAT(CONCAT(w.to_store, ' (', CAST(ROUND(w.short_qty) AS SIGNED), ')') ORDER BY w.to_store SEPARATOR ', ')
+          FROM wh_report_job_rows w
+          WHERE w.article_id = ppr.product_id AND w.report_date = ppr.date
+            AND w.report_type = 'VERIFICATION' AND UPPER(w.job_type) = ppr.job_type AND w.short_qty > 0
+        )) AS stores`;
+
 function mapVerificationRow(r) {
   if (!r) return null;
   return {
@@ -57,6 +69,8 @@ class PickPackVerificationsRepository {
             ELSE ppr.remark_str
           END AS remark_value,
           ppr.is_verified,
+          ppr.store,
+          ${STORES_SQL},
           ppr.created_at,
           ppr.updated_at
         FROM ${TABLE} ppr

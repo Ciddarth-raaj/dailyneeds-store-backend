@@ -26,14 +26,16 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table`);
+    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80));
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
              CREATE TABLE retailpilot_grn_headers (invoice_slug VARCHAR(64) PRIMARY KEY, entered_at DATETIME);
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
-             CREATE TABLE product_table (product_id INT PRIMARY KEY);
-             INSERT INTO product_table VALUES (1), (2), (3);
+             CREATE TABLE product_table (product_id INT PRIMARY KEY, de_name VARCHAR(200));
+             CREATE TABLE product_images (image_id INT PRIMARY KEY, product_id INT, image_url VARCHAR(200), priority INT);
+             CREATE TABLE pick_pack_verification_remarks (remark_id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255));
+             INSERT INTO product_table (product_id) VALUES (1), (2), (3);
              CREATE TABLE pick_pack_verifications (
                pick_pack_verification_id INT AUTO_INCREMENT PRIMARY KEY, product_id INT NOT NULL, mismatch_qty INT NOT NULL DEFAULT 0,
                date DATE NOT NULL, job_type ENUM('GRN','STA') NOT NULL, remark_id INT NULL, remark_str VARCHAR(500) NULL,
@@ -43,6 +45,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              INSERT INTO retailpilot_grn_headers VALUES ('old', '2026-10-01 10:00:00'), ('new', '2026-11-01 10:00:00');
              INSERT INTO retailpilot_grn_lines VALUES ('1', 'old', 2, 40), ('2', 'new', 2, 45);`);
     await q(SQL("up"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218130000-pick-pack-verification-store-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17");
   });
@@ -95,21 +98,42 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal(rows.data.rows[0].mrp_source, "GRN");
   });
 
-  it("puts the Verification write-off on the Verification page, keeping remarks on re-upload", async () => {
+  it("puts the Verification write-off on the Verification page per store, keeping remarks on re-upload", async () => {
     const line = (store, id, jt, short) => [jt, "warehouse", store, String(id), "a", "D", "C", "5", "5", "5", "0", "", String(short), String(short), "1", "0"];
     const up = (rows) => uc.upload({ report_type: "VERIFICATION", report_date: "2026-11-16", file_name: "Verification_Report_2026-11-16_ALL.csv", headers: JOB, rows });
+    const page = () => q("SELECT product_id, job_type, store, mismatch_qty, remark_str, is_verified FROM pick_pack_verifications ORDER BY product_id, job_type, store");
     const first = await up([line("ecr", 1, "GRN", 2), line("kathirkamam", 1, "GRN", 3), line("ecr", 2, "STA", 4), line("ecr", 3, "GRN", 1), line("ecr", 99, "GRN", 1), line("ecr", 2, "DAMG", 1)]);
-    assert.deepEqual(first.data.summary.verification_page, { added: 3, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 1, other_job_type_lines: 1 });
-    const page = async () => q("SELECT product_id, job_type, mismatch_qty, remark_str, is_verified, DATE_FORMAT(date, '%Y-%m-%d') AS d FROM pick_pack_verifications ORDER BY product_id, job_type");
-    assert.deepEqual((await page()).map((r) => [r.product_id, r.job_type, r.mismatch_qty, r.d]), [[1, "GRN", 5, "2026-11-16"], [2, "STA", 4, "2026-11-16"], [3, "GRN", 1, "2026-11-16"]]);
+    assert.deepEqual(first.data.summary.verification_page, { added: 4, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 1, other_job_type_lines: 1 });
+    assert.deepEqual((await page()).map((r) => [r.product_id, r.job_type, r.store, r.mismatch_qty]), [
+      [1, "GRN", "ecr", 2], [1, "GRN", "kathirkamam", 3], [2, "STA", "ecr", 4], [3, "GRN", "ecr", 1],
+    ]);
 
-    // The team adds a remark to article 1 and verifies article 2; then the report is uploaded again with new numbers.
-    await q("UPDATE pick_pack_verifications SET remark_str = 'bin empty' WHERE product_id = 1");
+    // A remark on article 1 at ecr, article 2 verified; then the report is uploaded again.
+    await q("UPDATE pick_pack_verifications SET remark_str = 'bin empty' WHERE product_id = 1 AND store = 'ecr'");
     await q("UPDATE pick_pack_verifications SET is_verified = 1 WHERE product_id = 2");
-    const again = await up([line("ecr", 1, "GRN", 7), line("ecr", 2, "STA", 9), line("ecr", 3, "GRN", 1)]);
-    assert.deepEqual(again.data.summary.verification_page, { added: 0, updated: 1, unchanged: 1, kept_verified: 1, unknown_articles: 0, other_job_type_lines: 0 });
-    const after = await page();
-    assert.deepEqual(after.map((r) => [r.product_id, r.mismatch_qty, r.remark_str, Number(r.is_verified)]), [[1, 7, "bin empty", 0], [2, 4, null, 1], [3, 1, null, 0]]);
+    const again = await up([line("ecr", 1, "GRN", 7), line("kathirkamam", 1, "GRN", 3), line("ecr", 2, "STA", 9), line("ecr", 3, "GRN", 1)]);
+    assert.deepEqual(again.data.summary.verification_page, { added: 0, updated: 1, unchanged: 2, kept_verified: 1, unknown_articles: 0, other_job_type_lines: 0 });
+    assert.deepEqual((await page()).map((r) => [r.product_id, r.store, r.mismatch_qty, r.remark_str, Number(r.is_verified)]), [
+      [1, "ecr", 7, "bin empty", 0], [1, "kathirkamam", 3, null, 0], [2, "ecr", 4, null, 1], [3, "ecr", 1, null, 0],
+    ]);
+  });
+
+  it("an older combined line becomes the first store's line and keeps its remark; a verified one stands", async () => {
+    await q("DELETE FROM pick_pack_verifications");
+    await q(`INSERT INTO pick_pack_verifications (product_id, mismatch_qty, date, job_type, store, remark_str, is_verified) VALUES
+               (1, 5, '2026-11-15', 'GRN', NULL, 'counted twice', 0), (2, 4, '2026-11-15', 'GRN', NULL, NULL, 1)`);
+    const line = (store, id, short) => ["GRN", "warehouse", store, String(id), "a", "D", "C", "5", "5", "5", "0", "", String(short), String(short), "1", "0"];
+    const res = await uc.upload({ report_type: "VERIFICATION", report_date: "2026-11-15", file_name: "Verification_Report_2026-11-15_ALL.csv", headers: JOB,
+      rows: [line("ecr", 1, 2), line("kathirkamam", 1, 3), line("ecr", 2, 1), line("moolakulam", 2, 3)] });
+    assert.deepEqual(res.data.summary.verification_page, { added: 1, updated: 1, unchanged: 0, kept_verified: 2, unknown_articles: 0, other_job_type_lines: 0 });
+    const rows = await q("SELECT product_id, store, mismatch_qty, remark_str, is_verified FROM pick_pack_verifications ORDER BY product_id, store");
+    assert.deepEqual(rows.map((r) => [r.product_id, r.store, r.mismatch_qty, r.remark_str, Number(r.is_verified)]), [
+      [1, "ecr", 2, "counted twice", 0], [1, "kathirkamam", 3, null, 0], [2, null, 4, null, 1],
+    ]);
+
+    // The Verification page's list: a line's own store, or for an older combined line the report's stores.
+    const list = await require("./pick_pack_verifications")(pool).getAll({ from_date: "2026-11-15", to_date: "2026-11-15" });
+    assert.deepEqual(list.map((r) => [r.product_id, r.stores]).sort(), [[1, "ecr"], [1, "kathirkamam"], [2, "ecr (1), moolakulam (3)"]]);
   });
 
   it("deletes an upload with its rows, and the down migration removes everything", async () => {
