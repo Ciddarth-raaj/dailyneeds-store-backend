@@ -286,6 +286,24 @@ function verificationWriteOffs(rows) {
   return { rows: out, other_job_type_lines: other };
 }
 
+/**
+ * The Picking report's write-off as rows for the Pick & Pack Write Off page:
+ * Short Qty > 0, one row per article and store (job types summed - that page
+ * has no job type), whole units.
+ */
+function pickingWriteOffs(rows) {
+  const by = new Map();
+  for (const r of rows || []) {
+    if (!(Number(r.short_qty) > 0)) continue;
+    const store = r.to_store || null;
+    const key = `${r.article_id}|${store}`;
+    const cur = by.get(key) || { product_id: r.article_id, store, mismatch_qty: 0 };
+    cur.mismatch_qty += Number(r.short_qty);
+    by.set(key, cur);
+  }
+  return { rows: [...by.values()].map((r) => ({ ...r, mismatch_qty: Math.round(r.mismatch_qty) })).filter((r) => r.mismatch_qty > 0) };
+}
+
 /** A box going back to the warehouse (damage returns): loaded, but never unloaded at a store. */
 const isReturn = (r) => String(r.job_type || "").toUpperCase() === "DAMG" || (r.planned_to_store && r.planned_to_store === r.from_store);
 
@@ -395,4 +413,5 @@ module.exports = {
   reconcileBoxes,
   VERIFICATION_PAGE_JOB_TYPES,
   verificationWriteOffs,
+  pickingWriteOffs,
 };

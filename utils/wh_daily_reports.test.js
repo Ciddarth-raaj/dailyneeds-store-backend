@@ -131,6 +131,21 @@ describe("verificationWriteOffs", () => {
   });
 });
 
+describe("pickingWriteOffs", () => {
+  it("one row per article and store, job types summed", () => {
+    const r = W.pickingWriteOffs([
+      { article_id: 1, job_type: "STA", to_store: "ecr", short_qty: 2 },
+      { article_id: 1, job_type: "GRN", to_store: "ecr", short_qty: 1.4 },
+      { article_id: 1, job_type: "STA", to_store: "moolakulam", short_qty: 5 },
+      { article_id: 2, job_type: "STA", to_store: "ecr", short_qty: 0 },
+    ]);
+    assert.deepEqual(r.rows, [
+      { product_id: 1, store: "ecr", mismatch_qty: 3 },
+      { product_id: 1, store: "moolakulam", mismatch_qty: 5 },
+    ]);
+  });
+});
+
 describe("usecase upload", () => {
   const fakeRepo = (over = {}) => {
     const saved = [];
@@ -138,7 +153,7 @@ describe("usecase upload", () => {
       saved,
       latestMrp: async (ids) => new Map(ids.filter((id) => id === 102654).map((id) => [id, 45])),
       uploads: async () => [],
-      replaceUpload: async (u) => (saved.push(u), { upload_id: 7, verification_page: u.verificationWriteOffs ? { added: u.verificationWriteOffs.length } : null }),
+      replaceUpload: async (u) => (saved.push(u), { upload_id: 7, page: u.pageLines ? { added: u.pageLines.rows.length } : null }),
       ...over,
     };
   };
@@ -149,17 +164,20 @@ describe("usecase upload", () => {
     const repo = fakeRepo();
     const res = await uc(repo).upload(body());
     assert.equal(res.code, 200);
-    assert.deepEqual(res.data.summary, { rows: 2, short_lines: 1, short_qty: 72, short_value: 3240, short_unpriced_lines: 0, open_lines: 0 });
+    assert.deepEqual(res.data.summary, { rows: 2, short_lines: 1, short_qty: 72, short_value: 3240, short_unpriced_lines: 0, open_lines: 0, write_off_page: { added: 1 } });
     assert.equal(repo.saved[0].rows[0].mrp_source, "FILE");
     assert.equal(repo.saved[0].rows[1].mrp_source, "GRN");
     assert.equal(repo.saved[0].uploaded_by, 3);
   });
-  it("sends only the Verification report's write-off to the Verification page", async () => {
+  it("sends the Picking write-off to the Write Off page and the Verification write-off to the Verification page", async () => {
     const repo = fakeRepo();
-    await uc(repo).upload(body());
-    assert.equal(repo.saved[0].verificationWriteOffs, null);
+    const pick = await uc(repo).upload(body());
+    assert.deepEqual(repo.saved[0].pageLines, { page: "WRITE_OFF", rows: [{ product_id: 102654, store: "vallalar salai", mismatch_qty: 72 }] });
+    assert.equal(pick.data.summary.write_off_page.added, 1);
+    await uc(repo).upload(body({ report_type: "PACKING", file_name: "Packing_Report_2026-11-16_ALL.csv" }));
+    assert.equal(repo.saved[1].pageLines, null);
     const res = await uc(repo).upload(body({ report_type: "VERIFICATION", file_name: "Verification_Report_2026-11-16_ALL.csv", headers: [...JOB_HEADERS], rows: [job({ "Job Type": "GRN", "Short Qty": "6", "Returned Qty": "6" })] }));
-    assert.deepEqual(repo.saved[1].verificationWriteOffs, [{ product_id: 100073, job_type: "GRN", store: "vallalar salai", mismatch_qty: 6 }]);
+    assert.deepEqual(repo.saved[2].pageLines, { page: "VERIFICATION", rows: [{ product_id: 100073, job_type: "GRN", store: "vallalar salai", mismatch_qty: 6 }] });
     assert.equal(res.data.summary.verification_page.added, 1);
   });
   it("refuses a file named for another report or day, and future days", async () => {

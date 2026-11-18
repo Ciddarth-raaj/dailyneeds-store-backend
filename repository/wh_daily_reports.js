@@ -27,6 +27,11 @@ const BOX_COLS = [
   "box_id", "box_kind", "truck_no", "article_id", "article_name", "department", "category", "mrp", "box_qty",
   "box_status", "finished_at",
 ];
+/** The Pick & Pack pages a report's write-off goes to. */
+const PAGES = {
+  VERIFICATION: { table: "pick_pack_verifications", id: "pick_pack_verification_id", jobType: true },
+  WRITE_OFF: { table: "pick_pack_write_off", id: "pick_pack_write_off_id", jobType: false },
+};
 /** Columns a job breakdown may group by. */
 const JOB_DIMS = ["report_type", "report_date", "to_store", "job_type", "department", "category"];
 
@@ -112,52 +117,57 @@ class WhDailyReportsRepository {
   }
 
   /**
-   * Put the Verification report's write-off on the Pick & Pack Verification
-   * page (pick_pack_verifications) for the day, one line per article, job
-   * type and store, inside the upload's transaction. The team's work is kept:
+   * Put a report's write-off on its Pick & Pack page for the day, one line
+   * per article (and job type, on Verification) and store, inside the
+   * upload's transaction:
    *
-   *   - a line already there for the same article, job type and store: an
+   *   VERIFICATION report -> pick_pack_verifications (Pick & Pack > Verification)
+   *   PICKING report      -> pick_pack_write_off     (Pick & Pack > Write Off)
+   *
+   * The team's work is kept:
+   *   - a line already there for the same article (job type) and store: an
    *     unverified one takes the new quantity and keeps its remark, a
    *     verified one is left alone;
    *   - a line from before stores were kept (store NULL, stores summed) for
-   *     the same article and job type: an unverified one becomes the first
+   *     the same article (job type): an unverified one becomes the first
    *     store's line, keeping its remark; a verified one stands for all the
    *     article's stores, and none are added;
    *   - otherwise a new line is added.
    *
    * Articles not in product_table cannot be added (foreign key) and are counted.
    */
-  async _syncVerificationPage(conn, date, writeOffs) {
+  async _syncPageLines(conn, page, date, writeOffs) {
+    const cfg = PAGES[page];
     const out = { added: 0, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 0 };
     if (!writeOffs.length) return out;
     const ids = [...new Set(writeOffs.map((w) => w.product_id))];
     const known = new Set((await queryAsync(conn, "SELECT product_id FROM product_table WHERE product_id IN (?)", [ids])).map((r) => Number(r.product_id)));
     const existing = await queryAsync(
       conn,
-      `SELECT pick_pack_verification_id, product_id, job_type, store, mismatch_qty, is_verified
-         FROM pick_pack_verifications WHERE date = ? ORDER BY pick_pack_verification_id`,
+      `SELECT ${cfg.id} AS id, product_id, ${cfg.jobType ? "job_type" : "NULL AS job_type"}, store, mismatch_qty, is_verified
+         FROM ${cfg.table} WHERE date = ? ORDER BY ${cfg.id}`,
       [date]
     );
+    const artKey = (r) => (cfg.jobType ? `${Number(r.product_id)}|${r.job_type}` : `${Number(r.product_id)}`);
     const byStore = new Map();
     const legacy = new Map();
     for (const e of existing) {
-      const art = `${Number(e.product_id)}|${e.job_type}`;
-      const map = e.store == null || e.store === "" ? legacy : byStore;
-      const k = map === legacy ? art : `${art}|${e.store}`;
+      const isLegacy = e.store == null || e.store === "";
+      const map = isLegacy ? legacy : byStore;
+      const k = isLegacy ? artKey(e) : `${artKey(e)}|${e.store}`;
       if (!map.has(k)) map.set(k, []);
       map.get(k).push(e);
     }
     const inserts = [];
     const setQty = async (row, qty, store) => {
-      const unchanged = Number(row.mismatch_qty) === qty && (store === undefined || row.store === store);
-      if (unchanged) {
+      if (Number(row.mismatch_qty) === qty && (store === undefined || row.store === store)) {
         out.unchanged += 1;
         return;
       }
       await queryAsync(
         conn,
-        `UPDATE pick_pack_verifications SET mismatch_qty = ?${store === undefined ? "" : ", store = ?"}, updated_at = CURRENT_TIMESTAMP WHERE pick_pack_verification_id = ?`,
-        store === undefined ? [qty, row.pick_pack_verification_id] : [qty, store, row.pick_pack_verification_id]
+        `UPDATE ${cfg.table} SET mismatch_qty = ?${store === undefined ? "" : ", store = ?"}, updated_at = CURRENT_TIMESTAMP WHERE ${cfg.id} = ?`,
+        store === undefined ? [qty, row.id] : [qty, store, row.id]
       );
       out.updated += 1;
     };
@@ -166,7 +176,7 @@ class WhDailyReportsRepository {
         out.unknown_articles += 1;
         continue;
       }
-      const art = `${Number(w.product_id)}|${w.job_type}`;
+      const art = artKey(w);
       const same = (byStore.get(`${art}|${w.store}`) || []).filter((e) => !e.claimed);
       if (same.length) {
         same[0].claimed = true;
@@ -186,21 +196,22 @@ class WhDailyReportsRepository {
         await setQty(reuse, w.mismatch_qty, w.store);
         continue;
       }
-      inserts.push([w.product_id, w.mismatch_qty, date, w.job_type, w.store, 0]);
+      inserts.push(cfg.jobType ? [w.product_id, w.mismatch_qty, date, w.job_type, w.store, 0] : [w.product_id, w.mismatch_qty, date, w.store, 0]);
     }
     if (inserts.length) {
-      await queryAsync(conn, "INSERT INTO pick_pack_verifications (product_id, mismatch_qty, date, job_type, store, is_verified) VALUES ?", [inserts]);
+      const cols = cfg.jobType ? "product_id, mismatch_qty, date, job_type, store, is_verified" : "product_id, mismatch_qty, date, store, is_verified";
+      await queryAsync(conn, `INSERT INTO ${cfg.table} (${cols}) VALUES ?`, [inserts]);
       out.added = inserts.length;
     }
     return out;
   }
 
   /**
-   * Save one report for one day, replacing what was there. Answers
-   * { upload_id, verification_page } - the second only when
-   * `verificationWriteOffs` is given (the Verification report).
+   * Save one report for one day, replacing what was there. With `pageLines`
+   * ({ page: "VERIFICATION" | "WRITE_OFF", rows }) its write-off also goes to
+   * that Pick & Pack page. Answers { upload_id, page }.
    */
-  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows, verificationWriteOffs = null }) {
+  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows, pageLines = null }) {
     const conn = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(conn);
@@ -215,9 +226,9 @@ class WhDailyReportsRepository {
       const table = shape === "JOB" ? "wh_report_job_rows" : "wh_report_box_rows";
       const values = rows.map((r) => cols.map((c) => (c === "upload_id" ? uploadId : c === "report_date" ? report_date : r[c] === undefined ? null : r[c])));
       await insertRowsInBatches(conn, `INSERT INTO ${table} (${cols.join(", ")}) VALUES ?`, values, 2000);
-      const verificationPage = verificationWriteOffs ? await this._syncVerificationPage(conn, report_date, verificationWriteOffs) : null;
+      const page = pageLines ? await this._syncPageLines(conn, pageLines.page, report_date, pageLines.rows) : null;
       await commitAsync(conn);
-      return { upload_id: uploadId, verification_page: verificationPage };
+      return { upload_id: uploadId, page };
     } catch (err) {
       await rollbackAsync(conn);
       logger.Log({

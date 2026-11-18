@@ -7,7 +7,8 @@ const respondError = require("../utils/http");
  *
  *   GET    /status?from&to                     what was uploaded each day        upload_wh_daily_reports (Daily Uploads),
  *                                                                                    view_wh_daily_reports (Analysis) or
- *                                                                                    view_pick_pack_verifications (its calendar)
+ *                                                                                    view_pick_pack_verifications or
+ *                                                                                    view_pick_pack_write_off (their calendars)
  *   GET    /analysis?from&to&store             write-offs, funnel, boxes, trucks  view_wh_daily_reports
  *   GET    /rows?from&to&report_type&only&store  rows for downloads              view_wh_daily_reports
  *   POST   /upload                             one file as one report for a day   upload_wh_daily_reports
@@ -32,8 +33,8 @@ class WhDailyReportsRoutes {
     };
     const q = (req, k) => (req.query[k] == null ? null : String(req.query[k]).trim() || null);
 
-    // The Pick & Pack Verification calendar reads it to mark days uploaded with no write-off.
-    this.router.get("/status", need("upload_wh_daily_reports", "view_wh_daily_reports", "view_pick_pack_verifications"), async (req, res) => {
+    // The Pick & Pack Verification and Write Off calendars read it to mark days uploaded with no write-off.
+    this.router.get("/status", need("upload_wh_daily_reports", "view_wh_daily_reports", "view_pick_pack_verifications", "view_pick_pack_write_off"), async (req, res) => {
       try {
         send(res, await this.usecase.status({ from: q(req, "from"), to: q(req, "to") }));
       } catch (err) {

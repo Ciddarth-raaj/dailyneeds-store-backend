@@ -2,6 +2,22 @@ const logger = require("../utils/logger");
 
 const TABLE = "pick_pack_write_off";
 
+/**
+ * The store a line is for. Lines written before stores were kept fall back
+ * to the stores in that day's uploaded Picking report, with each one's short
+ * qty: "ecr (2), kathirkamam (3)". Null for lines imported by hand.
+ */
+const STORES_SQL = `COALESCE(ppwo.store, (
+          SELECT GROUP_CONCAT(CONCAT(x.to_store, ' (', x.qty, ')') ORDER BY x.to_store SEPARATOR ', ')
+          FROM (
+            SELECT w.to_store, CAST(ROUND(SUM(w.short_qty)) AS SIGNED) AS qty
+            FROM wh_report_job_rows w
+            WHERE w.article_id = ppwo.product_id AND w.report_date = ppwo.date
+              AND w.report_type = 'PICKING' AND w.short_qty > 0
+            GROUP BY w.to_store
+          ) x
+        )) AS stores`;
+
 function mapWriteOffRow(r) {
   if (!r) return null;
   return {
@@ -54,6 +70,8 @@ class PickPackWriteOffRepository {
           ppwo.reason_employee_id,
           ne.employee_name AS reason_employee_name,
           ppwo.is_verified,
+          ppwo.store,
+          ${STORES_SQL},
           ppwo.created_at,
           ppwo.updated_at
         FROM ${TABLE} ppwo

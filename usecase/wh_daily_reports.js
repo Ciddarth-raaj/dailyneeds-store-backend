@@ -61,8 +61,8 @@ class WhDailyReports {
 
     const before = await this.repo.uploads(report_date, report_date);
     const replaced = before.some((u) => u.report_type === type);
-    // The Verification report's write-off also goes to the Pick & Pack Verification page.
-    const toPage = type === "VERIFICATION" ? W.verificationWriteOffs(out) : null;
+    // Write-off also goes to its Pick & Pack page: Verification report -> Verification, Picking report -> Write Off.
+    const toPage = type === "VERIFICATION" ? W.verificationWriteOffs(out) : type === "PICKING" ? W.pickingWriteOffs(out) : null;
     const saved = await this.repo.replaceUpload({
       report_type: type,
       report_date,
@@ -70,7 +70,7 @@ class WhDailyReports {
       uploaded_by: employee_id,
       shape,
       rows: out,
-      verificationWriteOffs: toPage ? toPage.rows : null,
+      pageLines: toPage ? { page: type === "VERIFICATION" ? "VERIFICATION" : "WRITE_OFF", rows: toPage.rows } : null,
     });
 
     const summary = { rows: out.length };
@@ -86,7 +86,8 @@ class WhDailyReports {
       summary.trucks = new Set(out.map((r) => r.truck_no).filter(Boolean)).size;
       summary.qty = out.reduce((s, r) => s + r.box_qty, 0);
     }
-    if (saved.verification_page) summary.verification_page = { ...saved.verification_page, other_job_type_lines: toPage.other_job_type_lines };
+    if (saved.page && type === "VERIFICATION") summary.verification_page = { ...saved.page, other_job_type_lines: toPage.other_job_type_lines };
+    if (saved.page && type === "PICKING") summary.write_off_page = saved.page;
     return { code: 200, data: { upload_id: saved.upload_id, report_type: type, report_date, replaced, summary } };
   }
 

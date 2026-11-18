@@ -26,7 +26,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks`);
+    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80));
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
@@ -35,6 +35,12 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              CREATE TABLE product_table (product_id INT PRIMARY KEY, de_name VARCHAR(200));
              CREATE TABLE product_images (image_id INT PRIMARY KEY, product_id INT, image_url VARCHAR(200), priority INT);
              CREATE TABLE pick_pack_verification_remarks (remark_id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255));
+             CREATE TABLE pick_pack_remarks (remark_id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255));
+             CREATE TABLE pick_pack_write_off (
+               pick_pack_write_off_id INT AUTO_INCREMENT PRIMARY KEY, product_id INT NOT NULL, mismatch_qty INT NOT NULL DEFAULT 0, date DATE NOT NULL,
+               remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0,
+               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (product_id) REFERENCES product_table(product_id));
              INSERT INTO product_table (product_id) VALUES (1), (2), (3);
              CREATE TABLE pick_pack_verifications (
                pick_pack_verification_id INT AUTO_INCREMENT PRIMARY KEY, product_id INT NOT NULL, mismatch_qty INT NOT NULL DEFAULT 0,
@@ -46,6 +52,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              INSERT INTO retailpilot_grn_lines VALUES ('1', 'old', 2, 40), ('2', 'new', 2, 45);`);
     await q(SQL("up"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218130000-pick-pack-verification-store-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218140000-pick-pack-write-off-store-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17");
   });
@@ -134,6 +141,36 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     // The Verification page's list: a line's own store, or for an older combined line the report's stores.
     const list = await require("./pick_pack_verifications")(pool).getAll({ from_date: "2026-11-15", to_date: "2026-11-15" });
     assert.deepEqual(list.map((r) => [r.product_id, r.stores]).sort(), [[1, "ecr"], [1, "kathirkamam"], [2, "ecr (1), moolakulam (3)"]]);
+  });
+
+  it("puts the Picking write-off on the Write Off page per store, keeping remarks; older combined lines carry over", async () => {
+    const line = (store, id, jt, short) => [jt, "warehouse", store, String(id), "a", "D", "C", "5", "5", "5", "0", "", String(short), "", "1", "0"];
+    const up = (date, rows) => uc.upload({ report_type: "PICKING", report_date: date, file_name: `Picking_Report_${date}_ALL.csv`, headers: JOB, rows });
+    const page = (date) => q("SELECT product_id, store, mismatch_qty, remark_str, is_verified FROM pick_pack_write_off WHERE date = ? ORDER BY product_id, store", [date]);
+
+    const first = await up("2026-11-10", [line("ecr", 1, "STA", 2), line("ecr", 1, "GRN", 1), line("moolakulam", 1, "STA", 5), line("ecr", 2, "STA", 4), line("ecr", 99, "STA", 1)]);
+    assert.deepEqual(first.data.summary.write_off_page, { added: 3, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 1 });
+    assert.deepEqual((await page("2026-11-10")).map((r) => [r.product_id, r.store, r.mismatch_qty]), [[1, "ecr", 3], [1, "moolakulam", 5], [2, "ecr", 4]]);
+
+    await q("UPDATE pick_pack_write_off SET remark_str = 'shortage' WHERE product_id = 1 AND store = 'moolakulam'");
+    await q("UPDATE pick_pack_write_off SET is_verified = 1 WHERE product_id = 2");
+    const again = await up("2026-11-10", [line("ecr", 1, "STA", 3), line("moolakulam", 1, "STA", 6), line("ecr", 2, "STA", 9)]);
+    assert.deepEqual(again.data.summary.write_off_page, { added: 0, updated: 1, unchanged: 1, kept_verified: 1, unknown_articles: 0 });
+    assert.deepEqual((await page("2026-11-10")).map((r) => [r.product_id, r.store, r.mismatch_qty, r.remark_str, Number(r.is_verified)]), [
+      [1, "ecr", 3, null, 0], [1, "moolakulam", 6, "shortage", 0], [2, "ecr", 4, null, 1],
+    ]);
+
+    // Lines from before (imported by hand, no store): the first store's line keeps the remark.
+    await q("INSERT INTO pick_pack_write_off (product_id, mismatch_qty, date, store, remark_str) VALUES (3, 8, '2026-11-11', NULL, 'damaged')");
+    const old = await up("2026-11-11", [line("ecr", 3, "STA", 2), line("kathirkamam", 3, "STA", 6)]);
+    assert.deepEqual(old.data.summary.write_off_page, { added: 1, updated: 1, unchanged: 0, kept_verified: 0, unknown_articles: 0 });
+    assert.deepEqual((await page("2026-11-11")).map((r) => [r.product_id, r.store, r.mismatch_qty, r.remark_str]), [[3, "ecr", 2, "damaged"], [3, "kathirkamam", 6, null]]);
+
+    // The Write Off page's list: each line's store; an older line falls back to the report's stores.
+    await q("INSERT INTO pick_pack_write_off (product_id, mismatch_qty, date, store) VALUES (2, 4, '2026-11-11', NULL)");
+    await up("2026-11-11", [line("ecr", 3, "STA", 2), line("kathirkamam", 3, "STA", 6), line("ecr", 2, "STA", 1), line("ecr", 2, "GRN", 1), line("moolakulam", 2, "STA", 3)]);
+    const list = await require("./pick_pack_write_off")(pool).getAll({ from_date: "2026-11-11", to_date: "2026-11-11" });
+    assert.deepEqual(list.map((r) => [r.product_id, r.stores]).sort(), [[2, "ecr"], [2, "moolakulam"], [3, "ecr"], [3, "kathirkamam"]]);
   });
 
   it("deletes an upload with its rows, and the down migration removes everything", async () => {
