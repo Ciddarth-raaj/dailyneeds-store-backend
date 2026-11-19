@@ -598,7 +598,7 @@ class DebitNoteRepository {
       `SELECT dn.debit_note_id, dn.is_approved, dn.ts, dni.debit_note_id AS internal_id
          FROM debit_note dn
          LEFT JOIN debit_note_internal dni ON dni.debit_note_id = dn.debit_note_id
-        WHERE dn.store_id = ? AND dn.mprh_pr_no = ?
+        WHERE dn.store_id = ? AND CAST(dn.mprh_pr_no AS CHAR) = ?
         ORDER BY dn.debit_note_id
         LIMIT 1`,
       [payload.STORE_ID, payload.MPRH_PR_NO]
@@ -609,6 +609,52 @@ class DebitNoteRepository {
     if (String(existing.ts) === String(payload.TS)) return { action: "unchanged", debit_note_id: id };
     if (existing.internal_id != null) return { action: "kept", debit_note_id: id };
     return { action: "updated", debit_note_id: id };
+  }
+
+  /**
+   * How many of these RetailPilot debit notes (REC-... slugs) are in the
+   * table, compared as text: the sync's check that what it wrote stuck.
+   */
+  async countRetailPilotSlugs(slugs) {
+    if (!slugs.length) return 0;
+    const [row] = await this._query(
+      "SELECT COUNT(DISTINCT CAST(mprh_pr_no AS CHAR)) AS n FROM debit_note WHERE CAST(mprh_pr_no AS CHAR) IN (?)",
+      [slugs]
+    );
+    return Number(row && row.n) || 0;
+  }
+
+  /**
+   * The debit_note columns and unique keys the sync depends on, as this
+   * database has them - reported when the sync's writes did not stick, since
+   * environments differ from the migrations.
+   */
+  async describeForRetailPilot() {
+    const cols = await this._query(
+      `SELECT column_name AS name, column_type AS type FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = 'debit_note'
+          AND column_name IN ('store_id', 'mprh_pr_no', 'mprh_pr_refno', 'supplier_id', 'mprh_dist_code', 'supplier_gstn')`
+    );
+    const keys = await this._query(
+      `SELECT index_name AS name, GROUP_CONCAT(column_name ORDER BY seq_in_index) AS cols FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = 'debit_note' AND non_unique = 0
+        GROUP BY index_name`
+    );
+    const [mode] = await this._query("SELECT @@SESSION.sql_mode AS m");
+    return [
+      `columns: ${cols.map((c) => `${c.name} ${c.type}`).join(", ")}`,
+      `unique keys: ${keys.map((k) => `${k.name}(${k.cols})`).join(", ") || "none"}`,
+      `sql_mode: ${(mode && mode.m) || "(empty)"}`,
+    ].join("; ");
+  }
+
+  /** Whether mprh_pr_no can hold a RetailPilot slug (REC-...): a text column. */
+  async prNoHoldsText() {
+    const [col] = await this._query(
+      `SELECT data_type AS t FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = 'debit_note' AND column_name = 'mprh_pr_no'`
+    );
+    return !!col && ["char", "varchar", "tinytext", "text", "mediumtext", "longtext"].includes(String(col.t).toLowerCase());
   }
 
   /** What upsertRetailPilotDebitNote WOULD do, for a dry run. */

@@ -202,6 +202,25 @@ describe("RetailPilotDebitNoteSync.run", () => {
     assert.match(out.warnings[0], /1 debit note\(s\) skipped/);
   });
 
+  it("says so, with the table as the database has it, when saved debit notes cannot be found", async () => {
+    const r = repo(() => ({ action: "inserted" }));
+    r.countRetailPilotSlugs = async () => 1;
+    r.describeForRetailPilot = async () => "columns: mprh_pr_no int(11)";
+    const out = await syncFactory(spectra([row({ recon_slug: "REC-1", seq: 1 }), row({ recon_slug: "REC-2", seq: 2 })]), r, config, async () => STORE_MAP).run();
+    assert.match(out.msg, /^2 read from RetailPilot - 2 new/);
+    assert.match(out.msg, /Only 1 of 2 debit notes can be found in debit_note after saving - columns: mprh_pr_no int\(11\)/);
+  });
+
+  it("refuses to save when mprh_pr_no cannot hold the slug", async () => {
+    const r = repo(() => ({ action: "inserted" }));
+    r.prNoHoldsText = async () => false;
+    r.describeForRetailPilot = async () => "columns: mprh_pr_no int(11)";
+    const out = await syncFactory(spectra([row()]), r, config, async () => STORE_MAP).run();
+    assert.equal(out.code, 500);
+    assert.match(out.message, /nothing was saved/);
+    assert.equal(r.calls.upsert.length, 0);
+  });
+
   it("still fails the run on any other database error", async () => {
     const r = repo(() => { throw new Error("connection lost"); });
     await assert.rejects(syncFactory(spectra([row()]), r, config, async () => STORE_MAP).run(), /connection lost/);

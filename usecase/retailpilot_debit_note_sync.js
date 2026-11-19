@@ -88,6 +88,7 @@ class RetailPilotDebitNoteSync {
       const rows = await this.spectra.queryAll(buildDebitNoteQuery(lookback));
       const mapped = mapDebitNotes(rows, storeMap);
       const skipped = mapped.skipped;
+      const readCount = mapped.debitNotes.length + mapped.skipped.length;
       const debitNotes = await this._withoutRefnoClashes(mapped.debitNotes, skipped);
 
       const warnings = [];
@@ -101,6 +102,16 @@ class RetailPilotDebitNoteSync {
         );
       }
 
+      // A number column would turn every slug into 0 and fold the debit
+      // notes into one row: refuse rather than write that.
+      if (!dryRun && typeof this.debitNoteRepo.prNoHoldsText === "function" && !(await this.debitNoteRepo.prNoHoldsText())) {
+        const schema = await this.debitNoteRepo.describeForRetailPilot().catch(() => "");
+        return {
+          code: 500,
+          message: `debit_note.mprh_pr_no cannot hold RetailPilot's REC-... numbers, so nothing was saved. Run the database migrations. ${schema}`.trim(),
+        };
+      }
+
       const counts = { inserted: 0, updated: 0, unchanged: 0, approved: 0, kept: 0 };
       const notes = [];
       for (const d of debitNotes) {
@@ -112,8 +123,11 @@ class RetailPilotDebitNoteSync {
         } catch (err) {
           // Another unique key on debit_note (they differ by environment)
           // refused this one: report it and carry on with the rest.
-          if (err && err.code === "ER_DUP_ENTRY") {
-            skipped.push({ recon_slug: d.MPRH_PR_NO, reason: `the database refused it as a duplicate: ${err.sqlMessage || err.message}` });
+          if (err && (err.code === "ER_DUP_ENTRY" || /^ER_(TRUNCATED|WARN_DATA|DATA_TOO_LONG|BAD_NULL|NO_DEFAULT)/.test(err.code || ""))) {
+            skipped.push({
+              recon_slug: d.MPRH_PR_NO,
+              reason: `the database refused it${err.code === "ER_DUP_ENTRY" ? " as a duplicate" : ""}: ${err.sqlMessage || err.message}`,
+            });
             continue;
           }
           throw err;
@@ -133,17 +147,36 @@ class RetailPilotDebitNoteSync {
         });
       }
 
+      // What was written must be findable again by its slug. When it is not -
+      // a column that cannot hold "REC-...", say - the run says so, with the
+      // table as this database has it, rather than reporting rows it lost.
+      const processed = counts.inserted + counts.updated + counts.unchanged + counts.approved + counts.kept;
+      if (!dryRun && processed && typeof this.debitNoteRepo.countRetailPilotSlugs === "function") {
+        const found = await this.debitNoteRepo.countRetailPilotSlugs(notes.map((n) => n.recon_slug));
+        if (found < processed) {
+          const schema = await this.debitNoteRepo.describeForRetailPilot().catch((e) => `(could not read: ${e.message})`);
+          warnings.push(`Only ${found} of ${processed} debit notes can be found in debit_note after saving - ${schema}`);
+        }
+      }
+
       if (skipped.length) {
         warnings.unshift(
           `${skipped.length} debit note(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.recon_slug} (${s.reason})`).join("; ")}`
         );
       }
 
+      const summary =
+        `${dryRun ? "Dry run: " : ""}${readCount} read from RetailPilot - ` +
+        `${counts.inserted} new, ${counts.updated} updated, ${counts.unchanged} unchanged, ` +
+        `${counts.approved} approved (not touched), ${counts.kept} kept for Accounts, ${skipped.length} skipped` +
+        (warnings.length ? `. ${warnings.join(" | ")}` : "");
+
       return {
         code: 200,
+        msg: summary.slice(0, 1000),
         ...(dryRun ? { dry_run: true } : {}),
         days: lookback,
-        row_count: debitNotes.length,
+        row_count: processed,
         inserted: counts.inserted,
         updated: counts.updated,
         unchanged: counts.unchanged,
