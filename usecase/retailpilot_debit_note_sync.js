@@ -91,11 +91,6 @@ class RetailPilotDebitNoteSync {
       const debitNotes = await this._withoutRefnoClashes(mapped.debitNotes, skipped);
 
       const warnings = [];
-      if (skipped.length) {
-        warnings.push(
-          `${skipped.length} debit note(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.recon_slug} (${s.reason})`).join("; ")}`
-        );
-      }
       const unrated = debitNotes.filter((d) => d.UNRATED_LINES > 0);
       if (unrated.length) {
         warnings.push(
@@ -109,9 +104,20 @@ class RetailPilotDebitNoteSync {
       const counts = { inserted: 0, updated: 0, unchanged: 0, approved: 0, kept: 0 };
       const notes = [];
       for (const d of debitNotes) {
-        const r = dryRun
-          ? await this.debitNoteRepo.previewRetailPilotDebitNote(d)
-          : await this.debitNoteRepo.upsertRetailPilotDebitNote(d);
+        let r;
+        try {
+          r = dryRun
+            ? await this.debitNoteRepo.previewRetailPilotDebitNote(d)
+            : await this.debitNoteRepo.upsertRetailPilotDebitNote(d);
+        } catch (err) {
+          // Another unique key on debit_note (they differ by environment)
+          // refused this one: report it and carry on with the rest.
+          if (err && err.code === "ER_DUP_ENTRY") {
+            skipped.push({ recon_slug: d.MPRH_PR_NO, reason: `the database refused it as a duplicate: ${err.sqlMessage || err.message}` });
+            continue;
+          }
+          throw err;
+        }
         counts[r.action] += 1;
         notes.push({
           recon_slug: d.MPRH_PR_NO,
@@ -125,6 +131,12 @@ class RetailPilotDebitNoteSync {
           action: r.action,
           debit_note_id: r.debit_note_id ?? null,
         });
+      }
+
+      if (skipped.length) {
+        warnings.unshift(
+          `${skipped.length} debit note(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.recon_slug} (${s.reason})`).join("; ")}`
+        );
       }
 
       return {

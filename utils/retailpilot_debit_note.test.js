@@ -190,6 +190,23 @@ describe("RetailPilotDebitNoteSync.run", () => {
     assert.deepEqual(out.skipped, []);
   });
 
+  it("skips a debit note the database refuses as a duplicate and carries on", async () => {
+    const r = repo((d) => {
+      if (d.MPRH_PR_NO === "REC-1") throw Object.assign(new Error("dup"), { code: "ER_DUP_ENTRY", sqlMessage: "Duplicate entry '3-51' for key 'sr'" });
+      return { action: "inserted" };
+    });
+    const out = await syncFactory(spectra([row({ recon_slug: "REC-1", seq: 1 }), row({ recon_slug: "REC-2", seq: 2 })]), r, config, async () => STORE_MAP).run();
+    assert.equal(out.code, 200);
+    assert.equal(out.inserted, 1);
+    assert.match(out.skipped[0].reason, /Duplicate entry '3-51'/);
+    assert.match(out.warnings[0], /1 debit note\(s\) skipped/);
+  });
+
+  it("still fails the run on any other database error", async () => {
+    const r = repo(() => { throw new Error("connection lost"); });
+    await assert.rejects(syncFactory(spectra([row()]), r, config, async () => STORE_MAP).run(), /connection lost/);
+  });
+
   it("warns about lines with no GST rate", async () => {
     const r = repo(() => ({ action: "inserted" }));
     const out = await syncFactory(spectra([row({ unrated_lines: 2 })]), r, config, async () => STORE_MAP).run();
