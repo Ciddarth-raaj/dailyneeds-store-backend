@@ -19,6 +19,10 @@ require("dotenv").config();
  *   RETAILPILOT_PURCHASE_SYNC_ENABLED  the cron at 9:00, 14:00 and 17:00
  *                                Asia/Kolkata. ON unless set to "false".
  *   RETAILPILOT_PURCHASE_LOOKBACK_DAYS days re-read on every cron run (default 3)
+ *   RETAILPILOT_DEBIT_NOTE_SYNC_ENABLED  the debit note pull at 9:00, 14:00
+ *                                and 17:00 Asia/Kolkata. ON unless set to "false".
+ *   RETAILPILOT_DEBIT_NOTE_LOOKBACK_DAYS days re-read on every debit note run
+ *                                (default 3)
  *   RETAILPILOT_GRN_OUTLET_ID    the outlet whose RetailPilot purchases are the
  *                                GRN pages' GRNs (default 2, the warehouse)
  *   RETAILPILOT_STOCK_SYNC_ENABLED     the daily 6:00 Asia/Kolkata pull of batch
@@ -39,6 +43,7 @@ require("dotenv").config();
  */
 
 const lookback = parseInt(process.env.RETAILPILOT_PURCHASE_LOOKBACK_DAYS, 10);
+const debitNoteLookback = parseInt(process.env.RETAILPILOT_DEBIT_NOTE_LOOKBACK_DAYS, 10);
 
 /** masterhub's address: given, else the runway address with /masterhub in place of its last part. */
 function masterhubUrl(explicit, runway) {
@@ -67,6 +72,10 @@ module.exports = {
     String(process.env.RETAILPILOT_GRN_SYNC_ENABLED || "").toLowerCase() !== "false",
   grnOutletId: parseInt(process.env.RETAILPILOT_GRN_OUTLET_ID, 10) || 2,
   purchaseLookbackDays: Number.isInteger(lookback) && lookback >= 0 ? lookback : 3,
+  debitNoteSyncEnabled:
+    String(process.env.RETAILPILOT_DEBIT_NOTE_SYNC_ENABLED || "").toLowerCase() !== "false",
+  debitNoteLookbackDays:
+    Number.isInteger(debitNoteLookback) && debitNoteLookback >= 0 ? debitNoteLookback : 3,
   pageSize: 2000,
   timeoutMs: 60000,
 };

@@ -562,6 +562,123 @@ class DebitNoteRepository {
     });
   }
 
+  _query(sql, params) {
+    return new Promise((resolve, reject) => {
+      this.db.query(sql, params, (err, result) => (err ? reject(err) : resolve(result)));
+    });
+  }
+
+  /**
+   * Debit notes at these outlets with these references in these financial
+   * years, for the RetailPilot sync's clash check.
+   * @param keys [[store_id, refno, fy_start, fy_end], ...]
+   */
+  async findByOutletRefnos(keys) {
+    if (!keys.length) return [];
+    return this._query(
+      `SELECT debit_note_id, store_id, mprh_pr_no, mprh_pr_refno, mprh_pr_dt
+         FROM debit_note
+        WHERE ${keys.map(() => "(store_id = ? AND mprh_pr_refno = ? AND mprh_pr_dt BETWEEN ? AND ?)").join(" OR ")}`,
+      keys.flat()
+    );
+  }
+
+  /**
+   * What the RetailPilot sync does with one debit note (the uppercase sync
+   * payload), found by outlet + reconciliation slug (mprh_pr_no):
+   * - not there: inserted
+   * - approved: never touched
+   * - saved by Accounts on the Debit Note screen (has a debit_note_internal
+   *   row): not touched, so their corrections stay - reported as kept when
+   *   RetailPilot has changed it since
+   * - otherwise: updated when RetailPilot changed it (TS is a content hash)
+   */
+  async _retailPilotDecision(payload) {
+    const [existing] = await this._query(
+      `SELECT dn.debit_note_id, dn.is_approved, dn.ts, dni.debit_note_id AS internal_id
+         FROM debit_note dn
+         LEFT JOIN debit_note_internal dni ON dni.debit_note_id = dn.debit_note_id
+        WHERE dn.store_id = ? AND dn.mprh_pr_no = ?
+        ORDER BY dn.debit_note_id
+        LIMIT 1`,
+      [payload.STORE_ID, payload.MPRH_PR_NO]
+    );
+    if (!existing) return { action: "inserted" };
+    const id = existing.debit_note_id;
+    if (Number(existing.is_approved)) return { action: "approved", debit_note_id: id };
+    if (String(existing.ts) === String(payload.TS)) return { action: "unchanged", debit_note_id: id };
+    if (existing.internal_id != null) return { action: "kept", debit_note_id: id };
+    return { action: "updated", debit_note_id: id };
+  }
+
+  /** What upsertRetailPilotDebitNote WOULD do, for a dry run. */
+  previewRetailPilotDebitNote(payload) {
+    return this._retailPilotDecision(payload);
+  }
+
+  async upsertRetailPilotDebitNote(payload) {
+    const decision = await this._retailPilotDecision(payload);
+    const values = [
+      payload.STORE_ID,
+      payload.MPRH_PR_NO,
+      payload.MPRH_PR_REFNO,
+      payload.MPRH_PR_DT,
+      payload.MPRH_DIST_CODE,
+      payload.SUPPLIER_ID,
+      payload.SUPPLIER_NAME,
+      payload.SUPPLIER_GSTN,
+      payload.TOT_SGST_AMT,
+      payload.TOT_CGST_AMT,
+      payload.TOT_IGST_AMT,
+      payload.TOT_GST_CESS_AMT,
+      payload.TOT_ITEM_QTY,
+      payload.TOT_ITEM_VALUE,
+      payload.TS,
+      JSON.stringify(payload.SGST),
+      JSON.stringify(payload.CGST),
+      JSON.stringify(payload.IGST),
+      JSON.stringify(payload.CESS),
+    ];
+    try {
+      if (decision.action === "inserted") {
+        const result = await this._query(
+          `INSERT INTO debit_note (
+            store_id, mprh_pr_no, mprh_pr_refno, mprh_pr_dt,
+            mprh_dist_code, supplier_id, supplier_name, supplier_gstn,
+            tot_sgst_amt, tot_cgst_amt, tot_igst_amt, tot_gst_cess_amt,
+            tot_item_qty, tot_item_value, ts, sgst, cgst, igst, cess
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          values
+        );
+        return { action: "inserted", debit_note_id: result.insertId };
+      }
+      if (decision.action === "updated") {
+        // is_approved = 0 again here: an approval between the read and this
+        // write still wins.
+        await this._query(
+          `UPDATE debit_note SET
+            store_id = ?, mprh_pr_no = ?, mprh_pr_refno = ?, mprh_pr_dt = ?,
+            mprh_dist_code = ?, supplier_id = ?, supplier_name = ?, supplier_gstn = ?,
+            tot_sgst_amt = ?, tot_cgst_amt = ?, tot_igst_amt = ?, tot_gst_cess_amt = ?,
+            tot_item_qty = ?, tot_item_value = ?, ts = ?, sgst = ?, cgst = ?, igst = ?, cess = ?
+          WHERE debit_note_id = ? AND is_approved = 0`,
+          [...values, decision.debit_note_id]
+        );
+      }
+      return decision;
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "REPOSITORY.DEBIT_NOTE",
+        code: "REPOSITORY.DEBIT_NOTE.UPSERT-RETAILPILOT",
+        description: err.toString(),
+        category: "",
+        ref: { mprh_pr_no: payload.MPRH_PR_NO },
+      });
+      throw err;
+    }
+  }
+
   async deleteTallyResponse(VoucherNo) {
     return new Promise((resolve, reject) => {
       try {

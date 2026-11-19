@@ -105,6 +105,12 @@ const API_SYNC_TYPES = [
     match: "/purchase/retailpilot-sync",
   },
   {
+    type: "retailpilot_debit_note_sync",
+    category: "sync",
+    label: "RetailPilot Debit Note Sync",
+    match: "/debit-note/retailpilot-sync",
+  },
+  {
     type: "product_sales_bulk",
     category: "bulk",
     label: "Product Sales Bulk",
