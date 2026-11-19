@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const { buildDebitNoteQuery, mapDebitNotes } = require("./retailpilot_debit_note");
 const syncFactory = require("../usecase/retailpilot_debit_note_sync");
 
+const round2 = (v) => Math.round(v * 100) / 100;
 const STORE_MAP = { "9rJMC": 2, sooWy: 5 };
 
 // One rate group of a debit note, as the SPECTRA query returns it.
@@ -73,6 +74,9 @@ describe("mapDebitNotes", () => {
     assert.equal(d.TOT_ITEM_QTY, 60);
     assert.equal(d.TOT_ITEM_VALUE, 13251.36);
     assert.equal(d.PURCHASE_REF, "6372");
+    // Round-off: MPRH amount less taxable + GST, as the Debit Note screen adds it up.
+    assert.equal(d.ROUND_OFF, round2(13251.36 - (11758.23 + 746.41 * 2)));
+    assert.equal(d.TOTAL_AMOUNT, 13251.36);
     assert.equal(typeof d.TS, "number");
   });
 

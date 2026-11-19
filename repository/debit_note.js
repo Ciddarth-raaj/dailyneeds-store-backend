@@ -513,7 +513,8 @@ class DebitNoteRepository {
                   tcs_value = ?,
                   total_amount = ?,
                   mmh_mrc_refno = ?,
-                  round_off = ?
+                  round_off = ?,
+                  filled_by_sync = 0
                 WHERE debit_note_id = ?`,
                 [
                   debitNoteInternal.scheme_difference || 0.0,
@@ -612,7 +613,8 @@ class DebitNoteRepository {
    */
   async _retailPilotDecision(payload) {
     const [existing] = await this._query(
-      `SELECT dn.debit_note_id, dn.is_approved, dn.ts, dni.debit_note_id AS internal_id
+      `SELECT dn.debit_note_id, dn.is_approved, dn.ts, dni.debit_note_id AS internal_id,
+              dni.filled_by_sync
          FROM debit_note dn
          LEFT JOIN debit_note_internal dni ON dni.debit_note_id = dn.debit_note_id
         WHERE dn.store_id = ? AND CAST(dn.mprh_pr_no AS CHAR) = ?
@@ -622,10 +624,14 @@ class DebitNoteRepository {
     );
     if (!existing) return { action: "inserted" };
     const id = existing.debit_note_id;
-    if (Number(existing.is_approved)) return { action: "approved", debit_note_id: id };
-    if (String(existing.ts) === String(payload.TS)) return { action: "unchanged", debit_note_id: id };
-    if (existing.internal_id != null) return { action: "kept", debit_note_id: id };
-    return { action: "updated", debit_note_id: id };
+    // The sync's own pre-filled internal row (filled_by_sync = 1) is not a
+    // save by Accounts.
+    const savedByAccounts = existing.internal_id != null && !Number(existing.filled_by_sync);
+    const internal = savedByAccounts ? "accounts" : existing.internal_id != null ? "sync" : "none";
+    if (Number(existing.is_approved)) return { action: "approved", debit_note_id: id, internal };
+    if (String(existing.ts) === String(payload.TS)) return { action: "unchanged", debit_note_id: id, internal };
+    if (savedByAccounts) return { action: "kept", debit_note_id: id, internal };
+    return { action: "updated", debit_note_id: id, internal };
   }
 
   /**
@@ -674,6 +680,31 @@ class DebitNoteRepository {
     return !!col && ["char", "varchar", "tinytext", "text", "mediumtext", "longtext"].includes(String(col.t).toLowerCase());
   }
 
+  /**
+   * Pre-fills the Debit Note screen's internal fields for a RetailPilot debit
+   * note - round-off, total amount and the purchase's MRC ref no - marked
+   * filled_by_sync, until Accounts saves it on the screen
+   * (updateDebitNoteWithInternal clears the mark). An unapproved debit note
+   * written before these were filled gets them on the next run.
+   */
+  async _fillInternal(debitNoteId, payload, internal) {
+    const params = [payload.TOTAL_AMOUNT || 0, payload.PURCHASE_REF || "", payload.ROUND_OFF || 0];
+    if (internal === "none") {
+      await this._query(
+        `INSERT INTO debit_note_internal
+           (debit_note_id, scheme_difference, narration, tcs_value, total_amount, mmh_mrc_refno, round_off, filled_by_sync)
+         VALUES (?, 0, '', 0, ?, ?, ?, 1)`,
+        [debitNoteId, ...params]
+      );
+    } else if (internal === "sync") {
+      await this._query(
+        `UPDATE debit_note_internal SET total_amount = ?, mmh_mrc_refno = ?, round_off = ?
+          WHERE debit_note_id = ? AND filled_by_sync = 1`,
+        [...params, debitNoteId]
+      );
+    }
+  }
+
   /** What upsertRetailPilotDebitNote WOULD do, for a dry run. */
   previewRetailPilotDebitNote(payload) {
     return this._retailPilotDecision(payload);
@@ -713,6 +744,7 @@ class DebitNoteRepository {
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           values
         );
+        await this._fillInternal(result.insertId, payload, "none");
         return { action: "inserted", debit_note_id: result.insertId };
       }
       if (decision.action === "updated") {
@@ -727,6 +759,9 @@ class DebitNoteRepository {
           WHERE debit_note_id = ? AND is_approved = 0`,
           [...values, decision.debit_note_id]
         );
+      }
+      if (decision.action === "updated" || decision.action === "unchanged") {
+        await this._fillInternal(decision.debit_note_id, payload, decision.internal);
       }
       return decision;
     } catch (err) {

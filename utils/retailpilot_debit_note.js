@@ -1,4 +1,4 @@
-const { contentTs, isInterstateSupplier } = require("./retailpilot_purchase");
+const { contentTs, isInterstateSupplier, roundOffForRow } = require("./retailpilot_purchase");
 
 /**
  * RetailPilot debit notes -> the uppercase payload POST /debit-note/bulk
@@ -285,6 +285,22 @@ function mapDebitNotes(rows, storeMap) {
     payload.PURCHASE_REF = h.invoice_seq == null ? "" : str(h.invoice_seq);
     payload.SUPPLIER_INVOICE_ID = str(h.supplier_invoice_id);
     payload.UNRATED_LINES = unrated;
+    // For the Debit Note screen's internal fields (debit_note_internal), as
+    // the purchase sync pre-fills purchase_internal: the round-off that makes
+    // the screen's total (taxable + GST, util/debit-note.js
+    // calculateTotalAmount - the same sum as the Purchase screen's) equal the
+    // MPRH amount, that total, and the purchase's MRC ref no.
+    const { round_off, total_amount } = roundOffForRow({
+      supplier_gstn: gstin,
+      igst,
+      sgst,
+      tot_igst_amt: payload.TOT_IGST_AMT,
+      tot_sgst_amt: payload.TOT_SGST_AMT,
+      tot_cgst_amt: payload.TOT_CGST_AMT,
+      mmh_mrc_amt: payload.TOT_ITEM_VALUE,
+    });
+    payload.ROUND_OFF = round_off;
+    payload.TOTAL_AMOUNT = total_amount;
     payload.TS = contentTs(payload);
     debitNotes.push(payload);
   }
