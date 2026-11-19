@@ -13,8 +13,8 @@
 --    MasterID - (VoucherNo, CostCentre) - would let Tally's response to a
 --    RetailPilot debit note overwrite the response to the older debit note
 --    with the same number. It becomes UNIQUE (VoucherNo, CostCentre,
---    MasterID): each exported debit note keeps its own response. Every row
---    the old key allowed, the new one allows, so this cannot fail on data.
+--    MasterID): each exported debit note keeps its own response. Where
+--    responses already repeat (production does) it is a plain index instead.
 --    (Prefix lengths keep the key inside InnoDB's 767-byte column limit.)
 -- Safe to run again.
 
@@ -89,6 +89,21 @@ SET @have = (
   WHERE table_schema = DATABASE() AND table_name = 'debit_note_tally_response'
     AND index_name = 'uniq_dntr_voucher_master'
 );
-SET @sql = IF(@have > 0, 'SELECT 1',
-  'ALTER TABLE `debit_note_tally_response` ADD UNIQUE KEY `uniq_dntr_voucher_master` (`VoucherNo`(100), `CostCentre`(100), `MasterID`(150))');
+-- Production already holds repeated responses (same voucher, outlet and
+-- MasterID), so there the key is a plain index: responses keep being
+-- appended, as they were. Where none repeat it is unique.
+SET @repeats = (
+  SELECT COUNT(*) FROM (
+    SELECT 1 FROM `debit_note_tally_response`
+    GROUP BY LEFT(`VoucherNo`, 100), LEFT(`CostCentre`, 100), LEFT(`MasterID`, 150)
+    HAVING COUNT(*) > 1
+  ) r
+);
+SET @sql = CASE
+  WHEN @have > 0 THEN 'SELECT 1'
+  WHEN @repeats > 0 THEN
+    'ALTER TABLE `debit_note_tally_response` ADD KEY `uniq_dntr_voucher_master` (`VoucherNo`(100), `CostCentre`(100), `MasterID`(150))'
+  ELSE
+    'ALTER TABLE `debit_note_tally_response` ADD UNIQUE KEY `uniq_dntr_voucher_master` (`VoucherNo`(100), `CostCentre`(100), `MasterID`(150))'
+END;
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
