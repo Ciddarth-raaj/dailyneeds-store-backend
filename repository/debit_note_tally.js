@@ -86,8 +86,18 @@ class PurchaseTallyRepository {
                p.tot_item_value
          FROM debit_note_tally_response tr
          JOIN outlets o ON tr.CostCentre = o.outlet_name
-         LEFT JOIN debit_note p ON tr.VoucherNo = p.mprh_pr_refno 
-           AND p.store_id = o.outlet_id
+         -- A RetailPilot debit note (REC-...) may share its number with an
+         -- older GoFrugal one, so it is found by the MasterID the export
+         -- sent for it; a GoFrugal one by number + outlet, as always.
+         LEFT JOIN debit_note p_rp ON p_rp.debit_note_id =
+           CAST(SUBSTRING_INDEX(tr.MasterID, '-purchase-entry', 1) AS UNSIGNED)
+           AND tr.MasterID REGEXP '^[0-9]+-purchase-entry$'
+           AND p_rp.mprh_pr_no LIKE 'REC-%'
+         LEFT JOIN debit_note p_gf ON p_rp.debit_note_id IS NULL
+           AND tr.VoucherNo = p_gf.mprh_pr_refno
+           AND p_gf.store_id = o.outlet_id
+           AND p_gf.mprh_pr_no NOT LIKE 'REC-%'
+         LEFT JOIN debit_note p ON p.debit_note_id = COALESCE(p_rp.debit_note_id, p_gf.debit_note_id)
          LEFT JOIN debit_note_internal pi ON p.debit_note_id = pi.debit_note_id
          ${whereClause}
          ORDER BY tr.created_at DESC`,

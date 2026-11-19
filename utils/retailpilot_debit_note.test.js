@@ -171,16 +171,18 @@ describe("RetailPilotDebitNoteSync.run", () => {
     assert.equal(out.payloads.length, 1);
   });
 
-  it("skips a number another debit note already has at the outlet that financial year", async () => {
+  it("imports a debit note whose number an older one at the outlet already has that financial year, and reports it", async () => {
     const r = repo(() => ({ action: "inserted" }), [
       { debit_note_id: 4, store_id: 2, mprh_pr_refno: "1458", mprh_pr_no: "77881", mprh_pr_dt: "2026-05-02" },
     ]);
     const out = await syncFactory(spectra([row()]), r, config, async () => STORE_MAP).run();
-    assert.equal(out.row_count, 0);
-    assert.match(out.skipped[0].reason, /already belongs to debit note 4/);
+    assert.equal(out.inserted, 1);
+    assert.deepEqual(out.skipped, []);
+    assert.deepEqual(out.shared_numbers, [{ recon_slug: "REC-RL8HLA", refno: "1458", other: "4 (77881)" }]);
+    assert.match(out.msg, /1 imported debit note\(s\) share their number/);
   });
 
-  it("does not count the same RetailPilot debit note, or last year's number, as a clash", async () => {
+  it("does not count the same RetailPilot debit note, or last year's number, as a shared number", async () => {
     const r = repo(() => ({ action: "unchanged" }), [
       { debit_note_id: 5, store_id: 2, mprh_pr_refno: "1458", mprh_pr_no: "REC-RL8HLA", mprh_pr_dt: "2026-11-03" },
       { debit_note_id: 6, store_id: 2, mprh_pr_refno: "1458", mprh_pr_no: "55", mprh_pr_dt: "2026-02-10" },
@@ -188,6 +190,7 @@ describe("RetailPilotDebitNoteSync.run", () => {
     const out = await syncFactory(spectra([row()]), r, config, async () => STORE_MAP).run();
     assert.equal(out.unchanged, 1);
     assert.deepEqual(out.skipped, []);
+    assert.deepEqual(out.shared_numbers, []);
   });
 
   it("skips a debit note the database refuses as a duplicate and carries on", async () => {

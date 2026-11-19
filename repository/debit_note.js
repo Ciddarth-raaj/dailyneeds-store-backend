@@ -5,6 +5,18 @@ const {
 } = require("../utils/purchase_overlay_sql");
 const moment = require("moment");
 
+/**
+ * Tally's response to a debit note. A RetailPilot debit note (mprh_pr_no
+ * REC-...) can share its number with an older GoFrugal one at the same
+ * outlet - RetailPilot numbers continue into GoFrugal's - so it is matched
+ * on the MasterID the export sent for it (debitNoteEntryMasterId: always
+ * plain for these new rows). GoFrugal debit notes keep the voucher number
+ * + outlet match they always had, less any response whose plain MasterID
+ * names another debit note (one that shares the number).
+ */
+const RETAILPILOT_DN = "(dn.mprh_pr_no LIKE 'REC-%')";
+const TALLY_VOUCHER = "COALESCE(dntr.VoucherNo, dntr_rp.VoucherNo)";
+
 class DebitNoteRepository {
   constructor(db) {
     this.db = db;
@@ -111,16 +123,16 @@ class DebitNoteRepository {
 
       if (filters.is_approved !== undefined) {
         const conditionString = filters.is_approved
-          ? "dn.is_approved = ? AND dntr.VoucherNo IS NULL"
+          ? `dn.is_approved = ? AND ${TALLY_VOUCHER} IS NULL`
           : "dn.is_approved = ?";
         filterConditions.push(conditionString);
         filterValues.push(filters.is_approved);
       }
 
       if (filters.is_pushed === true) {
-        filterConditions.push("dntr.VoucherNo IS NOT NULL");
+        filterConditions.push(`${TALLY_VOUCHER} IS NOT NULL`);
       } else if (filters.is_pushed === false) {
-        filterConditions.push("dntr.VoucherNo IS NULL");
+        filterConditions.push(`${TALLY_VOUCHER} IS NULL`);
       }
 
       const whereClause =
@@ -136,10 +148,10 @@ class DebitNoteRepository {
           dni.total_amount,
           dni.round_off,
           dni.mmh_mrc_refno,
-          dntr.VoucherNo,
-          dntr.InvoiceValue,
-          dntr.SupplierName,
-          dntr.CostCentre,
+          ${TALLY_VOUCHER} AS VoucherNo,
+          COALESCE(dntr.InvoiceValue, dntr_rp.InvoiceValue) AS InvoiceValue,
+          COALESCE(dntr.SupplierName, dntr_rp.SupplierName) AS SupplierName,
+          COALESCE(dntr.CostCentre, dntr_rp.CostCentre) AS CostCentre,
           o.outlet_name,
           o.outlet_id,
           ${mergedCol("mmh_dist_bill_dt")} AS mmh_dist_bill_dt,
@@ -147,7 +159,12 @@ class DebitNoteRepository {
         FROM debit_note dn
         LEFT JOIN debit_note_internal dni ON dn.debit_note_id = dni.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
-        LEFT JOIN debit_note_tally_response dntr ON dntr.VoucherNo = dn.mprh_pr_refno AND dntr.CostCentre = o.outlet_name
+        LEFT JOIN debit_note_tally_response dntr ON ${RETAILPILOT_DN} = 0
+          AND dntr.VoucherNo = dn.mprh_pr_refno AND dntr.CostCentre = o.outlet_name
+          AND NOT (dntr.MasterID REGEXP '^[0-9]+-purchase-entry$'
+                   AND dntr.MasterID <> CONCAT(dn.debit_note_id, '-purchase-entry'))
+        LEFT JOIN debit_note_tally_response dntr_rp ON ${RETAILPILOT_DN} = 1
+          AND dntr_rp.MasterID = CONCAT(dn.debit_note_id, '-purchase-entry')
         LEFT JOIN purchase p ON p.mmh_mrc_refno = dni.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
         ${purchaseOverlayJoins("p")}
         ${whereClause}

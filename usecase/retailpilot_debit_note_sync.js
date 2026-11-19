@@ -32,15 +32,17 @@ class RetailPilotDebitNoteSync {
   }
 
   /**
-   * The reference (mprh_pr_refno) is the Tally voucher number, and Tally's
-   * responses are matched back on it and the outlet. RetailPilot numbers
-   * debit notes per store and financial year, so a reference already used
-   * at the outlet in the same financial year by another debit note (an old
-   * GoFrugal one) is a clash: skipped and reported. The same RetailPilot
-   * debit note coming back (same slug in mprh_pr_no) is not a clash.
+   * The reference (mprh_pr_refno) is the Tally voucher number. RetailPilot's
+   * numbers continue into the range GoFrugal used, so a RetailPilot debit
+   * note can share its number with an older GoFrugal one at the same outlet
+   * in the same financial year. It is imported all the same (Accounts asked
+   * for that; Tally's responses to it are matched on its MasterID, not the
+   * number) and listed in the run's report. The same RetailPilot debit note
+   * coming back (same slug in mprh_pr_no) is not a shared number.
+   * @returns [{ recon_slug, refno, other }]
    */
-  async _withoutRefnoClashes(debitNotes, skipped) {
-    if (!debitNotes.length) return debitNotes;
+  async _sharedNumbers(debitNotes) {
+    if (!debitNotes.length) return [];
     const seriesYear = (d) => (d.FY ? financialYearBounds(`${d.FY}-04-01`) : financialYearBounds(d.MPRH_PR_DT));
     const keyOf = (outletId, refno, fyStart) => `${outletId}|${String(refno).trim()}|${fyStart}`;
     const existing = await this.debitNoteRepo.findByOutletRefnos(
@@ -55,16 +57,13 @@ class RetailPilotDebitNoteSync {
       if (!byKey.has(k)) byKey.set(k, []);
       byKey.get(k).push(r);
     }
-    return debitNotes.filter((d) => {
+    const shared = [];
+    for (const d of debitNotes) {
       const rows = byKey.get(keyOf(d.STORE_ID, d.MPRH_PR_REFNO, seriesYear(d).start)) || [];
       const other = rows.find((r) => String(r.mprh_pr_no || "").trim() !== d.MPRH_PR_NO);
-      if (!other) return true;
-      skipped.push({
-        recon_slug: d.MPRH_PR_NO,
-        reason: `reference ${d.MPRH_PR_REFNO} already belongs to debit note ${other.debit_note_id} (${other.mprh_pr_no}) at this outlet in the same financial year`,
-      });
-      return false;
-    });
+      if (other) shared.push({ recon_slug: d.MPRH_PR_NO, refno: d.MPRH_PR_REFNO, other: `${other.debit_note_id} (${other.mprh_pr_no})` });
+    }
+    return shared;
   }
 
   async run({ days, dryRun = false } = {}) {
@@ -89,7 +88,8 @@ class RetailPilotDebitNoteSync {
       const mapped = mapDebitNotes(rows, storeMap);
       const skipped = mapped.skipped;
       const readCount = mapped.debitNotes.length + mapped.skipped.length;
-      const debitNotes = await this._withoutRefnoClashes(mapped.debitNotes, skipped);
+      const debitNotes = mapped.debitNotes;
+      const shared = await this._sharedNumbers(debitNotes);
 
       const warnings = [];
       const unrated = debitNotes.filter((d) => d.UNRATED_LINES > 0);
@@ -159,6 +159,15 @@ class RetailPilotDebitNoteSync {
         }
       }
 
+      if (shared.length) {
+        warnings.push(
+          `${shared.length} imported debit note(s) share their number with an older debit note at the same outlet this financial year: ${shared
+            .slice(0, 5)
+            .map((x) => `${x.recon_slug} no. ${x.refno} (also debit note ${x.other})`)
+            .join("; ")}`
+        );
+      }
+
       if (skipped.length) {
         warnings.unshift(
           `${skipped.length} debit note(s) skipped: ${skipped.slice(0, 5).map((s) => `${s.recon_slug} (${s.reason})`).join("; ")}`
@@ -186,6 +195,7 @@ class RetailPilotDebitNoteSync {
         kept_for_accounts: counts.kept,
         debit_notes: notes,
         ...(dryRun ? { payloads: debitNotes } : {}),
+        shared_numbers: shared,
         skipped,
         warnings,
       };
