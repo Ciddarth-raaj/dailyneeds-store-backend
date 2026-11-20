@@ -56,7 +56,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(SQL("up"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218130000-pick-pack-verification-store-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218140000-pick-pack-write-off-store-up.sql"), "utf8"));
-    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218150000-wh-report-retailpilot-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17");
   });
@@ -209,7 +209,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
     const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
-    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218150000-wh-report-retailpilot-down.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-down.sql"), "utf8"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'worked_by'")).length, 0);
     await q(SQL("down"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_report%'")).length, 0);
