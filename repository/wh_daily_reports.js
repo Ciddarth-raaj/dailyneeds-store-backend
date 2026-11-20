@@ -20,12 +20,12 @@ const {
 const JOB_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "to_store", "article_id", "article_name",
   "department", "category", "recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty",
-  "returned_qty", "jobs", "open_jobs", "mrp", "mrp_source",
+  "returned_qty", "jobs", "open_jobs", "mrp", "mrp_source", "job_id", "worked_by",
 ];
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
   "box_id", "box_kind", "truck_no", "article_id", "article_name", "department", "category", "mrp", "box_qty",
-  "box_status", "finished_at",
+  "box_status", "finished_at", "job_id", "worked_by",
 ];
 /** The Pick & Pack pages a report's write-off goes to. */
 const PAGES = {
@@ -33,7 +33,7 @@ const PAGES = {
   WRITE_OFF: { table: "pick_pack_write_off", id: "pick_pack_write_off_id", jobType: false },
 };
 /** Columns a job breakdown may group by. */
-const JOB_DIMS = ["report_type", "report_date", "to_store", "job_type", "department", "category"];
+const JOB_DIMS = ["report_type", "report_date", "to_store", "job_type", "department", "category", "worked_by"];
 
 const n = (v) => (v == null ? null : Number(v));
 const toNumbers = (rows, keys) =>
@@ -207,19 +207,42 @@ class WhDailyReportsRepository {
   }
 
   /**
+   * Article name, department and category from the product master, for
+   * reports pulled from RetailPilot (an uploaded file carries its own).
+   */
+  async productInfo(articleIds) {
+    const ids = [...new Set((articleIds || []).map(Number).filter((x) => Number.isInteger(x) && x > 0))];
+    const info = new Map();
+    for (let i = 0; i < ids.length; i += 1000) {
+      const rows = await this.run(
+        "PRODUCT_INFO",
+        `SELECT p.product_id, COALESCE(NULLIF(p.de_name, ''), p.gf_item_name) AS article_name,
+                d.department_name AS department, c.category_name AS category
+           FROM product_table p
+           LEFT JOIN department d ON d.department_id = p.department_id
+           LEFT JOIN categories c ON c.category_id = p.category_id
+          WHERE p.product_id IN (?)`,
+        [ids.slice(i, i + 1000)]
+      );
+      for (const r of rows) info.set(Number(r.product_id), { article_name: r.article_name || null, department: r.department || null, category: r.category || null });
+    }
+    return info;
+  }
+
+  /**
    * Save one report for one day, replacing what was there. With `pageLines`
    * ({ page: "VERIFICATION" | "WRITE_OFF", rows }) its write-off also goes to
    * that Pick & Pack page. Answers { upload_id, page }.
    */
-  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows, pageLines = null }) {
+  async replaceUpload({ report_type, report_date, file_name, uploaded_by, shape, rows, pageLines = null, source = "UPLOAD" }) {
     const conn = await getConnectionAsync(this.db);
     try {
       await beginTransactionAsync(conn);
       await queryAsync(conn, "DELETE FROM wh_report_uploads WHERE report_type = ? AND report_date = ?", [report_type, report_date]);
       const res = await queryAsync(
         conn,
-        `INSERT INTO wh_report_uploads (report_type, report_date, file_name, row_count, uploaded_by) VALUES (?, ?, ?, ?, ?)`,
-        [report_type, report_date, file_name || null, rows.length, uploaded_by || null]
+        `INSERT INTO wh_report_uploads (report_type, report_date, source, file_name, row_count, uploaded_by) VALUES (?, ?, ?, ?, ?, ?)`,
+        [report_type, report_date, source, file_name || null, rows.length, uploaded_by || null]
       );
       const uploadId = res.insertId;
       const cols = shape === "JOB" ? JOB_COLS : BOX_COLS;
@@ -248,7 +271,7 @@ class WhDailyReportsRepository {
   async uploads(from, to) {
     const rows = await this.run(
       "UPLOADS",
-      `SELECT u.upload_id, u.report_type, DATE_FORMAT(u.report_date, '%Y-%m-%d') AS report_date, u.file_name, u.row_count,
+      `SELECT u.upload_id, u.report_type, DATE_FORMAT(u.report_date, '%Y-%m-%d') AS report_date, u.source, u.file_name, u.row_count,
               u.uploaded_by, e.employee_name AS uploaded_by_name, u.uploaded_at
          FROM wh_report_uploads u
          LEFT JOIN new_employee e ON e.employee_id = u.uploaded_by
@@ -324,7 +347,7 @@ class WhDailyReportsRepository {
       `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_type, r.from_store, r.to_store,
               r.article_id, r.article_name, r.department, r.category, r.recommended_qty, r.planned_qty, r.advised_qty,
               r.actual_qty, r.short_qty, r.returned_qty, r.jobs, r.open_jobs, r.mrp, r.mrp_source,
-              r.short_qty * r.mrp AS short_value
+              r.short_qty * r.mrp AS short_value, r.job_id, r.worked_by
          FROM wh_report_job_rows r
         WHERE ${where}${extra}
         ORDER BY r.report_date DESC, r.report_type, r.to_store, short_value DESC, r.article_id
@@ -352,7 +375,7 @@ class WhDailyReportsRepository {
               MAX(r.from_store) AS from_store, MAX(r.planned_to_store) AS planned_to_store,
               MAX(r.unloaded_store) AS unloaded_store, MAX(r.truck_no) AS truck_no,
               SUM(r.box_qty) AS box_qty, SUM(r.box_qty * r.mrp) / NULLIF(SUM(CASE WHEN r.mrp IS NULL THEN 0 ELSE r.box_qty END), 0) AS mrp,
-              DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i:%s') AS finished_at
+              DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i:%s') AS finished_at, MAX(r.worked_by) AS worked_by
          FROM wh_report_box_rows r
         WHERE r.report_type = ? AND r.report_date BETWEEN ? AND ?${storeSql}
         GROUP BY r.report_date, r.box_id, r.article_id

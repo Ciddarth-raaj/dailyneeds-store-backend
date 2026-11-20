@@ -363,6 +363,8 @@ function reconcileBoxes(loaded, unloaded, { lastUnloadDate = null } = {}) {
       mrp: l.mrp != null ? Number(l.mrp) : u && u.mrp != null ? Number(u.mrp) : null,
       loaded_at: l.finished_at || null,
       unloaded_at: u ? u.finished_at || null : null,
+      loaded_by: l.worked_by || null,
+      unloaded_by: u ? u.worked_by || null : null,
       unload_date: u ? u.report_date : null,
     });
   }
@@ -386,6 +388,8 @@ function reconcileBoxes(loaded, unloaded, { lastUnloadDate = null } = {}) {
         mrp: u.mrp != null ? Number(u.mrp) : null,
         loaded_at: null,
         unloaded_at: u.finished_at || null,
+        loaded_by: null,
+        unloaded_by: u.worked_by || null,
         unload_date: u.report_date,
       });
     }

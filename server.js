@@ -1321,7 +1321,9 @@ class Server {
     );
     // Warehouse Daily Reports: the five RetailPilot exports uploaded every morning.
     this.whDailyReportsUsecase = require("./usecase/wh_daily_reports")(
-      require("./repository/wh_daily_reports")(this.mysql.connection)
+      require("./repository/wh_daily_reports")(this.mysql.connection),
+      undefined,
+      require("./services/retailpilot_spectra")(retailPilotConfig)
     );
     this.poFollowupRepo = require("./repository/po_followup")(this.mysql.connection);
     this.poTrackerUsecase = require("./usecase/po_tracker")(
@@ -2932,6 +2934,42 @@ class Server {
      * wrapper below catches anything that escapes so a cron tick can never
      * take the process down.
      */
+    // WAREHOUSE DAILY REPORTS FROM RETAILPILOT - 11:30 pm IST every day:
+    // Picking, Packing, Loading, Unloading and Verification pulled from
+    // RetailPilot's pick & pack jobs for today and yesterday (yesterday again
+    // catches jobs finished after last night's pull), replacing that day's
+    // reports and sending write-off to the Write Off and Verification pages
+    // (remarks kept). ON unless WH_REPORTS_RETAILPILOT_PULL_ENABLED is "false".
+    this.cronService.register(
+      "wh_reports_retailpilot_pull",
+      "30 23 * * *",
+      async () => {
+        if (String(process.env.WH_REPORTS_RETAILPILOT_PULL_ENABLED || "").toLowerCase() === "false") {
+          console.log("[CRON] wh_reports_retailpilot_pull - WH_REPORTS_RETAILPILOT_PULL_ENABLED is 'false'; nothing pulled");
+          return;
+        }
+        try {
+          const today = require("./utils/istDate").istToday();
+          const yesterday = require("./utils/wh_daily_reports").addDays(today, -1);
+          const r = await this.whDailyReportsUsecase.pull({ from: yesterday, to: today });
+          if (r.code !== 200) throw new Error(r.msg);
+          const failed = r.data.days.flatMap((d) => d.reports.filter((x) => !x.ok).map((x) => `${d.date} ${x.type}: ${x.msg}`));
+          console.log(`[CRON] wh_reports_retailpilot_pull ${yesterday}..${today}: ${failed.length ? `failed - ${failed.join("; ")}` : "ok"}`);
+          if (failed.length) throw new Error(failed.join("; "));
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "CRON.WH_REPORTS_RETAILPILOT_PULL",
+            code: "CRON.WH_REPORTS_RETAILPILOT_PULL.RUN",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+        }
+      },
+      { preventOverlap: true }
+    );
+
     // PO FOLLOW-UP SUMMARY - 7 pm IST, Monday to Saturday: chased / not
     // chased of the POs due a follow-up today, privately to everyone holding
     // receive_po_daily_summary. ON unless PO_DAILY_SUMMARY_TELEGRAM_ENABLED is

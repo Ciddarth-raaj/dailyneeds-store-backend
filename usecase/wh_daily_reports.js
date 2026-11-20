@@ -1,8 +1,12 @@
 const W = require("../utils/wh_daily_reports");
+const R = require("../utils/wh_rp_reports");
+const logger = require("../utils/logger");
 const { istToday } = require("../utils/istDate");
 
 /** The widest range one analysis covers. */
 const MAX_RANGE_DAYS = 92;
+/** The most days one pull from RetailPilot covers. */
+const MAX_PULL_DAYS = 31;
 /** Box lines with these statuses are listed as issues on the page. */
 const BOX_ISSUES = ["NOT_UNLOADED", "WRONG_STORE", "QTY_DIFF", "NOT_LOADED", "OPEN"];
 
@@ -16,8 +20,9 @@ const maxOf = (a, b) => (a == null ? b : b == null ? a : a > b ? a : b);
  * every morning; this saves them and answers the analysis page.
  */
 class WhDailyReports {
-  constructor(repo, today = () => istToday()) {
+  constructor(repo, today = () => istToday(), spectra = null) {
     this.repo = repo;
+    this.spectra = spectra;
     this.today = today;
   }
 
@@ -49,11 +54,20 @@ class WhDailyReports {
     const parsed = W.parseRows(type, headers, rows);
     if (parsed.errors.length) return { code: 422, msg: parsed.errors[0], errors: parsed.errors };
 
+    return this._save({ type, report_date, rows: parsed.rows, file_name, employee_id, source: "UPLOAD" });
+  }
+
+  /**
+   * Save one report's rows for one day (an uploaded file's, or pulled from
+   * RetailPilot): price them, replace that day's report, and send its
+   * write-off to its Pick & Pack page. Answers the upload's result.
+   */
+  async _save({ type, report_date, rows, file_name, employee_id = null, source = "UPLOAD", other = {} }) {
     // Price every row: the file's MRP Split when it has one, else the latest GRN MRP.
     const shape = W.shapeOf(type);
-    const unpriced = parsed.rows.filter((r) => r.mrp == null).map((r) => r.article_id);
+    const unpriced = rows.filter((r) => r.mrp == null).map((r) => r.article_id);
     const prices = unpriced.length ? await this.repo.latestMrp(unpriced) : new Map();
-    const out = parsed.rows.map((r) => {
+    const out = rows.map((r) => {
       if (r.mrp != null) return shape === "JOB" ? { ...r, mrp_source: "FILE" } : r;
       const mrp = prices.has(r.article_id) ? prices.get(r.article_id) : null;
       return shape === "JOB" ? { ...r, mrp, mrp_source: mrp == null ? null : "GRN" } : { ...r, mrp };
@@ -70,10 +84,11 @@ class WhDailyReports {
       uploaded_by: employee_id,
       shape,
       rows: out,
+      source,
       pageLines: toPage ? { page: type === "VERIFICATION" ? "VERIFICATION" : "WRITE_OFF", rows: toPage.rows } : null,
     });
 
-    const summary = { rows: out.length };
+    const summary = { rows: out.length, ...other };
     if (shape === "JOB") {
       const short = out.filter((r) => r.short_qty > 0);
       summary.short_lines = short.length;
@@ -88,7 +103,68 @@ class WhDailyReports {
     }
     if (saved.page && type === "VERIFICATION") summary.verification_page = { ...saved.page, other_job_type_lines: toPage.other_job_type_lines };
     if (saved.page && type === "PICKING") summary.write_off_page = saved.page;
-    return { code: 200, data: { upload_id: saved.upload_id, report_type: type, report_date, replaced, summary } };
+    return { code: 200, data: { upload_id: saved.upload_id, report_type: type, report_date, replaced, source, summary } };
+  }
+
+  /**
+   * Pull the five reports for each day from..to (at most 31) straight from
+   * RetailPilot's pick & pack jobs (utils/wh_rp_reports.js), replacing what
+   * was there - an upload included. A day RetailPilot cannot answer for is
+   * left as it was and reported. Answers { days: [{ date, reports: [{ type,
+   * ok, msg?, summary? }] }] }.
+   */
+  async pull({ from, to, types = R.PULL_TYPES, employee_id = null }) {
+    if (!this.spectra || !this.spectra.isConfigured()) return { code: 502, msg: "RetailPilot is not configured" };
+    const r = this._range(from, to);
+    if (r.error) return { code: 422, msg: r.error };
+    if (r.to > this.today()) return { code: 422, msg: "Cannot pull a day in the future" };
+    if (daysBetween(r.from, r.to) + 1 > MAX_PULL_DAYS) return { code: 422, msg: `Pull at most ${MAX_PULL_DAYS} days at a time` };
+    const wanted = R.PULL_TYPES.filter((t) => types.includes(t));
+
+    let stores;
+    try {
+      stores = R.storeNames(await this.spectra.queryAll(R.STORES_QUERY));
+    } catch (err) {
+      return { code: 502, msg: `RetailPilot: ${err.message}` };
+    }
+    const days = [];
+    for (let d = r.from; d <= r.to; d = W.addDays(d, 1)) {
+      const reports = [];
+      for (const type of wanted) {
+        try {
+          const job = Boolean(R.JOB_STAGES[type]);
+          // eslint-disable-next-line no-await-in-loop
+          const lines = await this.spectra.queryAll(job ? R.buildJobLinesQuery(type, d) : R.buildBoxLinesQuery(type, d));
+          const mapped = job ? R.mapJobLines(type, lines, stores) : R.mapBoxLines(type, lines, stores);
+          // eslint-disable-next-line no-await-in-loop
+          const info = await this.repo.productInfo(mapped.rows.map((x) => x.article_id));
+          const rows = mapped.rows.map((x) => ({ ...x, ...(info.get(x.article_id) || {}) }));
+          // eslint-disable-next-line no-await-in-loop
+          const saved = await this._save({
+            type,
+            report_date: d,
+            rows,
+            file_name: "RetailPilot",
+            employee_id,
+            source: "RETAILPILOT",
+            other: mapped.skipped ? { skipped_lines: mapped.skipped } : {},
+          });
+          reports.push({ type, ok: true, summary: saved.data.summary });
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "USECASE.WH_DAILY_REPORTS",
+            code: "USECASE.WH_DAILY_REPORTS.PULL",
+            description: err.toString(),
+            category: "",
+            ref: { type, date: d },
+          });
+          reports.push({ type, ok: false, msg: err.message });
+        }
+      }
+      days.push({ date: d, reports });
+    }
+    return { code: 200, data: { from: r.from, to: r.to, days } };
   }
 
   /** What was uploaded for each day in the range. */
@@ -133,7 +209,7 @@ class WhDailyReports {
     const r = this._range(from, to);
     if (r.error) return { code: 422, msg: r.error };
     const opts = { store: store || null };
-    const [summary, byStore, storeJob, byDepartment, byJobType, daily, storeList, articles, uploads, lines] = await Promise.all([
+    const [summary, byStore, storeJob, byDepartment, byJobType, daily, storeList, articles, uploads, lines, byWorker] = await Promise.all([
       this.repo.jobBreakdown(r.from, r.to, ["report_type"], opts),
       this.repo.jobBreakdown(r.from, r.to, ["report_type", "to_store"], opts),
       this.repo.jobBreakdown(r.from, r.to, ["report_type", "to_store", "job_type"], opts),
@@ -144,6 +220,7 @@ class WhDailyReports {
       this.repo.shortArticles(r.from, r.to, opts, 500),
       this.repo.uploads(r.from, r.to),
       this._boxes(r.from, r.to, opts.store),
+      this.repo.jobBreakdown(r.from, r.to, ["report_type", "worked_by"], opts),
     ]);
 
     // Box totals by status, per truck and day, and per day.
@@ -163,7 +240,7 @@ class WhDailyReports {
       if (!trucks.has(tk)) {
         trucks.set(tk, {
           report_date: l.report_date, truck_no: l.truck_no || null, boxes: new Set(), stores: new Set(), lines: 0,
-          loaded_qty: 0, unloaded_qty: 0, issues: 0, returns: 0, first_loaded_at: null, last_loaded_at: null,
+          loaded_qty: 0, unloaded_qty: 0, issues: 0, returns: 0, loaded_by: new Set(), unloaded_by: new Set(), first_loaded_at: null, last_loaded_at: null,
           first_unloaded_at: null, last_unloaded_at: null,
         });
       }
@@ -171,6 +248,8 @@ class WhDailyReports {
       t.boxes.add(l.box_id);
       if (l.planned_to_store && l.status !== "RETURN") t.stores.add(l.planned_to_store);
       t.lines += 1;
+      for (const u of String(l.loaded_by || "").split(",").map((x) => x.trim()).filter(Boolean)) t.loaded_by.add(u);
+      for (const u of String(l.unloaded_by || "").split(",").map((x) => x.trim()).filter(Boolean)) t.unloaded_by.add(u);
       t.loaded_qty += l.loaded_qty || 0;
       t.unloaded_qty += l.unloaded_qty || 0;
       if (BOX_ISSUES.includes(l.status) && l.status !== "OPEN") t.issues += 1;
@@ -224,13 +303,14 @@ class WhDailyReports {
         by_store: byStore,
         by_department: byDepartment,
         by_job_type: byJobType,
+        by_worker: byWorker,
         daily,
         short_articles: articles,
         funnel: funnelRows.sort((a, b) => String(a.store).localeCompare(String(b.store)) || String(a.job_type).localeCompare(String(b.job_type))),
         boxes: {
           by_status: Object.values(byStatus).map((s) => ({ ...s, boxes: s.boxes.size, qty: round2(s.qty), value: round2(s.value) })),
           trucks: [...trucks.values()]
-            .map((t) => ({ ...t, boxes: t.boxes.size, stores: [...t.stores].sort().join(", ") }))
+            .map((t) => ({ ...t, boxes: t.boxes.size, stores: [...t.stores].sort().join(", "), loaded_by: [...t.loaded_by].sort().join(", "), unloaded_by: [...t.unloaded_by].sort().join(", ") }))
             .sort((a, b) => b.report_date.localeCompare(a.report_date) || String(a.truck_no).localeCompare(String(b.truck_no))),
           daily: [...boxDaily.values()].map((d) => ({ ...d, boxes: d.boxes.size })).sort((a, b) => a.report_date.localeCompare(b.report_date)),
           issues: lines.filter((l) => BOX_ISSUES.includes(l.status)).slice(0, 5000),
@@ -241,5 +321,5 @@ class WhDailyReports {
   }
 }
 
-module.exports = (repo, today) => new WhDailyReports(repo, today);
+module.exports = (repo, today, spectra) => new WhDailyReports(repo, today, spectra);
 module.exports.MAX_RANGE_DAYS = MAX_RANGE_DAYS;

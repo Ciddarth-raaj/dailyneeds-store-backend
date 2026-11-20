@@ -26,13 +26,16 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks`);
+    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80));
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
              CREATE TABLE retailpilot_grn_headers (invoice_slug VARCHAR(64) PRIMARY KEY, entered_at DATETIME);
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
-             CREATE TABLE product_table (product_id INT PRIMARY KEY, de_name VARCHAR(200));
+             CREATE TABLE product_table (product_id INT PRIMARY KEY, de_name VARCHAR(200), gf_item_name VARCHAR(200), department_id INT, category_id INT);
+             CREATE TABLE department (department_id INT PRIMARY KEY, department_name VARCHAR(100));
+             CREATE TABLE categories (category_id INT PRIMARY KEY, category_name VARCHAR(100));
+             INSERT INTO department VALUES (1, 'Snacks');
              CREATE TABLE product_images (image_id INT PRIMARY KEY, product_id INT, image_url VARCHAR(200), priority INT);
              CREATE TABLE pick_pack_verification_remarks (remark_id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255));
              CREATE TABLE pick_pack_remarks (remark_id INT AUTO_INCREMENT PRIMARY KEY, label VARCHAR(255));
@@ -53,6 +56,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(SQL("up"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218130000-pick-pack-verification-store-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218140000-pick-pack-write-off-store-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218150000-wh-report-retailpilot-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17");
   });
@@ -173,11 +177,40 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(list.map((r) => [r.product_id, r.stores]).sort(), [[2, "ecr"], [2, "moolakulam"], [3, "ecr"], [3, "kathirkamam"]]);
   });
 
+  it("pulls a day from RetailPilot: who did each job is kept, write-off goes to the Write Off page, a later upload is marked as such", async () => {
+    await q("UPDATE product_table SET de_name = 'Hide & Seek', department_id = 1 WHERE product_id = 1");
+    const spectra = {
+      isConfigured: () => true,
+      async queryAll(sql) {
+        if (/masterhub\.stores/.test(sql)) return [{ slug: "wh", name: "Warehouse" }, { slug: "e", name: "ECR" }];
+        if (/'PICKED'/.test(sql)) return [{ job_id: "job_1", job_type: "STA", state: "PICKED", assigned_user: "kp-7", article_id: "1", origin: "wh", destination: "e", advised_qty: "10", actual_qty: "7", meta: null }];
+        if (/'LOADED'/.test(sql)) return [{ job_id: "job_5", job_type: "STA", state: "LOADED", assigned_user: "kp-1,kp-2", box_id: "B1", origin: "wh", destination: "e", truck_id: "T1", unloaded_store: null, meta: {}, article_id: "1", qty: "7", updated_at: "2026-11-12T07:00:00Z" }];
+        return [];
+      },
+    };
+    const rp = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17", spectra);
+    const res = await rp.pull({ from: "2026-11-12", to: "2026-11-12" });
+    assert.equal(res.code, 200);
+    assert.ok(res.data.days[0].reports.every((r) => r.ok));
+    const [row] = await q("SELECT job_id, to_store, article_name, department, short_qty, worked_by FROM wh_report_job_rows WHERE report_date = '2026-11-12'");
+    assert.deepEqual([row.job_id, row.to_store, row.article_name, row.department, Number(row.short_qty), row.worked_by], ["job_1", "ecr", "Hide & Seek", "Snacks", 3, "kp-7"]);
+    const [box] = await q("SELECT worked_by, DATE_FORMAT(finished_at, '%H:%i') t FROM wh_report_box_rows WHERE report_date = '2026-11-12'");
+    assert.deepEqual([box.worked_by, box.t], ["kp-1,kp-2", "12:30"]);
+    assert.deepEqual((await q("SELECT store, mismatch_qty FROM pick_pack_write_off WHERE date = '2026-11-12'")).map((r) => [r.store, r.mismatch_qty]), [["ecr", 3]]);
+    const status = await rp.status({ from: "2026-11-12", to: "2026-11-12" });
+    assert.equal(status.data.uploads.length, 5);
+    assert.ok(status.data.uploads.every((u) => u.source === "RETAILPILOT"));
+    const a = await rp.analysis({ from: "2026-11-12", to: "2026-11-12" });
+    assert.deepEqual(a.data.by_worker.filter((w) => w.report_type === "PICKING").map((w) => [w.worked_by, w.short_qty]), [["kp-7", 3]]);
+  });
+
   it("deletes an upload with its rows, and the down migration removes everything", async () => {
-    const [u] = await q("SELECT upload_id FROM wh_report_uploads WHERE report_type = 'LOADING'");
+    const [u] = await q("SELECT upload_id FROM wh_report_uploads WHERE report_type = 'LOADING' AND report_date = '2026-11-16'");
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
-    const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE report_type = 'LOADING'");
+    const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218150000-wh-report-retailpilot-down.sql"), "utf8"));
+    assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'worked_by'")).length, 0);
     await q(SQL("down"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_report%'")).length, 0);
     assert.equal((await q("SELECT * FROM all_permissions")).length, 0);

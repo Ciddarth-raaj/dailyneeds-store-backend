@@ -14,6 +14,8 @@ const respondError = require("../utils/http");
  *   POST   /upload                             one file as one report for a day   upload_wh_daily_reports
  *          { report_type, report_date, file_name, headers: [...], rows: [[...], ...], allow_date_mismatch }
  *   DELETE /uploads/:upload_id                 remove an upload and its rows      upload_wh_daily_reports
+ *   POST   /pull { from, to }                  the five reports from RetailPilot  upload_wh_daily_reports
+ *                                             for each day (at most 31), replacing what was there
  */
 class WhDailyReportsRoutes {
   constructor(usecase, permissions) {
@@ -29,7 +31,7 @@ class WhDailyReportsRoutes {
     const need = (...keys) => (this.permissions ? this.permissions.require(...keys) : deny);
     const send = (res, result) => {
       if (result.code === 200) return res.json(result);
-      return res.status([403, 404, 409, 422].includes(result.code) ? result.code : 400).json(result);
+      return res.status([403, 404, 409, 422, 502].includes(result.code) ? result.code : 400).json(result);
     };
     const q = (req, k) => (req.query[k] == null ? null : String(req.query[k]).trim() || null);
 
@@ -83,6 +85,15 @@ class WhDailyReportsRoutes {
             employee_id: (req.decoded && req.decoded.employee_id) || null,
           })
         );
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/pull", need("upload_wh_daily_reports"), async (req, res) => {
+      try {
+        const b = req.body || {};
+        send(res, await this.usecase.pull({ from: b.from || null, to: b.to || null, employee_id: (req.decoded && req.decoded.employee_id) || null }));
       } catch (err) {
         respondError(res, err);
       }
