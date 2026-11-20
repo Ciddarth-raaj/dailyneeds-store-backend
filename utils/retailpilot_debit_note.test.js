@@ -74,10 +74,20 @@ describe("mapDebitNotes", () => {
     assert.equal(d.TOT_ITEM_QTY, 60);
     assert.equal(d.TOT_ITEM_VALUE, 13251.36);
     assert.equal(d.PURCHASE_REF, "6372");
-    // Round-off: MPRH amount less taxable + GST, as the Debit Note screen adds it up.
-    assert.equal(d.ROUND_OFF, round2(13251.36 - (11758.23 + 746.41 * 2)));
-    assert.equal(d.TOTAL_AMOUNT, 13251.36);
+    // Taxable + GST as the Debit Note screen adds it up is 13251.05; the
+    // total rounds to the nearest rupee, the round-off is the difference.
+    assert.equal(d.TOTAL_AMOUNT, 13251);
+    assert.equal(d.ROUND_OFF, -0.05);
     assert.equal(typeof d.TS, "number");
+  });
+
+  it("rounds the total up to the next rupee from 50 paise, the round-off taking it there", () => {
+    const up = mapDebitNotes([row({ cgst_rate: 0, sgst_rate: 0, taxable: 1234.75 })], STORE_MAP).debitNotes[0];
+    assert.equal(up.TOTAL_AMOUNT, 1235);
+    assert.equal(up.ROUND_OFF, 0.25);
+    const igst = mapDebitNotes([row({ supplier_gstn: "33AAACN2369L1ZD", cgst_rate: 0, sgst_rate: 0, igst_rate: 5, taxable: 100.4 })], STORE_MAP).debitNotes[0];
+    assert.equal(igst.TOTAL_AMOUNT, 105);
+    assert.equal(igst.ROUND_OFF, round2(105 - (100.4 + 5.02)));
   });
 
   it("puts an interstate supplier's tax in IGST", () => {
