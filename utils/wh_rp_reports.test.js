@@ -48,6 +48,10 @@ describe("mapping", () => {
     assert.equal(rows[0].returned_qty, null);
     assert.equal(R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED" })], STORES).rows[0].returned_qty, 2);
   });
+  it("goods that stay at the store they are at (GRN kept at the warehouse, auto-picked) are not write-off", () => {
+    const { rows } = R.mapJobLines("PICKING", [line({ job_type: "GRN", state: "PICKED_PACKED", destination: "wh1", advised_qty: "10000", actual_qty: "0" })], STORES);
+    assert.deepEqual([rows[0].to_store, rows[0].short_qty], ["warehouse", 0]);
+  });
   it("box lines: unloading keeps the box's original store as planned and skips boxes still on the truck", () => {
     const box = (o) => ({ job_id: "job_9", job_type: "STA", state: "UNLOADED", assigned_user: "u1,u2", box_id: "0380903545", origin: "wh1", destination: "st2", truck_id: "py-01-da-8159", unloaded_store: "st2", meta: '{"original_destination":"st1"}', article_id: "101742", qty: "50", updated_at: "2026-11-16T05:56:00Z", ...o });
     const { rows } = R.mapBoxLines("UNLOADING", [box(), box({ unloaded_store: null })], STORES);

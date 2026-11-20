@@ -29,8 +29,8 @@ const BOX_COLS = [
 ];
 /** The Pick & Pack pages a report's write-off goes to. */
 const PAGES = {
-  VERIFICATION: { table: "pick_pack_verifications", id: "pick_pack_verification_id", jobType: true },
-  WRITE_OFF: { table: "pick_pack_write_off", id: "pick_pack_write_off_id", jobType: false },
+  VERIFICATION: { table: "pick_pack_verifications", id: "pick_pack_verification_id", jobType: true, employee: false },
+  WRITE_OFF: { table: "pick_pack_write_off", id: "pick_pack_write_off_id", jobType: false, employee: true },
 };
 /** Columns a job breakdown may group by. */
 const JOB_DIMS = ["report_type", "report_date", "to_store", "job_type", "department", "category", "worked_by"];
@@ -132,19 +132,25 @@ class WhDailyReportsRepository {
    *     the same article (job type): an unverified one becomes the first
    *     store's line, keeping its remark; a verified one stands for all the
    *     article's stores, and none are added;
-   *   - otherwise a new line is added.
+   *   - otherwise a new line is added;
+   *   - a line this sync wrote earlier (it has a store) that is no longer in
+   *     the report is removed - but only if nobody has touched it: no remark,
+   *     no staff member, not verified. A corrected report so takes its wrong
+   *     lines away, and the team's work stays.
    *
    * Articles not in product_table cannot be added (foreign key) and are counted.
    */
   async _syncPageLines(conn, page, date, writeOffs) {
     const cfg = PAGES[page];
-    const out = { added: 0, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 0 };
-    if (!writeOffs.length) return out;
+    const out = { added: 0, updated: 0, unchanged: 0, kept_verified: 0, unknown_articles: 0, removed: 0 };
     const ids = [...new Set(writeOffs.map((w) => w.product_id))];
-    const known = new Set((await queryAsync(conn, "SELECT product_id FROM product_table WHERE product_id IN (?)", [ids])).map((r) => Number(r.product_id)));
+    const known = ids.length
+      ? new Set((await queryAsync(conn, "SELECT product_id FROM product_table WHERE product_id IN (?)", [ids])).map((r) => Number(r.product_id)))
+      : new Set();
     const existing = await queryAsync(
       conn,
-      `SELECT ${cfg.id} AS id, product_id, ${cfg.jobType ? "job_type" : "NULL AS job_type"}, store, mismatch_qty, is_verified
+      `SELECT ${cfg.id} AS id, product_id, ${cfg.jobType ? "job_type" : "NULL AS job_type"}, store, mismatch_qty, is_verified,
+              remark_id, remark_str, ${cfg.employee ? "reason_employee_id" : "NULL AS reason_employee_id"}
          FROM ${cfg.table} WHERE date = ? ORDER BY ${cfg.id}`,
       [date]
     );
@@ -197,6 +203,14 @@ class WhDailyReportsRepository {
         continue;
       }
       inserts.push(cfg.jobType ? [w.product_id, w.mismatch_qty, date, w.job_type, w.store, 0] : [w.product_id, w.mismatch_qty, date, w.store, 0]);
+    }
+    // Lines this sync wrote that the report no longer has, untouched by the team.
+    const untouched = (e) =>
+      !e.claimed && !Number(e.is_verified) && e.remark_id == null && !String(e.remark_str || "").trim() && e.reason_employee_id == null;
+    const gone = [...byStore.values()].flat().filter(untouched).map((e) => e.id);
+    if (gone.length) {
+      await queryAsync(conn, `DELETE FROM ${cfg.table} WHERE ${cfg.id} IN (?)`, [gone]);
+      out.removed = gone.length;
     }
     if (inserts.length) {
       const cols = cfg.jobType ? "product_id, mismatch_qty, date, job_type, store, is_verified" : "product_id, mismatch_qty, date, store, is_verified";

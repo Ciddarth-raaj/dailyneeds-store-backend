@@ -133,7 +133,9 @@ const articleNo = (v) => {
 
 /**
  * Job article lines -> wh_report_job_rows rows. A finished line is short by
- * advised - actual (never below 0); an open one is not a write-off yet.
+ * advised - actual (never below 0); an open one is not a write-off yet, and
+ * neither is a line whose goods stay where they are (origin = destination:
+ * GRN goods kept at the receiving store, auto-picked, never scanned).
  * Verification's short is also its returned qty. Answers { rows, skipped }:
  * lines whose article id is not a number are counted, not kept.
  */
@@ -151,7 +153,8 @@ function mapJobLines(type, lines, stores) {
     const done = st.done.includes(clean(l.state));
     const advised = num(l.advised_qty);
     const actual = num(l.actual_qty);
-    const short = done ? Math.max(0, Math.round((advised - actual) * 1000) / 1000) : 0;
+    const stays = clean(l.origin) !== "" && clean(l.origin) === clean(l.destination);
+    const short = done && !stays ? Math.max(0, Math.round((advised - actual) * 1000) / 1000) : 0;
     rows.push({
       report_type: type,
       job_id: clean(l.job_id) || null,
