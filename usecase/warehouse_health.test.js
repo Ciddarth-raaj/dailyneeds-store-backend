@@ -9,6 +9,18 @@ const repo = {
   remarksPending: async () => [],
   shortArticles: async () => [],
   pickerMistakes: async () => [],
+  boxSummary: async (type) =>
+    type === "LOADING"
+      ? [
+          { report_date: "2026-11-19", box_id: "R1", planned_to_store: "warehouse", from_store: "ecr", truck_no: "T9", articles: 1, qty: 24, value: 1800 },
+          { report_date: "2026-11-20", box_id: "B1", planned_to_store: "ecr", from_store: "warehouse", truck_no: "T1", articles: 2, qty: 10, value: 500 },
+          { report_date: "2026-11-20", box_id: "B1", planned_to_store: "moolakulam", from_store: "warehouse", truck_no: "T1", articles: 1, qty: 5, value: 100 },
+        ]
+      : [
+          { report_date: "2026-11-20", box_id: "R1", planned_to_store: "warehouse", unloaded_store: "warehouse", articles: 1, qty: 24 },
+          { report_date: "2026-11-20", box_id: "B1", planned_to_store: "ecr", unloaded_store: "ecr", articles: 2, qty: 10 },
+        ],
+  boxArticles: async (type, keys) => keys.map((k) => ({ ...k, article_id: 7, article_name: "Milk", qty: 5, value: 100 })),
 };
 const reports = { _boxes: async () => [], _staffNames: async () => ({}) };
 
@@ -89,4 +101,16 @@ test("a PDF that fails still sends the message", async () => {
   const { uc, sent, docs } = setup([{ employee_id: 1, private_chat_id: "c1" }], null, { pdf, s3: { uploadFile: async () => "x" } });
   const out = await uc.run();
   assert.deepStrictEqual([out.sent, out.pdf, sent.length, docs.length], [1, false, 1, 0]);
+});
+
+test("the box chain: open from earlier + loaded - unloaded = still open, a box being its id and store", async () => {
+  const { uc } = setup([]);
+  const r = await uc.health({ date: "2026-11-20" });
+  const u = r.data.tiles.unloading;
+  assert.deepStrictEqual([u.chain.opening.boxes, u.chain.loaded.boxes, u.chain.unloaded.boxes, u.chain.unloaded.from_earlier, u.chain.still_open.boxes], [1, 2, 2, 1, 1]);
+  assert.deepStrictEqual(u.still_open.map((b) => [b.box_id, b.to_store, b.items[0].article_name]), [["B1", "moolakulam", "Milk"]]);
+  assert.deepStrictEqual(u.closed_old.map((b) => [b.box_id, b.days_late]), [["R1", 1]]);
+  assert.ok(r.data.need_you.some((i) => /1 box loaded and not unloaded/.test(i.text)));
+  // days since 10 Oct with no Loading / Unloading report are listed
+  assert.strictEqual(u.chain.missing_days[0].date, "2026-10-10");
 });

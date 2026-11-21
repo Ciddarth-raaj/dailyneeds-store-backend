@@ -410,6 +410,45 @@ class WhDailyReportsRepository {
   }
 
   /**
+   * The box chain (utils/wh_box_chain.js): Loading or Unloading from..to, one
+   * row per day per box - a box being its box id AND the store it is going
+   * to, as box ids are reused - with its articles, qty and NLC value.
+   */
+  async boxSummary(reportType, from, to) {
+    const rows = await this.run(
+      "BOX_SUMMARY",
+      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store,
+              MAX(r.unloaded_store) AS unloaded_store, MAX(r.from_store) AS from_store, MAX(r.job_type) AS job_type,
+              MAX(r.truck_no) AS truck_no, COUNT(DISTINCT r.article_id) AS articles, SUM(r.box_qty) AS qty,
+              SUM(r.box_qty * COALESCE(r.nlc, 0)) AS value, DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i:%s') AS finished_at
+         FROM wh_report_box_rows r
+        WHERE r.report_type = ? AND r.report_date BETWEEN ? AND ?
+        GROUP BY r.report_date, r.box_id, r.planned_to_store`,
+      [reportType, from, to]
+    );
+    return toNumbers(rows, ["articles", "qty", "value"]);
+  }
+
+  /** The articles in some boxes: keys [{ report_date, box_id, planned_to_store }]. */
+  async boxArticles(reportType, keys) {
+    if (!keys || !keys.length) return [];
+    const some = keys.slice(0, 500);
+    const params = [reportType];
+    for (const k of some) params.push(k.report_date, k.box_id, k.planned_to_store || null);
+    const rows = await this.run(
+      "BOX_ARTICLES",
+      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store, r.article_id,
+              MAX(r.article_name) AS article_name, SUM(r.box_qty) AS qty, SUM(r.box_qty * COALESCE(r.nlc, 0)) AS value
+         FROM wh_report_box_rows r
+        WHERE r.report_type = ? AND (${some.map(() => "(r.report_date = ? AND r.box_id = ? AND r.planned_to_store <=> ?)").join(" OR ")})
+        GROUP BY r.report_date, r.box_id, r.planned_to_store, r.article_id
+        ORDER BY r.box_id, r.article_id`,
+      params
+    );
+    return toNumbers(rows, ["qty", "value"]);
+  }
+
+  /**
    * Who worked, from the reports pulled from RetailPilot: per report, user
    * (as recorded - loading / unloading hold several, comma-separated) and the
    * store they worked at (picking, packing, loading: where the goods left;

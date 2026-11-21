@@ -105,8 +105,63 @@ function pickers(work, mistakes, names) {
     .sort((a, b) => b.lines - a.lines || b.value - a.value);
 }
 
-/** Everything the dashboard shows for `date`, from what the usecase read. */
-function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines: rawBoxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
+/**
+ * Everything the dashboard shows for `date`, from what the usecase read.
+ * With `boxChain` (utils/wh_box_chain.js, from BOX_CHAIN_FROM) Unloading is
+ * the running ledger of boxes: open from earlier days + loaded - unloaded =
+ * still open.
+ */
+function buildHealth(args) {
+  const h = buildHealthBase(args);
+  const c = args.boxChain;
+  if (!c) return h;
+  const asBox = (b, status) => ({ ...b, status, store: b.to_store, items: b.items || [] });
+  const stillOpen = c.lists.still_open.map((b) => asBox(b, "NOT_UNLOADED"));
+  const wrong = c.lists.wrong_store.map((b) => asBox(b, "WRONG_STORE"));
+  const notLoaded = c.lists.not_loaded.map((b) => ({ ...b, status: "NOT_LOADED", store: b.to_store, items: b.items || [] }));
+  h.tiles.unloading = {
+    chain: {
+      from: c.from,
+      opening: c.opening,
+      loaded: c.loaded,
+      unloaded: c.unloaded,
+      still_open: c.still_open,
+      not_loaded: c.not_loaded,
+      wrong_store: c.wrong_store,
+      missing_days: c.missing_days || [],
+    },
+    loaded_boxes: c.loaded.boxes,
+    unloaded_boxes: c.unloaded.boxes,
+    problems: c.still_open.boxes + c.wrong_store.boxes + c.not_loaded.boxes,
+    not_unloaded: c.still_open.boxes,
+    wrong_store: c.wrong_store.boxes,
+    not_loaded: c.not_loaded.boxes,
+    still_open: stillOpen.slice(0, 300),
+    closed_old: c.lists.closed_old.map((b) => asBox(b, "CLOSED_LATE")).slice(0, 300),
+    list: [...stillOpen, ...wrong, ...notLoaded].slice(0, 300),
+    waiting: [],
+  };
+  h.flow.unloaded_boxes = c.unloaded.boxes;
+  h.flow.not_unloaded_boxes = c.still_open.boxes;
+  h.flow.not_unloaded = stillOpen.slice(0, 200);
+  h.flow.loading_list_boxes = h.tiles.loading.boxes;
+  h.need_you = h.need_you.filter((i) => i.key !== "unloading");
+  const at = h.need_you.findIndex((i) => i.key === "verification");
+  const add = [];
+  if (c.still_open.boxes) {
+    add.push({
+      key: "unloading",
+      tone: "red",
+      text: `Unloading: ${c.still_open.boxes} box${c.still_open.boxes === 1 ? "" : "es"} loaded and not unloaded (${fmt(c.still_open.qty)} qty${c.still_open.older ? `, ${c.still_open.older} from earlier days, oldest ${c.still_open.oldest_days} day${c.still_open.oldest_days === 1 ? "" : "s"}` : ""})`,
+    });
+  }
+  if (c.wrong_store.boxes) add.push({ key: "unloading", tone: "red", text: `Unloading: ${c.wrong_store.boxes} box${c.wrong_store.boxes === 1 ? "" : "es"} unloaded at the wrong store` });
+  if (c.not_loaded.boxes) add.push({ key: "unloading", tone: "amber", text: `Unloading: ${c.not_loaded.boxes} box${c.not_loaded.boxes === 1 ? "" : "es"} unloaded with no loading since ${dayText(c.from)}` });
+  h.need_you.splice(at < 0 ? h.need_you.length : at, 0, ...add);
+  return h;
+}
+
+function buildHealthBase({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines: rawBoxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
   // The day looked at is over: a box put on a truck and not unloaded is a
   // problem, even if the next day's unloading is not pulled yet - not "still
   // awaiting". Only damage / returns going back to the warehouse are apart.
@@ -136,8 +191,9 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   const issues = boxIssues(boxLines);
   const countBy = (st) => issues.filter((b) => b.status === st).length;
   const loaded = (boxLines || []).filter((l) => l.status !== "NOT_LOADED");
-  const listBoxes = new Set(loaded.map((l) => `${l.report_date}|${l.box_id}`));
-  const onTruck = new Set(loaded.filter((l) => l.truck_no).map((l) => `${l.report_date}|${l.box_id}`));
+  // A box is its box id AND the store it is going to: box ids are reused.
+  const listBoxes = new Set(loaded.map((l) => `${l.report_date}|${l.box_id}|${l.planned_to_store || ""}`));
+  const onTruck = new Set(loaded.filter((l) => l.truck_no).map((l) => `${l.report_date}|${l.box_id}|${l.planned_to_store || ""}`));
   // Unloading, by box id, from ONE set of boxes so the numbers always add up:
   // boxes on trucks (damage returns apart) = unloaded + not unloaded.
   const boxOf = (l) => String(l.box_id);

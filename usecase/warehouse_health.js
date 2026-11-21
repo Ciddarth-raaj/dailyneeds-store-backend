@@ -5,6 +5,7 @@ const H = require("../utils/warehouse_health");
 const W = require("../utils/wh_daily_reports");
 const { istToday } = require("../utils/istDate");
 const P = require("../utils/warehouse_health_pdf");
+const C = require("../utils/wh_box_chain");
 
 const A4 = { format: "A4", printBackground: true, preferCSSPageSize: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } };
 
@@ -68,7 +69,50 @@ class WarehouseHealth {
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
     ]);
-    return H.buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+    const boxChain = await this.boxChain(date);
+    return H.buildHealth({ boxChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+  }
+
+  /**
+   * The box chain for `date` (utils/wh_box_chain.js), from BOX_CHAIN_FROM:
+   * open from earlier days + loaded - unloaded = still open, with the
+   * articles of every box listed, and the days since BOX_CHAIN_FROM that
+   * have no Loading or Unloading report (the chain is only as complete as
+   * the days pulled).
+   */
+  async boxChain(date) {
+    if (date < C.BOX_CHAIN_FROM) return null;
+    const [loads, unloads, ups] = await Promise.all([
+      this.repo.boxSummary("LOADING", C.BOX_CHAIN_FROM, date),
+      this.repo.boxSummary("UNLOADING", C.BOX_CHAIN_FROM, date),
+      this.repo.uploads(C.BOX_CHAIN_FROM, date),
+    ]);
+    const chain = C.buildChain({ loads, unloads, date });
+    const loadedKeys = [...chain.lists.still_open, ...chain.lists.closed_old, ...chain.lists.wrong_store].map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store }));
+    const unloadedKeys = chain.lists.not_loaded.map((b) => ({ report_date: date, box_id: b.box_id, planned_to_store: b.to_store }));
+    const [la, ua] = await Promise.all([this.repo.boxArticles("LOADING", loadedKeys), this.repo.boxArticles("UNLOADING", unloadedKeys)]);
+    const items = (rows) => {
+      const m = new Map();
+      for (const r of rows) {
+        const k = `${r.report_date}|${r.box_id}|${r.planned_to_store || ""}`;
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push({ article_id: r.article_id, article_name: r.article_name || null, qty: Number(r.qty) || 0, value: Math.round((Number(r.value) || 0) * 100) / 100 });
+      }
+      return m;
+    };
+    const li = items(la);
+    const ui = items(ua);
+    for (const list of [chain.lists.still_open, chain.lists.closed_old, chain.lists.wrong_store]) for (const b of list) b.items = li.get(`${b.loaded_on}|${b.box_id}|${b.to_store || ""}`) || [];
+    for (const b of chain.lists.not_loaded) b.items = ui.get(`${date}|${b.box_id}|${b.to_store || ""}`) || [];
+    const have = { LOADING: new Set(), UNLOADING: new Set() };
+    for (const u of ups) if (have[u.report_type]) have[u.report_type].add(u.report_date);
+    const missing = [];
+    for (let d = C.BOX_CHAIN_FROM; d <= date; d = H.addDays(d, 1)) {
+      const lacks = ["LOADING", "UNLOADING"].filter((t) => !have[t].has(d));
+      if (lacks.length) missing.push({ date: d, reports: lacks.map((t) => (t === "LOADING" ? "Loading" : "Unloading")) });
+    }
+    chain.missing_days = missing;
+    return chain;
   }
 
   /** The dashboard for `date` (default yesterday). Not a day in the future. */
