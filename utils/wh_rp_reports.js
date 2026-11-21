@@ -135,17 +135,17 @@ function mapStuckCartons(loadRows, packRows, stores, today) {
     const box = clean(r.box_id);
     if (!box) continue;
     const k = `${box}|${clean(r.destination)}`;
-    const c = by.get(k) || { carton: box, job_type: clean(r.job_type).toUpperCase() || null, from_store: name(r.origin), to_store: name(r.destination), destination: clean(r.destination), stage_id: clean(r.stage_id) || null, load_jobs: [], joblets: new Set(), since: r.created_at, items: new Map() };
+    const c = by.get(k) || { carton: box, job_type: clean(r.job_type).toUpperCase() || null, from_store: name(r.origin), to_store: name(r.destination), destination: clean(r.destination), stage_id: clean(r.stage_id) || null, load_jobs: [], joblets: new Map(), since: r.created_at };
     if (!c.load_jobs.includes(clean(r.load_job))) c.load_jobs.push(clean(r.load_job));
     if (String(r.created_at) < String(c.since)) c.since = r.created_at;
+    // Per loading job (joblet), what the carton holds. Two open loading jobs
+    // for one carton list the same goods: count them once (the larger qty).
     const joblet = clean(r.joblet);
     const article = articleNo(r.article_id);
     if (article) {
-      const key = `${joblet}|${article}`;
-      if (!c.joblets.has(key)) {
-        c.joblets.add(key);
-        c.items.set(article, (c.items.get(article) || 0) + num(r.qty));
-      }
+      if (!c.joblets.has(joblet)) c.joblets.set(joblet, new Map());
+      const m = c.joblets.get(joblet);
+      m.set(article, (m.get(article) || 0) + num(r.qty));
     }
     by.set(k, c);
   }
@@ -160,7 +160,9 @@ function mapStuckCartons(loadRows, packRows, stores, today) {
     .map((c) => {
       const before = (packs.get(c.carton) || []).filter((p) => clean(p.destination) === c.destination && String(p.updated_at) <= String(c.since));
       const last = before.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0] || null;
-      const items = [...c.items].map(([article_id, qty]) => ({ article_id, qty: Math.round(qty * 1000) / 1000 }));
+      const most = new Map();
+      for (const m of c.joblets.values()) for (const [a, q] of m) most.set(a, Math.max(most.get(a) || 0, q));
+      const items = [...most].map(([article_id, qty]) => ({ article_id, qty: Math.round(qty * 1000) / 1000 }));
       const waitingSince = istDateTime(c.since);
       return {
         carton: c.carton,

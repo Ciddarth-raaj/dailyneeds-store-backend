@@ -170,8 +170,9 @@ describe("stuck cartons", () => {
       { box_id: "7186914543", joblet_id: "aj2", updated_at: "2026-11-17T07:18:00Z", pack_job: "job_19423175", destination: "st_mk", assigned_user: "tuxbOdI82lFA" },
     ];
     const rows = R.mapStuckCartons(loads, packs, STORES, "2026-11-21");
-    assert.deepEqual(rows.map((r) => [r.carton, r.to_store, r.days, r.units]), [["7186914543", "vallalar salai", 36, 20], ["127577", "moolakulam", 19, 120], ["7186914543", "moolakulam", 4, 20]]);
+    assert.deepEqual(rows.map((r) => [r.carton, r.to_store, r.days, r.units]), [["7186914543", "vallalar salai", 36, 20], ["127577", "moolakulam", 19, 60], ["7186914543", "moolakulam", 4, 20]]);
     assert.deepEqual([rows[0].packer, rows[0].pack_job, rows[0].load_jobs], ["tuxbOdI82lFA", "job_62735109", ["job_88669842"]]);
+    // two open loading jobs for one carton: both listed, its 60 units counted once
     assert.deepEqual(rows[1].load_jobs, ["job_12134893", "job_12275517"]);
     assert.equal(rows[2].pack_job, "job_19423175");
   });
