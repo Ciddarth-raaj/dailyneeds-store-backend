@@ -137,6 +137,35 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     }));
   const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
   const unloadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.list || []), [4, 5, 6]);
+  const st = h.stuck_cartons;
+  const stuckHtml = !st
+    ? ""
+    : !st.ok
+      ? `<p class="note warn">Stuck cartons: could not read from RetailPilot.</p>`
+      : section(
+          `Stuck cartons - ${num(st.count)} packed, loading job open more than ${st.stuck_days} days${st.count ? ` · ${num(st.units)} units · ${rupees(st.value)}` : ""}`,
+          st.count
+            ? table(
+                ["Carton", "To", "Waiting since", "Days", "Items", "Units", "Value", "Packed by", "Pack job / loading job"],
+                st.cartons.slice(0, 60).map((c) => ({
+                  cls: c.days >= 14 ? "bad" : "",
+                  cells: [
+                    `${esc(c.carton)}<div class="sub">${esc(c.job_type || "")}</div>`,
+                    esc(title(c.to_store)),
+                    esc((c.waiting_since || "").slice(0, 16)),
+                    num(c.days),
+                    esc(c.items.map((i) => `${i.article_name || i.article_id} × ${num(i.qty)}`).join("; ")),
+                    num(c.units),
+                    rupees(c.value),
+                    esc(c.packer_name || c.packer || "—"),
+                    `<span class="sub">${esc(c.pack_job || "—")} / ${esc(c.load_jobs.join(" + "))}</span>`,
+                  ],
+                })),
+                [3, 5, 6]
+              )
+            : `<p class="note">No carton is stuck.</p>`,
+          "Live from RetailPilot when the report was made."
+        );
   const sc = h.stage_chain;
   const stageHtml = sc
     ? `<h2 style="margin-top:4px">Where everything stands tonight</h2>
@@ -310,6 +339,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
 </header>
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
 ${stageHtml}
+${stuckHtml}
 ${needYou}
 <div class="cards">${cards}</div>
 <h2>Flow of goods</h2>${flow}
