@@ -104,10 +104,17 @@ function pickers(work, mistakes, names) {
 }
 
 /** Everything the dashboard shows for `date`, from what the usecase read. */
-function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
+function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
   const reports = Object.fromEntries(Object.keys(LABEL).map((k) => [k, (uploads || []).some((u) => u.report_type === k)]));
   const job = Object.fromEntries(["PICKING", "PACKING", "VERIFICATION"].map((k) => [k, blankJob()]));
   for (const s of summary || []) if (job[s.report_type]) for (const f of Object.keys(blankJob())) job[s.report_type][f] = n(s[f]);
+
+  // Picking write-off by job type (GRN / STA / ...), most lines first
+  const jt = (t) => String(t || "Other").toUpperCase();
+  const writeoffByType = (byJobType || [])
+    .filter((r) => r.report_type === "PICKING" && n(r.short_lines))
+    .map((r) => ({ job_type: jt(r.job_type), lines: n(r.short_lines), qty: n(r.short_qty), value: r2(r.short_value) }))
+    .sort((a, b) => b.lines - a.lines);
 
   // Boxes
   const issues = boxIssues(boxLines);
@@ -138,7 +145,7 @@ function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, bo
   const stores = new Map();
   const store = (name) => {
     const k = name || "(unknown)";
-    if (!stores.has(k)) stores.set(k, { store: k, picking_short_qty: 0, picking_short_lines: 0, picking_short_value: 0, verification_short_qty: 0, yet_to_verify_qty: 0, box_issues: 0, open_lines: 0 });
+    if (!stores.has(k)) stores.set(k, { store: k, picking_short_qty: 0, picking_short_lines: 0, picking_short_value: 0, picking_by_type: {}, verification_short_qty: 0, yet_to_verify_qty: 0, box_issues: 0, open_lines: 0 });
     return stores.get(k);
   };
   for (const s of byStore || []) {
@@ -147,6 +154,11 @@ function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, bo
       st.picking_short_qty += n(s.short_qty);
       st.picking_short_lines += n(s.short_lines);
       st.picking_short_value = r2(st.picking_short_value + n(s.short_value));
+      if (n(s.short_lines)) {
+        const t = jt(s.job_type);
+        const cur = st.picking_by_type[t] || { lines: 0, value: 0 };
+        st.picking_by_type[t] = { lines: cur.lines + n(s.short_lines), value: r2(cur.value + n(s.short_value)) };
+      }
     }
     if (s.report_type === "VERIFICATION") st.verification_short_qty += n(s.short_qty);
     st.open_lines += n(s.open_lines);
@@ -169,7 +181,7 @@ function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, bo
   const openLines = job.PICKING.open_lines + job.PACKING.open_lines;
   const items = [];
   // Picking write-off is counted in lines (articles short), not units.
-  if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)` });
+  if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)${writeoffByType.length > 1 || (writeoffByType[0] && writeoffByType[0].job_type !== "OTHER") ? ` - ${writeoffByType.map((t) => `${t.job_type} ${fmt(t.lines)}`).join(", ")}` : ""}` });
   if (countBy("NOT_ON_TRUCK")) items.push({ key: "boxes", tone: "red", text: `${countBy("NOT_ON_TRUCK")} box${countBy("NOT_ON_TRUCK") === 1 ? "" : "es"} on the loading list but not on a truck` });
   const lost = countBy("NOT_UNLOADED") + countBy("WRONG_STORE") + countBy("QTY_DIFF");
   if (lost) items.push({ key: "boxes", tone: "red", text: `${lost} box${lost === 1 ? "" : "es"} not delivered right (not unloaded, wrong store or quantity differs)` });
@@ -187,7 +199,7 @@ function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, bo
     missing_reports: Object.keys(LABEL).filter((k) => !reports[k]).map((k) => LABEL[k]),
     need_you: items,
     tiles: {
-      writeoff: { lines: job.PICKING.short_lines, qty: job.PICKING.short_qty, value: r2(job.PICKING.short_value), packing_lines: job.PACKING.short_lines, packing_qty: job.PACKING.short_qty, packing_value: r2(job.PACKING.short_value) },
+      writeoff: { lines: job.PICKING.short_lines, qty: job.PICKING.short_qty, value: r2(job.PICKING.short_value), by_job_type: writeoffByType, packing_lines: job.PACKING.short_lines, packing_qty: job.PACKING.short_qty, packing_value: r2(job.PACKING.short_value) },
       boxes: { not_on_truck: countBy("NOT_ON_TRUCK"), not_unloaded: countBy("NOT_UNLOADED"), wrong_store: countBy("WRONG_STORE"), qty_diff: countBy("QTY_DIFF"), not_loaded: countBy("NOT_LOADED"), list: issues.slice(0, 200) },
       remarks: { write_off: rm.WRITE_OFF, verification: rm.VERIFICATION },
       jobs: { picking_open: job.PICKING.open_lines, packing_open: job.PACKING.open_lines, verification_open: job.VERIFICATION.open_lines, by_store: storeRows.filter((s) => s.open_lines).map((s) => ({ name: s.name, open_lines: s.open_lines })) },

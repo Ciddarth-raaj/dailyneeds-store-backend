@@ -9,9 +9,15 @@ const base = {
     { report_type: "PICKING", lines: 1200, done_lines: 956, actual_qty: 9000, actual_value: 412000, short_lines: 115, short_qty: 2750, short_value: 48210, open_lines: 244 },
     { report_type: "VERIFICATION", lines: 400, done_lines: 398, short_lines: 3, short_qty: 7, short_value: 300, open_lines: 2 },
   ],
+  byJobType: [
+    { report_type: "PICKING", job_type: "STA", short_lines: 85, short_qty: 2000, short_value: 30000 },
+    { report_type: "PICKING", job_type: "GRN", short_lines: 30, short_qty: 750, short_value: 18210 },
+    { report_type: "VERIFICATION", job_type: "STA", short_lines: 3 },
+  ],
   byStore: [
-    { report_type: "PICKING", to_store: "kathirkamam", short_lines: 45, short_qty: 1043, short_value: 9000, open_lines: 0 },
-    { report_type: "PICKING", to_store: "moolakulam", short_lines: 30, short_qty: 1200, short_value: 20000, open_lines: 10 },
+    { report_type: "PICKING", to_store: "kathirkamam", job_type: "STA", short_lines: 40, short_qty: 1000, short_value: 8000, open_lines: 0 },
+    { report_type: "PICKING", to_store: "kathirkamam", job_type: "GRN", short_lines: 5, short_qty: 43, short_value: 1000, open_lines: 0 },
+    { report_type: "PICKING", to_store: "moolakulam", job_type: "STA", short_lines: 30, short_qty: 1200, short_value: 20000, open_lines: 10 },
   ],
   yetToVerify: [{ to_store: "warehouse", from_store: "muthialpet", article_id: "A1", article_name: "Soan papdi", advised_qty: 5, actual_qty: 0, nlc: 40 }],
   remarks: [{ page: "WRITE_OFF", total: 115, pending: 115, backlog: 0 }],
@@ -38,7 +44,9 @@ const base = {
 test("picking write-off is headed by lines, value and qty after", () => {
   const h = H.buildHealth(base);
   assert.deepStrictEqual([h.tiles.writeoff.lines, h.tiles.writeoff.qty, h.tiles.writeoff.value], [115, 2750, 48210]);
-  assert.match(h.need_you[0].text, /^Picking write-off 115 lines · ₹48,210 \(2,750 qty\)$/);
+  assert.match(h.need_you[0].text, /^Picking write-off 115 lines · ₹48,210 \(2,750 qty\) - STA 85, GRN 30$/);
+  assert.deepStrictEqual(h.tiles.writeoff.by_job_type.map((t) => [t.job_type, t.lines, t.value]), [["STA", 85, 30000], ["GRN", 30, 18210]]);
+  assert.deepStrictEqual(h.stores[0].picking_by_type, { STA: { lines: 40, value: 8000 }, GRN: { lines: 5, value: 1000 } });
   assert.strictEqual(h.stores[0].store, "kathirkamam"); // most lines first, not most qty
   assert.strictEqual(h.trend[6].short_lines, 115);
   assert.strictEqual(h.trend.length, 7);

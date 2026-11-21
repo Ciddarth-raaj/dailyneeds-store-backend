@@ -33,10 +33,11 @@ class WarehouseHealth {
   async build(date) {
     const week = H.addDays(date, -6);
     const month = H.monthStart(date);
-    const [uploads, summary, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames] = await Promise.all([
+    const [uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames] = await Promise.all([
       this.repo.uploads(date, date),
       this.repo.jobBreakdown(date, date, ["report_type"]),
-      this.repo.jobBreakdown(date, date, ["report_type", "to_store"]),
+      this.repo.jobBreakdown(date, date, ["report_type", "job_type"]),
+      this.repo.jobBreakdown(date, date, ["report_type", "to_store", "job_type"]),
       this.repo.jobRows(date, date, { only: "open", report_type: "VERIFICATION" }, 500),
       this.repo.remarksPending(date),
       this.reports._boxes(date, date, null),
@@ -47,7 +48,7 @@ class WarehouseHealth {
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
     ]);
-    return H.buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+    return H.buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
   }
 
   /** The dashboard for `date` (default yesterday). Not a day in the future. */
