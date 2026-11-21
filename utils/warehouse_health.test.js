@@ -25,6 +25,7 @@ const base = {
     { report_date: "2026-11-19", box_id: "B1", status: "NOT_ON_TRUCK", truck_no: null, loaded_qty: 4, nlc: 10, planned_to_store: "ecr" },
     { report_date: "2026-11-19", box_id: "B2", status: "OK", truck_no: "TN01", loaded_qty: 4, unloaded_qty: 4, unload_date: "2026-11-19" },
     { report_date: "2026-11-19", box_id: "B3", status: "NOT_UNLOADED", truck_no: "TN01", loaded_qty: 2, nlc: 5, planned_to_store: "ecr" },
+    { report_date: "2026-11-19", box_id: "B4", status: "RETURN", truck_no: "TN01", loaded_qty: 3, nlc: 5, planned_to_store: "warehouse" },
   ],
   repeats: [{ article_id: "A9", article_name: "milk", days_short: 3 }, { article_id: "A8", days_short: 1 }],
   trend: [{ report_date: "2026-11-19", report_type: "PICKING", short_lines: 115, short_qty: 2750, short_value: 48210 }],
@@ -56,8 +57,12 @@ test("boxes: not on a truck is separate from not delivered", () => {
   const h = H.buildHealth(base);
   assert.strictEqual(h.tiles.boxes.not_on_truck, 1);
   assert.strictEqual(h.tiles.boxes.not_unloaded, 1);
-  assert.strictEqual(h.flow.loading_list_boxes, 3);
-  assert.strictEqual(h.flow.on_truck_boxes, 2);
+  assert.strictEqual(h.flow.loading_list_boxes, 4);
+  assert.strictEqual(h.flow.on_truck_boxes, 3);
+  assert.strictEqual(h.flow.unloaded_boxes, 1);
+  // The difference between loaded and unloaded, box by box, with why - a return is not a problem but is listed.
+  assert.deepStrictEqual(h.flow.not_unloaded.map((b) => [b.box_id, b.status]).sort(), [["B1", "NOT_ON_TRUCK"], ["B3", "NOT_UNLOADED"], ["B4", "RETURN"]]);
+  assert.strictEqual(h.flow.not_unloaded_boxes, 3);
   assert.strictEqual(h.flow.trucks, 1);
 });
 

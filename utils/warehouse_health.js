@@ -123,6 +123,21 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   const listBoxes = new Set(loaded.map((l) => `${l.report_date}|${l.box_id}`));
   const onTruck = new Set(loaded.filter((l) => l.truck_no).map((l) => `${l.report_date}|${l.box_id}`));
   const unloaded = new Set((boxLines || []).filter((l) => l.unloaded_qty != null).map((l) => `${l.unload_date}|${l.box_id}`));
+  // Loaded but not unloaded: every box on the loading list with no unloading,
+  // with why - including the ones that are not a problem (still awaiting
+  // unloading, damage / returns going back to the warehouse).
+  const unloadedBoxIds = new Set((boxLines || []).filter((l) => l.unloaded_qty != null).map((l) => `${l.report_date}|${l.box_id}`));
+  const gapBy = new Map();
+  for (const l of loaded) {
+    const k = `${l.report_date}|${l.box_id}`;
+    if (unloadedBoxIds.has(k)) continue;
+    const g = gapBy.get(k) || { box_id: l.box_id, status: l.status, store: l.planned_to_store || null, truck_no: l.truck_no || null, job_type: l.job_type || null, articles: 0, qty: 0, value: 0 };
+    g.articles += 1;
+    g.qty += n(l.loaded_qty);
+    g.value = r2(g.value + n(l.loaded_qty) * n(l.nlc));
+    gapBy.set(k, g);
+  }
+  const gap = [...gapBy.values()].sort((a, b) => b.qty - a.qty);
   const trucks = new Set(loaded.filter((l) => l.truck_no).map((l) => l.truck_no));
 
   // Yet to verify (verification lines still open), by where they are to be verified
@@ -215,6 +230,8 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
       on_truck_boxes: onTruck.size,
       trucks: trucks.size,
       unloaded_boxes: unloaded.size,
+      not_unloaded_boxes: gap.length,
+      not_unloaded: gap.slice(0, 200),
       verified_lines: job.VERIFICATION.done_lines,
       verification_short_lines: job.VERIFICATION.short_lines,
     },
