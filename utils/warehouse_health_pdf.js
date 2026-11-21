@@ -69,7 +69,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       `${rupees(t.writeoff.value)} at NLC · ${num(t.writeoff.qty)} qty${typeSplit(t.writeoff.by_job_type) ? `<br><b>${typeSplit(t.writeoff.by_job_type)}</b>` : ""}`,
       t.writeoff.lines ? "red" : "green"
     ),
-    card("Box problems", num(b.not_on_truck + notDelivered), `${num(b.not_on_truck)} not on a truck<br>${num(notDelivered)} not delivered`, b.not_on_truck + notDelivered ? "red" : "green"),
+    card("Box problems", num(b.not_on_truck + notDelivered), b.not_on_truck + notDelivered || !(h.flow.not_unloaded || []).length ? `${num(b.not_on_truck)} not on a truck<br>${num(notDelivered)} not delivered` : `None<br>${(h.flow.not_unloaded || []).length} loaded, not unloaded yet (not a problem)`, b.not_on_truck + notDelivered ? "red" : "green"),
     card(
       "Verification",
       plural(t.verification.short_lines, "line"),
@@ -92,11 +92,16 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     : `<div class="need clear"><b>All clear</b></div>`;
 
   const f = h.flow;
+  const gapList = f.not_unloaded || [];
+  const gapBy = new Map();
+  for (const x of gapList) gapBy.set(x.status, (gapBy.get(x.status) || 0) + 1);
+  const gapText = [...gapBy].map(([st, c]) => `${num(c)} ${(BOX_LABEL[st] || st).toLowerCase()}`).join(" · ");
+  const gapProblem = gapList.some((x) => !["OPEN", "RETURN"].includes(x.status));
   const flow = `<div class="flow">${[
     ["1 · Picked", plural(f.picked_lines, "line"), `${rupees(f.picked_value)} · ${num(f.picking_short_lines)} short`],
     ["2 · Packed", plural(f.packed_lines, "line"), `${num(f.packing_short_lines)} short`],
     ["3 · Loading list", plural(f.loading_list_boxes, "box", "boxes"), `${num(f.on_truck_boxes)} on ${plural(f.trucks, "truck")}`],
-    ["4 · Unloaded", plural(f.unloaded_boxes, "box", "boxes"), f.not_unloaded_boxes ? `<span class="warn">${plural(f.not_unloaded_boxes, "box", "boxes")} loaded, not unloaded</span>` : "at stores"],
+    ["4 · Unloaded", plural(f.unloaded_boxes, "box", "boxes"), f.not_unloaded_boxes ? (gapProblem ? `<span class="warn">${esc(gapText)}</span>` : esc(gapText)) : "at stores"],
     ["5 · Verified", plural(f.verified_lines, "line"), `${num(f.verification_short_lines)} short`],
   ]
     .map(([l, v, s]) => `<div class="step"><div class="cl">${esc(l)}</div><div class="sv">${esc(v)}</div><div class="cs">${s}</div></div>`)
