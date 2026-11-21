@@ -75,6 +75,8 @@ test("unloading is by box: an unloaded box missing an article, or with a quantit
   const u = h.tiles.unloading;
   assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.qty_diff, u.problems], [3, 2, 1, 0, 1]);
   assert.deepStrictEqual(u.list.map((x) => [x.box_id, x.status]), [["B", "NOT_UNLOADED"]]);
+  // What was in the box, article by article.
+  assert.deepStrictEqual(u.list[0].items, [{ article_id: 1, article_name: null, qty: 5, value: 10 }]);
 });
 
 test("boxes: not on a truck is separate from not delivered", () => {

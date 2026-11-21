@@ -129,7 +129,9 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const boxRows = (list) =>
     list.map((x) => ({
       cls: ["OPEN", "RETURN"].includes(x.status) ? "" : "bad",
-      cells: [esc(x.box_id), esc(BOX_LABEL[x.status] || x.status), esc(title(x.store)), esc(x.truck_no || "—"), num(x.articles), num(x.qty), rupees(x.value)],
+      cells: [
+        `${esc(x.box_id)}${(x.items || []).length ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(it.article_name || it.article_id)} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>` : ""}`,
+        esc(BOX_LABEL[x.status] || x.status), esc(title(x.store)), esc(x.truck_no || "—"), num(x.articles), num(x.qty), rupees(x.value)],
     }));
   const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
   const unloadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.list || []), [4, 5, 6]);

@@ -60,12 +60,14 @@ function boxIssues(lines) {
       articles: 0,
       qty: 0,
       value: 0,
+      items: [],
     };
     b.articles += 1;
     // The units at stake: the difference when quantities differ, else the whole line.
     const q = l.status === "QTY_DIFF" ? Math.abs(n(l.loaded_qty) - n(l.unloaded_qty)) : n(l.loaded_qty == null ? l.unloaded_qty : l.loaded_qty);
     b.qty += q;
     b.value += q * n(l.nlc);
+    if (b.items.length < 100) b.items.push({ article_id: l.article_id, article_name: l.article_name || null, qty: q, value: r2(q * n(l.nlc)) });
     by.set(k, b);
   }
   const order = { NOT_ON_TRUCK: 0, NOT_UNLOADED: 1, WRONG_STORE: 2, QTY_DIFF: 3, NOT_LOADED: 4 };
@@ -146,8 +148,9 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
     const k = `${l.report_date}|${l.box_id}`;
     // Only boxes put on a truck: one never on a truck is a loading problem, shown under Loading.
     if (unloadedBoxIds.has(k) || !l.truck_no) continue;
-    const g = gapBy.get(k) || { box_id: l.box_id, status: l.status, store: l.planned_to_store || null, truck_no: l.truck_no || null, job_type: l.job_type || null, articles: 0, qty: 0, value: 0 };
+    const g = gapBy.get(k) || { box_id: l.box_id, status: l.status, store: l.planned_to_store || null, truck_no: l.truck_no || null, job_type: l.job_type || null, articles: 0, qty: 0, value: 0, items: [] };
     g.articles += 1;
+    if (g.items.length < 100) g.items.push({ article_id: l.article_id, article_name: l.article_name || null, qty: n(l.loaded_qty), value: r2(n(l.loaded_qty) * n(l.nlc)) });
     g.qty += n(l.loaded_qty);
     g.value = r2(g.value + n(l.loaded_qty) * n(l.nlc));
     gapBy.set(k, g);
