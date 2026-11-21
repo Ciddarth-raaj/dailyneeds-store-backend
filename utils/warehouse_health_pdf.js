@@ -32,7 +32,6 @@ const istTime = (ms) => new Date(ms).toLocaleString("en-IN", { timeZone: "Asia/K
 const BOX_LABEL = {
   NOT_ON_TRUCK: "Not on a truck",
   NOT_UNLOADED: "Not unloaded",
-  PART_UNLOADED: "Part unloaded - article missing",
   WRONG_STORE: "Wrong store",
   QTY_DIFF: "Quantity differs",
   NOT_LOADED: "Unloaded, not loaded",
@@ -80,7 +79,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     card(
       "Unloading",
       plural(t.unloading.problems, "problem"),
-      `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded<br>${num(t.unloading.not_unloaded)} not unloaded · ${num(t.unloading.part_unloaded || 0)} article missing${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
+      `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded<br>${num(t.unloading.not_unloaded)} not unloaded · ${num(t.unloading.wrong_store)} wrong store${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
       t.unloading.problems ? "red" : "green"
     ),
     card(
@@ -257,7 +256,7 @@ ${needYou}
 <h2>Flow of goods</h2>${flow}
 ${section("Picking write-off by store", writeoff)}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
-${section("Unloading problems", unloadingT, "On a truck, but not unloaded, unloaded with an article missing, at the wrong store, quantity differs - or unloaded but never loaded.")}
+${section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
 ${section("Remarks pending", remarks)}

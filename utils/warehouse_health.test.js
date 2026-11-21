@@ -61,20 +61,20 @@ test("a box on a truck and not unloaded is a problem, even before the next day's
   assert.ok(h.need_you.some((i) => i.key === "unloading"));
 });
 
-test("a box unloaded with an article missing is part unloaded, not a box not unloaded", () => {
+test("unloading is by box: an unloaded box missing an article, or with a quantity difference, is for verification, not unloading", () => {
   const L = (o) => ({ report_date: "2026-11-19", truck_no: "TN01", loaded_qty: 5, nlc: 2, planned_to_store: "ecr", ...o });
   const h = H.buildHealth({
     ...base,
     boxLines: [
       L({ box_id: "A", article_id: 1, status: "OK", unloaded_qty: 5, unload_date: "2026-11-19" }),
       L({ box_id: "A", article_id: 2, status: "NOT_UNLOADED" }),
+      L({ box_id: "C", article_id: 1, status: "QTY_DIFF", unloaded_qty: 4, unload_date: "2026-11-19" }),
       L({ box_id: "B", article_id: 1, status: "OPEN" }),
     ],
   });
   const u = h.tiles.unloading;
-  assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.part_unloaded, u.problems], [2, 1, 1, 1, 2]);
-  assert.deepStrictEqual(u.list.map((x) => [x.box_id, x.status]), [["B", "NOT_UNLOADED"], ["A", "PART_UNLOADED"]]);
-  assert.deepStrictEqual(h.flow.not_unloaded.map((x) => x.box_id), ["B"]);
+  assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.qty_diff, u.problems], [3, 2, 1, 0, 1]);
+  assert.deepStrictEqual(u.list.map((x) => [x.box_id, x.status]), [["B", "NOT_UNLOADED"]]);
 });
 
 test("boxes: not on a truck is separate from not delivered", () => {
