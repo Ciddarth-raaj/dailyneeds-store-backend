@@ -28,6 +28,8 @@ test("a line stuck for days keeps its age", () => {
   const c = S.buildStageChain({ date: "2026-11-20", jobs: [J("PICKING", "2026-11-17")], boxes: [] });
   const p = g(c, "to_pack");
   assert.deepStrictEqual([p.stands, p.oldest_days, p.stuck, p.list[0].since], [10, 3, 1, "2026-11-17"]);
+  // 2 days is allowed: not stuck yet
+  assert.strictEqual(g(S.buildStageChain({ date: "2026-11-20", jobs: [J("PICKING", "2026-11-18")], boxes: [] }), "to_pack").stuck, 0);
 });
 
 test("pick-pack goes straight to waiting to be loaded; a carton with no document is matched by article and store", () => {

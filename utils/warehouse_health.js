@@ -112,8 +112,35 @@ function pickers(work, mistakes, names) {
  * still open.
  */
 function buildHealth(args) {
-  const h = withBoxChain(buildHealthBase(args), args.boxChain);
-  const sc = args.stageChain;
+  const h = withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain), args.stuckCartons);
+  return h;
+}
+
+/**
+ * Stuck cartons, live from RetailPilot: packed into a carton, a loading job
+ * made, not loaded for more than 2 days. Not tied to the day looked at.
+ */
+function withStuck(h, s) {
+  if (!s) return h;
+  if (!s.ok) {
+    h.stuck_cartons = { ok: false, msg: s.msg };
+    return h;
+  }
+  const cartons = s.cartons || [];
+  const units = cartons.reduce((t, c) => t + n(c.units), 0);
+  const value = r2(cartons.reduce((t, c) => t + n(c.value), 0));
+  h.stuck_cartons = { ok: true, at: s.at, stuck_days: s.stuck_days, cartons: cartons.slice(0, 300), count: cartons.length, units, value, oldest_days: cartons.length ? cartons[0].days : 0, packer_note: s.packer_note || null };
+  if (cartons.length) {
+    h.need_you.unshift({
+      key: "stuck_cartons",
+      tone: "red",
+      text: `Stuck cartons: ${cartons.length} packed, loading job open more than ${s.stuck_days} days (${fmt(units)} units · ${rupees(value)} · oldest ${cartons[0].days} days)`,
+    });
+  }
+  return h;
+}
+
+function withStageChain(h, sc) {
   if (!sc) return h;
   // The stage chain heads the page: what stands between each two stages tonight.
   const box = h.tiles.unloading.chain;
@@ -126,7 +153,7 @@ function buildHealth(args) {
   };
   const add = [];
   for (const g of sc.gaps) {
-    if (g.stuck) add.push({ key: `chain_${g.key}`, tone: "red", text: `${g.label}: ${g.stuck} line${g.stuck === 1 ? "" : "s"} waiting 2 days or more (oldest ${g.oldest_days} days)` });
+    if (g.stuck) add.push({ key: `chain_${g.key}`, tone: "red", text: `${g.label}: ${g.stuck} line${g.stuck === 1 ? "" : "s"} waiting more than 2 days (oldest ${g.oldest_days} days)` });
     const skipped = { to_pack: "Packed with no picking record", to_load: "Loaded with no packing record", to_verify: "Verified with no unloading record" }[g.key];
     if (g.jumped.lines) add.push({ key: `chain_${g.key}`, tone: "amber", text: `${skipped}: ${g.jumped.lines} line${g.jumped.lines === 1 ? "" : "s"} (${fmt(g.jumped.qty)} qty)` });
   }

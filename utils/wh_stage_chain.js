@@ -20,6 +20,9 @@
  */
 const { BOX_CHAIN_FROM } = require("./wh_box_chain");
 
+/** Waiting more than this many days is stuck (the warehouse allows 2). */
+const STUCK_DAYS = 2;
+
 const n = (v) => Number(v) || 0;
 const r3 = (v) => Math.round(n(v) * 1000) / 1000;
 const r2 = (v) => Math.round(n(v) * 100) / 100;
@@ -107,7 +110,7 @@ function gap({ key, label, unit, ins, outs, lost, date }) {
     value: r2(list.reduce((s, l) => s + l.value, 0)),
     lines: list.length,
     oldest_days: list.length ? list[0].days : 0,
-    stuck: list.filter((l) => l.days >= 2).length,
+    stuck: list.filter((l) => l.days > STUCK_DAYS).length,
     lost: { qty: r3(lostToday.reduce((s, e) => s + n(e.qty), 0)), value: r2(lostToday.reduce((s, e) => s + n(e.qty) * n(e.nlc), 0)), lines: lostToday.length },
     jumped: { qty: r3(jumpedToday.reduce((s, j) => s + j.qty, 0)), lines: jumpedToday.length, list: jumpedToday.slice(0, 200) },
     list: list.slice(0, 300),
@@ -151,4 +154,4 @@ function buildStageChain({ jobs, boxes, date }) {
   };
 }
 
-module.exports = { buildStageChain, follow };
+module.exports = { STUCK_DAYS, buildStageChain, follow };

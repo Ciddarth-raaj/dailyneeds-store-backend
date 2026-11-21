@@ -156,7 +156,7 @@ ${sc.gaps
       `${g.label} - ${num(g.stands)} qty · ${rupees(g.value)}`,
       table(
         ["Article", "Document", "From → To", "Qty", "Value", "Waiting"],
-        g.list.slice(0, 40).map((l) => ({ cls: l.days >= 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
+        g.list.slice(0, 40).map((l) => ({ cls: l.days > 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
         [3, 4, 5]
       ),
       g.list.length > 40 ? `Oldest 40 of ${g.list.length} lines - all on the dashboard.` : ""

@@ -124,7 +124,17 @@ test("the stage chain heads the page: picked, not yet packed, stuck 3 days, flag
   const r = await uc.health({ date: "2026-11-20" });
   const g = r.data.stage_chain.gaps.find((x) => x.key === "to_pack");
   assert.deepStrictEqual([g.stands, g.oldest_days, g.list[0].article_name], [12, 3, "Atta"]);
-  assert.match(r.data.need_you[0].text, /Picked, not yet packed: 1 line waiting 2 days or more/);
+  assert.match(r.data.need_you[0].text, /Picked, not yet packed: 1 line waiting more than 2 days/);
   // Loading counts the same box trips as the chain
   assert.strictEqual(r.data.tiles.loading.boxes, r.data.tiles.unloading.chain.loaded.boxes);
+});
+
+test("stuck cartons head 'things need you'; a RetailPilot refusal shows as a note", async () => {
+  const { uc } = setup([]);
+  uc.reports = { ...reports, stuckCartons: async () => ({ ok: true, at: "x", stuck_days: 2, cartons: [{ carton: "7186914543", days: 36, units: 20, value: 1100, items: [] }] }) };
+  const r = await uc.health({ date: "2026-11-20" });
+  assert.deepStrictEqual([r.data.stuck_cartons.count, r.data.stuck_cartons.units], [1, 20]);
+  assert.match(r.data.need_you[0].text, /^Stuck cartons: 1 packed, loading job open more than 2 days \(20 units · ₹1,100 · oldest 36 days\)/);
+  uc.reports = { ...reports, stuckCartons: async () => ({ ok: false, msg: "RetailPilot: whitelist_violation" }) };
+  assert.deepStrictEqual((await uc.health({ date: "2026-11-20" })).data.stuck_cartons, { ok: false, msg: "RetailPilot: whitelist_violation" });
 });

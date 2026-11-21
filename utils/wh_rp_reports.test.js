@@ -148,3 +148,31 @@ describe("usecase pull", () => {
     assert.equal((await usecaseFactory(repo(), () => "2026-11-17").pull({ from: "2026-11-16", to: "2026-11-16" })).code, 502);
   });
 });
+
+describe("stuck cartons", () => {
+  const STORES = new Map([["st_vs", "vallalar salai"], ["st_mk", "moolakulam"], ["wh1", "warehouse"]]);
+  const L = (o) => ({ load_job: "job_88669842", job_type: "grn", created_at: "2026-10-16T13:40:00Z", joblet: "bj1", box_id: "7186914543", origin: "wh1", destination: "st_vs", stage_id: null, article_id: "100500", qty: "20", ...o });
+  it("only loading jobs open since before the cutoff are asked for; box ids are checked", () => {
+    assert.match(R.buildStuckLoadingQuery("2026-11-19"), /j\.state = 'LOADING' AND .* < DATE '2026-11-19'/);
+    assert.equal(R.buildBoxPackQuery(["x'; drop", ""]), null);
+    assert.match(R.buildBoxPackQuery(["7186914543", "48653-10"]), /box_ratio[\s\S]*IN \('7186914543', '48653-10'\)/);
+  });
+  it("one row per carton and store, oldest first; the packer is the last pack into it for that store before loading; a reused barcode stays apart", () => {
+    const loads = [
+      L(),
+      L({ load_job: "job_39946255", created_at: "2026-11-17T07:30:00Z", joblet: "bj2", destination: "st_mk" }),
+      L({ load_job: "job_12134893", box_id: "127577", job_type: "alloc", created_at: "2026-11-02T10:50:00Z", joblet: "bj3", destination: "st_mk", article_id: "100600", qty: "60" }),
+      L({ load_job: "job_12275517", box_id: "127577", job_type: "alloc", created_at: "2026-11-02T11:00:00Z", joblet: "bj4", destination: "st_mk", article_id: "100600", qty: "60" }),
+    ];
+    const packs = [
+      { box_id: "7186914543", joblet_id: "aj1", updated_at: "2026-10-16T13:38:00Z", pack_job: "job_62735109", destination: "st_vs", assigned_user: "tuxbOdI82lFA" },
+      { box_id: "7186914543", joblet_id: "aj9", updated_at: "2026-11-20T09:00:00Z", pack_job: "job_later", destination: "st_vs", assigned_user: "someone" },
+      { box_id: "7186914543", joblet_id: "aj2", updated_at: "2026-11-17T07:18:00Z", pack_job: "job_19423175", destination: "st_mk", assigned_user: "tuxbOdI82lFA" },
+    ];
+    const rows = R.mapStuckCartons(loads, packs, STORES, "2026-11-21");
+    assert.deepEqual(rows.map((r) => [r.carton, r.to_store, r.days, r.units]), [["7186914543", "vallalar salai", 36, 20], ["127577", "moolakulam", 19, 120], ["7186914543", "moolakulam", 4, 20]]);
+    assert.deepEqual([rows[0].packer, rows[0].pack_job, rows[0].load_jobs], ["tuxbOdI82lFA", "job_62735109", ["job_88669842"]]);
+    assert.deepEqual(rows[1].load_jobs, ["job_12134893", "job_12275517"]);
+    assert.equal(rows[2].pack_job, "job_19423175");
+  });
+});

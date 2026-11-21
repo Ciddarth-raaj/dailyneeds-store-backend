@@ -1,5 +1,6 @@
 const W = require("../utils/wh_daily_reports");
 const R = require("../utils/wh_rp_reports");
+const { STUCK_DAYS } = require("../utils/wh_stage_chain");
 const logger = require("../utils/logger");
 const { istToday } = require("../utils/istDate");
 
@@ -226,6 +227,56 @@ class WhDailyReports {
     const prices = new Map(ids.filter((id) => found.has(id)).map((id) => [id, found.get(id)]));
     const updated = prices.size ? await this.repo.fillNlc(r.from, r.to, prices) : 0;
     return { code: 200, data: { from: r.from, to: r.to, articles: ids.length, priced: prices.size, still_unpriced: ids.length - prices.size, rows_updated: updated } };
+  }
+
+  /**
+   * Stuck cartons, live from RetailPilot: loading jobs open for more than
+   * STUCK_DAYS days (packed into a carton, a loading job made, never loaded),
+   * with articles, units, NLC value, and who packed the carton (from
+   * box_ratio). RetailPilot refusing box_ratio leaves the packer out, not the
+   * cartons. Kept for 10 minutes. { ok, at, cartons } or { ok: false, msg }.
+   */
+  async stuckCartons({ fresh = false } = {}) {
+    const now = Date.now();
+    if (!fresh && this.stuckCache && now - this.stuckCache.at < 10 * 60 * 1000) return this.stuckCache.value;
+    if (!this.spectra || !this.spectra.isConfigured()) return { ok: false, msg: "RetailPilot is not set up" };
+    const today = this.today();
+    let value;
+    try {
+      const stores = R.storeNames(await this.spectra.queryAll(R.STORES_QUERY));
+      const loads = await this.spectra.queryAll(R.buildStuckLoadingQuery(W.addDays(today, -STUCK_DAYS)));
+      let packs = [];
+      let packerNote = null;
+      const q = R.buildBoxPackQuery(loads.map((l) => l.box_id));
+      if (q) {
+        try {
+          packs = await this.spectra.queryAll(q);
+        } catch (err) {
+          packerNote = `Packer not available: ${err.message.slice(0, 200)}`;
+        }
+      }
+      const cartons = R.mapStuckCartons(loads, packs, stores, today);
+      const ids = [...new Set(cartons.flatMap((c) => c.items.map((i) => i.article_id)))];
+      const [info, nlc, names] = await Promise.all([this.repo.productInfo(ids), this._nlc(ids), this._staffNames()]);
+      for (const c of cartons) {
+        c.items = c.items.map((i) => ({ ...i, article_name: (info.get(i.article_id) || {}).article_name || null, value: Math.round(i.qty * (nlc.get(i.article_id) || 0) * 100) / 100 }));
+        c.value = Math.round(c.items.reduce((s, i) => s + i.value, 0) * 100) / 100;
+        c.packer_name = c.packer ? names[c.packer] || null : null;
+      }
+      value = { ok: true, at: new Date(now).toISOString(), stuck_days: STUCK_DAYS, cartons, packer_note: packerNote };
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.WH_DAILY_REPORTS",
+        code: "USECASE.WH_DAILY_REPORTS.STUCK_CARTONS",
+        description: err.toString(),
+        category: "",
+        ref: {},
+      });
+      value = { ok: false, msg: `RetailPilot: ${err.message.slice(0, 300)}` };
+    }
+    this.stuckCache = { at: now, value };
+    return value;
   }
 
   /** RetailPilot user id -> employee name, for the mapped ids. */

@@ -91,6 +91,97 @@ WHERE j.job_type <> 'SO' AND j.state = '${st.done}' AND ${istDay("j.updated_at")
 ORDER BY j.job_id, b.box_id, a.article_id`;
 }
 
+/**
+ * Stuck cartons: loading jobs still open (state LOADING) that were created
+ * before `cutoff` (an IST day), with the articles in each carton. Kept flat
+ * (no WITH / sub-queries); buildBoxPackQuery finds who packed each carton.
+ */
+function buildStuckLoadingQuery(cutoff) {
+  const d = validDay(cutoff);
+  if (!d) throw new Error("Invalid day");
+  return `
+SELECT j.job_id AS load_job, j.job_type, j.created_at, b.slug AS joblet, b.box_id, b.origin, b.destination, b.stage_id,
+  a.article_id, a.qty
+FROM picknpack.state_machine j
+JOIN picknpack.box_dimension_joblets b ON b.job_id = j.job_id
+LEFT JOIN picknpack.box_articles a ON a.joblet_id = b.slug
+WHERE j.state = 'LOADING' AND ${istDay("j.created_at")} < DATE '${d}'
+ORDER BY j.created_at, j.job_id, a.article_id`;
+}
+
+/** Every pack into these cartons (picknpack.box_ratio): the pack line, its job, lane and packer. */
+function buildBoxPackQuery(boxIds) {
+  const ids = [...new Set((boxIds || []).map((v) => clean(v)).filter((v) => /^[A-Za-z0-9_-]{1,64}$/.test(v)))];
+  if (!ids.length) return null;
+  return `
+SELECT r.box_id, r.joblet_id, r.updated_at, l.job_id AS pack_job, l.destination, j.assigned_user
+FROM picknpack.box_ratio r
+JOIN picknpack.article_dimension_joblets l ON l.slug = r.joblet_id
+JOIN picknpack.state_machine j ON j.job_id = l.job_id
+WHERE r.box_id IN (${quoted(ids)})
+ORDER BY r.box_id, r.updated_at`;
+}
+
+/**
+ * One row per stuck carton (box id + store it goes to): its open loading
+ * job(s), since when, the articles and units in it, and - from the last pack
+ * into that carton for that store before the loading job - the packer and
+ * pack job. A carton with two open loading jobs lists both.
+ */
+function mapStuckCartons(loadRows, packRows, stores, today) {
+  const name = (slug) => (slug ? (stores && stores.get(clean(slug))) || clean(slug).toLowerCase() : null);
+  const by = new Map();
+  for (const r of loadRows || []) {
+    const box = clean(r.box_id);
+    if (!box) continue;
+    const k = `${box}|${clean(r.destination)}`;
+    const c = by.get(k) || { carton: box, job_type: clean(r.job_type).toUpperCase() || null, from_store: name(r.origin), to_store: name(r.destination), destination: clean(r.destination), stage_id: clean(r.stage_id) || null, load_jobs: [], joblets: new Set(), since: r.created_at, items: new Map() };
+    if (!c.load_jobs.includes(clean(r.load_job))) c.load_jobs.push(clean(r.load_job));
+    if (String(r.created_at) < String(c.since)) c.since = r.created_at;
+    const joblet = clean(r.joblet);
+    const article = articleNo(r.article_id);
+    if (article) {
+      const key = `${joblet}|${article}`;
+      if (!c.joblets.has(key)) {
+        c.joblets.add(key);
+        c.items.set(article, (c.items.get(article) || 0) + num(r.qty));
+      }
+    }
+    by.set(k, c);
+  }
+  const packs = new Map();
+  for (const p of packRows || []) {
+    const box = clean(p.box_id);
+    if (!packs.has(box)) packs.set(box, []);
+    packs.get(box).push(p);
+  }
+  const day = (v) => istDateTime(v).slice(0, 10);
+  return [...by.values()]
+    .map((c) => {
+      const before = (packs.get(c.carton) || []).filter((p) => clean(p.destination) === c.destination && String(p.updated_at) <= String(c.since));
+      const last = before.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))[0] || null;
+      const items = [...c.items].map(([article_id, qty]) => ({ article_id, qty: Math.round(qty * 1000) / 1000 }));
+      const waitingSince = istDateTime(c.since);
+      return {
+        carton: c.carton,
+        job_type: c.job_type,
+        from_store: c.from_store,
+        to_store: c.to_store,
+        stage_id: c.stage_id,
+        load_jobs: c.load_jobs,
+        waiting_since: waitingSince,
+        days: Math.max(0, Math.round((Date.parse(`${today}T00:00:00Z`) - Date.parse(`${day(c.since)}T00:00:00Z`)) / 86400000)),
+        items,
+        articles: items.length,
+        units: Math.round(items.reduce((s, i) => s + i.qty, 0) * 1000) / 1000,
+        packer: last ? clean(last.assigned_user) || null : null,
+        pack_job: last ? clean(last.pack_job) || null : null,
+        packed_at: last ? istDateTime(last.updated_at) : null,
+      };
+    })
+    .sort((a, b) => b.days - a.days || b.units - a.units);
+}
+
 /** Every store's name. */
 const STORES_QUERY = `
 SELECT CAST(s.slug AS TEXT) AS slug, s.name
@@ -279,6 +370,9 @@ module.exports = {
   buildJobLinesQuery,
   buildBoxLinesQuery,
   storeNames,
+  buildStuckLoadingQuery,
+  buildBoxPackQuery,
+  mapStuckCartons,
   istDateTime,
   mapJobLines,
   mapBoxLines,

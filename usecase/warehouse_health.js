@@ -70,8 +70,12 @@ class WarehouseHealth {
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
     ]);
-    const [boxChain, stageChain] = await Promise.all([this.boxChain(date), this.stageChain(date)]);
-    return H.buildHealth({ boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+    const [boxChain, stageChain, stuckCartons] = await Promise.all([
+      this.boxChain(date),
+      this.stageChain(date),
+      typeof this.reports.stuckCartons === "function" ? this.reports.stuckCartons() : null,
+    ]);
+    return H.buildHealth({ boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
   }
 
   /**
