@@ -138,24 +138,39 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   const loaded = (boxLines || []).filter((l) => l.status !== "NOT_LOADED");
   const listBoxes = new Set(loaded.map((l) => `${l.report_date}|${l.box_id}`));
   const onTruck = new Set(loaded.filter((l) => l.truck_no).map((l) => `${l.report_date}|${l.box_id}`));
-  const unloaded = new Set((boxLines || []).filter((l) => l.unloaded_qty != null).map((l) => `${l.unload_date}|${l.box_id}`));
-  // Loaded but not unloaded: every box on the loading list with no unloading,
-  // with why - including the ones that are not a problem (still awaiting
-  // unloading, damage / returns going back to the warehouse).
-  const unloadedBoxIds = new Set((boxLines || []).filter((l) => l.unloaded_qty != null).map((l) => `${l.report_date}|${l.box_id}`));
-  const gapBy = new Map();
-  for (const l of loaded) {
-    const k = `${l.report_date}|${l.box_id}`;
-    // Only boxes put on a truck: one never on a truck is a loading problem, shown under Loading.
-    if (unloadedBoxIds.has(k) || !l.truck_no) continue;
-    const g = gapBy.get(k) || { box_id: l.box_id, status: l.status, store: l.planned_to_store || null, truck_no: l.truck_no || null, job_type: l.job_type || null, articles: 0, qty: 0, value: 0, items: [] };
-    g.articles += 1;
-    if (g.items.length < 100) g.items.push({ article_id: l.article_id, article_name: l.article_name || null, qty: n(l.loaded_qty), value: r2(n(l.loaded_qty) * n(l.nlc)) });
-    g.qty += n(l.loaded_qty);
-    g.value = r2(g.value + n(l.loaded_qty) * n(l.nlc));
-    gapBy.set(k, g);
-  }
-  const gap = [...gapBy.values()].sort((a, b) => b.qty - a.qty);
+  // Unloading, by box id, from ONE set of boxes so the numbers always add up:
+  // boxes on trucks (damage returns apart) = unloaded + not unloaded.
+  const boxOf = (l) => String(l.box_id);
+  const onTruckIds = new Set(loaded.filter((l) => l.truck_no).map(boxOf));
+  const returnIds = new Set(loaded.filter((l) => l.status === "RETURN").map(boxOf));
+  const unloadedIds = new Set((boxLines || []).filter((l) => l.unloaded_qty != null).map(boxOf));
+  const listIds = new Set(loaded.map(boxOf));
+  const expected = [...onTruckIds].filter((id) => !returnIds.has(id));
+  const unloadedOf = expected.filter((id) => unloadedIds.has(id));
+  const notUnloadedIds = new Set(expected.filter((id) => !unloadedIds.has(id)));
+  const unloaded = new Set(unloadedOf);
+  const boxEntry = (lines, status) => {
+    const l0 = lines[0];
+    const e = { box_id: l0.box_id, status, store: l0.planned_to_store || l0.unloaded_store || null, unloaded_store: l0.unloaded_store || null, truck_no: l0.truck_no || null, job_type: l0.job_type || null, articles: 0, qty: 0, value: 0, items: [] };
+    for (const l of lines) {
+      const q = n(l.loaded_qty == null ? l.unloaded_qty : l.loaded_qty);
+      e.articles += 1;
+      e.qty += q;
+      e.value = r2(e.value + q * n(l.nlc));
+      if (e.items.length < 100) e.items.push({ article_id: l.article_id, article_name: l.article_name || null, qty: q, value: r2(q * n(l.nlc)) });
+    }
+    return e;
+  };
+  const linesOf = (pred) => {
+    const m = new Map();
+    for (const l of boxLines || []) if (pred(l)) m.set(boxOf(l), [...(m.get(boxOf(l)) || []), l]);
+    return m;
+  };
+  const notUnloadedList = [...linesOf((l) => l.status !== "NOT_LOADED" && notUnloadedIds.has(boxOf(l))).values()].map((ls) => boxEntry(ls, "NOT_UNLOADED"));
+  const wrongStoreList = [...linesOf((l) => l.status === "WRONG_STORE" && expected.includes(boxOf(l))).values()].map((ls) => boxEntry(ls, "WRONG_STORE"));
+  const notLoadedList = [...linesOf((l) => l.status === "NOT_LOADED" && !listIds.has(boxOf(l))).values()].map((ls) => boxEntry(ls, "NOT_LOADED"));
+  const returnList = [...linesOf((l) => l.status === "RETURN" && !unloadedIds.has(boxOf(l))).values()].map((ls) => boxEntry(ls, "RETURN"));
+  const gap = [...notUnloadedList, ...returnList].sort((x, y) => y.qty - x.qty);
   const trucks = new Set(loaded.filter((l) => l.truck_no).map((l) => l.truck_no));
 
   // Yet to verify (verification lines still open), by where they are to be verified
@@ -216,7 +231,7 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   // Picking write-off is counted in lines (articles short), not units.
   if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)${writeoffByType.length > 1 || (writeoffByType[0] && writeoffByType[0].job_type !== "OTHER") ? ` - ${writeoffByType.map((t) => `${t.job_type} ${fmt(t.lines)}`).join(", ")}` : ""}` });
   if (countBy("NOT_ON_TRUCK")) items.push({ key: "loading", tone: "red", text: `Loading: ${countBy("NOT_ON_TRUCK")} box${countBy("NOT_ON_TRUCK") === 1 ? "" : "es"} on the loading list but not on a truck` });
-  const lost = countBy("NOT_UNLOADED") + countBy("WRONG_STORE");
+  const lost = notUnloadedList.length + wrongStoreList.length;
   if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded or wrong store)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
   if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
@@ -237,16 +252,15 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
       // Loading and unloading, each on its own.
       loading: { boxes: listBoxes.size, on_truck: onTruck.size, trucks: trucks.size, not_on_truck: countBy("NOT_ON_TRUCK"), list: issues.filter((x) => x.status === "NOT_ON_TRUCK").slice(0, 200) },
       unloading: {
-        loaded_boxes: onTruck.size,
-        unloaded_boxes: unloaded.size,
-        problems: lost + countBy("NOT_LOADED"),
-        not_unloaded: countBy("NOT_UNLOADED"),
-        wrong_store: countBy("WRONG_STORE"),
-        qty_diff: countBy("QTY_DIFF"),
-        not_loaded: countBy("NOT_LOADED"),
-        list: issues.filter((x) => x.status !== "NOT_ON_TRUCK").slice(0, 200),
+        loaded_boxes: expected.length,
+        unloaded_boxes: unloadedOf.length,
+        problems: notUnloadedList.length + wrongStoreList.length + notLoadedList.length,
+        not_unloaded: notUnloadedList.length,
+        wrong_store: wrongStoreList.length,
+        not_loaded: notLoadedList.length,
+        list: [...notUnloadedList.sort((x, y) => y.qty - x.qty), ...wrongStoreList, ...notLoadedList].slice(0, 200),
         // On a truck, not unloaded, and not a problem: damage / returns going back to the warehouse.
-        waiting: gap.filter((x) => x.status === "RETURN").slice(0, 200),
+        waiting: returnList.slice(0, 200),
       },
       remarks: { write_off: rm.WRITE_OFF, verification: rm.VERIFICATION },
       jobs: { picking_open: job.PICKING.open_lines, packing_open: job.PACKING.open_lines, verification_open: job.VERIFICATION.open_lines, by_store: storeRows.filter((s) => s.open_lines).map((s) => ({ name: s.name, open_lines: s.open_lines })) },

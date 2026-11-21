@@ -73,17 +73,38 @@ test("unloading is by box: an unloaded box missing an article, or with a quantit
     ],
   });
   const u = h.tiles.unloading;
-  assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.qty_diff, u.problems], [3, 2, 1, 0, 1]);
+  assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.problems], [3, 2, 1, 1]);
+  // The numbers add up: on trucks - unloaded = not unloaded.
+  assert.strictEqual(u.loaded_boxes - u.unloaded_boxes, u.not_unloaded);
   assert.deepStrictEqual(u.list.map((x) => [x.box_id, x.status]), [["B", "NOT_UNLOADED"]]);
   // What was in the box, article by article.
   assert.deepStrictEqual(u.list[0].items, [{ article_id: 1, article_name: null, qty: 5, value: 10 }]);
+});
+
+test("a box unloaded under another day's key or with other article ids still counts as unloaded once", () => {
+  const L = (o) => ({ report_date: "2026-11-19", truck_no: "TN01", loaded_qty: 5, nlc: 2, planned_to_store: "ecr", ...o });
+  const h = H.buildHealth({
+    ...base,
+    boxLines: [
+      L({ box_id: "X", article_id: 1, status: "NOT_UNLOADED" }),
+      { report_date: "2026-11-19", box_id: "X", article_id: 9, status: "NOT_LOADED", unloaded_qty: 5, unload_date: "2026-11-20", unloaded_store: "ecr" },
+      L({ box_id: "Y", article_id: 1, status: "OK", unloaded_qty: 5, unload_date: "2026-11-19" }),
+      L({ box_id: "Z", article_id: 1, status: "OPEN" }),
+    ],
+  });
+  const u = h.tiles.unloading;
+  assert.deepStrictEqual([u.loaded_boxes, u.unloaded_boxes, u.not_unloaded, u.not_loaded, u.problems], [3, 2, 1, 0, 1]);
+  assert.deepStrictEqual(u.list.map((x) => x.box_id), ["Z"]);
+  assert.deepStrictEqual(h.flow.not_unloaded.map((x) => x.box_id), ["Z"]);
+  assert.strictEqual(h.flow.unloaded_boxes, 2);
 });
 
 test("boxes: not on a truck is separate from not delivered", () => {
   const h = H.buildHealth(base);
   assert.strictEqual(h.tiles.boxes.not_on_truck, 1);
   assert.deepStrictEqual([h.tiles.loading.boxes, h.tiles.loading.on_truck, h.tiles.loading.not_on_truck, h.tiles.loading.list[0].box_id], [4, 3, 1, "B1"]);
-  assert.deepStrictEqual([h.tiles.unloading.loaded_boxes, h.tiles.unloading.unloaded_boxes, h.tiles.unloading.problems, h.tiles.unloading.list[0].box_id], [3, 1, 1, "B3"]);
+  // B4 is a damage return: apart from the boxes expected at stores.
+  assert.deepStrictEqual([h.tiles.unloading.loaded_boxes, h.tiles.unloading.unloaded_boxes, h.tiles.unloading.problems, h.tiles.unloading.list[0].box_id], [2, 1, 1, "B3"]);
   assert.deepStrictEqual(h.tiles.unloading.waiting.map((x) => [x.box_id, x.status]), [["B4", "RETURN"]]);
   assert.deepStrictEqual(h.need_you.filter((i) => ["loading", "unloading"].includes(i.key)).map((i) => i.key), ["loading", "unloading"]);
   assert.strictEqual(h.tiles.boxes.not_unloaded, 1);
