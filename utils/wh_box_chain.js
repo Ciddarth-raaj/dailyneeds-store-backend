@@ -123,7 +123,7 @@ function buildChain({ loads, unloads, date }) {
     date,
     from: BOX_CHAIN_FROM,
     opening: { boxes: opening.length, qty: sum(opening, "qty"), value: sum(opening, "value") },
-    loaded: { boxes: loadedToday.length, qty: sum(loadedToday, "qty"), trucks: trucks.size },
+    loaded: { boxes: loadedToday.length, qty: sum(loadedToday, "qty"), trucks: trucks.size, no_truck: loadedToday.filter((l) => !l.truck_no).length },
     unloaded: {
       boxes: closedToday.length + closedOld.length,
       from_today: closedToday.length,

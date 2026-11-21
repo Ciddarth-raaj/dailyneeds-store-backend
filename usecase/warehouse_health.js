@@ -6,6 +6,7 @@ const W = require("../utils/wh_daily_reports");
 const { istToday } = require("../utils/istDate");
 const P = require("../utils/warehouse_health_pdf");
 const C = require("../utils/wh_box_chain");
+const SC = require("../utils/wh_stage_chain");
 
 const A4 = { format: "A4", printBackground: true, preferCSSPageSize: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } };
 
@@ -69,8 +70,8 @@ class WarehouseHealth {
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
     ]);
-    const boxChain = await this.boxChain(date);
-    return H.buildHealth({ boxChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+    const [boxChain, stageChain] = await Promise.all([this.boxChain(date), this.stageChain(date)]);
+    return H.buildHealth({ boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
   }
 
   /**
@@ -113,6 +114,13 @@ class WarehouseHealth {
     }
     chain.missing_days = missing;
     return chain;
+  }
+
+  /** The stage chain for `date` (utils/wh_stage_chain.js), from BOX_CHAIN_FROM. */
+  async stageChain(date) {
+    if (date < C.BOX_CHAIN_FROM || typeof this.repo.stageFlows !== "function") return null;
+    const { jobs, boxes } = await this.repo.stageFlows(C.BOX_CHAIN_FROM, date);
+    return SC.buildStageChain({ jobs, boxes, date });
   }
 
   /** The dashboard for `date` (default yesterday). Not a day in the future. */

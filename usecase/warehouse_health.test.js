@@ -20,6 +20,10 @@ const repo = {
           { report_date: "2026-11-20", box_id: "R1", planned_to_store: "warehouse", unloaded_store: "warehouse", articles: 1, qty: 24 },
           { report_date: "2026-11-20", box_id: "B1", planned_to_store: "ecr", unloaded_store: "ecr", articles: 2, qty: 10 },
         ],
+  stageFlows: async () => ({
+    jobs: [{ report_type: "PICKING", report_date: "2026-11-17", stage_id: "sta_9", article_id: 5, article_name: "Atta", from_store: "warehouse", to_store: "ecr", pick_pack: 0, qty: 12, short_qty: 0, nlc: 220, no_state: 0 }],
+    boxes: [],
+  }),
   boxArticles: async (type, keys) => keys.map((k) => ({ ...k, article_id: 7, article_name: "Milk", qty: 5, value: 100 })),
 };
 const reports = { _boxes: async () => [], _staffNames: async () => ({}) };
@@ -113,4 +117,14 @@ test("the box chain: open from earlier + loaded - unloaded = still open, a box b
   assert.ok(r.data.need_you.some((i) => /1 box loaded and not unloaded/.test(i.text)));
   // days since 10 Oct with no Loading / Unloading report are listed
   assert.strictEqual(u.chain.missing_days[0].date, "2026-10-10");
+});
+
+test("the stage chain heads the page: picked, not yet packed, stuck 3 days, flagged", async () => {
+  const { uc } = setup([]);
+  const r = await uc.health({ date: "2026-11-20" });
+  const g = r.data.stage_chain.gaps.find((x) => x.key === "to_pack");
+  assert.deepStrictEqual([g.stands, g.oldest_days, g.list[0].article_name], [12, 3, "Atta"]);
+  assert.match(r.data.need_you[0].text, /Picked, not yet packed: 1 line waiting 2 days or more/);
+  // Loading counts the same box trips as the chain
+  assert.strictEqual(r.data.tiles.loading.boxes, r.data.tiles.unloading.chain.loaded.boxes);
 });

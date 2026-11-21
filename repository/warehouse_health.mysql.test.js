@@ -28,7 +28,7 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
              CREATE TABLE pick_pack_write_off (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);
              CREATE TABLE pick_pack_verifications (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);`);
-    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up"]) {
+    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up"]) {
       // eslint-disable-next-line no-await-in-loop
       await q(MIG(m));
     }
@@ -102,7 +102,23 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(items.map((i) => [i.job_id, i.article_name, i.qty]), [["j1", "Milk", 5], ["j1", "Curd", 3]]);
   });
 
+  it("stage flows: done work per day, document, article and lane; pick-pack marked; open jobs left out", async () => {
+    const day = "2026-11-21";
+    const row = (o) => ({ report_type: "PICKING", job_type: "STA", from_store: "warehouse", to_store: "ecr", article_id: 1, article_name: "Milk", advised_qty: 10, actual_qty: 10, short_qty: 0, jobs: 1, open_jobs: 0, nlc: 20, nlc_source: "RETAILPILOT", stage_id: "sta_1", job_state: "PICKED", ...o });
+    await repo.replaceUpload({ report_type: "PICKING", report_date: day, source: "RETAILPILOT", shape: "JOB", file_name: "rp", uploaded_by: null, rows: [
+      row({ job_id: "p1" }),
+      row({ job_id: "p2", actual_qty: 5 }),
+      row({ job_id: "p3", stage_id: "inv_1", job_state: "PICKED_PACKED", actual_qty: 7 }),
+      row({ job_id: "p4", job_state: "PICKING", open_jobs: 1, actual_qty: 3 }),
+    ] });
+    const { jobs } = await repo.stageFlows(day, day);
+    const by = Object.fromEntries(jobs.map((j) => [`${j.stage_id}|${j.pick_pack}`, j.qty]));
+    assert.deepEqual(by, { "sta_1|0": 15, "inv_1|1": 7 });
+  });
+
   it("down migration", async () => {
+    await q(MIG("20261228120000-wh-job-state-down"));
+    assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'job_state'")).length, 0);
     await q(MIG("20261227120000-wh-box-stage-down"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_box_rows LIKE 'stage_id'")).length, 0);
     await q(MIG("20261226120000-warehouse-health-down"));

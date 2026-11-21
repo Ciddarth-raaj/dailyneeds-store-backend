@@ -112,8 +112,28 @@ function pickers(work, mistakes, names) {
  * still open.
  */
 function buildHealth(args) {
-  const h = buildHealthBase(args);
-  const c = args.boxChain;
+  const h = withBoxChain(buildHealthBase(args), args.boxChain);
+  const sc = args.stageChain;
+  if (!sc) return h;
+  // The stage chain heads the page: what stands between each two stages tonight.
+  const box = h.tiles.unloading.chain;
+  h.stage_chain = {
+    from: sc.from,
+    stages: { ...sc.stages, loaded_boxes: box ? box.loaded.boxes : null, unloaded_boxes: box ? box.unloaded.boxes : null },
+    gaps: sc.gaps,
+    boxes: box || null,
+    days_without_state: sc.days_without_state,
+  };
+  const add = [];
+  for (const g of sc.gaps) {
+    if (g.stuck) add.push({ key: `chain_${g.key}`, tone: "red", text: `${g.label}: ${g.stuck} line${g.stuck === 1 ? "" : "s"} waiting 2 days or more (oldest ${g.oldest_days} days)` });
+    if (g.jumped.lines) add.push({ key: `chain_${g.key}`, tone: "amber", text: `${g.label.split(",")[0]} skipped: ${g.jumped.lines} line${g.jumped.lines === 1 ? "" : "s"} (${fmt(g.jumped.qty)} qty) reached the next stage with no record here` });
+  }
+  h.need_you.unshift(...add);
+  return h;
+}
+
+function withBoxChain(h, c) {
   if (!c) return h;
   const asBox = (b, status) => ({ ...b, status, store: b.to_store, items: b.items || [] });
   const stillOpen = c.lists.still_open.map((b) => asBox(b, "NOT_UNLOADED"));
@@ -144,7 +164,13 @@ function buildHealth(args) {
   h.flow.unloaded_boxes = c.unloaded.boxes;
   h.flow.not_unloaded_boxes = c.still_open.boxes;
   h.flow.not_unloaded = stillOpen.slice(0, 200);
-  h.flow.loading_list_boxes = h.tiles.loading.boxes;
+  // Loading counts the same box trips as the chain (box ids are reused).
+  h.tiles.loading.boxes = c.loaded.boxes;
+  h.tiles.loading.trucks = c.loaded.trucks;
+  h.tiles.loading.on_truck = c.loaded.boxes - (c.loaded.no_truck || 0);
+  h.flow.loading_list_boxes = c.loaded.boxes;
+  h.flow.on_truck_boxes = h.tiles.loading.on_truck;
+  h.flow.trucks = c.loaded.trucks;
   h.need_you = h.need_you.filter((i) => i.key !== "unloading");
   const at = h.need_you.findIndex((i) => i.key === "verification");
   const add = [];

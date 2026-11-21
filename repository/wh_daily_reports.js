@@ -20,7 +20,7 @@ const {
 const JOB_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "to_store", "article_id", "article_name",
   "department", "category", "recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty",
-  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by", "stage_id", "picking_job",
+  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by", "stage_id", "picking_job", "job_state",
 ];
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
@@ -428,6 +428,41 @@ class WhDailyReportsRepository {
       [reportType, from, to]
     );
     return toNumbers(rows, ["articles", "qty", "value"]);
+  }
+
+  /**
+   * The stage chain (utils/wh_stage_chain.js), from..to: what each stage
+   * moved, per day, document (stage_id), article and lane, finished work
+   * only. Jobs: Picking (pick_pack = picked and packed in one job), Packing,
+   * Verification - done qty and short qty. Boxes: Loading and Unloading -
+   * the qty in the boxes, the box's document where it has one.
+   */
+  async stageFlows(from, to) {
+    const [jobs, boxes] = await Promise.all([
+      this.run(
+        "STAGE_FLOWS_JOBS",
+        `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.stage_id, r.article_id,
+                MAX(r.article_name) AS article_name, r.from_store, r.to_store,
+                MAX(r.job_state = 'PICKED_PACKED') AS pick_pack,
+                SUM(COALESCE(r.actual_qty, 0)) AS qty, SUM(COALESCE(r.short_qty, 0)) AS short_qty, MAX(r.nlc) AS nlc,
+                SUM(r.job_state IS NULL) AS no_state
+           FROM wh_report_job_rows r
+          WHERE r.report_date BETWEEN ? AND ? AND COALESCE(r.open_jobs, 0) = 0
+          GROUP BY r.report_type, r.report_date, r.stage_id, r.article_id, r.from_store, r.to_store, (r.job_state = 'PICKED_PACKED')`,
+        [from, to]
+      ),
+      this.run(
+        "STAGE_FLOWS_BOXES",
+        `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.stage_id, r.article_id,
+                MAX(r.article_name) AS article_name, r.from_store, r.planned_to_store AS to_store,
+                SUM(r.box_qty) AS qty, MAX(r.nlc) AS nlc
+           FROM wh_report_box_rows r
+          WHERE r.report_date BETWEEN ? AND ?
+          GROUP BY r.report_type, r.report_date, r.stage_id, r.article_id, r.from_store, r.planned_to_store`,
+        [from, to]
+      ),
+    ]);
+    return { jobs: toNumbers(jobs, ["qty", "short_qty", "nlc", "pick_pack", "no_state"]), boxes: toNumbers(boxes, ["qty", "nlc"]) };
   }
 
   /** The articles in some box trips: keys [{ report_date, box_id, planned_to_store, job_id }]. */
