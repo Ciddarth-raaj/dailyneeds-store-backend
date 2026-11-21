@@ -14,6 +14,8 @@ const respondError = require("../utils/http");
  *   POST   /upload                             one file as one report for a day   upload_wh_daily_reports
  *          { report_type, report_date, file_name, headers: [...], rows: [[...], ...], allow_date_mismatch }
  *   DELETE /uploads/:upload_id                 remove an upload and its rows      upload_wh_daily_reports
+ *   POST   /fill-nlc { from, to }              NLC from RetailPilot on rows      view_wh_daily_reports or
+ *                                             that have none                     upload_wh_daily_reports
  *   POST   /pull { from, to }                  the five reports from RetailPilot  upload_wh_daily_reports
  *                                             for each day (at most 31), replacing what was there
  */
@@ -85,6 +87,15 @@ class WhDailyReportsRoutes {
             employee_id: (req.decoded && req.decoded.employee_id) || null,
           })
         );
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/fill-nlc", need("view_wh_daily_reports", "upload_wh_daily_reports"), async (req, res) => {
+      try {
+        const b = req.body || {};
+        send(res, await this.usecase.fillNlc({ from: b.from || null, to: b.to || null }));
       } catch (err) {
         respondError(res, err);
       }

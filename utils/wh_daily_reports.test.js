@@ -151,22 +151,30 @@ describe("usecase upload", () => {
     const saved = [];
     return {
       saved,
-      latestMrp: async (ids) => new Map(ids.filter((id) => id === 102654).map((id) => [id, 45])),
       uploads: async () => [],
       replaceUpload: async (u) => (saved.push(u), { upload_id: 7, page: u.pageLines ? { added: u.pageLines.rows.length } : null }),
       ...over,
     };
   };
-  const uc = (repo) => usecaseFactory(repo, () => "2026-11-17");
+  // RetailPilot batches: 102654 has two in stock (NLC 40 x 10, 50 x 30) -> 47.5; 100073 has none priced.
+  const spectra = {
+    isConfigured: () => true,
+    queryAll: async (q) => (/inventory_batches/.test(q) ? [
+      { article_id: "102654", batch_id: "b1", net_landing_cost: "40", quantity: "10" },
+      { article_id: "102654", batch_id: "b2", net_landing_cost: "50", quantity: "30" },
+    ] : []),
+  };
+  const uc = (repo) => usecaseFactory(repo, () => "2026-11-17", spectra);
   const body = (o = {}) => ({ report_type: "PICKING", report_date: "2026-11-16", file_name: "Picking_Report_2026-11-16_ALL.csv", headers: JOB_HEADERS, rows: [job(), job({ "Article ID": "102654", "Actual Qty": "0", "MRP Split": "", "Short Qty": "72" })], employee_id: 3, ...o });
 
-  it("prices short rows from GRN and sums the write-off", async () => {
+  it("values write-off at NLC from RetailPilot (stock-weighted), never the file's MRP", async () => {
     const repo = fakeRepo();
     const res = await uc(repo).upload(body());
     assert.equal(res.code, 200);
-    assert.deepEqual(res.data.summary, { rows: 2, short_lines: 1, short_qty: 72, short_value: 3240, short_unpriced_lines: 0, open_lines: 0, write_off_page: { added: 1 } });
-    assert.equal(repo.saved[0].rows[0].mrp_source, "FILE");
-    assert.equal(repo.saved[0].rows[1].mrp_source, "GRN");
+    assert.deepEqual(res.data.summary, { rows: 2, short_lines: 1, short_qty: 72, short_value: 3420, short_unpriced_lines: 0, open_lines: 0, write_off_page: { added: 1 } });
+    // 100073's file says MRP 30: not used - it has no NLC in RetailPilot.
+    assert.deepEqual([repo.saved[0].rows[0].nlc, repo.saved[0].rows[0].nlc_source], [null, null]);
+    assert.deepEqual([repo.saved[0].rows[1].nlc, repo.saved[0].rows[1].nlc_source], [47.5, "RETAILPILOT"]);
     assert.equal(repo.saved[0].uploaded_by, 3);
   });
   it("sends the Picking write-off to the Write Off page and the Verification write-off to the Verification page", async () => {

@@ -63,14 +63,12 @@ class WhDailyReports {
    * write-off to its Pick & Pack page. Answers the upload's result.
    */
   async _save({ type, report_date, rows, file_name, employee_id = null, source = "UPLOAD", other = {} }) {
-    // Price every row: the file's MRP Split when it has one, else the latest GRN MRP.
+    // Every value is NLC (net landing cost) from RetailPilot - never MRP, not even the file's.
     const shape = W.shapeOf(type);
-    const unpriced = rows.filter((r) => r.mrp == null).map((r) => r.article_id);
-    const prices = unpriced.length ? await this.repo.latestMrp(unpriced) : new Map();
+    const prices = await this._nlc(rows.map((r) => r.article_id));
     const out = rows.map((r) => {
-      if (r.mrp != null) return shape === "JOB" ? { ...r, mrp_source: "FILE" } : r;
-      const mrp = prices.has(r.article_id) ? prices.get(r.article_id) : null;
-      return shape === "JOB" ? { ...r, mrp, mrp_source: mrp == null ? null : "GRN" } : { ...r, mrp };
+      const nlc = prices.has(r.article_id) ? prices.get(r.article_id) : null;
+      return shape === "JOB" ? { ...r, nlc, nlc_source: nlc == null ? null : "RETAILPILOT" } : { ...r, nlc };
     });
 
     const before = await this.repo.uploads(report_date, report_date);
@@ -93,8 +91,8 @@ class WhDailyReports {
       const short = out.filter((r) => r.short_qty > 0);
       summary.short_lines = short.length;
       summary.short_qty = short.reduce((s, r) => s + r.short_qty, 0);
-      summary.short_value = round2(short.reduce((s, r) => s + r.short_qty * (r.mrp || 0), 0));
-      summary.short_unpriced_lines = short.filter((r) => r.mrp == null).length;
+      summary.short_value = round2(short.reduce((s, r) => s + r.short_qty * (r.nlc || 0), 0));
+      summary.short_unpriced_lines = short.filter((r) => r.nlc == null).length;
       summary.open_lines = out.filter((r) => (r.open_jobs || 0) > 0).length;
     } else {
       summary.boxes = new Set(out.map((r) => r.box_id)).size;
@@ -167,6 +165,46 @@ class WhDailyReports {
     return { code: 200, data: { from: r.from, to: r.to, days } };
   }
 
+  /**
+   * NLC of these articles from RetailPilot (utils/wh_rp_reports.nlcByArticle).
+   * RetailPilot not configured or not answering: no prices - the rows are
+   * saved unpriced and filled in later (fillNlc / the nightly pull).
+   */
+  async _nlc(articleIds) {
+    const ids = [...new Set((articleIds || []).filter((x) => Number.isInteger(x) && x > 0))];
+    if (!ids.length || !this.spectra || !this.spectra.isConfigured()) return new Map();
+    const rows = [];
+    try {
+      for (let i = 0; i < ids.length; i += 500) {
+        // eslint-disable-next-line no-await-in-loop
+        rows.push(...(await this.spectra.queryAll(R.buildNlcQuery(ids.slice(i, i + 500)))));
+      }
+    } catch (err) {
+      logger.Log({
+        level: logger.LEVEL.ERROR,
+        component: "USECASE.WH_DAILY_REPORTS",
+        code: "USECASE.WH_DAILY_REPORTS.NLC",
+        description: err.toString(),
+        category: "",
+        ref: { articles: ids.length },
+      });
+      return new Map();
+    }
+    return R.nlcByArticle(rows);
+  }
+
+  /** Fill in NLC from RetailPilot on rows in from..to that have none (at most MAX_RANGE_DAYS). */
+  async fillNlc({ from, to }) {
+    const r = this._range(from, to);
+    if (r.error) return { code: 422, msg: r.error };
+    if (!this.spectra || !this.spectra.isConfigured()) return { code: 502, msg: "RetailPilot is not configured" };
+    const ids = await this.repo.unpricedArticles(r.from, r.to);
+    const found = await this._nlc(ids);
+    const prices = new Map(ids.filter((id) => found.has(id)).map((id) => [id, found.get(id)]));
+    const updated = prices.size ? await this.repo.fillNlc(r.from, r.to, prices) : 0;
+    return { code: 200, data: { from: r.from, to: r.to, articles: ids.length, priced: prices.size, still_unpriced: ids.length - prices.size, rows_updated: updated } };
+  }
+
   /** What was uploaded for each day in the range. */
   async status({ from, to }) {
     const r = this._range(from, to);
@@ -231,7 +269,7 @@ class WhDailyReports {
       s.boxes.add(`${l.report_date}|${l.box_id}`);
       const q = l.loaded_qty == null ? l.unloaded_qty : l.loaded_qty;
       s.qty += q || 0;
-      s.value += (q || 0) * (l.mrp || 0);
+      s.value += (q || 0) * (l.nlc || 0);
     }
     const trucks = new Map();
     const boxDaily = new Map();

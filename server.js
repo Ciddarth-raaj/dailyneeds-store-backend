@@ -2953,6 +2953,9 @@ class Server {
           const yesterday = require("./utils/wh_daily_reports").addDays(today, -1);
           const r = await this.whDailyReportsUsecase.pull({ from: yesterday, to: today });
           if (r.code !== 200) throw new Error(r.msg);
+          // NLC on older rows still without one (uploaded files, or RetailPilot was down).
+          const f = await this.whDailyReportsUsecase.fillNlc({ from: require("./utils/wh_daily_reports").addDays(today, -91), to: today });
+          if (f.code === 200 && f.data.rows_updated) console.log(`[CRON] wh_reports_retailpilot_pull: NLC filled on ${f.data.rows_updated} rows`);
           const failed = r.data.days.flatMap((d) => d.reports.filter((x) => !x.ok).map((x) => `${d.date} ${x.type}: ${x.msg}`));
           console.log(`[CRON] wh_reports_retailpilot_pull ${yesterday}..${today}: ${failed.length ? `failed - ${failed.join("; ")}` : "ok"}`);
           if (failed.length) throw new Error(failed.join("; "));

@@ -18,6 +18,8 @@ const SQL = (name) => fs.readFileSync(path.join(__dirname, `../migrations/mysql/
 describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" }, () => {
   let pool;
   let repo;
+  let nlcSpectra;
+  let nlcRows = [{ article_id: "2", batch_id: "x", net_landing_cost: "45", quantity: "1" }];
   let uc;
   const q = (sql, p = []) => new Promise((res, rej) => pool.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
   const JOB = ["Job Type", "From Store", "To Store", "Article ID", "Article Name", "Department", "Category", "Recommended Qty", "Planned Qty", "Advised Qty", "Actual Qty", "MRP Split", "Short Qty", "Returned Qty", "Jobs", "Open Jobs"];
@@ -57,8 +59,14 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218130000-pick-pack-verification-store-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218140000-pick-pack-write-off-store-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
-    uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17");
+    // RetailPilot as far as NLC goes: article 2 has NLC 45; article 1 none.
+    nlcSpectra = {
+      isConfigured: () => true,
+      queryAll: async (sql) => (/inventory_batches/.test(sql) ? nlcRows : []),
+    };
+    uc = require("../usecase/wh_daily_reports")(repo, () => "2026-11-17", nlcSpectra);
   });
   after(() => pool && pool.end());
 
@@ -67,7 +75,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(rows.map((r) => r.permission_key), ["upload_wh_daily_reports", "view_wh_daily_reports"]);
   });
 
-  it("saves an upload, prices from the latest GRN, and replaces it on a second upload", async () => {
+  it("saves an upload, values it at NLC from RetailPilot (not the file's MRP), and replaces it on a second upload", async () => {
     const rows = [
       ["STA", "warehouse", "ecr", "1", "a", "Snacks", "Biscuits", "10", "10", "10", "10", '[{"mrp":30,"qty":10}]', "0", "", "1", "0"],
       ["STA", "warehouse", "ecr", "2", "b", "Snacks", "Biscuits", "5", "5", "5", "0", "", "5", "", "1", "1"],
@@ -106,7 +114,8 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal(ecr.unloaded, 3);
     const rows = await uc.rows({ from: "2026-11-16", to: "2026-11-16", only: "short" });
     assert.equal(rows.data.rows.length, 1);
-    assert.equal(rows.data.rows[0].mrp_source, "GRN");
+    assert.equal(rows.data.rows[0].nlc_source, "RETAILPILOT");
+    assert.equal(rows.data.rows[0].nlc, 45);
   });
 
   it("puts the Verification write-off on the Verification page per store, keeping remarks on re-upload", async () => {
@@ -216,11 +225,28 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(left.map((r) => [r.product_id, r.store]), [[1, "ecr"], [2, "ecr"], [3, "moolakulam"]]);
   });
 
+  it("fills NLC from RetailPilot on rows that have none, in both report shapes", async () => {
+    await q("UPDATE wh_report_job_rows SET nlc = NULL, nlc_source = NULL WHERE report_date = '2026-11-16'");
+    await q("UPDATE wh_report_box_rows SET nlc = NULL WHERE report_date = '2026-11-16'");
+    nlcRows = ["1", "2", "3", "99"].map((id, i) => ({ article_id: id, batch_id: `b${id}`, net_landing_cost: id === "1" ? "12" : String(40 + i), quantity: "2" }));
+    const res = await uc.fillNlc({ from: "2026-11-16", to: "2026-11-16" });
+    assert.equal(res.code, 200);
+    assert.ok(res.data.rows_updated > 0);
+    assert.equal(res.data.still_unpriced, 0);
+    const [{ n }] = await q("SELECT COUNT(*) AS n FROM wh_report_job_rows WHERE report_date = '2026-11-16' AND nlc IS NULL");
+    assert.equal(Number(n), 0);
+    const [{ v }] = await q("SELECT MAX(nlc) AS v FROM wh_report_box_rows WHERE report_date = '2026-11-16' AND article_id = 1");
+    assert.equal(Number(v), 12);
+    nlcRows = [{ article_id: "2", batch_id: "x", net_landing_cost: "45", quantity: "1" }];
+  });
+
   it("deletes an upload with its rows, and the down migration removes everything", async () => {
     const [u] = await q("SELECT upload_id FROM wh_report_uploads WHERE report_type = 'LOADING' AND report_date = '2026-11-16'");
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
     const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-down.sql"), "utf8"));
+    assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'mrp'")).length, 1);
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-down.sql"), "utf8"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'worked_by'")).length, 0);
     await q(SQL("down"));

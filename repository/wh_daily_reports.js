@@ -20,11 +20,11 @@ const {
 const JOB_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "to_store", "article_id", "article_name",
   "department", "category", "recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty",
-  "returned_qty", "jobs", "open_jobs", "mrp", "mrp_source", "job_id", "worked_by",
+  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by",
 ];
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
-  "box_id", "box_kind", "truck_no", "article_id", "article_name", "department", "category", "mrp", "box_qty",
+  "box_id", "box_kind", "truck_no", "article_id", "article_name", "department", "category", "nlc", "box_qty",
   "box_status", "finished_at", "job_id", "worked_by",
 ];
 /** The Pick & Pack pages a report's write-off goes to. */
@@ -51,8 +51,8 @@ const JOB_METRICS = `
   COALESCE(SUM(r.actual_qty), 0) AS actual_qty,
   SUM(r.short_qty > 0) AS short_lines,
   COALESCE(SUM(r.short_qty), 0) AS short_qty,
-  COALESCE(SUM(r.short_qty * r.mrp), 0) AS short_value,
-  SUM(r.short_qty > 0 AND r.mrp IS NULL) AS short_unpriced_lines,
+  COALESCE(SUM(r.short_qty * r.nlc), 0) AS short_value,
+  SUM(r.short_qty > 0 AND r.nlc IS NULL) AS short_unpriced_lines,
   SUM(COALESCE(r.returned_qty, 0) > 0) AS returned_lines,
   COALESCE(SUM(r.returned_qty), 0) AS returned_qty,
   SUM(COALESCE(r.open_jobs, 0) > 0) AS open_lines,
@@ -87,33 +87,41 @@ class WhDailyReportsRepository {
     });
   }
 
-  /**
-   * The latest MRP each article was received at, from the warehouse's
-   * RetailPilot GRN copy. Used to price rows whose file has no MRP (an
-   * article fully short has an empty MRP Split). Never throws: no prices
-   * is an answer.
-   */
-  async latestMrp(articleIds) {
-    const ids = [...new Set((articleIds || []).map(Number).filter((x) => Number.isInteger(x) && x > 0))];
-    const prices = new Map();
-    if (!ids.length) return prices;
-    try {
-      for (let i = 0; i < ids.length; i += 1000) {
-        const rows = await this.run(
-          "LATEST_MRP",
-          `SELECT l.product_id, l.mrp
-             FROM retailpilot_grn_lines l
-             JOIN retailpilot_grn_headers h ON h.invoice_slug = l.invoice_slug
-            WHERE l.product_id IN (?) AND l.mrp > 0
-            ORDER BY l.product_id, h.entered_at DESC`,
-          [ids.slice(i, i + 1000)]
-        );
-        for (const r of rows) if (!prices.has(Number(r.product_id))) prices.set(Number(r.product_id), Number(r.mrp));
-      }
-    } catch (err) {
-      // Logged by run(); the upload goes ahead unpriced.
+  /** Articles in from..to whose rows have no NLC yet (both report shapes). */
+  async unpricedArticles(from, to) {
+    const rows = await this.run(
+      "UNPRICED_ARTICLES",
+      `SELECT DISTINCT article_id FROM wh_report_job_rows WHERE report_date BETWEEN ? AND ? AND nlc IS NULL
+       UNION SELECT DISTINCT article_id FROM wh_report_box_rows WHERE report_date BETWEEN ? AND ? AND nlc IS NULL`,
+      [from, to, from, to]
+    );
+    return rows.map((r) => Number(r.article_id));
+  }
+
+  /** Fill in NLC on rows in from..to that have none, from `prices` (article id -> NLC). Answers rows updated. */
+  async fillNlc(from, to, prices) {
+    let updated = 0;
+    const entries = [...prices.entries()];
+    for (let i = 0; i < entries.length; i += 500) {
+      const chunk = entries.slice(i, i + 500);
+      const cases = chunk.map(() => "WHEN ? THEN ?").join(" ");
+      const params = chunk.flat();
+      const ids = chunk.map(([id]) => id);
+      const job = await this.run(
+        "FILL_NLC_JOB",
+        `UPDATE wh_report_job_rows SET nlc = CASE article_id ${cases} END, nlc_source = 'RETAILPILOT'
+          WHERE report_date BETWEEN ? AND ? AND nlc IS NULL AND article_id IN (?)`,
+        [...params, from, to, ids]
+      );
+      const box = await this.run(
+        "FILL_NLC_BOX",
+        `UPDATE wh_report_box_rows SET nlc = CASE article_id ${cases} END
+          WHERE report_date BETWEEN ? AND ? AND nlc IS NULL AND article_id IN (?)`,
+        [...params, from, to, ids]
+      );
+      updated += job.affectedRows + box.affectedRows;
     }
-    return prices;
+    return updated;
   }
 
   /**
@@ -340,8 +348,8 @@ class WhDailyReportsRepository {
               MAX(r.category) AS category,
               COUNT(DISTINCT r.report_date) AS days_short, COUNT(*) AS \`lines\`,
               GROUP_CONCAT(DISTINCT r.to_store ORDER BY r.to_store SEPARATOR ', ') AS stores,
-              COALESCE(SUM(r.short_qty), 0) AS short_qty, COALESCE(SUM(r.short_qty * r.mrp), 0) AS short_value,
-              MAX(r.mrp) AS mrp, DATE_FORMAT(MAX(r.report_date), '%Y-%m-%d') AS last_short_date
+              COALESCE(SUM(r.short_qty), 0) AS short_qty, COALESCE(SUM(r.short_qty * r.nlc), 0) AS short_value,
+              MAX(r.nlc) AS nlc, DATE_FORMAT(MAX(r.report_date), '%Y-%m-%d') AS last_short_date
          FROM wh_report_job_rows r
         WHERE ${where} AND r.short_qty > 0
         GROUP BY r.report_type, r.article_id
@@ -349,7 +357,7 @@ class WhDailyReportsRepository {
         LIMIT ?`,
       [...params, limit]
     );
-    return toNumbers(rows, ["days_short", "lines", "short_qty", "short_value", "mrp"]);
+    return toNumbers(rows, ["days_short", "lines", "short_qty", "short_value", "nlc"]);
   }
 
   /** Rows of the job reports: every row, only write-offs (short), or only rows with open jobs. */
@@ -360,15 +368,15 @@ class WhDailyReportsRepository {
       "JOB_ROWS",
       `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_type, r.from_store, r.to_store,
               r.article_id, r.article_name, r.department, r.category, r.recommended_qty, r.planned_qty, r.advised_qty,
-              r.actual_qty, r.short_qty, r.returned_qty, r.jobs, r.open_jobs, r.mrp, r.mrp_source,
-              r.short_qty * r.mrp AS short_value, r.job_id, r.worked_by
+              r.actual_qty, r.short_qty, r.returned_qty, r.jobs, r.open_jobs, r.nlc, r.nlc_source,
+              r.short_qty * r.nlc AS short_value, r.job_id, r.worked_by
          FROM wh_report_job_rows r
         WHERE ${where}${extra}
         ORDER BY r.report_date DESC, r.report_type, r.to_store, short_value DESC, r.article_id
         LIMIT ?`,
       [...params, limit]
     );
-    return toNumbers(rows, ["recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty", "returned_qty", "jobs", "open_jobs", "mrp", "short_value"]);
+    return toNumbers(rows, ["recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty", "returned_qty", "jobs", "open_jobs", "nlc", "short_value"]);
   }
 
   /**
@@ -388,7 +396,7 @@ class WhDailyReportsRepository {
               MAX(r.article_name) AS article_name, MAX(r.box_kind) AS box_kind, MAX(r.job_type) AS job_type,
               MAX(r.from_store) AS from_store, MAX(r.planned_to_store) AS planned_to_store,
               MAX(r.unloaded_store) AS unloaded_store, MAX(r.truck_no) AS truck_no,
-              SUM(r.box_qty) AS box_qty, SUM(r.box_qty * r.mrp) / NULLIF(SUM(CASE WHEN r.mrp IS NULL THEN 0 ELSE r.box_qty END), 0) AS mrp,
+              SUM(r.box_qty) AS box_qty, SUM(r.box_qty * r.nlc) / NULLIF(SUM(CASE WHEN r.nlc IS NULL THEN 0 ELSE r.box_qty END), 0) AS nlc,
               DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i:%s') AS finished_at, MAX(r.worked_by) AS worked_by
          FROM wh_report_box_rows r
         WHERE r.report_type = ? AND r.report_date BETWEEN ? AND ?${storeSql}
@@ -396,7 +404,7 @@ class WhDailyReportsRepository {
         ORDER BY r.report_date, r.box_id, r.article_id`,
       params
     );
-    return toNumbers(rows, ["box_qty", "mrp"]);
+    return toNumbers(rows, ["box_qty", "nlc"]);
   }
 
   /** The last day there is an Unloading report for, on or before `to`. */

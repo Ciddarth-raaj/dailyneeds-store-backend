@@ -26,6 +26,22 @@ describe("queries", () => {
   });
 });
 
+describe("NLC", () => {
+  it("query checks article ids; stock-weighted NLC, else the batches' average", () => {
+    assert.equal(R.buildNlcQuery(["abc", "1;DROP"]), null);
+    assert.match(R.buildNlcQuery(["100073", 100073, "102654"]), /IN \('100073', '102654'\) AND b\.net_landing_cost > 0/);
+    const m = R.nlcByArticle([
+      { article_id: "1", batch_id: "a", net_landing_cost: "10", quantity: "3" },
+      { article_id: "1", batch_id: "b", net_landing_cost: "20", quantity: "1" },
+      { article_id: "1", batch_id: "c", net_landing_cost: "99", quantity: null },
+      { article_id: "2", batch_id: "x", net_landing_cost: "8", quantity: null },
+      { article_id: "2", batch_id: "y", net_landing_cost: "12", quantity: null },
+      { article_id: "3", batch_id: "z", net_landing_cost: "0", quantity: "5" },
+    ]);
+    assert.deepEqual([...m.entries()], [[1, 12.5], [2, 10]]);
+  });
+});
+
 describe("mapping", () => {
   const line = (o) => ({ job_id: "job_1", job_type: "sta", state: "PICKED", assigned_user: "u7", article_id: "100073", origin: "wh1", destination: "st1", advised_qty: "72", actual_qty: "70", ...o });
   it("job lines: short = advised - actual on finished jobs; open jobs are not write-off; store names", () => {
@@ -73,6 +89,7 @@ describe("usecase pull", () => {
       this.queries.push(q);
       if (fail && fail(q)) throw new Error("SPECTRA error: whitelist_violation");
       if (/masterhub\.stores/.test(q)) return [{ slug: "wh1", name: "Warehouse" }, { slug: "st1", name: "Vallalar Salai" }];
+      if (/inventory_batches/.test(q)) return [{ article_id: "100073", batch_id: "b", net_landing_cost: "28.5", quantity: null }];
       return byQuery(q);
     },
   });
@@ -80,7 +97,6 @@ describe("usecase pull", () => {
     const saved = [];
     return {
       saved,
-      latestMrp: async () => new Map([[100073, 30]]),
       productInfo: async () => new Map([[100073, { article_name: "parle hide & seek 120g", department: "Snacks", category: "Biscuits" }]]),
       uploads: async () => [],
       replaceUpload: async (u) => (saved.push(u), { upload_id: saved.length, page: u.pageLines ? { added: u.pageLines.rows.length } : null }),
@@ -98,7 +114,7 @@ describe("usecase pull", () => {
     const pick = rp.saved.find((u) => u.report_type === "PICKING" && u.report_date === "2026-11-16");
     assert.equal(pick.source, "RETAILPILOT");
     assert.equal(pick.rows[0].article_name, "parle hide & seek 120g");
-    assert.equal(pick.rows[0].mrp, 30);
+    assert.equal(pick.rows[0].nlc, 28.5);
     assert.deepEqual(pick.pageLines, { page: "WRITE_OFF", rows: [{ product_id: 100073, store: "vallalar salai", mismatch_qty: 2 }] });
     const day = res.data.days.find((d) => d.date === "2026-11-16");
     assert.equal(day.reports.find((r) => r.type === "PICKING").summary.write_off_page.added, 1);
