@@ -48,7 +48,7 @@ function staffLabel(ids, names) {
 function boxIssues(lines) {
   const by = new Map();
   for (const l of lines || []) {
-    if (!["NOT_ON_TRUCK", "NOT_UNLOADED", "WRONG_STORE", "QTY_DIFF", "NOT_LOADED"].includes(l.status)) continue;
+    if (!["NOT_ON_TRUCK", "NOT_UNLOADED", "PART_UNLOADED", "WRONG_STORE", "QTY_DIFF", "NOT_LOADED"].includes(l.status)) continue;
     const k = `${l.report_date}|${l.box_id}|${l.status}`;
     const b = by.get(k) || {
       status: l.status,
@@ -68,7 +68,7 @@ function boxIssues(lines) {
     b.value += q * n(l.nlc);
     by.set(k, b);
   }
-  const order = { NOT_ON_TRUCK: 0, NOT_UNLOADED: 1, WRONG_STORE: 2, QTY_DIFF: 3, NOT_LOADED: 4 };
+  const order = { NOT_ON_TRUCK: 0, NOT_UNLOADED: 1, PART_UNLOADED: 2, WRONG_STORE: 3, QTY_DIFF: 4, NOT_LOADED: 5 };
   return [...by.values()].map((b) => ({ ...b, value: r2(b.value) })).sort((a, b) => order[a.status] - order[b.status] || b.qty - a.qty);
 }
 
@@ -108,7 +108,11 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   // The day looked at is over: a box put on a truck and not unloaded is a
   // problem, even if the next day's unloading is not pulled yet - not "still
   // awaiting". Only damage / returns going back to the warehouse are apart.
-  const boxLines = (rawBoxLines || []).map((l) => (l.status === "OPEN" ? { ...l, status: "NOT_UNLOADED" } : l));
+  const opened = (rawBoxLines || []).map((l) => (l.status === "OPEN" ? { ...l, status: "NOT_UNLOADED" } : l));
+  // A box that was unloaded but is missing an article from its loading list
+  // is not a box "not unloaded": it is part unloaded (an article missing).
+  const someUnloaded = new Set(opened.filter((l) => l.unloaded_qty != null).map((l) => `${l.report_date}|${l.box_id}`));
+  const boxLines = opened.map((l) => (l.status === "NOT_UNLOADED" && someUnloaded.has(`${l.report_date}|${l.box_id}`) ? { ...l, status: "PART_UNLOADED" } : l));
   const reports = Object.fromEntries(Object.keys(LABEL).map((k) => [k, (uploads || []).some((u) => u.report_type === k)]));
   const job = Object.fromEntries(["PICKING", "PACKING", "VERIFICATION"].map((k) => [k, blankJob()]));
   for (const s of summary || []) if (job[s.report_type]) for (const f of Object.keys(blankJob())) job[s.report_type][f] = n(s[f]);
@@ -203,8 +207,8 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   // Picking write-off is counted in lines (articles short), not units.
   if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)${writeoffByType.length > 1 || (writeoffByType[0] && writeoffByType[0].job_type !== "OTHER") ? ` - ${writeoffByType.map((t) => `${t.job_type} ${fmt(t.lines)}`).join(", ")}` : ""}` });
   if (countBy("NOT_ON_TRUCK")) items.push({ key: "loading", tone: "red", text: `Loading: ${countBy("NOT_ON_TRUCK")} box${countBy("NOT_ON_TRUCK") === 1 ? "" : "es"} on the loading list but not on a truck` });
-  const lost = countBy("NOT_UNLOADED") + countBy("WRONG_STORE") + countBy("QTY_DIFF");
-  if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded, wrong store or quantity differs)` });
+  const lost = countBy("NOT_UNLOADED") + countBy("PART_UNLOADED") + countBy("WRONG_STORE") + countBy("QTY_DIFF");
+  if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded, article missing, wrong store or quantity differs)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
   if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
   if (rm.WRITE_OFF.pending + rm.VERIFICATION.pending) items.push({ key: "remarks", tone: rm.WRITE_OFF.backlog + rm.VERIFICATION.backlog ? "red" : "amber", text: `${rm.WRITE_OFF.pending + rm.VERIFICATION.pending} lines without remark` });
@@ -228,6 +232,7 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
         unloaded_boxes: unloaded.size,
         problems: lost + countBy("NOT_LOADED"),
         not_unloaded: countBy("NOT_UNLOADED"),
+        part_unloaded: countBy("PART_UNLOADED"),
         wrong_store: countBy("WRONG_STORE"),
         qty_diff: countBy("QTY_DIFF"),
         not_loaded: countBy("NOT_LOADED"),
