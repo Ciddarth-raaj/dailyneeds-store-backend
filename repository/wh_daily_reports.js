@@ -25,7 +25,7 @@ const JOB_COLS = [
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
   "box_id", "box_kind", "truck_no", "article_id", "article_name", "department", "category", "nlc", "box_qty",
-  "box_status", "finished_at", "job_id", "worked_by",
+  "box_status", "finished_at", "job_id", "stage_id", "worked_by",
 ];
 /** The Pick & Pack pages a report's write-off goes to. */
 const PAGES = {
@@ -411,37 +411,38 @@ class WhDailyReportsRepository {
 
   /**
    * The box chain (utils/wh_box_chain.js): Loading or Unloading from..to, one
-   * row per day per box - a box being its box id AND the store it is going
-   * to, as box ids are reused - with its articles, qty and NLC value.
+   * row per box trip - per RetailPilot job (one box per loading / unloading
+   * job), or for uploaded files (no job) per day, box id and store - with its
+   * source document (stage_id), articles, qty and NLC value.
    */
   async boxSummary(reportType, from, to) {
     const rows = await this.run(
       "BOX_SUMMARY",
-      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store,
-              MAX(r.unloaded_store) AS unloaded_store, MAX(r.from_store) AS from_store, MAX(r.job_type) AS job_type,
+      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store, r.job_id,
+              MAX(r.stage_id) AS stage_id, MAX(r.unloaded_store) AS unloaded_store, MAX(r.from_store) AS from_store, MAX(r.job_type) AS job_type,
               MAX(r.truck_no) AS truck_no, COUNT(DISTINCT r.article_id) AS articles, SUM(r.box_qty) AS qty,
               SUM(r.box_qty * COALESCE(r.nlc, 0)) AS value, DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i:%s') AS finished_at
          FROM wh_report_box_rows r
         WHERE r.report_type = ? AND r.report_date BETWEEN ? AND ?
-        GROUP BY r.report_date, r.box_id, r.planned_to_store`,
+        GROUP BY r.report_date, r.box_id, r.planned_to_store, r.job_id`,
       [reportType, from, to]
     );
     return toNumbers(rows, ["articles", "qty", "value"]);
   }
 
-  /** The articles in some boxes: keys [{ report_date, box_id, planned_to_store }]. */
+  /** The articles in some box trips: keys [{ report_date, box_id, planned_to_store, job_id }]. */
   async boxArticles(reportType, keys) {
     if (!keys || !keys.length) return [];
     const some = keys.slice(0, 500);
     const params = [reportType];
-    for (const k of some) params.push(k.report_date, k.box_id, k.planned_to_store || null);
+    for (const k of some) params.push(k.report_date, k.box_id, k.planned_to_store || null, k.job_id || null);
     const rows = await this.run(
       "BOX_ARTICLES",
-      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store, r.article_id,
+      `SELECT DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.box_id, r.planned_to_store, r.job_id, r.article_id,
               MAX(r.article_name) AS article_name, SUM(r.box_qty) AS qty, SUM(r.box_qty * COALESCE(r.nlc, 0)) AS value
          FROM wh_report_box_rows r
-        WHERE r.report_type = ? AND (${some.map(() => "(r.report_date = ? AND r.box_id = ? AND r.planned_to_store <=> ?)").join(" OR ")})
-        GROUP BY r.report_date, r.box_id, r.planned_to_store, r.article_id
+        WHERE r.report_type = ? AND (${some.map(() => "(r.report_date = ? AND r.box_id = ? AND r.planned_to_store <=> ? AND r.job_id <=> ?)").join(" OR ")})
+        GROUP BY r.report_date, r.box_id, r.planned_to_store, r.job_id, r.article_id
         ORDER BY r.box_id, r.article_id`,
       params
     );

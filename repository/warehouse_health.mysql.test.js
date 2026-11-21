@@ -28,7 +28,7 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
              CREATE TABLE pick_pack_write_off (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);
              CREATE TABLE pick_pack_verifications (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);`);
-    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up"]) {
+    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up"]) {
       // eslint-disable-next-line no-await-in-loop
       await q(MIG(m));
     }
@@ -88,7 +88,23 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal(String(await summary.chatOf(1)), "998877665544");
   });
 
+  it("box trips: one row per loading / unloading job, with the document; articles of chosen trips", async () => {
+    const day = "2026-11-20";
+    const B = (o) => ({ report_type: "LOADING", job_type: "STA", from_store: "warehouse", planned_to_store: "ecr", box_id: "K1", truck_no: "T1", article_id: 1, article_name: "Milk", nlc: 20, box_qty: 5, box_status: "Loaded", finished_at: "2026-11-20 09:00:00", ...o });
+    await repo.replaceUpload({ report_type: "LOADING", report_date: day, source: "RETAILPILOT", shape: "BOX", file_name: "rp", uploaded_by: null, rows: [
+      B({ job_id: "j1", stage_id: "sta_1" }),
+      B({ job_id: "j1", stage_id: "sta_1", article_id: 2, article_name: "Curd", box_qty: 3 }),
+      B({ job_id: "j2", stage_id: "sta_2", finished_at: "2026-11-20 15:00:00" }),
+    ] });
+    const trips = await repo.boxSummary("LOADING", day, day);
+    assert.deepEqual(trips.map((t) => [t.job_id, t.stage_id, t.articles, t.qty, t.value]).sort(), [["j1", "sta_1", 2, 8, 160], ["j2", "sta_2", 1, 5, 100]]);
+    const items = await repo.boxArticles("LOADING", [{ report_date: day, box_id: "K1", planned_to_store: "ecr", job_id: "j1" }]);
+    assert.deepEqual(items.map((i) => [i.job_id, i.article_name, i.qty]), [["j1", "Milk", 5], ["j1", "Curd", 3]]);
+  });
+
   it("down migration", async () => {
+    await q(MIG("20261227120000-wh-box-stage-down"));
+    assert.equal((await q("SHOW COLUMNS FROM wh_report_box_rows LIKE 'stage_id'")).length, 0);
     await q(MIG("20261226120000-warehouse-health-down"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_health_summary_sends'")).length, 0);
     assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'picking_job'")).length, 0);

@@ -90,6 +90,7 @@ describe("mapping", () => {
       ["vallalar salai", "ecr", "PY-01-DA-8159", 50, "2026-11-16 11:26:00", "u1,u2", "Unloaded"]
     );
     const loading = R.mapBoxLines("LOADING", [box({ state: "LOADED", meta: {}, unloaded_store: null })], STORES).rows[0];
+    assert.equal(R.mapBoxLines("LOADING", [box({ state: "LOADED", stage_id: "sta_77", unloaded_store: null })], STORES).rows[0].stage_id, "sta_77");
     assert.deepEqual([loading.planned_to_store, loading.unloaded_store, loading.box_status], ["ecr", null, "Loaded"]);
   });
 });

@@ -82,7 +82,7 @@ function buildBoxLinesQuery(type, day) {
   if (!d) throw new Error("Invalid day");
   return `
 SELECT j.job_id, j.job_type, j.state, j.assigned_user, j.updated_at,
-  b.slug AS box_row, b.box_id, b.origin, b.destination, b.truck_id, b.unloaded_store, b.meta,
+  b.slug AS box_row, b.box_id, b.origin, b.destination, b.truck_id, b.unloaded_store, b.stage_id, b.meta,
   a.article_id, a.qty
 FROM picknpack.state_machine j
 JOIN picknpack.box_dimension_joblets b ON b.job_id = j.job_id
@@ -245,6 +245,7 @@ function mapBoxLines(type, lines, stores) {
     rows.push({
       report_type: type,
       job_id: clean(l.job_id) || null,
+      stage_id: clean(l.stage_id).slice(0, 64) || null,
       job_type: clean(l.job_type).toUpperCase() || null,
       from_store: name(l.origin),
       planned_to_store: name(unloading && clean(m.original_destination) ? m.original_destination : l.destination),

@@ -5,11 +5,14 @@
  *
  *   open from earlier days + loaded today - unloaded today = still open
  *
- * A box is its box id AND the store it is going to: box ids (carton
- * barcodes) are reused, the same id going to several stores on one day.
- *
- * Loads and unloads of one box are paired in date order: each unloading
- * closes the earliest still-open loading of that box on or before its day.
+ * A box trip is one RetailPilot loading job (one box per loading job), and
+ * its unloading is a separate unloading job. Box ids (carton barcodes) are
+ * reused - to several stores, or to the same store twice on one day - so an
+ * unloading is paired with a loading of the same box id going to the same
+ * store:
+ *   - the same source document (stage_id) when both rows have one,
+ *   - else the earliest loading still open, loaded no later than the
+ *     unloading (by day, and by time on the same day).
  * An unloading with no open loading is "unloaded, not loaded" (loaded
  * before BOX_CHAIN_FROM, or never on a loading report).
  *
@@ -54,6 +57,8 @@ function buildChain({ loads, unloads, date }) {
 
   const entry = (l, extra = {}) => ({
     box_id: l.box_id,
+    job_id: l.job_id || null,
+    stage_id: l.stage_id || null,
     from_store: l.from_store || null,
     to_store: l.planned_to_store || null,
     job_type: l.job_type || null,
@@ -70,12 +75,19 @@ function buildChain({ loads, unloads, date }) {
     box.loads.sort((a, b) => String(a.report_date).localeCompare(String(b.report_date)) || String(a.finished_at || "").localeCompare(String(b.finished_at || "")));
     box.unloads.sort((a, b) => String(a.report_date).localeCompare(String(b.report_date)) || String(a.finished_at || "").localeCompare(String(b.finished_at || "")));
     for (const u of box.unloads) {
-      const l = box.loads.find((x) => !x.closed_by && x.report_date <= u.report_date);
+      const fits = (x) =>
+        !x.closed_by &&
+        x.report_date <= u.report_date &&
+        !(x.report_date === u.report_date && x.finished_at && u.finished_at && x.finished_at > u.finished_at) &&
+        !(x.stage_id && u.stage_id && x.stage_id !== u.stage_id);
+      const l = box.loads.find((x) => fits(x) && x.stage_id && u.stage_id) || box.loads.find(fits);
       if (l) l.closed_by = u;
       if (u.report_date !== date) continue;
       if (!l) {
         notLoaded.push({
           box_id: u.box_id,
+          job_id: u.job_id || null,
+          stage_id: u.stage_id || null,
           from_store: u.from_store || null,
           to_store: u.planned_to_store || null,
           unloaded_store: u.unloaded_store || null,

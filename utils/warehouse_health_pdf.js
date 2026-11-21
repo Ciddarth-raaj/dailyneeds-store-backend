@@ -79,7 +79,9 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     card(
       "Unloading",
       plural(t.unloading.problems, "problem"),
-      `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded<br>${num(t.unloading.not_unloaded)} not unloaded · ${num(t.unloading.wrong_store)} wrong store${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
+      t.unloading.chain
+        ? `${num(t.unloading.chain.opening.boxes)} open from earlier + ${num(t.unloading.chain.loaded.boxes)} loaded<br>− ${num(t.unloading.chain.unloaded.boxes)} unloaded = <b>${num(t.unloading.chain.still_open.boxes)} still open</b>`
+        : `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded<br>${num(t.unloading.not_unloaded)} not unloaded · ${num(t.unloading.wrong_store)} wrong store${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
       t.unloading.problems ? "red" : "green"
     ),
     card(
@@ -135,6 +137,33 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     }));
   const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
   const unloadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.list || []), [4, 5, 6]);
+  const c = t.unloading.chain;
+  const tripItems = (x) =>
+    (x.items || []).length
+      ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(it.article_name || it.article_id)} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>`
+      : "";
+  const tripRows = (list, f) =>
+    list.map((x) => ({
+      cls: n(x[f]) >= 2 ? "bad" : "",
+      cells: [`${esc(x.box_id)}${tripItems(x)}`, `${esc(title(x.from_store))} → ${esc(title(x.to_store))}`, esc(x.truck_no || "—"), esc(dayText(x.loaded_on)), num(x[f]), num(x.articles), num(x.qty), rupees(x.value)],
+    }));
+  const chainHtml = c
+    ? `<h2>Unloading - box chain since ${esc(dayText(c.from))}</h2>
+${c.missing_days.length ? `<p class="note warn">${c.missing_days.length} day(s) since ${esc(dayText(c.from))} have no Loading or Unloading report - the chain may miss boxes.</p>` : ""}
+${table(
+  ["", "Boxes", ""],
+  [
+    { cells: ["Open from earlier days", num(c.opening.boxes), `${num(c.opening.qty)} qty`] },
+    { cells: ["+ Loaded today", num(c.loaded.boxes), `on ${plural(c.loaded.trucks, "truck")}`] },
+    { cells: ["− Unloaded today", num(c.unloaded.boxes), `${num(c.unloaded.from_today)} from today's loading · ${num(c.unloaded.from_earlier)} from earlier days`] },
+    { cls: c.still_open.boxes ? "bad" : "", cells: ["<b>= Still open</b>", `<b>${num(c.still_open.boxes)}</b>`, c.still_open.boxes ? `${num(c.still_open.qty)} qty · ${rupees(c.still_open.value)}${c.still_open.older ? ` · oldest ${plural(c.still_open.oldest_days, "day")}` : ""}` : "nothing open"] },
+  ],
+  [1]
+)}
+${section("Still open - loaded, not unloaded", table(["Box", "From → To", "Truck", "Loaded", "Days open", "Articles", "Qty", "Value"], tripRows(t.unloading.still_open || [], "days_open"), [4, 5, 6, 7]))}
+${section("Closed today - loaded on an earlier day", table(["Box", "From → To", "Truck", "Loaded", "Days late", "Articles", "Qty", "Value"], tripRows(t.unloading.closed_old || [], "days_late"), [4, 5, 6, 7]))}
+${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unloading.list || []).some((x) => x.status !== "NOT_UNLOADED") ? table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows((t.unloading.list || []).filter((x) => x.status !== "NOT_UNLOADED")), [4, 5, 6]) : "")}`
+    : "";
   const waitingT = table(["Box", "Why", "To", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.waiting || []), [4, 5, 6]);
 
   const yet = table(
@@ -258,8 +287,9 @@ ${needYou}
 <h2>Flow of goods</h2>${flow}
 ${section("Picking write-off by store", writeoff)}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
-${section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
-${section("Damage returns going back to the warehouse - not a problem", waitingT)}
+${chainHtml}
+${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
+${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
 ${section("Remarks pending", remarks)}
 ${section("Stores", stores)}

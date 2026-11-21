@@ -88,13 +88,13 @@ class WarehouseHealth {
       this.repo.uploads(C.BOX_CHAIN_FROM, date),
     ]);
     const chain = C.buildChain({ loads, unloads, date });
-    const loadedKeys = [...chain.lists.still_open, ...chain.lists.closed_old, ...chain.lists.wrong_store].map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store }));
-    const unloadedKeys = chain.lists.not_loaded.map((b) => ({ report_date: date, box_id: b.box_id, planned_to_store: b.to_store }));
+    const loadedKeys = [...chain.lists.still_open, ...chain.lists.closed_old, ...chain.lists.wrong_store].map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
+    const unloadedKeys = chain.lists.not_loaded.map((b) => ({ report_date: date, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
     const [la, ua] = await Promise.all([this.repo.boxArticles("LOADING", loadedKeys), this.repo.boxArticles("UNLOADING", unloadedKeys)]);
     const items = (rows) => {
       const m = new Map();
       for (const r of rows) {
-        const k = `${r.report_date}|${r.box_id}|${r.planned_to_store || ""}`;
+        const k = `${r.report_date}|${r.box_id}|${r.planned_to_store || ""}|${r.job_id || ""}`;
         if (!m.has(k)) m.set(k, []);
         m.get(k).push({ article_id: r.article_id, article_name: r.article_name || null, qty: Number(r.qty) || 0, value: Math.round((Number(r.value) || 0) * 100) / 100 });
       }
@@ -102,8 +102,8 @@ class WarehouseHealth {
     };
     const li = items(la);
     const ui = items(ua);
-    for (const list of [chain.lists.still_open, chain.lists.closed_old, chain.lists.wrong_store]) for (const b of list) b.items = li.get(`${b.loaded_on}|${b.box_id}|${b.to_store || ""}`) || [];
-    for (const b of chain.lists.not_loaded) b.items = ui.get(`${date}|${b.box_id}|${b.to_store || ""}`) || [];
+    for (const list of [chain.lists.still_open, chain.lists.closed_old, chain.lists.wrong_store]) for (const b of list) b.items = li.get(`${b.loaded_on}|${b.box_id}|${b.to_store || ""}|${b.job_id || ""}`) || [];
+    for (const b of chain.lists.not_loaded) b.items = ui.get(`${date}|${b.box_id}|${b.to_store || ""}|${b.job_id || ""}`) || [];
     const have = { LOADING: new Set(), UNLOADING: new Set() };
     for (const u of ups) if (have[u.report_type]) have[u.report_type].add(u.report_date);
     const missing = [];

@@ -45,3 +45,17 @@ test("unloaded with no open loading, and unloaded at the wrong store", () => {
   assert.deepStrictEqual([c.not_loaded.boxes, c.wrong_store.boxes, c.lists.wrong_store[0].unloaded_store, c.lists.not_loaded[0].box_id], [1, 1, "muthialpet", "Z"]);
   assert.strictEqual(add(c), c.still_open.boxes);
 });
+
+test("the same box to the same store twice on one day is two trips, paired by document, else by time", () => {
+  const loads = [
+    L("2026-11-20", "K", "ecr", { job_id: "j1", stage_id: "sta_1", finished_at: "2026-11-20 09:00:00" }),
+    L("2026-11-20", "K", "ecr", { job_id: "j2", stage_id: "sta_2", finished_at: "2026-11-20 15:00:00" }),
+  ];
+  // only the second trip is unloaded: by document it closes j2, not the earlier j1
+  const byDoc = C.buildChain({ date: "2026-11-20", loads, unloads: [U("2026-11-20", "K", "ecr", { job_id: "u2", stage_id: "sta_2", finished_at: "2026-11-20 17:00:00" })] });
+  assert.deepStrictEqual([byDoc.loaded.boxes, byDoc.unloaded.boxes, byDoc.still_open.boxes, byDoc.lists.still_open[0].job_id], [2, 1, 1, "j1"]);
+  // cartons carry no document: by time, an unloading at 12:00 can only close the 09:00 loading
+  const noDoc = loads.map((l) => ({ ...l, stage_id: null }));
+  const byTime = C.buildChain({ date: "2026-11-20", loads: noDoc, unloads: [U("2026-11-20", "K", "ecr", { job_id: "u1", finished_at: "2026-11-20 12:00:00" })] });
+  assert.deepStrictEqual([byTime.unloaded.boxes, byTime.still_open.boxes, byTime.lists.still_open[0].job_id], [1, 1, "j2"]);
+});

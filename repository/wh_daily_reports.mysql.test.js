@@ -62,6 +62,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261226120000-warehouse-health-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261227120000-wh-box-stage-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     // RetailPilot as far as NLC goes: article 2 has NLC 45; article 1 none.
     nlcSpectra = {
@@ -267,6 +268,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
     const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261227120000-wh-box-stage-down.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261226120000-warehouse-health-down.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-down.sql"), "utf8"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_rp_staff_map'")).length, 0);
