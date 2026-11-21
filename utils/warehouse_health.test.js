@@ -53,6 +53,14 @@ test("picking write-off is headed by lines, value and qty after", () => {
   assert.strictEqual(h.trend.length, 7);
 });
 
+test("a box on a truck and not unloaded is a problem, even before the next day's unloading is pulled", () => {
+  const h = H.buildHealth({ ...base, boxLines: [{ report_date: "2026-11-19", box_id: "B7", status: "OPEN", truck_no: "TN01", loaded_qty: 5, nlc: 2, planned_to_store: "ecr" }] });
+  assert.strictEqual(h.tiles.unloading.problems, 1);
+  assert.strictEqual(h.tiles.unloading.list[0].status, "NOT_UNLOADED");
+  assert.strictEqual(h.tiles.unloading.waiting.length, 0);
+  assert.ok(h.need_you.some((i) => i.key === "unloading"));
+});
+
 test("boxes: not on a truck is separate from not delivered", () => {
   const h = H.buildHealth(base);
   assert.strictEqual(h.tiles.boxes.not_on_truck, 1);

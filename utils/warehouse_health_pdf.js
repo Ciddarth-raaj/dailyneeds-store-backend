@@ -257,7 +257,7 @@ ${needYou}
 ${section("Picking write-off by store", writeoff)}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${section("Unloading problems", unloadingT, "On a truck, but not unloaded, unloaded at the wrong store, quantity differs - or unloaded but never loaded.")}
-${section("Not unloaded yet - not a problem", waitingT, "Still awaiting unloading, or damage returns going back to the warehouse.")}
+${section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
 ${section("Remarks pending", remarks)}
 ${section("Stores", stores)}

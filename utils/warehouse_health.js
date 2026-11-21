@@ -104,7 +104,11 @@ function pickers(work, mistakes, names) {
 }
 
 /** Everything the dashboard shows for `date`, from what the usecase read. */
-function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
+function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines: rawBoxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
+  // The day looked at is over: a box put on a truck and not unloaded is a
+  // problem, even if the next day's unloading is not pulled yet - not "still
+  // awaiting". Only damage / returns going back to the warehouse are apart.
+  const boxLines = (rawBoxLines || []).map((l) => (l.status === "OPEN" ? { ...l, status: "NOT_UNLOADED" } : l));
   const reports = Object.fromEntries(Object.keys(LABEL).map((k) => [k, (uploads || []).some((u) => u.report_type === k)]));
   const job = Object.fromEntries(["PICKING", "PACKING", "VERIFICATION"].map((k) => [k, blankJob()]));
   for (const s of summary || []) if (job[s.report_type]) for (const f of Object.keys(blankJob())) job[s.report_type][f] = n(s[f]);
@@ -228,8 +232,8 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
         qty_diff: countBy("QTY_DIFF"),
         not_loaded: countBy("NOT_LOADED"),
         list: issues.filter((x) => x.status !== "NOT_ON_TRUCK").slice(0, 200),
-        // On a truck, not unloaded, and not a problem: still awaiting unloading or a damage return.
-        waiting: gap.filter((x) => ["OPEN", "RETURN"].includes(x.status)).slice(0, 200),
+        // On a truck, not unloaded, and not a problem: damage / returns going back to the warehouse.
+        waiting: gap.filter((x) => x.status === "RETURN").slice(0, 200),
       },
       remarks: { write_off: rm.WRITE_OFF, verification: rm.VERIFICATION },
       jobs: { picking_open: job.PICKING.open_lines, packing_open: job.PACKING.open_lines, verification_open: job.VERIFICATION.open_lines, by_store: storeRows.filter((s) => s.open_lines).map((s) => ({ name: s.name, open_lines: s.open_lines })) },
