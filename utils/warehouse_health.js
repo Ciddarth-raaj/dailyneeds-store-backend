@@ -130,7 +130,8 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   const gapBy = new Map();
   for (const l of loaded) {
     const k = `${l.report_date}|${l.box_id}`;
-    if (unloadedBoxIds.has(k)) continue;
+    // Only boxes put on a truck: one never on a truck is a loading problem, shown under Loading.
+    if (unloadedBoxIds.has(k) || !l.truck_no) continue;
     const g = gapBy.get(k) || { box_id: l.box_id, status: l.status, store: l.planned_to_store || null, truck_no: l.truck_no || null, job_type: l.job_type || null, articles: 0, qty: 0, value: 0 };
     g.articles += 1;
     g.qty += n(l.loaded_qty);
@@ -197,9 +198,9 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
   const items = [];
   // Picking write-off is counted in lines (articles short), not units.
   if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)${writeoffByType.length > 1 || (writeoffByType[0] && writeoffByType[0].job_type !== "OTHER") ? ` - ${writeoffByType.map((t) => `${t.job_type} ${fmt(t.lines)}`).join(", ")}` : ""}` });
-  if (countBy("NOT_ON_TRUCK")) items.push({ key: "boxes", tone: "red", text: `${countBy("NOT_ON_TRUCK")} box${countBy("NOT_ON_TRUCK") === 1 ? "" : "es"} on the loading list but not on a truck` });
+  if (countBy("NOT_ON_TRUCK")) items.push({ key: "loading", tone: "red", text: `Loading: ${countBy("NOT_ON_TRUCK")} box${countBy("NOT_ON_TRUCK") === 1 ? "" : "es"} on the loading list but not on a truck` });
   const lost = countBy("NOT_UNLOADED") + countBy("WRONG_STORE") + countBy("QTY_DIFF");
-  if (lost) items.push({ key: "boxes", tone: "red", text: `${lost} box${lost === 1 ? "" : "es"} not delivered right (not unloaded, wrong store or quantity differs)` });
+  if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded, wrong store or quantity differs)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
   if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
   if (rm.WRITE_OFF.pending + rm.VERIFICATION.pending) items.push({ key: "remarks", tone: rm.WRITE_OFF.backlog + rm.VERIFICATION.backlog ? "red" : "amber", text: `${rm.WRITE_OFF.pending + rm.VERIFICATION.pending} lines without remark` });
@@ -216,6 +217,20 @@ function buildHealth({ date, uploads, summary, byJobType, byStore, yetToVerify, 
     tiles: {
       writeoff: { lines: job.PICKING.short_lines, qty: job.PICKING.short_qty, value: r2(job.PICKING.short_value), by_job_type: writeoffByType, packing_lines: job.PACKING.short_lines, packing_qty: job.PACKING.short_qty, packing_value: r2(job.PACKING.short_value) },
       boxes: { not_on_truck: countBy("NOT_ON_TRUCK"), not_unloaded: countBy("NOT_UNLOADED"), wrong_store: countBy("WRONG_STORE"), qty_diff: countBy("QTY_DIFF"), not_loaded: countBy("NOT_LOADED"), list: issues.slice(0, 200) },
+      // Loading and unloading, each on its own.
+      loading: { boxes: listBoxes.size, on_truck: onTruck.size, trucks: trucks.size, not_on_truck: countBy("NOT_ON_TRUCK"), list: issues.filter((x) => x.status === "NOT_ON_TRUCK").slice(0, 200) },
+      unloading: {
+        loaded_boxes: onTruck.size,
+        unloaded_boxes: unloaded.size,
+        problems: lost + countBy("NOT_LOADED"),
+        not_unloaded: countBy("NOT_UNLOADED"),
+        wrong_store: countBy("WRONG_STORE"),
+        qty_diff: countBy("QTY_DIFF"),
+        not_loaded: countBy("NOT_LOADED"),
+        list: issues.filter((x) => x.status !== "NOT_ON_TRUCK").slice(0, 200),
+        // On a truck, not unloaded, and not a problem: still awaiting unloading or a damage return.
+        waiting: gap.filter((x) => ["OPEN", "RETURN"].includes(x.status)).slice(0, 200),
+      },
       remarks: { write_off: rm.WRITE_OFF, verification: rm.VERIFICATION },
       jobs: { picking_open: job.PICKING.open_lines, packing_open: job.PACKING.open_lines, verification_open: job.VERIFICATION.open_lines, by_store: storeRows.filter((s) => s.open_lines).map((s) => ({ name: s.name, open_lines: s.open_lines })) },
       verification: { short_qty: job.VERIFICATION.short_qty, short_lines: job.VERIFICATION.short_lines, short_value: r2(job.VERIFICATION.short_value), verified_lines: job.VERIFICATION.done_lines, yet_to_verify_qty: pendingQty, yet_to_verify: pending.slice(0, 200) },

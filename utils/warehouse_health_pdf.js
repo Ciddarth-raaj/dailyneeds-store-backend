@@ -57,9 +57,10 @@ const section = (heading, body, note = "") => (body ? `<h2>${esc(heading)}</h2>$
 
 function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const t = h.tiles;
-  const b = t.boxes;
-  const notDelivered = b.not_unloaded + b.wrong_store + b.qty_diff;
   const remarksPending = t.remarks.write_off.pending + t.remarks.verification.pending;
+  const waitBy = new Map();
+  for (const x of t.unloading.waiting || []) waitBy.set(x.status, (waitBy.get(x.status) || 0) + 1);
+  const gapWaiting = [...waitBy].map(([st, c]) => `${num(c)} ${(BOX_LABEL[st] || st).toLowerCase()}`).join(" · ");
   const card = (label, value, sub, tone) =>
     `<div class="card ${tone}"><div class="cl">${esc(label)}</div><div class="cv">${esc(value)}</div><div class="cs">${sub}</div></div>`;
   const cards = [
@@ -69,7 +70,18 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       `${rupees(t.writeoff.value)} at NLC · ${num(t.writeoff.qty)} qty${typeSplit(t.writeoff.by_job_type) ? `<br><b>${typeSplit(t.writeoff.by_job_type)}</b>` : ""}`,
       t.writeoff.lines ? "red" : "green"
     ),
-    card("Box problems", num(b.not_on_truck + notDelivered), b.not_on_truck + notDelivered || !(h.flow.not_unloaded || []).length ? `${num(b.not_on_truck)} not on a truck<br>${num(notDelivered)} not delivered` : `None<br>${(h.flow.not_unloaded || []).length} loaded, not unloaded yet (not a problem)`, b.not_on_truck + notDelivered ? "red" : "green"),
+    card(
+      "Loading",
+      plural(t.loading.not_on_truck, "problem"),
+      `${num(t.loading.not_on_truck)} not on a truck<br>${plural(t.loading.boxes, "box", "boxes")} on ${plural(t.loading.trucks, "truck")}`,
+      t.loading.not_on_truck ? "red" : "green"
+    ),
+    card(
+      "Unloading",
+      plural(t.unloading.problems, "problem"),
+      `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
+      t.unloading.problems ? "red" : "green"
+    ),
     card(
       "Verification",
       plural(t.verification.short_lines, "line"),
@@ -119,8 +131,9 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       cls: ["OPEN", "RETURN"].includes(x.status) ? "" : "bad",
       cells: [esc(x.box_id), esc(BOX_LABEL[x.status] || x.status), esc(title(x.store)), esc(x.truck_no || "—"), num(x.articles), num(x.qty), rupees(x.value)],
     }));
-  const boxes = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(b.list || []), [4, 5, 6]);
-  const gap = table(["Box", "Why", "To", "Truck", "Articles", "Qty", "Value"], boxRows(f.not_unloaded || []), [4, 5, 6]);
+  const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
+  const unloadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.list || []), [4, 5, 6]);
+  const waitingT = table(["Box", "Why", "To", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.waiting || []), [4, 5, 6]);
 
   const yet = table(
     ["Where", "From", "Item", "Qty", "Value"],
@@ -203,7 +216,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
   .need li { margin: 1px 0; }
   .need li.red { color: #9b2c2c; }
   .need li.amber { color: #9c4221; }
-  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 8px; }
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px; }
   .card { border: 1px solid #e2e8f0; border-left: 4px solid #38a169; border-radius: 4px; padding: 6px 8px; }
   .card.red { border-left-color: #e53e3e; }
   .card.amber { border-left-color: #dd6b20; }
@@ -242,8 +255,9 @@ ${needYou}
 <div class="cards">${cards}</div>
 <h2>Flow of goods</h2>${flow}
 ${section("Picking write-off by store", writeoff)}
-${section("Box problems", boxes, "Not on a truck: on the loading list, never put on a truck. Not delivered: on a truck but not unloaded, wrong store, or quantity differs.")}
-${section("Loaded but not unloaded", gap, "Every box on the loading list with no unloading. Awaiting unloading and damage returns are not problems.")}
+${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
+${section("Unloading problems", unloadingT, "On a truck, but not unloaded, unloaded at the wrong store, quantity differs - or unloaded but never loaded.")}
+${section("Not unloaded yet - not a problem", waitingT, "Still awaiting unloading, or damage returns going back to the warehouse.")}
 ${section("Yet to verify", yet)}
 ${section("Remarks pending", remarks)}
 ${section("Stores", stores)}

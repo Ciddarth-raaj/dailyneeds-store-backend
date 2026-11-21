@@ -56,13 +56,17 @@ test("picking write-off is headed by lines, value and qty after", () => {
 test("boxes: not on a truck is separate from not delivered", () => {
   const h = H.buildHealth(base);
   assert.strictEqual(h.tiles.boxes.not_on_truck, 1);
+  assert.deepStrictEqual([h.tiles.loading.boxes, h.tiles.loading.on_truck, h.tiles.loading.not_on_truck, h.tiles.loading.list[0].box_id], [4, 3, 1, "B1"]);
+  assert.deepStrictEqual([h.tiles.unloading.loaded_boxes, h.tiles.unloading.unloaded_boxes, h.tiles.unloading.problems, h.tiles.unloading.list[0].box_id], [3, 1, 1, "B3"]);
+  assert.deepStrictEqual(h.tiles.unloading.waiting.map((x) => [x.box_id, x.status]), [["B4", "RETURN"]]);
+  assert.deepStrictEqual(h.need_you.filter((i) => ["loading", "unloading"].includes(i.key)).map((i) => i.key), ["loading", "unloading"]);
   assert.strictEqual(h.tiles.boxes.not_unloaded, 1);
   assert.strictEqual(h.flow.loading_list_boxes, 4);
   assert.strictEqual(h.flow.on_truck_boxes, 3);
   assert.strictEqual(h.flow.unloaded_boxes, 1);
-  // The difference between loaded and unloaded, box by box, with why - a return is not a problem but is listed.
-  assert.deepStrictEqual(h.flow.not_unloaded.map((b) => [b.box_id, b.status]).sort(), [["B1", "NOT_ON_TRUCK"], ["B3", "NOT_UNLOADED"], ["B4", "RETURN"]]);
-  assert.strictEqual(h.flow.not_unloaded_boxes, 3);
+  // The difference between boxes on trucks and unloaded, box by box, with why - a return is not a problem but is listed.
+  assert.deepStrictEqual(h.flow.not_unloaded.map((b) => [b.box_id, b.status]).sort(), [["B3", "NOT_UNLOADED"], ["B4", "RETURN"]]);
+  assert.strictEqual(h.flow.not_unloaded_boxes, 2);
   assert.strictEqual(h.flow.trucks, 1);
 });
 
