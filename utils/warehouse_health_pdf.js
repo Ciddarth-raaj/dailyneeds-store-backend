@@ -137,6 +137,33 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     }));
   const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
   const unloadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.list || []), [4, 5, 6]);
+  const sc = h.stage_chain;
+  const stageHtml = sc
+    ? `<h2 style="margin-top:4px">Where everything stands tonight</h2>
+${table(
+  ["Waiting to be", "From earlier", "+ Arrived", "− Moved on", "= Tonight", "Oldest"],
+  [
+    ...sc.gaps.slice(0, 2).map((g) => ({ cls: g.stuck ? "bad" : "", cells: [`${esc(g.label)} <span class="sub">qty</span>`, num(g.from_earlier), num(g.arrived), num(g.moved_on), `<b>${num(g.stands)}</b>`, g.stands ? plural(g.oldest_days, "day") : "—"] })),
+    ...(sc.boxes ? [{ cls: sc.boxes.still_open.boxes ? "bad" : "", cells: ['Loaded, not yet unloaded <span class="sub">boxes</span>', num(sc.boxes.opening.boxes), num(sc.boxes.loaded.boxes), num(sc.boxes.unloaded.boxes), `<b>${num(sc.boxes.still_open.boxes)}</b>`, sc.boxes.still_open.boxes ? plural(sc.boxes.still_open.oldest_days, "day") : "—"] }] : []),
+    ...sc.gaps.slice(2).map((g) => ({ cls: g.stuck ? "bad" : "", cells: [`${esc(g.label)} <span class="sub">qty</span>`, num(g.from_earlier), num(g.arrived), num(g.moved_on), `<b>${num(g.stands)}</b>`, g.stands ? plural(g.oldest_days, "day") : "—"] })),
+  ],
+  [1, 2, 3, 4, 5]
+)}
+${sc.gaps
+  .filter((g) => g.list.length)
+  .map((g) =>
+    section(
+      `${g.label} - ${num(g.stands)} qty · ${rupees(g.value)}`,
+      table(
+        ["Article", "Document", "From → To", "Qty", "Value", "Waiting"],
+        g.list.slice(0, 40).map((l) => ({ cls: l.days >= 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
+        [3, 4, 5]
+      ),
+      g.list.length > 40 ? `Oldest 40 of ${g.list.length} lines - all on the dashboard.` : ""
+    )
+  )
+  .join("")}`
+    : "";
   const c = t.unloading.chain;
   const tripItems = (x) =>
     (x.items || []).length
@@ -282,6 +309,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   <div class="meta"><div class="day">${esc(dayText(h.date))}</div>Made ${esc(istTime(nowMs))} IST<br>Source: RetailPilot</div>
 </header>
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
+${stageHtml}
 ${needYou}
 <div class="cards">${cards}</div>
 <h2>Flow of goods</h2>${flow}

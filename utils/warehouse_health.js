@@ -127,7 +127,8 @@ function buildHealth(args) {
   const add = [];
   for (const g of sc.gaps) {
     if (g.stuck) add.push({ key: `chain_${g.key}`, tone: "red", text: `${g.label}: ${g.stuck} line${g.stuck === 1 ? "" : "s"} waiting 2 days or more (oldest ${g.oldest_days} days)` });
-    if (g.jumped.lines) add.push({ key: `chain_${g.key}`, tone: "amber", text: `${g.label.split(",")[0]} skipped: ${g.jumped.lines} line${g.jumped.lines === 1 ? "" : "s"} (${fmt(g.jumped.qty)} qty) reached the next stage with no record here` });
+    const skipped = { to_pack: "Packed with no picking record", to_load: "Loaded with no packing record", to_verify: "Verified with no unloading record" }[g.key];
+    if (g.jumped.lines) add.push({ key: `chain_${g.key}`, tone: "amber", text: `${skipped}: ${g.jumped.lines} line${g.jumped.lines === 1 ? "" : "s"} (${fmt(g.jumped.qty)} qty)` });
   }
   h.need_you.unshift(...add);
   return h;
