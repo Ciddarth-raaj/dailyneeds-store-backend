@@ -1,7 +1,22 @@
+const fs = require("fs");
+const path = require("path");
 const logger = require("../utils/logger");
 const H = require("../utils/warehouse_health");
 const W = require("../utils/wh_daily_reports");
 const { istToday } = require("../utils/istDate");
+const P = require("../utils/warehouse_health_pdf");
+
+const A4 = { format: "A4", printBackground: true, preferCSSPageSize: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } };
+
+/** The Daily Needs logo as a data URI (the payslip's copy), or null without it. */
+function loadLogo() {
+  try {
+    const file = path.join(__dirname, "..", "assets", "payslip", "dnds-logo.png");
+    return `data:image/png;base64,${fs.readFileSync(file).toString("base64")}`;
+  } catch (err) {
+    return null;
+  }
+}
 
 /**
  * Warehouse Health (utils/warehouse_health.js): the warehouse manager's
@@ -16,8 +31,13 @@ class WarehouseHealth {
    * @param summaryRepo     repository/warehouse_health_summary
    * @param telegramService services/telegram
    * @param dashboardUrl    the page the summary's button opens
+   * @param pdf / s3        services/pdf (withBrowser) and services/s3 (uploadFile): the PDF sent after the message
    */
-  constructor({ repo, reports, summaryRepo = null, telegramService = null, dashboardUrl = null, today = () => istToday() }) {
+  constructor({ repo, reports, summaryRepo = null, telegramService = null, dashboardUrl = null, pdf = null, s3 = null, today = () => istToday(), now = () => Date.now() }) {
+    this.pdf = pdf;
+    this.s3 = s3;
+    this.now = now;
+    this.logo = pdf ? loadLogo() : null;
     this.repo = repo;
     this.reports = reports;
     this.summaryRepo = summaryRepo;
@@ -59,16 +79,47 @@ class WarehouseHealth {
     return { code: 200, data: { ...(await this.build(d)), today: this.today(), yesterday: this.yesterday() } };
   }
 
-  /** The message about `date`, with a button to the dashboard. */
+  /**
+   * What is sent about `date`: the message (with a button to the dashboard)
+   * and, when PDFs are set up, the PDF's link. A PDF that fails is logged and
+   * left out - the message still goes.
+   */
   async message(date) {
     let text;
+    let h = null;
     try {
-      text = H.formatTelegram(await this.build(date));
+      h = await this.build(date);
+      text = H.formatTelegram(h);
     } catch (err) {
       text = `Warehouse Health - ${date}\nCould not be built: ${err.message}`;
     }
     const keyboard = this.dashboardUrl ? { inlineKeyboard: [[{ text: "Open Warehouse Health", url: this.dashboardUrl }]] } : null;
-    return { text, options: keyboard ? { parseMode: null, replyMarkup: keyboard } : { parseMode: null } };
+    const options = keyboard ? { parseMode: null, replyMarkup: keyboard } : { parseMode: null };
+    let pdfUrl = null;
+    if (h && this.pdf && this.s3) {
+      try {
+        const nowMs = this.now();
+        const html = P.buildHtml(h, { nowMs, logoDataUri: this.logo });
+        const file = await this.pdf.withBrowser((session) => session.renderPdf(html, A4));
+        pdfUrl = await this.s3.uploadFile(undefined, `warehouse_health/${date}_${nowMs}.pdf`, "application/pdf", file);
+      } catch (err) {
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.WAREHOUSE_HEALTH",
+          code: "USECASE.WAREHOUSE_HEALTH.PDF",
+          description: err.toString(),
+          category: "",
+          ref: { date },
+        });
+      }
+    }
+    return { text, options, pdfUrl, caption: `Warehouse Health - ${date} (PDF)` };
+  }
+
+  /** The message, then the PDF when there is one. */
+  async _send(chat, m) {
+    await this.telegram.sendMessage(chat, m.text, m.options);
+    if (m.pdfUrl) await this.telegram.sendDocument(chat, m.pdfUrl, m.caption);
   }
 
   /** "Send me the summary": yesterday's, to the caller's own Telegram. Not recorded. */
@@ -77,20 +128,21 @@ class WarehouseHealth {
     if (!this.summaryRepo || !this.telegram) return { code: 400, msg: "The summary is not set up" };
     const chat = await this.summaryRepo.chatOf(employeeId);
     if (!chat) return { code: 422, msg: "Your Telegram is not linked to the bot yet" };
-    const { text, options } = await this.message(this.yesterday());
+    const m = await this.message(this.yesterday());
     try {
-      await this.telegram.sendMessage(chat, text, options);
+      await this._send(chat, m);
     } catch (err) {
       return { code: 502, msg: `Telegram: ${err.message}` };
     }
-    return { code: 200, data: { text } };
+    return { code: 200, data: { text: m.text, pdf: Boolean(m.pdfUrl) } };
   }
 
   /** The 9 am send: yesterday's summary to every recipient not yet sent it. */
   async run() {
     const day = this.yesterday();
     const outcome = { date: day, sent: 0, failed: 0, skipped: 0, already: 0 };
-    const { text, options } = await this.message(day);
+    const m = await this.message(day);
+    outcome.pdf = Boolean(m.pdfUrl);
     const recipients = await this.summaryRepo.recipients(this.today());
     const done = await this.summaryRepo.sentOn(day);
     for (const r of recipients) {
@@ -106,7 +158,7 @@ class WarehouseHealth {
       }
       try {
         // eslint-disable-next-line no-await-in-loop
-        await this.telegram.sendMessage(r.private_chat_id, text, options);
+        await this._send(r.private_chat_id, m);
         outcome.sent += 1;
         await this.summaryRepo.record({ day, employee_id: employeeId, status: "SENT", chat_id: r.private_chat_id });
       } catch (err) {

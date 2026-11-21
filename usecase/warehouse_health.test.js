@@ -12,10 +12,12 @@ const repo = {
 };
 const reports = { _boxes: async () => [], _staffNames: async () => ({}) };
 
-function setup(recipients, failFor = null) {
+function setup(recipients, failFor = null, extra = {}) {
   const sent = [];
+  const docs = [];
   const recorded = [];
   const uc = make({
+    ...extra,
     repo,
     reports,
     today: () => "2026-11-21",
@@ -25,6 +27,7 @@ function setup(recipients, failFor = null) {
         if (chat === failFor) throw new Error("blocked");
         sent.push({ chat, text, options });
       },
+      sendDocument: async (chat, url, caption) => docs.push({ chat, url, caption }),
     },
     summaryRepo: {
       recipients: async () => recipients,
@@ -33,7 +36,7 @@ function setup(recipients, failFor = null) {
       chatOf: async (id) => (id === 1 ? "c1" : null),
     },
   });
-  return { uc, sent, recorded };
+  return { uc, sent, docs, recorded };
 }
 
 test("health defaults to yesterday and refuses the future", async () => {
@@ -51,7 +54,7 @@ test("run sends yesterday once per person, skips unlinked, records failures", as
     "c4"
   );
   const out = await uc.run();
-  assert.deepStrictEqual(out, { date: "2026-11-20", sent: 1, failed: 1, skipped: 1, already: 1 });
+  assert.deepStrictEqual(out, { date: "2026-11-20", pdf: false, sent: 1, failed: 1, skipped: 1, already: 1 });
   assert.strictEqual(sent[0].chat, "c1");
   assert.match(sent[0].text, /Picking write-off 2 lines/);
   assert.strictEqual(sent[0].options.replyMarkup.inlineKeyboard[0][0].url, "https://x/d");
@@ -64,4 +67,26 @@ test("send me", async () => {
   assert.strictEqual(sent.length, 1);
   assert.strictEqual((await uc.sendToMe(2)).code, 422);
   assert.strictEqual((await uc.sendToMe(null)).code, 403);
+});
+
+test("the PDF is made once, uploaded once and sent after the message to each person", async () => {
+  let renders = 0;
+  let uploads = 0;
+  let html = "";
+  const pdf = { withBrowser: async (fn) => fn({ renderPdf: async (h) => ((html = h), renders++, Buffer.from("pdf")) }) };
+  const s3 = { uploadFile: async (_, name) => (uploads++, `https://s3/${name}`) };
+  const { uc, sent, docs } = setup([{ employee_id: 1, private_chat_id: "c1" }, { employee_id: 5, private_chat_id: "c5" }], null, { pdf, s3, now: () => 1 });
+  const out = await uc.run();
+  assert.strictEqual(out.pdf, true);
+  assert.deepStrictEqual([renders, uploads, sent.length], [1, 1, 2]);
+  assert.deepStrictEqual(docs.map((d) => [d.chat, d.url, d.caption]), [["c1", "https://s3/warehouse_health/2026-11-20_1.pdf", "Warehouse Health - 2026-11-20 (PDF)"], ["c5", "https://s3/warehouse_health/2026-11-20_1.pdf", "Warehouse Health - 2026-11-20 (PDF)"]]);
+  assert.match(html, /Warehouse Health/);
+  assert.match(html, /2 lines/);
+});
+
+test("a PDF that fails still sends the message", async () => {
+  const pdf = { withBrowser: async () => { throw new Error("no chrome"); } };
+  const { uc, sent, docs } = setup([{ employee_id: 1, private_chat_id: "c1" }], null, { pdf, s3: { uploadFile: async () => "x" } });
+  const out = await uc.run();
+  assert.deepStrictEqual([out.sent, out.pdf, sent.length, docs.length], [1, false, 1, 0]);
 });

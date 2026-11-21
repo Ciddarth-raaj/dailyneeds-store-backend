@@ -1333,6 +1333,8 @@ class Server {
       summaryRepo: require("./repository/warehouse_health_summary")(this.mysql.connection),
       telegramService: require("./services/telegram")(),
       dashboardUrl: process.env.WAREHOUSE_HEALTH_URL || "https://dnds.co.in/dashboard/invoice-pipeline",
+      pdf: require("./services/pdf"),
+      s3: require("./services/s3"),
     });
     this.poFollowupRepo = require("./repository/po_followup")(this.mysql.connection);
     this.poTrackerUsecase = require("./usecase/po_tracker")(
@@ -2998,7 +3000,7 @@ class Server {
         }
         try {
           const r = await this.warehouseHealth.run();
-          console.log(`[CRON] warehouse_health_telegram ${r.date}: ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
+          console.log(`[CRON] warehouse_health_telegram ${r.date} (pdf ${r.pdf ? "yes" : "no"}): ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
         } catch (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
