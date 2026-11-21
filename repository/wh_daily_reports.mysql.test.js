@@ -28,8 +28,8 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
-    await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80));
+    await q(`DROP TABLE IF EXISTS wh_rp_staff_map, outlets, designation, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
+    await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL); CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80)); CREATE TABLE designation (designation_id INT PRIMARY KEY, designation_name VARCHAR(80)); INSERT INTO outlets VALUES (1, 'Warehouse'); INSERT INTO designation VALUES (3, 'Picker');
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
              CREATE TABLE retailpilot_grn_headers (invoice_slug VARCHAR(64) PRIMARY KEY, entered_at DATETIME);
@@ -52,7 +52,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
                date DATE NOT NULL, job_type ENUM('GRN','STA') NOT NULL, remark_id INT NULL, remark_str VARCHAR(500) NULL,
                is_verified TINYINT(1) NOT NULL DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                FOREIGN KEY (product_id) REFERENCES product_table(product_id));
-             INSERT INTO new_employee VALUES (7, 'Prashanth');
+             INSERT INTO new_employee VALUES (7, 'Prashanth', 1, 1, 3), (8, 'Left Already', 0, 1, 3);
              INSERT INTO retailpilot_grn_headers VALUES ('old', '2026-10-01 10:00:00'), ('new', '2026-11-01 10:00:00');
              INSERT INTO retailpilot_grn_lines VALUES ('1', 'old', 2, 40), ('2', 'new', 2, 45);`);
     await q(SQL("up"));
@@ -60,6 +60,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261218140000-pick-pack-write-off-store-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     // RetailPilot as far as NLC goes: article 2 has NLC 45; article 1 none.
     nlcSpectra = {
@@ -70,9 +71,9 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   });
   after(() => pool && pool.end());
 
-  it("migration adds both permissions once", async () => {
+  it("migrations add their permissions once", async () => {
     const rows = await q("SELECT permission_key FROM all_permissions ORDER BY permission_key");
-    assert.deepEqual(rows.map((r) => r.permission_key), ["upload_wh_daily_reports", "view_wh_daily_reports"]);
+    assert.deepEqual(rows.map((r) => r.permission_key), ["manage_wh_staff_map", "upload_wh_daily_reports", "view_wh_daily_reports"]);
   });
 
   it("saves an upload, values it at NLC from RetailPilot (not the file's MRP), and replaces it on a second upload", async () => {
@@ -225,6 +226,26 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(left.map((r) => [r.product_id, r.store]), [[1, "ecr"], [2, "ecr"], [3, "moolakulam"]]);
   });
 
+  it("staff mapping: every RetailPilot user with where they worked; mapped names reach the analysis", async () => {
+    // The RetailPilot pull test above left kp-7 picking at the warehouse and kp-1,kp-2 loading on 2026-11-12.
+    const before = await uc.staff();
+    const ids = before.data.staff.map((s) => s.rp_user_id);
+    assert.ok(["kp-7", "kp-1", "kp-2"].every((id) => ids.includes(id)));
+    const kp7 = before.data.staff.find((s) => s.rp_user_id === "kp-7");
+    assert.deepEqual([kp7.stages.PICKING, kp7.main_store, kp7.last_date, kp7.employee_id], [1, "warehouse", "2026-11-12", null]);
+    assert.deepEqual(before.data.employees.map((e) => [e.employee_id, e.store, e.designation]), [[7, "Warehouse", "Picker"]]);
+    assert.equal((await uc.mapStaff({ rp_user_id: "kp-7", employee_id: 7, updated_by: 7 })).code, 200);
+    assert.equal((await uc.mapStaff({ rp_user_id: "kp-7", employee_id: "x" })).code, 422);
+    const after = await uc.staff();
+    const mapped = after.data.staff.find((s) => s.rp_user_id === "kp-7");
+    assert.deepEqual([mapped.employee_name, mapped.updated_by_name], ["Prashanth", "Prashanth"]);
+    assert.equal(after.data.staff[after.data.staff.length - 1].rp_user_id, "kp-7");
+    const a = await uc.analysis({ from: "2026-11-12", to: "2026-11-12" });
+    assert.equal(a.data.staff_names["kp-7"], "Prashanth");
+    await uc.mapStaff({ rp_user_id: "kp-7", employee_id: null });
+    assert.equal((await uc.analysis({ from: "2026-11-12", to: "2026-11-12" })).data.staff_names["kp-7"], undefined);
+  });
+
   it("fills NLC from RetailPilot on rows that have none, in both report shapes", async () => {
     await q("UPDATE wh_report_job_rows SET nlc = NULL, nlc_source = NULL WHERE report_date = '2026-11-16'");
     await q("UPDATE wh_report_box_rows SET nlc = NULL WHERE report_date = '2026-11-16'");
@@ -245,6 +266,8 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
     const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-down.sql"), "utf8"));
+    assert.equal((await q("SHOW TABLES LIKE 'wh_rp_staff_map'")).length, 0);
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-down.sql"), "utf8"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_job_rows LIKE 'mrp'")).length, 1);
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-down.sql"), "utf8"));

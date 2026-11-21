@@ -407,6 +407,64 @@ class WhDailyReportsRepository {
     return toNumbers(rows, ["box_qty", "nlc"]);
   }
 
+  /**
+   * Who worked, from the reports pulled from RetailPilot: per report, user
+   * (as recorded - loading / unloading hold several, comma-separated) and the
+   * store they worked at (picking, packing, loading: where the goods left;
+   * verification: the store that verified; unloading: where it unloaded).
+   */
+  async staffWork() {
+    const rows = await this.run(
+      "STAFF_WORK",
+      `SELECT report_type, worked_by,
+              CASE WHEN report_type = 'VERIFICATION' THEN to_store ELSE from_store END AS store,
+              COUNT(*) AS \`lines\`, DATE_FORMAT(MIN(report_date), '%Y-%m-%d') AS first_date, DATE_FORMAT(MAX(report_date), '%Y-%m-%d') AS last_date
+         FROM wh_report_job_rows WHERE worked_by IS NOT NULL AND worked_by <> ''
+        GROUP BY report_type, worked_by, store
+       UNION ALL
+       SELECT report_type, worked_by,
+              CASE WHEN report_type = 'UNLOADING' THEN unloaded_store ELSE from_store END AS store,
+              COUNT(*) AS \`lines\`, DATE_FORMAT(MIN(report_date), '%Y-%m-%d'), DATE_FORMAT(MAX(report_date), '%Y-%m-%d')
+         FROM wh_report_box_rows WHERE worked_by IS NOT NULL AND worked_by <> ''
+        GROUP BY report_type, worked_by, store`
+    );
+    return toNumbers(rows, ["lines"]);
+  }
+
+  /** The mapping, with each mapped employee's name. */
+  async staffMap() {
+    return this.run(
+      "STAFF_MAP",
+      `SELECT m.rp_user_id, m.employee_id, e.employee_name, m.note, m.updated_at, u.employee_name AS updated_by_name
+         FROM wh_rp_staff_map m
+         LEFT JOIN new_employee e ON e.employee_id = m.employee_id
+         LEFT JOIN new_employee u ON u.employee_id = m.updated_by`
+    );
+  }
+
+  /** Map (or unmap, employee_id null) one RetailPilot user id. */
+  async setStaffMap({ rp_user_id, employee_id, note, updated_by }) {
+    await this.run(
+      "SET_STAFF_MAP",
+      `INSERT INTO wh_rp_staff_map (rp_user_id, employee_id, note, updated_by) VALUES (?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE employee_id = VALUES(employee_id), note = VALUES(note), updated_by = VALUES(updated_by)`,
+      [rp_user_id, employee_id, note, updated_by]
+    );
+  }
+
+  /** Active employees to choose from, with store and designation. */
+  async employeeChoices() {
+    return this.run(
+      "EMPLOYEE_CHOICES",
+      `SELECT e.employee_id, e.employee_name, o.outlet_name AS store, d.designation_name AS designation
+         FROM new_employee e
+         LEFT JOIN outlets o ON o.outlet_id = e.store_id
+         LEFT JOIN designation d ON d.designation_id = e.designation_id
+        WHERE e.status = 1
+        ORDER BY e.employee_name, e.employee_id`
+    );
+  }
+
   /** The last day there is an Unloading report for, on or before `to`. */
   async lastUploadDate(reportType, to) {
     const [row] = await this.run(

@@ -14,6 +14,9 @@ const respondError = require("../utils/http");
  *   POST   /upload                             one file as one report for a day   upload_wh_daily_reports
  *          { report_type, report_date, file_name, headers: [...], rows: [[...], ...], allow_date_mismatch }
  *   DELETE /uploads/:upload_id                 remove an upload and its rows      upload_wh_daily_reports
+ *   GET    /staff                              RetailPilot user ids, what they     manage_wh_staff_map
+ *                                             did and where, their employee
+ *   PUT    /staff/:rp_user_id { employee_id, note }  map / unmap one id            manage_wh_staff_map
  *   POST   /fill-nlc { from, to }              NLC from RetailPilot on rows      view_wh_daily_reports or
  *                                             that have none                     upload_wh_daily_reports
  *   POST   /pull { from, to }                  the five reports from RetailPilot  upload_wh_daily_reports
@@ -85,6 +88,31 @@ class WhDailyReportsRoutes {
             rows: b.rows,
             allow_date_mismatch: b.allow_date_mismatch === true,
             employee_id: (req.decoded && req.decoded.employee_id) || null,
+          })
+        );
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.get("/staff", need("manage_wh_staff_map"), async (req, res) => {
+      try {
+        send(res, await this.usecase.staff());
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.put("/staff/:rp_user_id", need("manage_wh_staff_map"), async (req, res) => {
+      try {
+        const b = req.body || {};
+        send(
+          res,
+          await this.usecase.mapStaff({
+            rp_user_id: req.params.rp_user_id,
+            employee_id: b.employee_id,
+            note: b.note,
+            updated_by: (req.decoded && req.decoded.employee_id) || null,
           })
         );
       } catch (err) {

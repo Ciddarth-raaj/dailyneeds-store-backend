@@ -205,6 +205,63 @@ class WhDailyReports {
     return { code: 200, data: { from: r.from, to: r.to, articles: ids.length, priced: prices.size, still_unpriced: ids.length - prices.size, rows_updated: updated } };
   }
 
+  /** RetailPilot user id -> employee name, for the mapped ids. */
+  async _staffNames() {
+    try {
+      const map = await this.repo.staffMap();
+      return Object.fromEntries(map.filter((m) => m.employee_id && m.employee_name).map((m) => [m.rp_user_id, m.employee_name]));
+    } catch (err) {
+      return {};
+    }
+  }
+
+  /**
+   * Staff Mapping: every RetailPilot user id the pulled reports name, with
+   * what they did and where (stores, lines, first and last day), and the
+   * employee it is mapped to; plus the active employees to choose from.
+   */
+  async staff() {
+    const [work, map, employees] = await Promise.all([this.repo.staffWork(), this.repo.staffMap(), this.repo.employeeChoices()]);
+    const byId = new Map();
+    for (const w of work) {
+      for (const id of String(w.worked_by).split(",").map((x) => x.trim()).filter(Boolean)) {
+        const s = byId.get(id) || { rp_user_id: id, lines: 0, stages: {}, stores: {}, first_date: null, last_date: null };
+        s.lines += w.lines;
+        s.stages[w.report_type] = (s.stages[w.report_type] || 0) + w.lines;
+        if (w.store) s.stores[w.store] = (s.stores[w.store] || 0) + w.lines;
+        if (!s.first_date || w.first_date < s.first_date) s.first_date = w.first_date;
+        if (!s.last_date || w.last_date > s.last_date) s.last_date = w.last_date;
+        byId.set(id, s);
+      }
+    }
+    for (const m of map) if (!byId.has(m.rp_user_id)) byId.set(m.rp_user_id, { rp_user_id: m.rp_user_id, lines: 0, stages: {}, stores: {}, first_date: null, last_date: null });
+    const mapped = new Map(map.map((m) => [m.rp_user_id, m]));
+    const staff = [...byId.values()]
+      .map((s) => {
+        const m = mapped.get(s.rp_user_id);
+        return {
+          ...s,
+          main_store: Object.entries(s.stores).sort((a, b) => b[1] - a[1])[0]?.[0] || null,
+          employee_id: (m && m.employee_id) || null,
+          employee_name: (m && m.employee_name) || null,
+          note: (m && m.note) || null,
+          updated_by_name: (m && m.updated_by_name) || null,
+          updated_at: m && m.updated_at ? new Date(m.updated_at).toISOString() : null,
+        };
+      })
+      .sort((a, b) => Number(Boolean(a.employee_id)) - Number(Boolean(b.employee_id)) || b.lines - a.lines);
+    return { code: 200, data: { staff, employees } };
+  }
+
+  async mapStaff({ rp_user_id, employee_id, note, updated_by }) {
+    const id = String(rp_user_id || "").trim();
+    if (!id || id.length > 100) return { code: 422, msg: "Invalid RetailPilot user" };
+    const emp = employee_id == null || employee_id === "" ? null : Number(employee_id);
+    if (emp !== null && (!Number.isInteger(emp) || emp <= 0)) return { code: 422, msg: "Choose an employee" };
+    await this.repo.setStaffMap({ rp_user_id: id, employee_id: emp, note: note ? String(note).slice(0, 255) : null, updated_by: updated_by || null });
+    return { code: 200, data: { rp_user_id: id, employee_id: emp } };
+  }
+
   /** What was uploaded for each day in the range. */
   async status({ from, to }) {
     const r = this._range(from, to);
@@ -260,6 +317,7 @@ class WhDailyReports {
       this._boxes(r.from, r.to, opts.store),
       this.repo.jobBreakdown(r.from, r.to, ["report_type", "worked_by"], opts),
     ]);
+    const staffNames = await this._staffNames();
 
     // Box totals by status, per truck and day, and per day.
     const byStatus = {};
@@ -342,6 +400,7 @@ class WhDailyReports {
         by_department: byDepartment,
         by_job_type: byJobType,
         by_worker: byWorker,
+        staff_names: staffNames,
         daily,
         short_articles: articles,
         funnel: funnelRows.sort((a, b) => String(a.store).localeCompare(String(b.store)) || String(a.job_type).localeCompare(String(b.job_type))),
