@@ -77,7 +77,7 @@ test("pickers: lines and value, mistakes traced, accuracy below 98% flagged", ()
 test("telegram text", () => {
   const t = H.formatTelegram(H.buildHealth(base));
   assert.match(t, /Picking write-off 115 lines/);
-  assert.match(t, /Yet to verify at: Warehouse 5/);
+  assert.match(t, /Yet to verify at: Warehouse \(returns\) 5/);
   assert.match(t, /Pickers below 98% this month: u2 97.0%/);
   assert.match(t, /Not pulled yet: Packing, Unloading/);
   assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");

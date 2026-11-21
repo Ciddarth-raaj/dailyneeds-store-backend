@@ -20,7 +20,10 @@ const rupees = (v) => {
   if (x >= 1e5) return `₹${(x / 1e5).toFixed(2)} L`;
   return `₹${fmt(x)}`;
 };
-const title = (s) => String(s || "").replace(/\b\w/g, (c) => c.toUpperCase());
+const title = (s) => {
+  const t = String(s || "").trim();
+  return t.length <= 3 ? t.toUpperCase() : t.replace(/\b\w/g, (c) => c.toUpperCase());
+};
 const blankJob = () => ({ lines: 0, done_lines: 0, actual_qty: 0, actual_value: 0, short_lines: 0, short_qty: 0, short_value: 0, open_lines: 0, returned_qty: 0 });
 
 function addDays(day, k) {
@@ -171,7 +174,7 @@ function buildHealth({ date, uploads, summary, byStore, yetToVerify, remarks, bo
   const lost = countBy("NOT_UNLOADED") + countBy("WRONG_STORE") + countBy("QTY_DIFF");
   if (lost) items.push({ key: "boxes", tone: "red", text: `${lost} box${lost === 1 ? "" : "es"} not delivered right (not unloaded, wrong store or quantity differs)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
-  if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} units yet to verify` });
+  if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
   if (rm.WRITE_OFF.pending + rm.VERIFICATION.pending) items.push({ key: "remarks", tone: rm.WRITE_OFF.backlog + rm.VERIFICATION.backlog ? "red" : "amber", text: `${rm.WRITE_OFF.pending + rm.VERIFICATION.pending} lines without remark` });
   if (openLines) items.push({ key: "jobs", tone: "amber", text: `${fmt(openLines)} picking / packing lines still open` });
 
@@ -219,12 +222,15 @@ function formatTelegram(h) {
   const pending = h.tiles.verification.yet_to_verify;
   if (pending.length) {
     const where = new Map();
-    for (const p of pending) where.set(title(p.to_store), (where.get(title(p.to_store)) || 0) + p.qty);
+    for (const p of pending) {
+      const k = p.is_return ? `${title(p.to_store)} (returns)` : title(p.to_store);
+      where.set(k, (where.get(k) || 0) + p.qty);
+    }
     lines.push(`Yet to verify at: ${[...where].map(([s, q]) => `${s} ${fmt(q)}`).join(", ")}`);
   }
   if (h.repeats.length) lines.push(`Short again and again: ${h.repeats.slice(0, 5).map((a) => title(a.article_name || a.article_id)).join(", ")}`);
   const below = h.pickers.filter((p) => p.below_target);
-  if (below.length) lines.push(`Pickers below ${Math.round(h.accuracy_target * 100)}% this month: ${below.slice(0, 5).map((p) => `${p.name} ${(p.accuracy * 100).toFixed(1)}%`).join(", ")}`);
+  if (below.length) lines.push(`Pickers below ${Math.round(h.accuracy_target * 100)}% this month: ${below.slice(0, 5).map((p) => `${p.name} ${(Math.floor(p.accuracy * 1000) / 10).toFixed(1)}%`).join(", ")}`);
   if (h.missing_reports.length) lines.push(`Not pulled yet: ${h.missing_reports.join(", ")}`);
   return lines.join("\n");
 }
