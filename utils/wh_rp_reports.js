@@ -98,46 +98,39 @@ FROM masterhub.stores s
 ORDER BY s.slug`;
 
 /**
- * NLC (net landing cost) of these articles: every batch with its NLC and
- * the stock it holds now (any store, any location). Article ids are checked
- * as digits.
+ * NLC (net landing cost) of these articles, one row each, summed in
+ * RetailPilot: the stock it holds now (any store, any location) and that
+ * stock's NLC value, and the plain average NLC of its batches. Article ids
+ * are checked as digits.
  */
 function buildNlcQuery(articleIds) {
   const ids = [...new Set((articleIds || []).map((v) => clean(v)).filter((v) => /^\d{1,18}$/.test(v)))];
   if (!ids.length) return null;
   return `
-SELECT CAST(b.article_id AS TEXT) AS article_id, b.batch_id, b.net_landing_cost, p.quantity
+SELECT CAST(b.article_id AS TEXT) AS article_id,
+  SUM(p.quantity * b.net_landing_cost) AS stock_value,
+  SUM(p.quantity) AS stock_qty,
+  AVG(b.net_landing_cost) AS avg_nlc
 FROM public.inventory_batches b
 LEFT JOIN public.batch_stock_positions p ON p.batch_id = b.batch_id AND p.quantity > 0
 WHERE CAST(b.article_id AS TEXT) IN (${ids.map((id) => `'${id}'`).join(", ")}) AND b.net_landing_cost > 0
-ORDER BY b.article_id, b.batch_id`;
+GROUP BY b.article_id
+ORDER BY b.article_id`;
 }
 
 /**
- * article id -> NLC: the stock-weighted average NLC of the batches the
- * article holds now; an article with no stock (often the case when it was
- * short) takes the plain average of its batches' NLC. 4 decimals.
+ * article id -> NLC: the stock-weighted average NLC of what the article
+ * holds now; an article with no stock (often the case when it was short)
+ * takes the average NLC of its batches. 4 decimals.
  */
 function nlcByArticle(rows) {
-  const by = new Map();
+  const out = new Map();
   for (const r of rows || []) {
     const id = articleNo(r.article_id);
-    const nlc = num(r.net_landing_cost);
-    if (!id || !(nlc > 0)) continue;
-    const a = by.get(id) || { batches: new Map(), qty: 0, value: 0 };
-    a.batches.set(clean(r.batch_id), nlc);
-    const q = num(r.quantity);
-    if (q > 0) {
-      a.qty += q;
-      a.value += q * nlc;
-    }
-    by.set(id, a);
-  }
-  const out = new Map();
-  for (const [id, a] of by) {
-    const list = [...a.batches.values()];
-    const v = a.qty > 0 ? a.value / a.qty : list.reduce((s, x) => s + x, 0) / list.length;
-    out.set(id, Math.round(v * 10000) / 10000);
+    if (!id) continue;
+    const qty = num(r.stock_qty);
+    const v = qty > 0 ? num(r.stock_value) / qty : num(r.avg_nlc);
+    if (v > 0) out.set(id, Math.round(v * 10000) / 10000);
   }
   return out;
 }

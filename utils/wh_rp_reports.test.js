@@ -29,16 +29,27 @@ describe("queries", () => {
 describe("NLC", () => {
   it("query checks article ids; stock-weighted NLC, else the batches' average", () => {
     assert.equal(R.buildNlcQuery(["abc", "1;DROP"]), null);
-    assert.match(R.buildNlcQuery(["100073", 100073, "102654"]), /IN \('100073', '102654'\) AND b\.net_landing_cost > 0/);
+    const q = R.buildNlcQuery(["100073", 100073, "102654"]);
+    assert.match(q, /IN \('100073', '102654'\) AND b\.net_landing_cost > 0/);
+    assert.match(q, /GROUP BY b\.article_id/);
     const m = R.nlcByArticle([
-      { article_id: "1", batch_id: "a", net_landing_cost: "10", quantity: "3" },
-      { article_id: "1", batch_id: "b", net_landing_cost: "20", quantity: "1" },
-      { article_id: "1", batch_id: "c", net_landing_cost: "99", quantity: null },
-      { article_id: "2", batch_id: "x", net_landing_cost: "8", quantity: null },
-      { article_id: "2", batch_id: "y", net_landing_cost: "12", quantity: null },
-      { article_id: "3", batch_id: "z", net_landing_cost: "0", quantity: "5" },
+      { article_id: "1", stock_value: "50", stock_qty: "4", avg_nlc: "43" },
+      { article_id: "2", stock_value: null, stock_qty: null, avg_nlc: "10" },
+      { article_id: "3", stock_value: null, stock_qty: null, avg_nlc: "0" },
     ]);
     assert.deepEqual([...m.entries()], [[1, 12.5], [2, 10]]);
+  });
+  it("values every line, asking RetailPilot once per article within 30 minutes", async () => {
+    const asked = [];
+    const spectra = { isConfigured: () => true, queryAll: async (q) => (asked.push(q), /inventory_batches/.test(q) ? [{ article_id: "100073", avg_nlc: "28.5" }] : []) };
+    const rp = { productInfo: async () => new Map(), uploads: async () => [], replaceUpload: async () => ({ upload_id: 1, page: null }) };
+    const uc = usecaseFactory(rp, () => "2026-11-17", spectra);
+    const line = (article, advised, actual) => ({ report_type: "PICKING", article_id: article, to_store: "ecr", short_qty: advised - actual, planned_qty: advised, actual_qty: actual, open_jobs: 0 });
+    await uc._save({ type: "PICKING", report_date: "2026-11-16", rows: [line(100073, 5, 3), line(200, 5, 5), line(300, 4, 4)] });
+    await uc._save({ type: "PICKING", report_date: "2026-11-15", rows: [line(100073, 2, 1)] });
+    const nlcQueries = asked.filter((q) => /inventory_batches/.test(q));
+    assert.equal(nlcQueries.length, 1);
+    assert.match(nlcQueries[0], /IN \('100073', '200', '300'\)/);
   });
 });
 
@@ -89,7 +100,7 @@ describe("usecase pull", () => {
       this.queries.push(q);
       if (fail && fail(q)) throw new Error("SPECTRA error: whitelist_violation");
       if (/masterhub\.stores/.test(q)) return [{ slug: "wh1", name: "Warehouse" }, { slug: "st1", name: "Vallalar Salai" }];
-      if (/inventory_batches/.test(q)) return [{ article_id: "100073", batch_id: "b", net_landing_cost: "28.5", quantity: null }];
+      if (/inventory_batches/.test(q)) return [{ article_id: "100073", stock_value: null, stock_qty: null, avg_nlc: "28.5" }];
       return byQuery(q);
     },
   });

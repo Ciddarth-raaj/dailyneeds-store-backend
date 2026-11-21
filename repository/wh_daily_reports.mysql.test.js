@@ -19,7 +19,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   let pool;
   let repo;
   let nlcSpectra;
-  let nlcRows = [{ article_id: "2", batch_id: "x", net_landing_cost: "45", quantity: "1" }];
+  let nlcRows = [{ article_id: "2", stock_value: "45", stock_qty: "1", avg_nlc: "45" }];
   let uc;
   const q = (sql, p = []) => new Promise((res, rej) => pool.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
   const JOB = ["Job Type", "From Store", "To Store", "Article ID", "Article Name", "Department", "Category", "Recommended Qty", "Planned Qty", "Advised Qty", "Actual Qty", "MRP Split", "Short Qty", "Returned Qty", "Jobs", "Open Jobs"];
@@ -249,16 +249,16 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   it("fills NLC from RetailPilot on rows that have none, in both report shapes", async () => {
     await q("UPDATE wh_report_job_rows SET nlc = NULL, nlc_source = NULL WHERE report_date = '2026-11-16'");
     await q("UPDATE wh_report_box_rows SET nlc = NULL WHERE report_date = '2026-11-16'");
-    nlcRows = ["1", "2", "3", "99"].map((id, i) => ({ article_id: id, batch_id: `b${id}`, net_landing_cost: id === "1" ? "12" : String(40 + i), quantity: "2" }));
+    nlcRows = ["1", "2", "3", "99"].map((id, i) => ({ article_id: id, stock_value: String(2 * (id === "1" ? 12 : 40 + i)), stock_qty: "2", avg_nlc: "1" }));
     const res = await uc.fillNlc({ from: "2026-11-16", to: "2026-11-16" });
     assert.equal(res.code, 200);
     assert.ok(res.data.rows_updated > 0);
     assert.equal(res.data.still_unpriced, 0);
     const [{ n }] = await q("SELECT COUNT(*) AS n FROM wh_report_job_rows WHERE report_date = '2026-11-16' AND nlc IS NULL");
     assert.equal(Number(n), 0);
-    const [{ v }] = await q("SELECT MAX(nlc) AS v FROM wh_report_box_rows WHERE report_date = '2026-11-16' AND article_id = 1");
-    assert.equal(Number(v), 12);
-    nlcRows = [{ article_id: "2", batch_id: "x", net_landing_cost: "45", quantity: "1" }];
+    const priced = await q("SELECT nlc FROM wh_report_box_rows WHERE report_date = '2026-11-16' AND article_id = 1");
+    assert.ok(priced.length > 0 && priced.every((b) => Number(b.nlc) === 12));
+    nlcRows = [{ article_id: "2", stock_value: "45", stock_qty: "1", avg_nlc: "45" }];
   });
 
   it("deletes an upload with its rows, and the down migration removes everything", async () => {

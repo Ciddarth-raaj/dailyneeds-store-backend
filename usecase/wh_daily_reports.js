@@ -5,6 +5,8 @@ const { istToday } = require("../utils/istDate");
 
 /** The widest range one analysis covers. */
 const MAX_RANGE_DAYS = 92;
+/** How long an article's NLC from RetailPilot is reused. */
+const NLC_TTL_MS = 30 * 60 * 1000;
 /** The most days one pull from RetailPilot covers. */
 const MAX_PULL_DAYS = 31;
 /** Box lines with these statuses are listed as issues on the page. */
@@ -63,7 +65,8 @@ class WhDailyReports {
    * write-off to its Pick & Pack page. Answers the upload's result.
    */
   async _save({ type, report_date, rows, file_name, employee_id = null, source = "UPLOAD", other = {} }) {
-    // Every value is NLC (net landing cost) from RetailPilot - never MRP, not even the file's.
+    // Every row is valued at NLC (net landing cost) from RetailPilot - never MRP, not even the
+    // file's - so picked, packed, loaded and verified value can be shown as well as write-off.
     const shape = W.shapeOf(type);
     const prices = await this._nlc(rows.map((r) => r.article_id));
     const out = rows.map((r) => {
@@ -170,14 +173,26 @@ class WhDailyReports {
    * RetailPilot not configured or not answering: no prices - the rows are
    * saved unpriced and filled in later (fillNlc / the nightly pull).
    */
-  async _nlc(articleIds) {
+  async _nlc(articleIds, { fresh = false } = {}) {
     const ids = [...new Set((articleIds || []).filter((x) => Number.isInteger(x) && x > 0))];
     if (!ids.length || !this.spectra || !this.spectra.isConfigured()) return new Map();
+    // NLC moves slowly: an answer is reused for NLC_TTL_MS, so pulling day after day asks once.
+    const now = Date.now();
+    if (!this.nlcCache) this.nlcCache = new Map();
+    const out = new Map();
+    const ask = [];
+    for (const id of ids) {
+      const hit = this.nlcCache.get(id);
+      if (!fresh && hit && now - hit.at < NLC_TTL_MS) {
+        if (hit.nlc != null) out.set(id, hit.nlc);
+      } else ask.push(id);
+    }
+    if (!ask.length) return out;
     const rows = [];
     try {
-      for (let i = 0; i < ids.length; i += 500) {
+      for (let i = 0; i < ask.length; i += 500) {
         // eslint-disable-next-line no-await-in-loop
-        rows.push(...(await this.spectra.queryAll(R.buildNlcQuery(ids.slice(i, i + 500)))));
+        rows.push(...(await this.spectra.queryAll(R.buildNlcQuery(ask.slice(i, i + 500)))));
       }
     } catch (err) {
       logger.Log({
@@ -186,11 +201,18 @@ class WhDailyReports {
         code: "USECASE.WH_DAILY_REPORTS.NLC",
         description: err.toString(),
         category: "",
-        ref: { articles: ids.length },
+        ref: { articles: ask.length },
       });
-      return new Map();
+      return out;
     }
-    return R.nlcByArticle(rows);
+    const found = R.nlcByArticle(rows);
+    for (const id of ask) {
+      const nlc = found.has(id) ? found.get(id) : null;
+      this.nlcCache.set(id, { at: now, nlc });
+      if (nlc != null) out.set(id, nlc);
+    }
+    if (this.nlcCache.size > 50000) this.nlcCache.clear();
+    return out;
   }
 
   /** Fill in NLC from RetailPilot on rows in from..to that have none (at most MAX_RANGE_DAYS). */
@@ -199,7 +221,8 @@ class WhDailyReports {
     if (r.error) return { code: 422, msg: r.error };
     if (!this.spectra || !this.spectra.isConfigured()) return { code: 502, msg: "RetailPilot is not configured" };
     const ids = await this.repo.unpricedArticles(r.from, r.to);
-    const found = await this._nlc(ids);
+    // Asked fresh: an article RetailPilot had no NLC for a minute ago may have one now.
+    const found = await this._nlc(ids, { fresh: true });
     const prices = new Map(ids.filter((id) => found.has(id)).map((id) => [id, found.get(id)]));
     const updated = prices.size ? await this.repo.fillNlc(r.from, r.to, prices) : 0;
     return { code: 200, data: { from: r.from, to: r.to, articles: ids.length, priced: prices.size, still_unpriced: ids.length - prices.size, rows_updated: updated } };
