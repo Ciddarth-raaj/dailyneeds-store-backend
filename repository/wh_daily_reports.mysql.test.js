@@ -28,7 +28,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_rp_staff_map, outlets, designation, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
+    await q(`DROP TABLE IF EXISTS wh_health_summary_sends, wh_rp_staff_map, outlets, designation, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL); CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80)); CREATE TABLE designation (designation_id INT PRIMARY KEY, designation_name VARCHAR(80)); INSERT INTO outlets VALUES (1, 'Warehouse'); INSERT INTO designation VALUES (3, 'Picker');
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
@@ -61,6 +61,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261223120000-wh-report-retailpilot-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261226120000-warehouse-health-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     // RetailPilot as far as NLC goes: article 2 has NLC 45; article 1 none.
     nlcSpectra = {
@@ -73,7 +74,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
 
   it("migrations add their permissions once", async () => {
     const rows = await q("SELECT permission_key FROM all_permissions ORDER BY permission_key");
-    assert.deepEqual(rows.map((r) => r.permission_key), ["manage_wh_staff_map", "upload_wh_daily_reports", "view_wh_daily_reports"]);
+    assert.deepEqual(rows.map((r) => r.permission_key), ["manage_wh_staff_map", "receive_warehouse_health_summary", "upload_wh_daily_reports", "view_warehouse_health", "view_wh_daily_reports"]);
   });
 
   it("saves an upload, values it at NLC from RetailPilot (not the file's MRP), and replaces it on a second upload", async () => {
@@ -266,6 +267,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal((await uc.deleteUpload({ upload_id: u.upload_id })).code, 200);
     const [{ c }] = await q("SELECT COUNT(*) AS c FROM wh_report_box_rows WHERE upload_id = ?", [u.upload_id]);
     assert.equal(Number(c), 0);
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261226120000-warehouse-health-down.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261225120000-wh-staff-map-down.sql"), "utf8"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_rp_staff_map'")).length, 0);
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261224120000-wh-report-nlc-down.sql"), "utf8"));

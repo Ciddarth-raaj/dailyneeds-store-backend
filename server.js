@@ -1325,6 +1325,15 @@ class Server {
       undefined,
       require("./services/retailpilot_spectra")(retailPilotConfig)
     );
+    // Warehouse Health: the warehouse manager's dashboard (under Invoice
+    // Pipeline) and its 9 am Telegram summary about yesterday (cron below).
+    this.warehouseHealth = require("./usecase/warehouse_health")({
+      repo: this.whDailyReportsUsecase.repo,
+      reports: this.whDailyReportsUsecase,
+      summaryRepo: require("./repository/warehouse_health_summary")(this.mysql.connection),
+      telegramService: require("./services/telegram")(),
+      dashboardUrl: process.env.WAREHOUSE_HEALTH_URL || "https://dnds.co.in/dashboard/invoice-pipeline",
+    });
     this.poFollowupRepo = require("./repository/po_followup")(this.mysql.connection);
     this.poTrackerUsecase = require("./usecase/po_tracker")(
       require("./services/retailpilot_spectra")(retailPilotConfig),
@@ -2201,6 +2210,7 @@ class Server {
     );
     const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions, this.poDailySummary);
     const whDailyReportsRouter = require("./routes/wh_daily_reports")(this.whDailyReportsUsecase, this.permissions);
+    const warehouseHealthRouter = require("./routes/warehouse_health")(this.warehouseHealth, this.permissions);
     const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
     const warehouseFlowRouter = require("./routes/warehouse_flow")(
       this.warehouseFlowUsecase,
@@ -2383,6 +2393,7 @@ class Server {
     app.use("/transfers", transfersRouter.getRouter());
     app.use("/po-tracker", poTrackerRouter.getRouter());
     app.use("/wh-daily-reports", whDailyReportsRouter.getRouter());
+    app.use("/warehouse-health", warehouseHealthRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
     app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
@@ -2964,6 +2975,35 @@ class Server {
             level: logger.LEVEL.ERROR,
             component: "CRON.WH_REPORTS_RETAILPILOT_PULL",
             code: "CRON.WH_REPORTS_RETAILPILOT_PULL.RUN",
+            description: err.toString(),
+            category: "",
+            ref: {},
+          });
+        }
+      },
+      { preventOverlap: true }
+    );
+
+    // WAREHOUSE HEALTH SUMMARY - 9 am IST every day: yesterday's write-off,
+    // boxes, yet to verify, remarks and pickers below target, privately to
+    // everyone holding receive_warehouse_health_summary. ON unless
+    // WAREHOUSE_HEALTH_TELEGRAM_ENABLED is "false". One send per person per day.
+    this.cronService.register(
+      "warehouse_health_telegram",
+      "0 9 * * *",
+      async () => {
+        if (String(process.env.WAREHOUSE_HEALTH_TELEGRAM_ENABLED || "").toLowerCase() === "false") {
+          console.log("[CRON] warehouse_health_telegram - WAREHOUSE_HEALTH_TELEGRAM_ENABLED is 'false'; nothing sent");
+          return;
+        }
+        try {
+          const r = await this.warehouseHealth.run();
+          console.log(`[CRON] warehouse_health_telegram ${r.date}: ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
+        } catch (err) {
+          logger.Log({
+            level: logger.LEVEL.ERROR,
+            component: "CRON.WAREHOUSE_HEALTH_TELEGRAM",
+            code: "CRON.WAREHOUSE_HEALTH_TELEGRAM.RUN",
             description: err.toString(),
             category: "",
             ref: {},

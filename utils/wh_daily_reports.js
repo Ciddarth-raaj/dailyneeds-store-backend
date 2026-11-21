@@ -245,7 +245,8 @@ function parseRows(type, headers, rawRows) {
         unloaded_store: lower(cell("unloaded_store"), 100),
         box_id: box,
         box_kind: text(cell("box_kind"), 30),
-        truck_no: text(cell("truck_no"), 30) && text(cell("truck_no"), 30).toUpperCase(),
+        // RetailPilot writes "-" for a box with no truck.
+        truck_no: text(cell("truck_no"), 30) && text(cell("truck_no"), 30) !== "-" ? text(cell("truck_no"), 30).toUpperCase() : null,
         box_qty: numbers.box_qty || 0,
         box_status: text(cell("box_status"), 30),
         finished_at: at,
@@ -322,7 +323,8 @@ const addDays = (d, n) => {
  *   OK            unloaded at the planned store, same quantity
  *   QTY_DIFF      unloaded, different quantity
  *   WRONG_STORE   unloaded at another store
- *   NOT_UNLOADED  never unloaded (OPEN when loaded on the last day there is unloading for)
+ *   NOT_ON_TRUCK  on the loading list but never scanned onto a truck (no truck)
+ *   NOT_UNLOADED  on a truck, never unloaded (OPEN when loaded on the last day there is unloading for)
  *   RETURN        damage / return to warehouse - not expected at a store
  * and every unloaded line no loading matches comes back as NOT_LOADED.
  */
@@ -342,7 +344,7 @@ function reconcileBoxes(loaded, unloaded, { lastUnloadDate = null } = {}) {
     const u = (pool.get(key) || []).find((c) => !c.used && c.report_date >= l.report_date && c.report_date <= next);
     if (u) u.used = true;
     let status;
-    if (!u) status = isReturn(l) ? "RETURN" : lastUnloadDate && l.report_date >= lastUnloadDate ? "OPEN" : "NOT_UNLOADED";
+    if (!u) status = isReturn(l) ? "RETURN" : !l.truck_no ? "NOT_ON_TRUCK" : lastUnloadDate && l.report_date >= lastUnloadDate ? "OPEN" : "NOT_UNLOADED";
     else if (u.unloaded_store && l.planned_to_store && u.unloaded_store !== l.planned_to_store) status = "WRONG_STORE";
     else if (Math.abs(Number(u.box_qty) - Number(l.box_qty)) > 1e-6) status = "QTY_DIFF";
     else status = "OK";

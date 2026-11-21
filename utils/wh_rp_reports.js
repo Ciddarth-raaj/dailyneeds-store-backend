@@ -196,6 +196,9 @@ function mapJobLines(type, lines, stores) {
     rows.push({
       report_type: type,
       job_id: clean(l.job_id) || null,
+      stage_id: clean(l.stage_id).slice(0, 64) || null,
+      // A verification line names the picking job its goods came from: how a store's shortage finds its picker.
+      picking_job: clean(meta(l.meta).picking_job).slice(0, 64) || null,
       job_type: clean(l.job_type).toUpperCase() || null,
       from_store: name(l.origin),
       to_store: name(l.destination),

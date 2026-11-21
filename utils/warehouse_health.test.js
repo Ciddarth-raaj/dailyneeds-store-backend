@@ -1,0 +1,84 @@
+const test = require("node:test");
+const assert = require("node:assert");
+const H = require("./warehouse_health");
+
+const base = {
+  date: "2026-11-19",
+  uploads: [{ report_type: "PICKING" }, { report_type: "VERIFICATION" }, { report_type: "LOADING" }],
+  summary: [
+    { report_type: "PICKING", lines: 1200, done_lines: 956, actual_qty: 9000, actual_value: 412000, short_lines: 115, short_qty: 2750, short_value: 48210, open_lines: 244 },
+    { report_type: "VERIFICATION", lines: 400, done_lines: 398, short_lines: 3, short_qty: 7, short_value: 300, open_lines: 2 },
+  ],
+  byStore: [
+    { report_type: "PICKING", to_store: "kathirkamam", short_lines: 45, short_qty: 1043, short_value: 9000, open_lines: 0 },
+    { report_type: "PICKING", to_store: "moolakulam", short_lines: 30, short_qty: 1200, short_value: 20000, open_lines: 10 },
+  ],
+  yetToVerify: [{ to_store: "warehouse", from_store: "muthialpet", article_id: "A1", article_name: "Soan papdi", advised_qty: 5, actual_qty: 0, nlc: 40 }],
+  remarks: [{ page: "WRITE_OFF", total: 115, pending: 115, backlog: 0 }],
+  boxLines: [
+    { report_date: "2026-11-19", box_id: "B1", status: "NOT_ON_TRUCK", truck_no: null, loaded_qty: 4, nlc: 10, planned_to_store: "ecr" },
+    { report_date: "2026-11-19", box_id: "B2", status: "OK", truck_no: "TN01", loaded_qty: 4, unloaded_qty: 4, unload_date: "2026-11-19" },
+    { report_date: "2026-11-19", box_id: "B3", status: "NOT_UNLOADED", truck_no: "TN01", loaded_qty: 2, nlc: 5, planned_to_store: "ecr" },
+  ],
+  repeats: [{ article_id: "A9", article_name: "milk", days_short: 3 }, { article_id: "A8", days_short: 1 }],
+  trend: [{ report_date: "2026-11-19", report_type: "PICKING", short_lines: 115, short_qty: 2750, short_value: 48210 }],
+  trendUploads: [{ report_date: "2026-11-19", report_type: "PICKING" }],
+  pickerWork: [
+    { worked_by: "u1", done_lines: 500, actual_qty: 4000, actual_value: 200000 },
+    { worked_by: "u2", done_lines: 100, actual_qty: 800, actual_value: 30000 },
+  ],
+  pickerMistakes: [
+    { worked_by: "u2", report_date: "2026-11-18", to_store: "ecr", article_id: "A1", short_qty: 2, nlc: 10 },
+    { worked_by: "u2", report_date: "2026-11-18", to_store: "ecr", article_id: "A2", short_qty: 1, nlc: 10 },
+    { worked_by: "u2", report_date: "2026-11-18", to_store: "ecr", article_id: "A3", short_qty: 1, nlc: 10 },
+  ],
+  staffNames: { u1: "Ravi" },
+};
+
+test("picking write-off is headed by lines, value and qty after", () => {
+  const h = H.buildHealth(base);
+  assert.deepStrictEqual([h.tiles.writeoff.lines, h.tiles.writeoff.qty, h.tiles.writeoff.value], [115, 2750, 48210]);
+  assert.match(h.need_you[0].text, /^Picking write-off 115 lines · ₹48,210 \(2,750 qty\)$/);
+  assert.strictEqual(h.stores[0].store, "kathirkamam"); // most lines first, not most qty
+  assert.strictEqual(h.trend[6].short_lines, 115);
+  assert.strictEqual(h.trend.length, 7);
+});
+
+test("boxes: not on a truck is separate from not delivered", () => {
+  const h = H.buildHealth(base);
+  assert.strictEqual(h.tiles.boxes.not_on_truck, 1);
+  assert.strictEqual(h.tiles.boxes.not_unloaded, 1);
+  assert.strictEqual(h.flow.loading_list_boxes, 3);
+  assert.strictEqual(h.flow.on_truck_boxes, 2);
+  assert.strictEqual(h.flow.trucks, 1);
+});
+
+test("yet to verify, returns labelled; remarks; missing reports; repeats", () => {
+  const h = H.buildHealth(base);
+  assert.strictEqual(h.tiles.verification.yet_to_verify_qty, 5);
+  assert.strictEqual(h.tiles.verification.yet_to_verify[0].is_return, true);
+  assert.strictEqual(h.tiles.remarks.write_off.pending, 115);
+  assert.deepStrictEqual(h.missing_reports, ["Packing", "Unloading"]);
+  assert.deepStrictEqual(h.repeats.map((r) => r.article_id), ["A9"]);
+});
+
+test("pickers: lines and value, mistakes traced, accuracy below 98% flagged", () => {
+  const [p1, p2] = H.buildHealth(base).pickers;
+  assert.strictEqual(p1.name, "Ravi");
+  assert.strictEqual(p1.mapped, true);
+  assert.strictEqual(p1.accuracy, 1);
+  assert.strictEqual(p2.name, "u2");
+  assert.strictEqual(p2.mistake_lines, 3);
+  assert.strictEqual(p2.mistake_value, 40);
+  assert.strictEqual(p2.accuracy, 0.97);
+  assert.strictEqual(p2.below_target, true);
+});
+
+test("telegram text", () => {
+  const t = H.formatTelegram(H.buildHealth(base));
+  assert.match(t, /Picking write-off 115 lines/);
+  assert.match(t, /Yet to verify at: Warehouse 5/);
+  assert.match(t, /Pickers below 98% this month: u2 97.0%/);
+  assert.match(t, /Not pulled yet: Packing, Unloading/);
+  assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");
+});

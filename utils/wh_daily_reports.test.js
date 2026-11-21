@@ -102,6 +102,10 @@ describe("reconcileBoxes", () => {
     const st = Object.fromEntries(lines.map((l) => [l.box_id, l.status]));
     assert.deepEqual(st, { B1: "OK", B2: "QTY_DIFF", B3: "WRONG_STORE", B4: "NOT_UNLOADED", B5: "RETURN", B6: "OK", B9: "NOT_LOADED" });
   });
+  it("a box on the loading list with no truck is not on a truck, not lost on the road", () => {
+    const [l] = W.reconcileBoxes([L({ truck_no: null })], [], { lastUnloadDate: "2026-11-17" });
+    assert.equal(l.status, "NOT_ON_TRUCK");
+  });
   it("a box loaded on the last day there is unloading for is open, not missing", () => {
     const [l] = W.reconcileBoxes([L()], [], { lastUnloadDate: "2026-11-16" });
     assert.equal(l.status, "OPEN");

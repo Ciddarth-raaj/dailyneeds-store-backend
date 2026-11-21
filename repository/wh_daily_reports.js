@@ -20,7 +20,7 @@ const {
 const JOB_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "to_store", "article_id", "article_name",
   "department", "category", "recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty",
-  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by",
+  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by", "stage_id", "picking_job",
 ];
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
@@ -52,13 +52,15 @@ const JOB_METRICS = `
   SUM(r.short_qty > 0) AS short_lines,
   COALESCE(SUM(r.short_qty), 0) AS short_qty,
   COALESCE(SUM(r.short_qty * r.nlc), 0) AS short_value,
+  COALESCE(SUM(r.actual_qty * r.nlc), 0) AS actual_value,
+  SUM(COALESCE(r.open_jobs, 0) = 0) AS done_lines,
   SUM(r.short_qty > 0 AND r.nlc IS NULL) AS short_unpriced_lines,
   SUM(COALESCE(r.returned_qty, 0) > 0) AS returned_lines,
   COALESCE(SUM(r.returned_qty), 0) AS returned_qty,
   SUM(COALESCE(r.open_jobs, 0) > 0) AS open_lines,
   COALESCE(SUM(r.open_jobs), 0) AS open_jobs`;
 const JOB_METRIC_KEYS = [
-  "lines", "articles", "days", "planned_qty", "actual_qty", "short_lines", "short_qty", "short_value",
+  "lines", "articles", "days", "planned_qty", "actual_qty", "short_lines", "short_qty", "short_value", "actual_value", "done_lines",
   "short_unpriced_lines", "returned_lines", "returned_qty", "open_lines", "open_jobs",
 ];
 
@@ -429,6 +431,64 @@ class WhDailyReportsRepository {
         GROUP BY report_type, worked_by, store`
     );
     return toNumbers(rows, ["lines"]);
+  }
+
+  /**
+   * Remarks on the Write Off and Verification pages for `date`: lines, those
+   * still without a remark (or staff member) and not verified, and how many
+   * such lines are waiting from the 30 days before it.
+   */
+  async remarksPending(date) {
+    const pendingWo = "ppwo.remark_id IS NULL AND COALESCE(TRIM(ppwo.remark_str), '') = '' AND ppwo.reason_employee_id IS NULL AND ppwo.is_verified = 0";
+    const pendingV = "v.remark_id IS NULL AND COALESCE(TRIM(v.remark_str), '') = '' AND v.is_verified = 0";
+    const rows = await this.run(
+      "REMARKS_PENDING",
+      `SELECT 'WRITE_OFF' AS page,
+              SUM(ppwo.date = ?) AS total,
+              SUM(ppwo.date = ? AND ${pendingWo}) AS pending,
+              SUM(ppwo.date < ? AND ${pendingWo}) AS backlog
+         FROM pick_pack_write_off ppwo WHERE ppwo.date BETWEEN DATE_SUB(?, INTERVAL 30 DAY) AND ?
+       UNION ALL
+       SELECT 'VERIFICATION',
+              SUM(v.date = ?),
+              SUM(v.date = ? AND ${pendingV}),
+              SUM(v.date < ? AND ${pendingV})
+         FROM pick_pack_verifications v WHERE v.date BETWEEN DATE_SUB(?, INTERVAL 30 DAY) AND ?`,
+      [date, date, date, date, date, date, date, date, date, date]
+    );
+    return toNumbers(rows, ["total", "pending", "backlog"]);
+  }
+
+  /**
+   * Shortages stores found at verification in from..to, each with the picker
+   * of the goods: through the line's picking job, or - where RetailPilot gave
+   * none - the picking line of the same document, article and store.
+   */
+  async pickerMistakes(from, to) {
+    const cols = `DATE_FORMAT(v.report_date, '%Y-%m-%d') AS report_date, v.to_store, v.article_id, v.article_name,
+                  v.short_qty, v.nlc, p.worked_by`;
+    const byJob = await this.run(
+      "PICKER_MISTAKES_JOB",
+      `SELECT ${cols}
+         FROM wh_report_job_rows v
+         JOIN (SELECT DISTINCT job_id, worked_by FROM wh_report_job_rows
+                WHERE report_type = 'PICKING' AND job_id IS NOT NULL AND worked_by IS NOT NULL) p
+           ON p.job_id = v.picking_job
+        WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0`,
+      [from, to]
+    );
+    const byDoc = await this.run(
+      "PICKER_MISTAKES_DOC",
+      `SELECT ${cols}
+         FROM wh_report_job_rows v
+         JOIN (SELECT DISTINCT stage_id, article_id, to_store, worked_by FROM wh_report_job_rows
+                WHERE report_type = 'PICKING' AND stage_id IS NOT NULL AND worked_by IS NOT NULL) p
+           ON p.stage_id = v.stage_id AND p.article_id = v.article_id AND p.to_store = v.to_store
+        WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0
+          AND v.picking_job IS NULL`,
+      [from, to]
+    );
+    return toNumbers([...byJob, ...byDoc], ["short_qty", "nlc"]);
   }
 
   /** The mapping, with each mapped employee's name. */

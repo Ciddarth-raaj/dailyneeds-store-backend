@@ -10,7 +10,7 @@ const NLC_TTL_MS = 30 * 60 * 1000;
 /** The most days one pull from RetailPilot covers. */
 const MAX_PULL_DAYS = 31;
 /** Box lines with these statuses are listed as issues on the page. */
-const BOX_ISSUES = ["NOT_UNLOADED", "WRONG_STORE", "QTY_DIFF", "NOT_LOADED", "OPEN"];
+const BOX_ISSUES = ["NOT_ON_TRUCK", "NOT_UNLOADED", "WRONG_STORE", "QTY_DIFF", "NOT_LOADED", "OPEN"];
 
 const daysBetween = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
 const round2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
