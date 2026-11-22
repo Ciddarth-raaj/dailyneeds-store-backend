@@ -41,39 +41,56 @@ const exact = (e) => `${e.stage_id || "-"}|${lane(e)}`;
 const staysPut = (e) => e.from_store && e.to_store && e.from_store === e.to_store;
 
 /** Follow one gap up to `cutoff`: what is still waiting, and what jumped. */
+/**
+ * Follow one gap up to `cutoff` in one pass: what is still waiting at the
+ * end of `cutoff`, what was waiting at the end of the day before it
+ * (`before`), and what jumped. Every list is sorted once and read from a
+ * moving start, so a long history costs little.
+ */
 function follow(ins, outs, cutoff) {
-  const layers = new Map(); // exact key -> [{...in, left}]
-  const byLane = new Map(); // lane -> Set(exact key)
+  const byDate = (a, b) => (a.report_date < b.report_date ? -1 : a.report_date > b.report_date ? 1 : 0);
+  const all = [];
+  const layers = new Map(); // exact key -> [layer]
+  const byLane = new Map(); // lane -> [layer]
   const byLink = new Map(); // job id | article | store -> [layer]
+  const add = (m, k, layer) => {
+    let list = m.get(k);
+    if (!list) {
+      list = [];
+      list.start = 0;
+      m.set(k, list);
+    }
+    list.push(layer);
+  };
   for (const e of ins) {
     if (e.report_date > cutoff || n(e.qty) <= 0) continue;
-    const k = exact(e);
     const layer = { ...e, left: n(e.qty) };
-    if (!layers.has(k)) layers.set(k, []);
-    layers.get(k).push(layer);
-    if (!byLane.has(lane(e))) byLane.set(lane(e), new Set());
-    byLane.get(lane(e)).add(k);
-    for (const id of [].concat(e.link || [])) {
-      const lk = `${id}|${e.article_id}|${e.to_store || ""}`;
-      if (!byLink.has(lk)) byLink.set(lk, []);
-      byLink.get(lk).push(layer);
-    }
+    all.push(layer);
+    add(layers, exact(e), layer);
+    add(byLane, lane(e), layer);
+    for (const id of [].concat(e.link || [])) add(byLink, `${id}|${e.article_id}|${e.to_store || ""}`, layer);
   }
-  for (const list of layers.values()) list.sort((a, b) => a.report_date.localeCompare(b.report_date));
-  const jumped = [];
+  for (const m of [layers, byLane, byLink]) for (const list of m.values()) list.sort(byDate);
   const take = (list, o, want) => {
     let need = want;
-    for (const l of list) {
-      if (need <= 0) break;
-      if (l.left <= 0 || l.report_date > o.report_date) continue;
+    while (list.start < list.length && list[list.start].left <= 0) list.start += 1; // skip what is used up
+    for (let i = list.start; i < list.length && need > 0; i += 1) {
+      const l = list[i];
+      if (l.report_date > o.report_date) break; // sorted: the rest came later
+      if (l.left <= 0) continue;
       const q = Math.min(l.left, need);
       l.left = r3(l.left - q);
       need = r3(need - q);
     }
     return need;
   };
-  const sorted = outs.filter((o) => o.report_date <= cutoff && n(o.qty) > 0).sort((a, b) => a.report_date.localeCompare(b.report_date));
+  const sorted = outs.filter((o) => o.report_date <= cutoff && n(o.qty) > 0).sort(byDate);
+  const jumped = [];
+  const prevDay = addDays(cutoff, -1);
+  let before = null;
+  const snapshot = () => all.filter((l) => l.report_date <= prevDay && l.left > 0).map((l) => ({ ...l }));
   for (const o of sorted) {
+    if (before === null && o.report_date === cutoff) before = snapshot();
     let need = n(o.qty);
     for (const id of o.links || []) {
       if (need <= 0) break;
@@ -81,24 +98,19 @@ function follow(ins, outs, cutoff) {
       if (list) need = take(list, o, need);
     }
     if (need > 0 && o.stage_id && layers.has(exact(o))) need = take(layers.get(exact(o)), o, need);
-    if (need > 0 && byLane.has(lane(o))) {
-      const all = [...byLane.get(lane(o))].flatMap((k) => layers.get(k)).sort((a, b) => a.report_date.localeCompare(b.report_date));
-      need = take(all, o, need);
-    }
+    if (need > 0 && byLane.has(lane(o))) need = take(byLane.get(lane(o)), o, need);
     if (need > 0) jumped.push({ ...o, qty: need });
   }
-  const waiting = [];
-  for (const list of layers.values()) for (const l of list) if (l.left > 0) waiting.push(l);
-  return { waiting, jumped };
+  if (before === null) before = snapshot();
+  return { waiting: all.filter((l) => l.left > 0), before, jumped };
 }
 
 function gap({ key, label, unit, ins, outs, lost, date }) {
   const I = ins.filter((e) => !staysPut(e));
   const O = outs.filter((e) => !staysPut(e));
-  const prev = follow(I, O, addDays(date, -1));
   const cur = follow(I, O, date);
   const sum = (list, f = "left") => r3(list.reduce((s, x) => s + n(x[f]), 0));
-  const fromEarlier = sum(prev.waiting);
+  const fromEarlier = sum(cur.before);
   const arrived = sum(I.filter((e) => e.report_date === date), "qty");
   const stands = sum(cur.waiting);
   // One line per document + article + store, aged by its oldest waiting qty.

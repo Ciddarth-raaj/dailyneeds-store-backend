@@ -167,3 +167,19 @@ test("trace: one line through every stage, boxes linked by packing job, which re
   assert.deepStrictEqual(r.data.pulled, { "2026-10-13": ["PICKING", "PACKING"], "2026-10-14": [] }); // 14 Oct: nothing pulled - the gap shows
   assert.strictEqual((await uc.trace({ article_id: "x", to_store: "ecr" })).code, 422);
 });
+
+test("a built day is shared and reused until a report is pulled, uploaded or removed", async () => {
+  const { uc } = setup([]);
+  let builds = 0;
+  let version = "v1";
+  uc.repo = { ...repo, dataVersion: async () => version, uploads: async (...a) => ((builds += 1), repo.uploads(...a)) };
+  const [a, b] = await Promise.all([uc.health({ date: "2026-11-20" }), uc.health({ date: "2026-11-20" })]);
+  await uc.health({ date: "2026-11-20" });
+  assert.strictEqual(a.data.date, b.data.date);
+  const once = builds;
+  version = "v2"; // a pull
+  await uc.health({ date: "2026-11-20" });
+  assert.ok(builds > once, "rebuilt after new data");
+  await uc.health({ date: "2026-11-20" });
+  assert.strictEqual(builds, once * 2);
+});

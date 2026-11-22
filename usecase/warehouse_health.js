@@ -6,6 +6,9 @@ const W = require("../utils/wh_daily_reports");
 const { istToday } = require("../utils/istDate");
 const P = require("../utils/warehouse_health_pdf");
 const C = require("../utils/wh_box_chain");
+
+/** How long a built day is reused when no report changed (the build reads every report since BOX_CHAIN_FROM). */
+const BUILD_TTL_MS = 10 * 60 * 1000;
 const SC = require("../utils/wh_stage_chain");
 
 const A4 = { format: "A4", printBackground: true, preferCSSPageSize: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } };
@@ -52,7 +55,32 @@ class WarehouseHealth {
     return H.addDays(this.today(), -1);
   }
 
+  /**
+   * What the dashboard, the PDF and the 9 am message show for `date`. Built
+   * from every report since BOX_CHAIN_FROM, which takes the server a while,
+   * so it is kept for BUILD_TTL_MS and shared by everyone asking meanwhile -
+   * unless a report was pulled, uploaded or removed since (dataVersion).
+   */
   async build(date) {
+    const now = Date.now();
+    let version = null;
+    try {
+      version = typeof this.repo.dataVersion === "function" ? await this.repo.dataVersion() : null;
+    } catch (err) {
+      version = null;
+    }
+    if (!this.built) this.built = new Map();
+    const hit = this.built.get(date);
+    if (hit && version !== null && hit.version === version && now - hit.at < BUILD_TTL_MS) return hit.promise;
+    const promise = this._build(date);
+    this.built.set(date, { at: now, version, promise });
+    promise.catch(() => this.built.delete(date));
+    // Keep the last few days only.
+    while (this.built.size > 8) this.built.delete(this.built.keys().next().value);
+    return promise;
+  }
+
+  async _build(date) {
     const week = H.addDays(date, -6);
     const month = H.monthStart(date);
     const [uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines] = await Promise.all([

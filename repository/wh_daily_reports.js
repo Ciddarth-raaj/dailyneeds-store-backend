@@ -292,6 +292,15 @@ class WhDailyReportsRepository {
     }
   }
 
+  /** Changes whenever a report is pulled, uploaded or removed: lets Warehouse Health reuse what it built. */
+  async dataVersion() {
+    const [row] = await this.run(
+      "DATA_VERSION",
+      "SELECT COUNT(*) AS n, MAX(upload_id) AS last_id, DATE_FORMAT(MAX(uploaded_at), '%Y-%m-%d %H:%i:%s') AS last_at FROM wh_report_uploads"
+    );
+    return row ? `${row.n}|${row.last_id}|${row.last_at}` : "";
+  }
+
   async uploads(from, to) {
     const rows = await this.run(
       "UPLOADS",

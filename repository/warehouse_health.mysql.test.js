@@ -137,6 +137,12 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.ok(j.jobs.length > 0 && j.jobs.every((x) => x.stage_id === "sta_1"));
   });
 
+  it("data version changes when a report is pulled again", async () => {
+    const v1 = await repo.dataVersion();
+    await repo.replaceUpload({ report_type: "PICKING", report_date: "2026-11-21", source: "RETAILPILOT", shape: "JOB", file_name: "rp", uploaded_by: null, rows: [] });
+    assert.notEqual(await repo.dataVersion(), v1);
+  });
+
   it("down migration", async () => {
     await q(MIG("20261230120000-wh-job-links-down"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_box_rows LIKE 'packing_jobs'")).length, 0);
