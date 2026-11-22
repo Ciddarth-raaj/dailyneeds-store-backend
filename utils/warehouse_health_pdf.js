@@ -74,22 +74,6 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
         .join("")}</ul></div>`
     : `<div class="need clear"><b>All clear</b></div>`;
 
-  const f = h.flow;
-  const gapList = f.not_unloaded || [];
-  const gapBy = new Map();
-  for (const x of gapList) gapBy.set(x.status, (gapBy.get(x.status) || 0) + 1);
-  const gapText = [...gapBy].map(([st, c]) => `${num(c)} ${(BOX_LABEL[st] || st).toLowerCase()}`).join(" · ");
-  const gapProblem = gapList.some((x) => !["OPEN", "RETURN"].includes(x.status));
-  const flow = `<div class="flow">${[
-    ["1 · Picked", plural(f.picked_lines, "line"), `${rupees(f.picked_value)} · ${num(f.picking_short_lines)} short`],
-    ["2 · Packed", plural(f.packed_lines, "line"), `${num(f.packing_short_lines)} short`],
-    ["3 · Loading list", plural(f.loading_list_boxes, "box", "boxes"), `${num(f.on_truck_boxes)} on ${plural(f.trucks, "truck")}`],
-    ["4 · Unloaded", plural(f.unloaded_boxes, "box", "boxes"), f.not_unloaded_boxes ? (gapProblem ? `<span class="warn">${esc(gapText)}</span>` : esc(gapText)) : "at stores"],
-    ["5 · Verified", plural(f.verified_lines, "line"), `${num(f.verification_short_lines)} short`],
-  ]
-    .map(([l, v, s]) => `<div class="step"><div class="cl">${esc(l)}</div><div class="sv">${esc(v)}</div><div class="cs">${s}</div></div>`)
-    .join("")}</div>`;
-
   const woStores = h.stores.filter((s) => s.picking_short_lines);
   const writeoff = table(
     ["Store", "Lines", "Split", "Value (NLC)", "Qty"],
@@ -202,7 +186,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   const stores = table(
     ["Store", "Picking write-off", "Short at verification", "Yet to verify", "Box problems"],
     h.stores
-      .filter((s) => s.store !== "warehouse" || s.needs_look)
+      .filter((s) => s.picking_short_lines || s.verification_short_qty || s.yet_to_verify_qty || s.box_issues)
       .map((s) => ({
         cls: s.needs_look ? "bad" : "",
         cells: [
@@ -221,16 +205,6 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     h.repeats.map((a) => ({ cells: [esc(a.article_name || a.article_id), num(a.days_short), num(a.lines), rupees(a.short_value), esc(String(a.stores || "").split(",").map(title).join(", "))] })),
     [1, 2, 3]
   );
-
-  const max = Math.max(1, ...h.trend.map((r) => r.short_lines));
-  const trend = `<div class="trend">${h.trend
-    .map(
-      (r) =>
-        `<div class="bar"><div class="bv">${r.has_report ? num(r.short_lines) : "—"}</div><div class="bb${r.has_report ? "" : " none"}" style="height:${r.has_report ? Math.max(3, Math.round((r.short_lines / max) * 60)) : 3}px"></div><div class="bd">${esc(
-          new Date(`${r.date}T00:00:00Z`).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", timeZone: "UTC" })
-        )}</div></div>`
-    )
-    .join("")}</div>`;
 
   const pickers = table(
     ["Picker", "Lines", "Value (NLC)", "Accuracy", "Mistakes", "Mistake value"],
@@ -301,7 +275,6 @@ ${stageHtml}
 ${stuckHtml}
 ${needYou}
 <div class="cards">${cards}</div>
-<h2>Flow of goods</h2>${flow}
 ${section("Picking write-off by store", writeoff)}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${chainHtml}
@@ -310,7 +283,6 @@ ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse -
 ${section("Yet to verify", yet)}
 ${section("Stores", stores)}
 ${section("Short again and again", repeats, "Picking write-off on 2 or more of the last 7 days - check the stock / bin.")}
-<h2>Picking write-off, last 7 days (lines)</h2>${trend}
 ${section(
   `Pickers this month (${dayText(h.month_from)} to ${dayText(h.date)})`,
   pickers,
