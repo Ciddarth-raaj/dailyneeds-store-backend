@@ -120,8 +120,8 @@ test("the PDF is made once, uploaded once and sent after the message to each per
   const out = await uc.run();
   assert.strictEqual(out.pdf, true);
   assert.deepStrictEqual([renders, uploads, sent.length], [1, 1, 2]);
-  assert.deepStrictEqual(docs.map((d) => [d.chat, d.url, d.caption]), [["c1", "https://s3/warehouse_health/2026-11-20_1.pdf", "Warehouse Health - 2026-11-20 (PDF)"], ["c5", "https://s3/warehouse_health/2026-11-20_1.pdf", "Warehouse Health - 2026-11-20 (PDF)"]]);
-  assert.match(html, /Warehouse Health/);
+  assert.deepStrictEqual(docs.map((d) => [d.chat, d.url, d.caption]), [["c1", "https://s3/warehouse_health/2026-11-20_1.pdf", "Pick Pack Daily Report – Warehouse · 2026-11-20 (PDF)"], ["c5", "https://s3/warehouse_health/2026-11-20_1.pdf", "Pick Pack Daily Report – Warehouse · 2026-11-20 (PDF)"]]);
+  assert.match(html, /Pick Pack Daily Report – Warehouse/);
   assert.match(html, /2 lines/);
 });
 
@@ -268,9 +268,9 @@ test("store managers get their own store's summary, found by their store's name;
   const out = await uc.run();
   assert.deepStrictEqual([out.sent, out.skipped, out.stores], [3, 2, { ecr: 1, moolakulam: 1 }]);
   const to = (chat) => sent.find((m) => m.chat === chat);
-  assert.match(to("c1").text, /^Warehouse Health - /);
-  assert.match(to("s10").text, /^ECR Store Health - /);
-  assert.match(to("s11").text, /^Moolakulam Store Health - /);
+  assert.match(to("c1").text, /^Pick Pack Daily Report – Warehouse · /);
+  assert.match(to("s10").text, /^Pick Pack Daily Report – ECR · /);
+  assert.match(to("s11").text, /^Pick Pack Daily Report – Moolakulam · /);
   assert.strictEqual(to("s10").options.replyMarkup.inlineKeyboard[0][0].url, "https://x/d?site=ecr");
   assert.deepStrictEqual(recorded.filter((r) => r.status !== "SENT").map((r) => [r.employee_id, r.reason]), [[12, 'Store "Lawspet" not found in the reports'], [13, "Telegram not linked"]]);
   assert.deepStrictEqual(recorded.filter((r) => r.status === "SENT").map((r) => [r.employee_id, r.site]), [[1, "warehouse"], [10, "ecr"], [11, "moolakulam"]]);
@@ -288,7 +288,7 @@ test("send me: the site I am looking at", async () => {
   const { uc, sent } = setup([]);
   const r = await uc.sendToMe(1, "ecr");
   assert.strictEqual(r.code, 200);
-  assert.match(sent[0].text, /^ECR Store Health - /);
+  assert.match(sent[0].text, /^Pick Pack Daily Report – ECR · /);
 });
 
 test("the PDF lists the lines found short at verification (who, when), not only how many", () => {

@@ -63,6 +63,8 @@ function whenText(v) {
 }
 const section = (heading, body, note = "") => (body ? `<h2>${esc(heading)}</h2>${note ? `<p class="note">${note}</p>` : ""}${body}` : "");
 
+const { reportName } = require("./warehouse_health");
+
 function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const t = h.tiles;
   const card = (label, value, sub, tone) =>
@@ -238,7 +240,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
 
 
   return `<!doctype html>
-<html><head><meta charset="utf-8"><title>Warehouse Health — ${esc(dayText(h.date))}</title>
+<html><head><meta charset="utf-8"><title>${esc(reportName(h.site, h.site_name))} — ${esc(dayText(h.date))}</title>
 <style>
   @page { size: A4; margin: 10mm; }
   * { box-sizing: border-box; }
@@ -290,7 +292,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
 </style></head>
 <body>
 <header>
-  <div class="brand">${logoDataUri ? `<div class="logo"><img src="${esc(logoDataUri)}" alt="Daily Needs"></div><div class="title">` : `<div>`}<h1>${esc(h.site && h.site !== "warehouse" ? `${h.site_name} Store Health` : "Warehouse Health")}</h1><div class="kicker">Daily report · Values at NLC</div></div></div>
+  <div class="brand">${logoDataUri ? `<div class="logo"><img src="${esc(logoDataUri)}" alt="Daily Needs"></div><div class="title">` : `<div>`}<h1>${esc(reportName(h.site, h.site_name))}</h1><div class="kicker">Daily report · Values at NLC</div></div></div>
   <div class="meta"><div class="day">${esc(dayText(h.date))}</div>Made ${esc(istTime(nowMs))} IST<br>Source: RetailPilot</div>
 </header>
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
@@ -306,7 +308,7 @@ ${secondHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
-<footer>The same figures are on dnds.co.in → Dashboard → Invoice Pipeline → Warehouse Health.</footer>
+<footer>The same figures are on dnds.co.in → WMS → Pick and Pack → Pick Pack Daily Report.</footer>
 </body></html>`;
 }
 

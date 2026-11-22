@@ -464,8 +464,13 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
 }
 
 /** The 9 am Telegram message (plain text). */
+/** The report's name: "Pick Pack Daily Report – Warehouse", "Pick Pack Daily Report – ECR". */
+function reportName(site, siteName) {
+  return `Pick Pack Daily Report – ${site && site !== "warehouse" ? siteName || title(site) : "Warehouse"}`;
+}
+
 function formatTelegram(h) {
-  const lines = [`${h.site && h.site !== "warehouse" ? `${h.site_name} Store Health` : "Warehouse Health"} - ${dayText(h.date)}`];
+  const lines = [`${reportName(h.site, h.site_name)} · ${dayText(h.date)}`];
   if (h.missing_reports.length === 5) return `${lines[0]}\nNo reports for this day yet.`;
   lines.push(h.need_you.length ? `${h.need_you.length} thing${h.need_you.length === 1 ? "" : "s"} need you:` : "All clear.");
   for (const i of h.need_you) lines.push(`- ${i.text}`);
@@ -484,4 +489,4 @@ function formatTelegram(h) {
   return lines.join("\n");
 }
 
-module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, pickerGroups, buildHealth, withSecondChain, formatTelegram, title };
+module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, pickerGroups, buildHealth, withSecondChain, formatTelegram, title, reportName };

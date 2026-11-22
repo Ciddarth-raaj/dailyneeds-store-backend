@@ -144,7 +144,7 @@ test("telegram text", () => {
   assert.match(t, /Yet to verify at: Warehouse \(returns\) 5/);
   assert.doesNotMatch(t, /Pickers/); // pickers are on the dashboard only
   assert.match(t, /Not pulled yet: Packing, Unloading/);
-  assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");
+  assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Pick Pack Daily Report – Warehouse · Thu, 19 Nov\nNo reports for this day yet.");
 });
 
 test("picking write-off: every line with what, where, who and when, most value first", () => {

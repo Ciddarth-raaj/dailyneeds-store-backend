@@ -1343,7 +1343,7 @@ class Server {
       reports: this.whDailyReportsUsecase,
       summaryRepo: require("./repository/warehouse_health_summary")(this.mysql.connection),
       telegramService: require("./services/telegram")(),
-      dashboardUrl: process.env.WAREHOUSE_HEALTH_URL || "https://dnds.co.in/dashboard/invoice-pipeline",
+      dashboardUrl: process.env.WAREHOUSE_HEALTH_URL || "https://dnds.co.in/pick-pack/daily-report",
       pdf: require("./services/pdf"),
       s3: require("./services/s3"),
     });

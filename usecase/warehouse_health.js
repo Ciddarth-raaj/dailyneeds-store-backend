@@ -287,14 +287,14 @@ class WarehouseHealth {
   async message(date, site = WAREHOUSE) {
     let text;
     let h = null;
-    const name = site === WAREHOUSE ? "Warehouse Health" : `${H.title(site)} Store Health`;
+    const name = H.reportName(site, H.title(site));
     try {
       h = await this.build(date, site);
       text = H.formatTelegram(h);
     } catch (err) {
-      text = `${name} - ${date}\nCould not be built: ${err.message}`;
+      text = `${name} · ${date}\nCould not be built: ${err.message}`;
     }
-    const keyboard = this.dashboardUrl ? { inlineKeyboard: [[{ text: `Open ${name}`, url: siteUrl(this.dashboardUrl, site) }]] } : null;
+    const keyboard = this.dashboardUrl ? { inlineKeyboard: [[{ text: "Open Pick Pack Daily Report", url: siteUrl(this.dashboardUrl, site) }]] } : null;
     const options = keyboard ? { parseMode: null, replyMarkup: keyboard } : { parseMode: null };
     let pdfUrl = null;
     if (h && this.pdf && this.s3) {
@@ -315,7 +315,7 @@ class WarehouseHealth {
         });
       }
     }
-    return { text, options, pdfUrl, caption: `${name} - ${date} (PDF)` };
+    return { text, options, pdfUrl, caption: `${name} · ${date} (PDF)` };
   }
 
   /** The message, then the PDF when there is one. */
