@@ -270,11 +270,11 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   <div class="meta"><div class="day">${esc(dayText(h.date))}</div>Made ${esc(istTime(nowMs))} IST<br>Source: RetailPilot</div>
 </header>
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
-${stageHtml}
-${stuckHtml}
 ${needYou}
 <div class="cards">${cards}</div>
 ${section("Picking write-off by store", writeoff)}
+${stageHtml}
+${stuckHtml}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${chainHtml}
 ${secondHtml}
