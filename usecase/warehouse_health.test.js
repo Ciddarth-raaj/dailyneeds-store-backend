@@ -290,3 +290,19 @@ test("send me: the site I am looking at", async () => {
   assert.strictEqual(r.code, 200);
   assert.match(sent[0].text, /^ECR Store Health - /);
 });
+
+test("the PDF lists the lines found short at verification (who, when), not only how many", () => {
+  const P = require("../utils/warehouse_health_pdf");
+  const H = require("../utils/warehouse_health");
+  const sc = SC.buildStageChain({
+    jobs: [
+      { report_type: "VERIFICATION", report_date: "2026-11-21", stage_id: "INV-1", article_id: 9, article_name: "nescafe sunrise 8g", from_store: "warehouse", to_store: "ecr", qty: 8, short_qty: 2, nlc: 10, worked_by: "kp9", finished_at: "2026-11-21 18:05", job_id: "v1" },
+    ],
+    boxes: [],
+    date: "2026-11-21",
+  });
+  const h = H.buildHealth({ date: "2026-11-21", uploads: [], summary: [], byJobType: [], byStore: [], yetToVerify: [], remarks: [], boxLines: [], repeats: [], trend: [], trendUploads: [], pickerWork: [], pickerMistakes: [], staffNames: { kp9: "Meena" }, writeoffLines: [], stageChain: { ...sc, days_without_state: [] } });
+  const html = P.buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Verified with issues - found short at the store - 1 line · 2 qty"));
+  assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Meena") && html.includes("2026-11-21 18:05"));
+});

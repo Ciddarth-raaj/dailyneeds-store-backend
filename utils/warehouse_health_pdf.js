@@ -119,6 +119,25 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
             : `<p class="note">No carton is stuck.</p>`,
           "Live from RetailPilot when the report was made."
         );
+  // What the next stage found short that day, line by line (verified with issues, packed less than picked, ...).
+  const SHORT_TITLE = { to_pack: "Packed less than picked", to_load: "Found short while splitting into cartons", to_verify: "Verified with issues - found short at the store" };
+  const foundShort = (g) => {
+    const lost = g.lost || {};
+    if (!lost.lines) return "";
+    const list = lost.list || [];
+    return section(
+      `${SHORT_TITLE[g.key] || "Found short"} - ${plural(lost.lines, "line")} · ${num(lost.qty)} qty · ${rupees(lost.value)}`,
+      table(
+        ["Article", "Document", "From → To", "Short", "Value", "By", "When"],
+        list.slice(0, 40).map((l) => ({
+          cls: "bad",
+          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc(l.worker_name || "—"), esc(l.finished_at || "—")],
+        })),
+        [3, 4]
+      ),
+      list.length > 40 ? `Biggest 40 of ${list.length} lines - all on the dashboard.` : ""
+    );
+  };
   const stageBlock = (sc, heading, cap) =>
     sc
     ? `<h2 style="margin-top:4px">${esc(heading)}</h2>
@@ -144,7 +163,8 @@ ${sc.gaps
       g.list.length > cap ? `Oldest ${cap} of ${g.list.length} lines - all on the dashboard.` : ""
     )
   )
-  .join("")}`
+  .join("")}
+${sc.gaps.map((g) => foundShort(g)).join("")}`
     : "";
   const mainTitle = h.main_title ? `${h.main_title} - where everything stands tonight` : "Where everything stands tonight";
   const stageHtml = stageBlock(h.stage_chain, mainTitle, 40);
