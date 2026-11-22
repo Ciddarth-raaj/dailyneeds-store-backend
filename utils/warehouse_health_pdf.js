@@ -151,16 +151,17 @@ ${table(
   [1, 2, 3, 4, 5]
 )}
 ${sc.gaps
-  .filter((g) => g.list.length)
-  .map((g) =>
+  .map((g) => ({ g, old: g.list.filter((l) => n(l.days) >= 2) }))
+  .filter((x) => x.old.length)
+  .map(({ g, old }) =>
     section(
       `${g.label} - ${num(g.stands)} qty · ${rupees(g.value)}`,
       table(
         ["Article", "Document", "From → To", "Qty", "Value", "Waiting"],
-        g.list.slice(0, cap).map((l) => ({ cls: l.days > 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
+        old.slice(0, cap).map((l) => ({ cls: "bad", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), plural(l.days, "day")] })),
         [3, 4, 5]
       ),
-      g.list.length > cap ? `Oldest ${cap} of ${g.list.length} lines - all on the dashboard.` : ""
+      `Only lines waiting 2 days or more${old.length > cap ? ` - oldest ${cap} of ${old.length}` : ` (${plural(old.length, "line")})`}; the newer ones are on the dashboard.`
     )
   )
   .join("")}

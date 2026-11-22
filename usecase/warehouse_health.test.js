@@ -306,3 +306,15 @@ test("the PDF lists the lines found short at verification (who, when), not only 
   assert.ok(html.includes("Verified with issues - found short at the store - 1 line · 2 qty"));
   assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Meena") && html.includes("2026-11-21 18:05"));
 });
+
+test("the PDF lists only lines waiting 2 days or more (the newer ones are on the dashboard)", () => {
+  const P = require("../utils/warehouse_health_pdf");
+  const H = require("../utils/warehouse_health");
+  const K = (d, id, name) => ({ report_type: "PACKING", report_date: d, stage_id: `S${id}`, article_id: id, article_name: name, from_store: "warehouse", to_store: "ecr", qty: 10, short_qty: 0, nlc: 5, worked_by: "kp1", job_id: `k${id}` });
+  const sc = SC.buildStageChain({ jobs: [K("2026-11-18", 1, "old soap"), K("2026-11-19", 2, "two day oil"), K("2026-11-20", 4, "one day dal"), K("2026-11-21", 3, "fresh ghee")], boxes: [], date: "2026-11-21" });
+  const h = H.buildHealth({ date: "2026-11-21", uploads: [], summary: [], byJobType: [], byStore: [], yetToVerify: [], remarks: [], boxLines: [], repeats: [], trend: [], trendUploads: [], pickerWork: [], pickerMistakes: [], staffNames: {}, writeoffLines: [], stageChain: { ...sc, days_without_state: [] } });
+  const html = P.buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Packed, not yet loaded - 40 qty")); // the total still counts everything
+  assert.deepStrictEqual(["old soap", "two day oil", "one day dal", "fresh ghee"].map((a) => html.includes(a)), [true, true, false, false]);
+  assert.ok(html.includes("Only lines waiting 2 days or more (2 lines)"));
+});
