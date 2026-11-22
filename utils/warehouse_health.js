@@ -109,10 +109,11 @@ function pickers(work, mistakes, names) {
     .sort((a, b) => b.lines - a.lines || b.value - a.value);
 }
 
-/** Pickers split by the kind of picking job: STA / Alloc, and the rest (GRN, DAMG, ...). */
+/** Pickers split by the kind of picking job: STA on its own, everything else (Alloc, GRN, DAMG, ...) together. */
+const isSta = (t) => String(t || "").toUpperCase() === "STA";
 const PICKER_GROUPS = [
-  { key: "sta", label: "STA / Alloc", has: (t) => ["STA", "ALLOC"].includes(String(t || "").toUpperCase()) },
-  { key: "other", label: "Others (GRN, DAMG)", has: (t) => !["STA", "ALLOC"].includes(String(t || "").toUpperCase()) },
+  { key: "sta", label: "STA", has: isSta },
+  { key: "other", label: "Others (Alloc, GRN, DAMG)", has: (t) => !isSta(t) },
 ];
 function pickerGroups(work, mistakes, names) {
   return PICKER_GROUPS.map((g) => ({
