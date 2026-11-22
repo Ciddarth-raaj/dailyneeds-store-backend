@@ -119,3 +119,22 @@ test("a pick-pack with no packing job after it still goes straight to waiting to
   const c = S.buildStageChain({ date: "2026-11-20", jobs: [J("PICKING", "2026-11-20", { pick_pack: 1, job_id: "pp1", qty: 9 })], boxes: [] });
   assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").stands], [0, 9]);
 });
+
+test("a pick-pack partly split into cartons by packing jobs: all of it packed once, cartons and crate loaded (healthy grocer, 14 Oct)", () => {
+  const T = (o) => ({ stage_id: "INV-Qq", article_id: 121280, to_store: "moolakulam", ...o });
+  const jobs = [
+    J("PICKING", "2026-10-14", T({ qty: 373, pick_pack: 1, job_id: "job_38623566" })),
+    // the same pick-pack also serves another store: its links must not cross stores
+    J("PICKING", "2026-10-14", T({ to_store: "ecr", qty: 50, pick_pack: 1, job_id: "job_38623566" })),
+    ...["job_25639555", "job_43651249", "job_89551815"].map((id) => J("PACKING", "2026-10-14", T({ qty: 120, job_id: id, picking_job: "job_38623566" }))),
+  ];
+  const boxes = [
+    ...["job_25639555", "job_43651249", "job_89551815"].map((id) => Bx("LOADING", "2026-10-15", T({ qty: 120, packing_jobs: id, picking_job: "job_38623566" }))),
+    Bx("LOADING", "2026-10-15", T({ qty: 13, packing_jobs: null, picking_job: "job_38623566" })), // crate RP031173
+    Bx("LOADING", "2026-10-15", T({ to_store: "ecr", qty: 50, packing_jobs: null, picking_job: "job_38623566" })),
+  ];
+  const c = S.buildStageChain({ date: "2026-10-15", jobs, boxes });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").stands, g(c, "to_load").jumped.qty], [0, 0, 0]);
+  const day1 = S.buildStageChain({ date: "2026-10-14", jobs, boxes });
+  assert.deepStrictEqual([g(day1, "to_pack").stands, g(day1, "to_load").stands], [0, 423]); // packed on the 14th, loaded on the 15th
+});

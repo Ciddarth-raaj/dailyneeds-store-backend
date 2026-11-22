@@ -44,7 +44,7 @@ const staysPut = (e) => e.from_store && e.to_store && e.from_store === e.to_stor
 function follow(ins, outs, cutoff) {
   const layers = new Map(); // exact key -> [{...in, left}]
   const byLane = new Map(); // lane -> Set(exact key)
-  const byLink = new Map(); // job id | article -> [layer]
+  const byLink = new Map(); // job id | article | store -> [layer]
   for (const e of ins) {
     if (e.report_date > cutoff || n(e.qty) <= 0) continue;
     const k = exact(e);
@@ -54,7 +54,7 @@ function follow(ins, outs, cutoff) {
     if (!byLane.has(lane(e))) byLane.set(lane(e), new Set());
     byLane.get(lane(e)).add(k);
     if (e.link) {
-      const lk = `${e.link}|${e.article_id}`;
+      const lk = `${e.link}|${e.article_id}|${e.to_store || ""}`;
       if (!byLink.has(lk)) byLink.set(lk, []);
       byLink.get(lk).push(layer);
     }
@@ -77,7 +77,7 @@ function follow(ins, outs, cutoff) {
     let need = n(o.qty);
     for (const id of o.links || []) {
       if (need <= 0) break;
-      const list = byLink.get(`${id}|${o.article_id}`);
+      const list = byLink.get(`${id}|${o.article_id}|${o.to_store || ""}`);
       if (list) need = take(list, o, need);
     }
     if (need > 0 && o.stage_id && layers.has(exact(o))) need = take(layers.get(exact(o)), o, need);
@@ -143,28 +143,33 @@ function buildStageChain({ jobs, boxes, date }) {
   const shortOf = (rows) => rows.filter((r) => n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty) }));
   // `link`: this stage's job id; `links`: the job(s) of the stage before that this line came from.
   const ids = (...vals) => [...new Set(vals.flatMap((v) => String(v || "").split(",")).map((v) => v.trim()).filter(Boolean))];
-  // A PICKED_PACKED picking job is packed in the same job only when no packing
-  // job follows it. RetailPilot also makes packing jobs after a pick-pack (GRN
-  // cartons: picked-packed, then one packing job per carton) - then those
-  // packing jobs are the packing, and the pick-pack counts as picked, or the
-  // same goods would be counted packed twice and wait for ever.
-  const packedAfter = new Set();
-  for (const r of J("PACKING")) {
-    if (r.picking_job) packedAfter.add(`J|${r.picking_job}|${r.article_id}`);
-    if (r.stage_id) packedAfter.add(`S|${r.stage_id}|${r.article_id}|${r.to_store || ""}`);
+  // A PICKED_PACKED (pick-pack) picking line is packed in full in that job.
+  // RetailPilot may then split part of it into cartons with packing jobs
+  // (GRN: 373 pick-packed, 3 packing jobs of 120 into cartons, 13 straight
+  // into a crate) - those packing jobs only split what is already packed:
+  // they are not packed again (their shortages still count as lost). Found
+  // by the packing line's picking_job, or on days pulled before job links by
+  // the same document + article + store as a pick-pack line.
+  const pickPackJobs = new Set();
+  const pickPackLanes = new Set();
+  for (const r of J("PICKING", (x) => n(x.pick_pack))) {
+    if (r.job_id) pickPackJobs.add(`${r.job_id}|${r.article_id}|${r.to_store || ""}`);
+    if (r.stage_id) pickPackLanes.add(`${r.stage_id}|${r.article_id}|${r.to_store || ""}`);
   }
-  const followedByPacking = (r) => packedAfter.has(`J|${r.job_id}|${r.article_id}`) || (r.stage_id && packedAfter.has(`S|${r.stage_id}|${r.article_id}|${r.to_store || ""}`));
-  const pickPack = (r) => n(r.pick_pack) && !followedByPacking(r);
-  const picked = J("PICKING", (r) => !pickPack(r)).map((r) => ({ ...r, link: r.job_id || null }));
-  const pickPacked = J("PICKING", (r) => pickPack(r)).map((r) => ({ ...r, link: r.job_id || null }));
-  const packing = J("PACKING").map((r) => ({ ...r, link: r.job_id || null, links: ids(r.picking_job) }));
+  const splitsPickPack = (r) =>
+    (r.picking_job && pickPackJobs.has(`${r.picking_job}|${r.article_id}|${r.to_store || ""}`)) ||
+    (!r.picking_job && r.stage_id && pickPackLanes.has(`${r.stage_id}|${r.article_id}|${r.to_store || ""}`));
+  const picked = J("PICKING", (r) => !n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
+  const pickPacked = J("PICKING", (r) => n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
+  const packing = J("PACKING", (r) => !splitsPickPack(r)).map((r) => ({ ...r, link: r.job_id || null, links: ids(r.picking_job) }));
+  const splitShort = J("PACKING", (r) => splitsPickPack(r) && n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty), links: ids(r.picking_job) }));
   const verification = J("VERIFICATION").map((r) => ({ ...r, links: ids(r.unloading_job) }));
   const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
   const unloaded = B("UNLOADING").map((r) => ({ ...r, link: r.job_id || null }));
   const today = (rows) => r3(rows.filter((r) => r.report_date === date && !staysPut(r)).reduce((s, r) => s + n(r.qty), 0));
   const gaps = [
     gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: picked, outs: [...packing, ...shortOf(packing)], lost: shortOf(packing), date }),
-    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: [...packing, ...pickPacked], outs: loaded, lost: [], date }),
+    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: [...packing, ...pickPacked], outs: [...loaded, ...splitShort], lost: splitShort, date }),
     gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: unloaded, outs: [...verification, ...shortOf(verification)], lost: shortOf(verification), date }),
   ];
   // Days the chain cannot follow by job state (uploaded files, or pulled before states were kept).
