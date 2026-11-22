@@ -68,6 +68,9 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal(own.length, 2);
     assert.ok(own.every((x) => x.job_type));
     assert.equal((await repo.jobBreakdown(day, day, ["worked_by"], { report_type: "PICKING", from_store: "nowhere" })).length, 0);
+    // who picked each verification line: by its picking job, else by the document
+    const who = await repo.pickersOfVerified([{ job_id: "VJ1" }, { job_id: "VJ2" }, { job_id: "VJ3" }]);
+    assert.deepEqual(who.map((x) => [x.job_id, Number(x.article_id), x.pickers]).sort(), [["VJ1", 1, "kp-1"], ["VJ2", 2, "kp-2"]]);
     const work = await repo.jobBreakdown(day, day, ["worked_by"], { report_type: "PICKING" });
     const k2 = work.find((w) => w.worked_by === "kp-2");
     assert.equal(k2.actual_value, 140);

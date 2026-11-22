@@ -304,7 +304,7 @@ test("the PDF lists the lines found short at verification (who, when), not only 
   const h = H.buildHealth({ date: "2026-11-21", uploads: [], summary: [], byJobType: [], byStore: [], yetToVerify: [], remarks: [], boxLines: [], repeats: [], trend: [], trendUploads: [], pickerWork: [], pickerMistakes: [], staffNames: { kp9: "Meena" }, writeoffLines: [], stageChain: { ...sc, days_without_state: [] } });
   const html = P.buildHtml(h, { nowMs: 0 });
   assert.ok(html.includes("Verified with issues - found short at the store - 1 line · 2 qty"));
-  assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Meena") && html.includes("21 Nov, 6:05 pm"));
+  assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Picked by") && html.includes("21 Nov, 6:05 pm"));
 });
 
 test("the PDF lists only lines waiting 2 days or more (the newer ones are on the dashboard)", () => {
@@ -332,4 +332,20 @@ test("the PDF lists the boxes sent to the warehouse still open 2 days or more, u
   assert.ok(html.includes("Received at the warehouse - still open, loaded 2 days or more ago"));
   assert.ok(html.includes("RP031488") && html.includes("bambino badam soan papdi 200g"));
   assert.ok(!html.includes("RP09")); // loaded today: on the dashboard
+});
+
+test("lines found short at verification show who picked them", async () => {
+  const { uc } = setup([]);
+  uc.repo = {
+    ...repo,
+    stageFlows: async () => ({ jobs: [{ report_type: "VERIFICATION", report_date: "2026-11-20", stage_id: "INV-q6", article_id: 5, article_name: "narasus coffee", from_store: "warehouse", to_store: "ecr", qty: 5, short_qty: 3, nlc: 249, job_id: "v1", finished_at: "2026-11-20 19:35" }], boxes: [] }),
+    pickersOfVerified: async (lines) => lines.map((l) => ({ job_id: l.job_id, article_id: l.article_id, pickers: "kp7" })),
+  };
+  uc.chain = fullChain(uc.repo);
+  uc.reports = { ...reports, _staffNames: async () => ({ kp7: "S.vignesh" }) };
+  const r = await uc.health({ date: "2026-11-20" });
+  const lost = r.data.stage_chain.gaps.find((g) => g.key === "to_verify").lost.list;
+  assert.deepStrictEqual(lost.map((l) => [l.article_name, l.picked_by]), [["narasus coffee", "S.vignesh"]]);
+  const html = require("../utils/warehouse_health_pdf").buildHtml(r.data, { nowMs: 0 });
+  assert.ok(html.includes("S.vignesh"));
 });

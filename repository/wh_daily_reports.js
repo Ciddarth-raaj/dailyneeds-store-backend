@@ -621,6 +621,27 @@ class WhDailyReportsRepository {
    * of the goods: through the line's picking job, or - where RetailPilot gave
    * none - the picking line of the same document, article and store.
    */
+  /**
+   * Who picked the goods of these verification lines (job_id + article): the
+   * picking job the line names, else the document's picking of the article
+   * for the same store. -> [{ job_id, article_id, pickers: "kp1,kp2" }]
+   */
+  async pickersOfVerified(lines) {
+    const jobs = [...new Set((lines || []).map((l) => l.job_id).filter(Boolean))];
+    if (!jobs.length) return [];
+    return this.run(
+      "PICKERS_OF_VERIFIED",
+      `SELECT v.job_id, v.article_id, GROUP_CONCAT(DISTINCT p.worked_by ORDER BY p.worked_by) AS pickers
+         FROM wh_report_job_rows v
+         JOIN wh_report_job_rows p
+           ON p.report_type = 'PICKING' AND p.article_id = v.article_id AND p.to_store = v.to_store AND p.worked_by IS NOT NULL
+          AND (p.job_id = v.picking_job OR (v.picking_job IS NULL AND p.stage_id = v.stage_id))
+        WHERE v.report_type = 'VERIFICATION' AND v.job_id IN (?)
+        GROUP BY v.job_id, v.article_id`,
+      [jobs.slice(0, 2000)]
+    );
+  }
+
   async pickerMistakes(from, to, { site = null } = {}) {
     // Only pickers working at `site` (the picking's from-store), when given.
     const at = site ? " AND from_store = ?" : "";

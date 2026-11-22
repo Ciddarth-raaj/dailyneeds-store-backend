@@ -158,6 +158,7 @@ class WarehouseHealth {
     const h = H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
     const title = isWh ? "Received at the warehouse" : `Sent from ${H.title(site)}`;
     H.withSecondChain(h, other && other.result ? other.result : null, { title, direction: isWh ? "to" : "from", staffNames });
+    await this.addPickers(h, staffNames);
     // At a store it is the store itself that found the shortage.
     if (!isWh) for (const i of h.need_you) i.text = i.text.replace(/^Stores found /, "Found ");
     h.site = site;
@@ -165,6 +166,29 @@ class WarehouseHealth {
     h.main_title = isWh ? "Sent from the warehouse" : `Received at ${H.title(site)}`;
     h.sites = sites;
     return h;
+  }
+
+  /** The lines found short at verification, with who picked them (names as HR mapped them). */
+  async addPickers(h, staffNames) {
+    const lists = [h.stage_chain, h.second && h.second.stage_chain]
+      .filter(Boolean)
+      .map((sc) => ((sc.gaps || []).find((g) => g.key === "to_verify") || {}).lost)
+      .filter((l) => l && l.list && l.list.length)
+      .map((l) => l.list);
+    if (!lists.length || typeof this.repo.pickersOfVerified !== "function") return;
+    let rows = [];
+    try {
+      rows = await this.repo.pickersOfVerified(lists.flat());
+    } catch (err) {
+      return; // the lines still show, without the picker
+    }
+    const by = new Map(rows.map((r) => [`${r.job_id}|${r.article_id}`, String(r.pickers || "").split(",").filter(Boolean)]));
+    for (const list of lists) {
+      for (const l of list) {
+        const ids = by.get(`${l.job_id}|${l.article_id}`) || [];
+        l.picked_by = ids.length ? ids.map((id) => H.staffLabel(id, staffNames)).join(", ") : null;
+      }
+    }
   }
 
   /** Every site with a stored chain on `date` (the warehouse first). */

@@ -136,10 +136,10 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     return section(
       `${SHORT_TITLE[g.key] || "Found short"} - ${plural(lost.lines, "line")} · ${num(lost.qty)} qty · ${rupees(lost.value)}`,
       table(
-        ["Article", "Document", "From → To", "Short", "Value", "By", "When"],
+        ["Article", "Document", "From → To", "Short", "Value", g.key === "to_verify" ? "Picked by" : "By", "When"],
         list.slice(0, 40).map((l) => ({
           cls: "bad",
-          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc(l.worker_name || "—"), esc(whenText(l.finished_at))],
+          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc((g.key === "to_verify" ? l.picked_by : l.worker_name) || "—"), esc(whenText(l.finished_at))],
         })),
         [3, 4]
       ),
