@@ -183,23 +183,6 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     [3, 4]
   );
 
-  const stores = table(
-    ["Store", "Picking write-off", "Short at verification", "Yet to verify", "Box problems"],
-    h.stores
-      .filter((s) => s.picking_short_lines || s.verification_short_qty || s.yet_to_verify_qty || s.box_issues)
-      .map((s) => ({
-        cls: s.needs_look ? "bad" : "",
-        cells: [
-          esc(s.name),
-          s.picking_short_lines ? `${plural(s.picking_short_lines, "line")} · ${rupees(s.picking_short_value)}` : "—",
-          s.verification_short_qty ? `${num(s.verification_short_qty)} qty` : "—",
-          s.yet_to_verify_qty ? `${num(s.yet_to_verify_qty)} qty` : "—",
-          s.box_issues ? num(s.box_issues) : "—",
-        ],
-      })),
-    []
-  );
-
   const repeats = table(
     ["Item", "Days short", "Lines", "Value", "Stores"],
     h.repeats.map((a) => ({ cells: [esc(a.article_name || a.article_id), num(a.days_short), num(a.lines), rupees(a.short_value), esc(String(a.stores || "").split(",").map(title).join(", "))] })),
@@ -288,7 +271,6 @@ ${chainHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
-${section("Stores", stores)}
 ${section("Short again and again", repeats, "Picking write-off on 2 or more of the last 7 days - check the stock / bin.")}
 ${section(
   `Pickers this month (${dayText(h.month_from)} to ${dayText(h.date)})`,

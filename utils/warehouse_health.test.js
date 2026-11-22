@@ -164,7 +164,7 @@ test("remarks (written next day) and open jobs (every night) are not things that
   const h = H.buildHealth(base);
   assert.deepStrictEqual(h.need_you.filter((i) => ["remarks", "jobs"].includes(i.key)), []);
   const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
-  for (const t of ["Remarks pending", "Jobs not finished", "Open lines", "Flow of goods", "Picking write-off, last 7 days", '<div class="cl">Loading', '<div class="cl">Unloading', '<div class="cl">Verification']) assert.ok(!html.includes(t), t);
+  for (const t of ["Remarks pending", "Jobs not finished", "Open lines", "Flow of goods", "Picking write-off, last 7 days", "<h2>Stores</h2>", '<div class="cl">Loading', '<div class="cl">Unloading', '<div class="cl">Verification']) assert.ok(!html.includes(t), t);
   assert.ok(html.includes('<div class="cl">Picking write-off'));
 });
 
