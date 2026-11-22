@@ -141,7 +141,16 @@ function gap({ key, label, unit, ins, outs, lost, date, carried = [] }) {
     lines: list.length,
     oldest_days: list.length ? list[0].days : 0,
     stuck: list.filter((l) => l.days > STUCK_DAYS).length,
-    lost: { qty: r3(lostToday.reduce((s, e) => s + n(e.qty), 0)), value: r2(lostToday.reduce((s, e) => s + n(e.qty) * n(e.nlc), 0)), lines: lostToday.length },
+    lost: {
+      qty: r3(lostToday.reduce((s, e) => s + n(e.qty), 0)),
+      value: r2(lostToday.reduce((s, e) => s + n(e.qty) * n(e.nlc), 0)),
+      lines: lostToday.length,
+      // What the next stage found short today, line by line: who, when, which job.
+      list: lostToday
+        .map((e) => ({ stage_id: e.stage_id || null, article_id: e.article_id, article_name: e.article_name || null, from_store: e.from_store || null, to_store: e.to_store || null, qty: r3(e.qty), value: r2(n(e.qty) * n(e.nlc)), worked_by: e.worked_by || null, finished_at: e.finished_at || null, job_id: e.job_id || null }))
+        .sort((a, b) => b.value - a.value || b.qty - a.qty)
+        .slice(0, 200),
+    },
     jumped: { qty: r3(jumpedToday.reduce((s, j) => s + j.qty, 0)), lines: jumpedToday.length, list: jumpedToday.slice(0, 200) },
     list: list.slice(0, 300),
     // Everything still waiting tonight, for tomorrow to start from (not sent to the page).

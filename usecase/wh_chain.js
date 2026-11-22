@@ -13,7 +13,7 @@ const LIST_CAP = 300;
  * stored under an older version are all redone (in the background) on the
  * next start, so a fix reaches every day, not only new ones.
  */
-const LOGIC = 2;
+const LOGIC = 3; // 3: the shortages each stage found, line by line
 
 const n = (v) => Number(v) || 0;
 

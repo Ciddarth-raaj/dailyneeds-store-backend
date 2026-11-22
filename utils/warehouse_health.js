@@ -112,7 +112,7 @@ function pickers(work, mistakes, names) {
  * still open.
  */
 function buildHealth(args) {
-  const h = withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain), args.stuckCartons);
+  const h = withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain, args.staffNames), args.stuckCartons);
   // Where the stored chain stands: final, or being worked out / redone (with progress).
   h.chain_status = args.chainStatus || null;
   return h;
@@ -142,10 +142,12 @@ function withStuck(h, s) {
   return h;
 }
 
-function withStageChain(h, sc) {
+function withStageChain(h, sc, staffNames) {
   if (!sc) return h;
   // The stage chain heads the page: what stands between each two stages tonight.
   const box = h.tiles.unloading.chain;
+  // Names of whoever found a shortage (RetailPilot user ids, as HR has mapped them).
+  for (const g of sc.gaps || []) for (const l of (g.lost && g.lost.list) || []) l.worker_name = l.worked_by ? staffLabel(l.worked_by, staffNames) : null;
   h.stage_chain = {
     from: sc.from,
     stages: { ...sc.stages, loaded_boxes: box ? box.loaded.boxes : null, unloaded_boxes: box ? box.unloaded.boxes : null },

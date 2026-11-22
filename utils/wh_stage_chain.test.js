@@ -61,6 +61,8 @@ test("unloaded, not yet verified; verified short is lost", () => {
   const c = S.buildStageChain({ date: "2026-11-20", jobs: [J("VERIFICATION", "2026-11-20", { qty: 6, short_qty: 1 })], boxes: [Bx("UNLOADING", "2026-11-20", { qty: 24 })] });
   const v = g(c, "to_verify");
   assert.deepStrictEqual([v.arrived, v.moved_on, v.stands, v.lost.qty], [24, 7, 17, 1]);
+  // the shortage line by line, for the page
+  assert.deepStrictEqual(v.lost.list.map((l) => [l.article_name, l.qty, l.value]), [["Atta 5kg", 1, 200]]);
 });
 
 test("days the chain cannot follow by job state are listed", () => {
