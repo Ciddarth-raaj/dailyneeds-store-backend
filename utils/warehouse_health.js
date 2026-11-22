@@ -113,6 +113,8 @@ function pickers(work, mistakes, names) {
  */
 function buildHealth(args) {
   const h = withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain), args.stuckCartons);
+  // Where the stored chain stands: final, or being worked out / redone (with progress).
+  h.chain_status = args.chainStatus || null;
   return h;
 }
 

@@ -2,7 +2,24 @@ const test = require("node:test");
 const assert = require("node:assert");
 const make = require("./warehouse_health");
 
-process.env.WAREHOUSE_HEALTH_CHAINS = "on"; // the chains are tested here; on the server they are off until made lighter
+const SC = require("../utils/wh_stage_chain");
+const BC = require("../utils/wh_box_chain");
+
+/** The stored chain (usecase/wh_chain.js), read for a day: here worked out at once from the stub reports. */
+function fullChain(repo) {
+  return {
+    version: async () => "v",
+    read: async (d) => {
+      const { jobs, boxes } = await repo.stageFlows("2026-10-10", d);
+      const box = BC.buildChain({ loads: await repo.boxSummary("LOADING", "2026-10-10", d), unloads: await repo.boxSummary("UNLOADING", "2026-10-10", d), date: d });
+      const keys = box.lists.still_open.map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
+      const items = await repo.boxArticles("LOADING", keys);
+      box.lists.still_open.forEach((b, i) => (b.items = items[i] ? [items[i]] : []));
+      box.missing_days = d >= "2026-10-10" ? [{ date: "2026-10-10", reports: ["Loading", "Unloading"] }] : [];
+      return { result: { stage: SC.buildStageChain({ jobs, boxes, date: d }), box }, final: true, status: "DONE", computed_at: "2026-11-21T18:12:00.000Z", progress: { todo: 0, done: 42, failed: 0, first_todo: null }, days_without_state: [] };
+    },
+  };
+}
 
 const repo = {
   uploads: async () => [{ report_type: "PICKING", report_date: "2026-11-20" }],
@@ -35,6 +52,7 @@ function setup(recipients, failFor = null, extra = {}) {
   const docs = [];
   const recorded = [];
   const uc = make({
+    chain: fullChain(repo),
     ...extra,
     repo,
     reports,
@@ -186,12 +204,22 @@ test("a built day is shared and reused until a report is pulled, uploaded or rem
   assert.strictEqual(builds, once * 2);
 });
 
-test("the chains are off unless WAREHOUSE_HEALTH_CHAINS is on: the page still loads without them", async () => {
-  process.env.WAREHOUSE_HEALTH_CHAINS = "";
+test("WAREHOUSE_HEALTH_CHAINS=off hides the chains: the page still loads without them", async () => {
+  process.env.WAREHOUSE_HEALTH_CHAINS = "off";
   const { uc } = setup([]);
   const r = await uc.health({ date: "2026-11-21" });
   assert.strictEqual(r.code, 200);
   assert.strictEqual(r.data.stage_chain, undefined);
   assert.strictEqual(r.data.tiles.unloading.chain, undefined);
-  process.env.WAREHOUSE_HEALTH_CHAINS = "on";
+  process.env.WAREHOUSE_HEALTH_CHAINS = "";
+});
+
+test("the chains are read as stored, with when they were worked out and how far a redo is", async () => {
+  const { uc } = setup([]);
+  const r = await uc.health({ date: "2026-11-20" });
+  assert.deepStrictEqual([r.data.chain_status.final, r.data.chain_status.computed_at], [true, "2026-11-21T18:12:00.000Z"]);
+  uc.chain = { version: async () => "x", read: async () => ({ result: null, final: false, status: "TODO", computed_at: null, progress: { todo: 12, done: 30, failed: 0, first_todo: "2026-10-14" }, days_without_state: [] }) };
+  uc.built = null;
+  const p = await uc.health({ date: "2026-11-20" });
+  assert.deepStrictEqual([p.data.stage_chain, p.data.chain_status.progress.todo], [undefined, 12]);
 });

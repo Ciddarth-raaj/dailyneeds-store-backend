@@ -1327,7 +1327,18 @@ class Server {
     );
     // Warehouse Health: the warehouse manager's dashboard (under Invoice
     // Pipeline) and its 9 am Telegram summary about yesterday (cron below).
+    // The stage chain / box chain, worked out one day at a time in the
+    // background and stored, so Warehouse Health only reads them. A day's
+    // reports changing (pull, upload, removal) redoes that day and later.
+    this.whChain = require("./usecase/wh_chain")({
+      chainRepo: require("./repository/wh_chain")(this.mysql.connection),
+      repo: this.whDailyReportsUsecase.repo,
+    });
+    this.whDailyReportsUsecase.onChange = (day) => this.whChain.markFrom(day);
+    // Catch up a while after a (re)start: days not worked out yet, redo left half-done.
+    setTimeout(() => this.whChain.ensure().catch(() => {}), 90 * 1000).unref();
     this.warehouseHealth = require("./usecase/warehouse_health")({
+      chain: this.whChain,
       repo: this.whDailyReportsUsecase.repo,
       reports: this.whDailyReportsUsecase,
       summaryRepo: require("./repository/warehouse_health_summary")(this.mysql.connection),
@@ -2969,6 +2980,8 @@ class Server {
           // NLC on older rows still without one (uploaded files, or RetailPilot was down).
           const f = await this.whDailyReportsUsecase.fillNlc({ from: require("./utils/wh_daily_reports").addDays(today, -91), to: today });
           if (f.code === 200 && f.data.rows_updated) console.log(`[CRON] wh_reports_retailpilot_pull: NLC filled on ${f.data.rows_updated} rows`);
+          // New days get a row; the pulls above already marked theirs to redo. Runs in the background.
+          this.whChain.ensure().catch(() => {});
           const failed = r.data.days.flatMap((d) => d.reports.filter((x) => !x.ok).map((x) => `${d.date} ${x.type}: ${x.msg}`));
           console.log(`[CRON] wh_reports_retailpilot_pull ${yesterday}..${today}: ${failed.length ? `failed - ${failed.join("; ")}` : "ok"}`);
           if (failed.length) throw new Error(failed.join("; "));

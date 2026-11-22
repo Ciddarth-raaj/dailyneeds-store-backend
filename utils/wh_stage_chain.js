@@ -105,8 +105,10 @@ function follow(ins, outs, cutoff) {
   return { waiting: all.filter((l) => l.left > 0), before, jumped };
 }
 
-function gap({ key, label, unit, ins, outs, lost, date }) {
-  const I = ins.filter((e) => !staysPut(e));
+function gap({ key, label, unit, ins, outs, lost, date, carried = [] }) {
+  // `carried`: what was still waiting at the end of the day before (stored), so
+  // a day is worked out without re-reading every earlier day.
+  const I = [...carried, ...ins.filter((e) => !staysPut(e))];
   const O = outs.filter((e) => !staysPut(e));
   const cur = follow(I, O, date);
   const sum = (list, f = "left") => r3(list.reduce((s, x) => s + n(x[f]), 0));
@@ -142,6 +144,8 @@ function gap({ key, label, unit, ins, outs, lost, date }) {
     lost: { qty: r3(lostToday.reduce((s, e) => s + n(e.qty), 0)), value: r2(lostToday.reduce((s, e) => s + n(e.qty) * n(e.nlc), 0)), lines: lostToday.length },
     jumped: { qty: r3(jumpedToday.reduce((s, j) => s + j.qty, 0)), lines: jumpedToday.length, list: jumpedToday.slice(0, 200) },
     list: list.slice(0, 300),
+    // Everything still waiting tonight, for tomorrow to start from (not sent to the page).
+    open: cur.waiting.map((w) => ({ report_date: w.report_date, stage_id: w.stage_id || null, article_id: w.article_id, article_name: w.article_name || null, from_store: w.from_store || null, to_store: w.to_store || null, link: [].concat(w.link || []), qty: r3(w.left), nlc: w.nlc == null ? null : n(w.nlc) })),
   };
 }
 
@@ -149,9 +153,13 @@ function gap({ key, label, unit, ins, outs, lost, date }) {
  * @param jobs  stageFlows().jobs: { report_type, report_date, stage_id, article_id, article_name, from_store, to_store, pick_pack, qty, short_qty, nlc, no_state }
  * @param boxes stageFlows().boxes: { report_type, report_date, stage_id, article_id, article_name, from_store, to_store, qty, nlc }
  */
-function buildStageChain({ jobs, boxes, date }) {
+function buildStageChain({ jobs, boxes, date, carried = null }) {
+  // With `carried` (the stored end of the day before) only `date`'s rows are
+  // new events; earlier rows passed in are context, to tell pick-packs and
+  // carton splits apart.
+  const isNew = (r) => !carried || r.report_date === date;
   const J = (t, pred = () => true) => (jobs || []).filter((r) => r.report_type === t && pred(r));
-  const B = (t) => (boxes || []).filter((r) => r.report_type === t);
+  const B = (t) => (boxes || []).filter((r) => r.report_type === t && isNew(r));
   const shortOf = (rows) => rows.filter((r) => n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty) }));
   // `link`: this stage's job id; `links`: the job(s) of the stage before that this line came from.
   const ids = (...vals) => [...new Set(vals.flatMap((v) => String(v || "").split(",")).map((v) => v.trim()).filter(Boolean))];
@@ -201,17 +209,19 @@ function buildStageChain({ jobs, boxes, date }) {
   const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
   const unloaded = B("UNLOADING").map((r) => ({ ...r, link: r.job_id || null }));
   const today = (rows) => r3(rows.filter((r) => r.report_date === date && !staysPut(r)).reduce((s, r) => s + n(r.qty), 0));
+  const T = (rows) => rows.filter(isNew);
+  const C = (k) => (carried && carried[k]) || [];
   const gaps = [
-    gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: picked, outs: [...packing, ...shortOf(packing)], lost: shortOf(packing), date }),
-    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: [...packing, ...pickPacked], outs: [...loaded, ...splitShort], lost: splitShort, date }),
-    gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: unloaded, outs: [...verification, ...shortOf(verification)], lost: shortOf(verification), date }),
+    gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: T(picked), outs: T([...packing, ...shortOf(packing)]), lost: T(shortOf(packing)), date, carried: C("to_pack") }),
+    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: T([...packing, ...pickPacked]), outs: T([...loaded, ...splitShort]), lost: T(splitShort), date, carried: C("to_load") }),
+    gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: T(unloaded), outs: T([...verification, ...shortOf(verification)]), lost: T(shortOf(verification)), date, carried: C("to_verify") }),
   ];
   // Days the chain cannot follow by job state (uploaded files, or pulled before states were kept).
   // ... or by job link (loading boxes pulled before the packing job was kept).
   const noState = [
     ...new Set([
-      ...(jobs || []).filter((r) => r.report_type === "PICKING" && n(r.no_state) > 0).map((r) => r.report_date),
-      ...(boxes || []).filter((r) => r.report_type === "LOADING" && n(r.no_link) > 0).map((r) => r.report_date),
+      ...(jobs || []).filter((r) => r.report_type === "PICKING" && n(r.no_state) > 0 && isNew(r)).map((r) => r.report_date),
+      ...(boxes || []).filter((r) => r.report_type === "LOADING" && n(r.no_link) > 0 && isNew(r)).map((r) => r.report_date),
     ]),
   ].sort();
   return {

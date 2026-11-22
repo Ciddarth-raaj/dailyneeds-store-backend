@@ -157,3 +157,38 @@ test("unassigned packing jobs that do not over-count what was picked are real pa
   const c = S.buildStageChain({ date: "2026-11-20", jobs, boxes: [] });
   assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").stands], [0, 10]);
 });
+
+test("worked out day by day from the stored end of the day before = worked out from every report at once", () => {
+  const days = ["2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15"];
+  const jobs = [];
+  const boxes = [];
+  let k = 0;
+  days.forEach((d, di) => {
+    for (let i = 0; i < 30; i += 1) {
+      k += 1;
+      const o = { stage_id: `S${i % 4}`, article_id: 1 + (i % 7), to_store: ["ecr", "moolakulam"][i % 2], nlc: 10 };
+      const pp = i % 5 === 0;
+      jobs.push(J("PICKING", d, { ...o, qty: 10, job_id: `pk${k}`, pick_pack: pp ? 1 : 0 }));
+      // packing the next day for some, loading two days later, some never
+      const pd = days[Math.min(di + (i % 2), days.length - 1)];
+      if (!pp && i % 7 !== 3) jobs.push(J("PACKING", pd, { ...o, qty: i % 6 === 0 ? 8 : 10, short_qty: i % 6 === 0 ? 2 : 0, job_id: `pa${k}`, picking_job: `pk${k}`, worked_by: "u" }));
+      const ld = days[Math.min(di + 2, days.length - 1)];
+      if (i % 9 !== 4) boxes.push(Bx("LOADING", ld, { ...o, qty: pp ? 10 : i % 6 === 0 ? 8 : 10, packing_jobs: pp ? null : `pa${k}`, picking_job: `pk${k}`, job_id: `l${k}` }));
+      if (i % 11 !== 2) boxes.push(Bx("UNLOADING", ld, { ...o, qty: 10, job_id: `u${k}` }));
+      if (i % 3 === 0) jobs.push(J("VERIFICATION", ld, { ...o, qty: 9, short_qty: 1, unloading_job: `u${k}` }));
+    }
+  });
+  const last = days[days.length - 1];
+  const full = S.buildStageChain({ jobs, boxes, date: last });
+  let carried = null;
+  let step;
+  days.forEach((d, di) => {
+    const from = days[Math.max(0, di - 7)];
+    const inWindow = (r) => r.report_date >= from && r.report_date <= d;
+    step = S.buildStageChain({ jobs: jobs.filter(inWindow), boxes: boxes.filter(inWindow), date: d, carried: carried || {} });
+    carried = Object.fromEntries(step.gaps.map((x) => [x.key, x.open]));
+  });
+  const pick = (c) => c.gaps.map((x) => [x.key, x.from_earlier, x.arrived, x.moved_on, x.stands, x.lines, x.oldest_days, x.lost.qty, x.jumped.qty]);
+  assert.deepStrictEqual(pick(step), pick(full));
+  assert.deepStrictEqual(step.stages, full.stages);
+});

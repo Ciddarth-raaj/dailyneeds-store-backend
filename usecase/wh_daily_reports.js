@@ -29,6 +29,20 @@ class WhDailyReports {
     this.today = today;
   }
 
+  /**
+   * A day's reports changed (pulled, uploaded or removed): tell whoever
+   * listens - the stored stage chain redoes that day and every later day.
+   * Never fails the save.
+   */
+  _changed(day) {
+    if (typeof this.onChange !== "function") return;
+    Promise.resolve()
+      .then(() => this.onChange(day))
+      .catch((err) =>
+        logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WH_DAILY_REPORTS", code: "USECASE.WH_DAILY_REPORTS.ON_CHANGE", description: err.toString(), category: "", ref: { day } })
+      );
+  }
+
   _range(from, to) {
     const t = this.today();
     const f = from || to || t;
@@ -105,6 +119,7 @@ class WhDailyReports {
     }
     if (saved.page && type === "VERIFICATION") summary.verification_page = { ...saved.page, other_job_type_lines: toPage.other_job_type_lines };
     if (saved.page && type === "PICKING") summary.write_off_page = saved.page;
+    this._changed(report_date);
     return { code: 200, data: { upload_id: saved.upload_id, report_type: type, report_date, replaced, source, summary } };
   }
 
@@ -346,7 +361,9 @@ class WhDailyReports {
   async deleteUpload({ upload_id }) {
     const id = Number(upload_id);
     if (!Number.isInteger(id) || id <= 0) return { code: 422, msg: "Invalid upload" };
+    const day = typeof this.repo.uploadDate === "function" ? await this.repo.uploadDate(id) : null;
     const ok = await this.repo.deleteUpload(id);
+    if (ok && day) this._changed(day);
     return ok ? { code: 200, data: { upload_id: id } } : { code: 404, msg: "Upload not found" };
   }
 

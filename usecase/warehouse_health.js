@@ -8,15 +8,14 @@ const P = require("../utils/warehouse_health_pdf");
 const C = require("../utils/wh_box_chain");
 
 /**
- * The stage chain and box chain read every report since BOX_CHAIN_FROM and
- * took the site down. OFF unless WAREHOUSE_HEALTH_CHAINS is "on", until a
- * lighter version is in place.
+ * The stage chain and box chain are worked out once per day and stored
+ * (usecase/wh_chain.js); this page only reads them. WAREHOUSE_HEALTH_CHAINS
+ * = "off" hides them (a switch, should they ever need to be turned off).
  */
-const chainsOn = () => String(process.env.WAREHOUSE_HEALTH_CHAINS || "").toLowerCase() === "on";
+const chainsOn = () => String(process.env.WAREHOUSE_HEALTH_CHAINS || "").toLowerCase() !== "off";
 
 /** How long a built day is reused when no report changed (the build reads every report since BOX_CHAIN_FROM). */
 const BUILD_TTL_MS = 10 * 60 * 1000;
-const SC = require("../utils/wh_stage_chain");
 
 const A4 = { format: "A4", printBackground: true, preferCSSPageSize: true, margin: { top: "10mm", bottom: "10mm", left: "10mm", right: "10mm" } };
 
@@ -45,7 +44,7 @@ class WarehouseHealth {
    * @param dashboardUrl    the page the summary's button opens
    * @param pdf / s3        services/pdf (withBrowser) and services/s3 (uploadFile): the PDF sent after the message
    */
-  constructor({ repo, reports, summaryRepo = null, telegramService = null, dashboardUrl = null, pdf = null, s3 = null, today = () => istToday(), now = () => Date.now() }) {
+  constructor({ chain = null, repo, reports, summaryRepo = null, telegramService = null, dashboardUrl = null, pdf = null, s3 = null, today = () => istToday(), now = () => Date.now() }) {
     this.pdf = pdf;
     this.s3 = s3;
     this.now = now;
@@ -53,6 +52,7 @@ class WarehouseHealth {
     this.repo = repo;
     this.reports = reports;
     this.summaryRepo = summaryRepo;
+    this.chain = chain; // usecase/wh_chain.js: the stored chains
     this.telegram = telegramService;
     this.dashboardUrl = dashboardUrl;
     this.today = today;
@@ -73,6 +73,8 @@ class WarehouseHealth {
     let version = null;
     try {
       version = typeof this.repo.dataVersion === "function" ? await this.repo.dataVersion() : null;
+      // ... and changes as the stored chain is worked out
+      if (version !== null && this.chain && typeof this.chain.version === "function") version = `${version}|${await this.chain.version()}`;
     } catch (err) {
       version = null;
     }
@@ -107,63 +109,26 @@ class WarehouseHealth {
       // Every picking write-off line of the day: what, where, who, when.
       this.repo.jobRows(date, date, { only: "short", report_type: "PICKING" }, 3000),
     ]);
-    const [boxChain, stageChain, stuckCartons] = await Promise.all([
-      this.boxChain(date),
-      this.stageChain(date),
-      typeof this.reports.stuckCartons === "function" ? this.reports.stuckCartons() : null,
-    ]);
-    return H.buildHealth({ boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
+    const [chain, stuckCartons] = await Promise.all([this.chainFor(date), typeof this.reports.stuckCartons === "function" ? this.reports.stuckCartons() : null]);
+    const boxChain = chain && chain.result ? chain.result.box : null;
+    const stageChain = chain && chain.result ? { ...chain.result.stage, days_without_state: chain.days_without_state } : null;
+    const chainStatus = chain ? { final: chain.final, status: chain.status, computed_at: chain.computed_at, progress: chain.progress, error: chain.error } : null;
+    return H.buildHealth({ chainStatus, boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
   }
 
   /**
-   * The box chain for `date` (utils/wh_box_chain.js), from BOX_CHAIN_FROM:
-   * open from earlier days + loaded - unloaded = still open, with the
-   * articles of every box listed, and the days since BOX_CHAIN_FROM that
-   * have no Loading or Unloading report (the chain is only as complete as
-   * the days pulled).
+   * The stage chain and box chain for `date`, as STORED by usecase/wh_chain.js
+   * (worked out once per day, in the background) - only read here, never
+   * worked out on a page view. WAREHOUSE_HEALTH_CHAINS=off hides them.
    */
-  async boxChain(date) {
-    if (!chainsOn()) return null;
-    if (date < C.BOX_CHAIN_FROM) return null;
-    const [loads, unloads, ups] = await Promise.all([
-      this.repo.boxSummary("LOADING", C.BOX_CHAIN_FROM, date),
-      this.repo.boxSummary("UNLOADING", C.BOX_CHAIN_FROM, date),
-      this.repo.uploads(C.BOX_CHAIN_FROM, date),
-    ]);
-    const chain = C.buildChain({ loads, unloads, date });
-    const loadedKeys = [...chain.lists.still_open, ...chain.lists.closed_old, ...chain.lists.wrong_store].map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
-    const unloadedKeys = chain.lists.not_loaded.map((b) => ({ report_date: date, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
-    const [la, ua] = await Promise.all([this.repo.boxArticles("LOADING", loadedKeys), this.repo.boxArticles("UNLOADING", unloadedKeys)]);
-    const items = (rows) => {
-      const m = new Map();
-      for (const r of rows) {
-        const k = `${r.report_date}|${r.box_id}|${r.planned_to_store || ""}|${r.job_id || ""}`;
-        if (!m.has(k)) m.set(k, []);
-        m.get(k).push({ article_id: r.article_id, article_name: r.article_name || null, qty: Number(r.qty) || 0, value: Math.round((Number(r.value) || 0) * 100) / 100 });
-      }
-      return m;
-    };
-    const li = items(la);
-    const ui = items(ua);
-    for (const list of [chain.lists.still_open, chain.lists.closed_old, chain.lists.wrong_store]) for (const b of list) b.items = li.get(`${b.loaded_on}|${b.box_id}|${b.to_store || ""}|${b.job_id || ""}`) || [];
-    for (const b of chain.lists.not_loaded) b.items = ui.get(`${date}|${b.box_id}|${b.to_store || ""}|${b.job_id || ""}`) || [];
-    const have = { LOADING: new Set(), UNLOADING: new Set() };
-    for (const u of ups) if (have[u.report_type]) have[u.report_type].add(u.report_date);
-    const missing = [];
-    for (let d = C.BOX_CHAIN_FROM; d <= date; d = H.addDays(d, 1)) {
-      const lacks = ["LOADING", "UNLOADING"].filter((t) => !have[t].has(d));
-      if (lacks.length) missing.push({ date: d, reports: lacks.map((t) => (t === "LOADING" ? "Loading" : "Unloading")) });
+  async chainFor(date) {
+    if (!chainsOn() || !this.chain || date < C.BOX_CHAIN_FROM) return null;
+    try {
+      return await this.chain.read(date);
+    } catch (err) {
+      logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.CHAIN", description: err.toString(), category: "", ref: { date } });
+      return null;
     }
-    chain.missing_days = missing;
-    return chain;
-  }
-
-  /** The stage chain for `date` (utils/wh_stage_chain.js), from BOX_CHAIN_FROM. */
-  async stageChain(date) {
-    if (!chainsOn()) return null;
-    if (date < C.BOX_CHAIN_FROM || typeof this.repo.stageFlows !== "function") return null;
-    const { jobs, boxes } = await this.repo.stageFlows(C.BOX_CHAIN_FROM, date);
-    return SC.buildStageChain({ jobs, boxes, date });
   }
 
   /**

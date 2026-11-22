@@ -315,6 +315,12 @@ class WhDailyReportsRepository {
     return rows.map((r) => ({ ...r, row_count: n(r.row_count), uploaded_at: r.uploaded_at ? new Date(r.uploaded_at).toISOString() : null }));
   }
 
+  /** The day an upload is for (null when there is no such upload). */
+  async uploadDate(uploadId) {
+    const rows = await this.run("UPLOAD_DATE", "SELECT DATE_FORMAT(report_date, '%Y-%m-%d') AS d FROM wh_report_uploads WHERE upload_id = ?", [uploadId]);
+    return rows.length ? rows[0].d : null;
+  }
+
   async deleteUpload(uploadId) {
     const res = await this.run("DELETE_UPLOAD", "DELETE FROM wh_report_uploads WHERE upload_id = ?", [uploadId]);
     return res.affectedRows > 0;
