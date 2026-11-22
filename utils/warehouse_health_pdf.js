@@ -207,11 +207,6 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     [3, 4]
   );
 
-  const repeats = table(
-    ["Item", "Days short", "Lines", "Value", "Stores"],
-    h.repeats.map((a) => ({ cells: [esc(a.article_name || a.article_id), num(a.days_short), num(a.lines), rupees(a.short_value), esc(String(a.stores || "").split(",").map(title).join(", "))] })),
-    [1, 2, 3]
-  );
 
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Warehouse Health — ${esc(dayText(h.date))}</title>
@@ -281,7 +276,6 @@ ${secondHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
-${section("Short again and again", repeats, "Picking write-off on 2 or more of the last 7 days - check the stock / bin.")}
 <footer>The same figures are on dnds.co.in → Dashboard → Invoice Pipeline → Warehouse Health.</footer>
 </body></html>`;
 }
