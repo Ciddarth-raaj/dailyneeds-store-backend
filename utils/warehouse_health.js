@@ -84,7 +84,11 @@ function pickers(work, mistakes, names) {
   const by = new Map();
   for (const w of work || []) {
     if (!w.worked_by) continue;
-    by.set(w.worked_by, { id: w.worked_by, lines: n(w.done_lines), qty: n(w.actual_qty), value: r2(w.actual_value), mistake_lines: 0, mistake_qty: 0, mistake_value: 0, mistakes: [] });
+    const p = by.get(w.worked_by) || { id: w.worked_by, lines: 0, qty: 0, value: 0, mistake_lines: 0, mistake_qty: 0, mistake_value: 0, mistakes: [] };
+    p.lines += n(w.done_lines);
+    p.qty += n(w.actual_qty);
+    p.value = r2(p.value + n(w.actual_value));
+    by.set(w.worked_by, p);
   }
   for (const m of mistakes || []) {
     if (!m.worked_by) continue;
@@ -103,6 +107,19 @@ function pickers(work, mistakes, names) {
       return { ...p, name: staffLabel(p.id, names), mapped: Boolean(names && names[p.id]), accuracy, below_target: accuracy != null && accuracy < ACCURACY_TARGET };
     })
     .sort((a, b) => b.lines - a.lines || b.value - a.value);
+}
+
+/** Pickers split by the kind of picking job: STA / Alloc, and the rest (GRN, DAMG, ...). */
+const PICKER_GROUPS = [
+  { key: "sta", label: "STA / Alloc", has: (t) => ["STA", "ALLOC"].includes(String(t || "").toUpperCase()) },
+  { key: "other", label: "Others (GRN, DAMG)", has: (t) => !["STA", "ALLOC"].includes(String(t || "").toUpperCase()) },
+];
+function pickerGroups(work, mistakes, names) {
+  return PICKER_GROUPS.map((g) => ({
+    key: g.key,
+    label: g.label,
+    rows: pickers((work || []).filter((w) => g.has(w.job_type)), (mistakes || []).filter((m) => g.has(m.job_type)), names),
+  }));
 }
 
 /**
@@ -351,6 +368,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
   // Remarks (written the next day) and jobs still open (every night) are normal: not listed here.
 
   const monthPickers = pickers(pickerWork, pickerMistakes, staffNames);
+  const monthPickerGroups = pickerGroups(pickerWork, pickerMistakes, staffNames);
   return {
     date,
     month_from: monthStart(date),
@@ -420,6 +438,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
     repeats: (repeats || []).filter((a) => n(a.days_short) >= 2).slice(0, 10),
     trend: trendRows,
     pickers: monthPickers,
+    picker_groups: monthPickerGroups,
   };
 }
 
@@ -439,10 +458,13 @@ function formatTelegram(h) {
     lines.push(`Yet to verify at: ${[...where].map(([s, q]) => `${s} ${fmt(q)}`).join(", ")}`);
   }
   if (h.repeats.length) lines.push(`Short again and again: ${h.repeats.slice(0, 5).map((a) => title(a.article_name || a.article_id)).join(", ")}`);
-  const below = h.pickers.filter((p) => p.below_target);
-  if (below.length) lines.push(`Pickers below ${Math.round(h.accuracy_target * 100)}% this month: ${below.slice(0, 5).map((p) => `${p.name} ${(Math.floor(p.accuracy * 1000) / 10).toFixed(1)}%`).join(", ")}`);
+  const acc = (p) => `${p.name} ${(Math.floor(p.accuracy * 1000) / 10).toFixed(1)}%`;
+  for (const g of h.picker_groups || []) {
+    const below = g.rows.filter((p) => p.below_target);
+    if (below.length) lines.push(`Pickers below ${Math.round(h.accuracy_target * 100)}% this month - ${g.label}: ${below.slice(0, 5).map(acc).join(", ")}`);
+  }
   if (h.missing_reports.length) lines.push(`Not pulled yet: ${h.missing_reports.join(", ")}`);
   return lines.join("\n");
 }
 
-module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, buildHealth, formatTelegram };
+module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, pickerGroups, buildHealth, formatTelegram };

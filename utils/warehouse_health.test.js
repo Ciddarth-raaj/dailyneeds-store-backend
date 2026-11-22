@@ -142,7 +142,7 @@ test("telegram text", () => {
   const t = H.formatTelegram(H.buildHealth(base));
   assert.match(t, /Picking write-off 115 lines/);
   assert.match(t, /Yet to verify at: Warehouse \(returns\) 5/);
-  assert.match(t, /Pickers below 98% this month: u2 97.0%/);
+  assert.match(t, /Pickers below 98% this month - Others \(GRN, DAMG\): u2 97.0%/);
   assert.match(t, /Not pulled yet: Packing, Unloading/);
   assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");
 });
@@ -166,4 +166,27 @@ test("remarks (written next day) and open jobs (every night) are not things that
   const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
   for (const t of ["Remarks pending", "Jobs not finished", "Open lines", "Flow of goods", "Picking write-off, last 7 days", '<div class="cl">Loading', '<div class="cl">Unloading', '<div class="cl">Verification']) assert.ok(!html.includes(t), t);
   assert.ok(html.includes('<div class="cl">Picking write-off'));
+});
+
+test("pickers split into STA / Alloc and the rest, each with its own accuracy", () => {
+  const work = [
+    { worked_by: "u1", job_type: "STA", done_lines: 90, actual_qty: 900, actual_value: 9000 },
+    { worked_by: "u1", job_type: "ALLOC", done_lines: 10, actual_qty: 10, actual_value: 100 },
+    { worked_by: "u1", job_type: "GRN", done_lines: 50, actual_qty: 500, actual_value: 5000 },
+    { worked_by: "u2", job_type: "DAMG", done_lines: 20, actual_qty: 20, actual_value: 200 },
+  ];
+  const mistakes = [
+    { worked_by: "u1", job_type: "STA", short_qty: 1, nlc: 10, report_date: "2026-11-19", to_store: "ecr", article_id: "A" },
+    { worked_by: "u1", job_type: "STA", short_qty: 1, nlc: 10, report_date: "2026-11-19", to_store: "ecr", article_id: "B" },
+    { worked_by: "u1", job_type: "STA", short_qty: 1, nlc: 10, report_date: "2026-11-19", to_store: "ecr", article_id: "C" },
+  ];
+  const h = H.buildHealth({ ...base, pickerWork: work, pickerMistakes: mistakes, staffNames: { u1: "Ravi" } });
+  const [sta, other] = h.picker_groups;
+  assert.deepStrictEqual([sta.label, other.label], ["STA / Alloc", "Others (GRN, DAMG)"]);
+  assert.deepStrictEqual(sta.rows.map((p) => [p.id, p.lines, p.mistake_lines, p.below_target]), [["u1", 100, 3, true]]); // 97%
+  assert.deepStrictEqual(other.rows.map((p) => [p.id, p.lines, p.mistake_lines]), [["u1", 50, 0], ["u2", 20, 0]]);
+  assert.strictEqual(h.pickers.find((p) => p.id === "u1").lines, 150); // all together still adds up
+  assert.match(H.formatTelegram(h), /Pickers below 98% this month - STA \/ Alloc: Ravi 97\.0%/);
+  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("<h3>STA / Alloc</h3>") && html.includes("<h3>Others (GRN, DAMG)</h3>"));
 });

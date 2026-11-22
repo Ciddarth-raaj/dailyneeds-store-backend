@@ -103,7 +103,7 @@ class WarehouseHealth {
       this.repo.shortArticles(week, date, { report_type: "PICKING" }, 50),
       this.repo.jobBreakdown(week, date, ["report_date", "report_type"]),
       this.repo.uploads(week, date),
-      this.repo.jobBreakdown(month, date, ["worked_by"], { report_type: "PICKING" }),
+      this.repo.jobBreakdown(month, date, ["worked_by", "job_type"], { report_type: "PICKING" }),
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
       // Every picking write-off line of the day: what, where, who, when.

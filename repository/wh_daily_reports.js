@@ -615,12 +615,12 @@ class WhDailyReportsRepository {
    */
   async pickerMistakes(from, to) {
     const cols = `DATE_FORMAT(v.report_date, '%Y-%m-%d') AS report_date, v.to_store, v.article_id, v.article_name,
-                  v.short_qty, v.nlc, p.worked_by`;
+                  v.short_qty, v.nlc, p.worked_by, p.job_type`;
     const byJob = await this.run(
       "PICKER_MISTAKES_JOB",
       `SELECT ${cols}
          FROM wh_report_job_rows v
-         JOIN (SELECT DISTINCT job_id, worked_by FROM wh_report_job_rows
+         JOIN (SELECT DISTINCT job_id, worked_by, job_type FROM wh_report_job_rows
                 WHERE report_type = 'PICKING' AND job_id IS NOT NULL AND worked_by IS NOT NULL) p
            ON p.job_id = v.picking_job
         WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0`,
@@ -630,7 +630,7 @@ class WhDailyReportsRepository {
       "PICKER_MISTAKES_DOC",
       `SELECT ${cols}
          FROM wh_report_job_rows v
-         JOIN (SELECT DISTINCT stage_id, article_id, to_store, worked_by FROM wh_report_job_rows
+         JOIN (SELECT DISTINCT stage_id, article_id, to_store, worked_by, job_type FROM wh_report_job_rows
                 WHERE report_type = 'PICKING' AND stage_id IS NOT NULL AND worked_by IS NOT NULL) p
            ON p.stage_id = v.stage_id AND p.article_id = v.article_id AND p.to_store = v.to_store
         WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0

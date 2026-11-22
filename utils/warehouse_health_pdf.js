@@ -206,14 +206,20 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     [1, 2, 3]
   );
 
-  const pickers = table(
-    ["Picker", "Lines", "Value (NLC)", "Accuracy", "Mistakes", "Mistake value"],
-    h.pickers.map((p) => ({
-      cls: p.below_target ? "bad" : "",
-      cells: [`${esc(p.name)}${p.mapped ? "" : ' <span class="sub">not mapped</span>'}`, num(p.lines), rupees(p.value), `<b>${pct(p.accuracy)}</b>`, num(p.mistake_lines), p.mistake_value ? rupees(p.mistake_value) : "—"],
-    })),
-    [1, 2, 3, 4, 5]
-  );
+  const pickerTable = (rows) =>
+    table(
+      ["Picker", "Lines", "Value (NLC)", "Accuracy", "Mistakes", "Mistake value"],
+      rows.map((p) => ({
+        cls: p.below_target ? "bad" : "",
+        cells: [`${esc(p.name)}${p.mapped ? "" : ' <span class="sub">not mapped</span>'}`, num(p.lines), rupees(p.value), `<b>${pct(p.accuracy)}</b>`, num(p.mistake_lines), p.mistake_value ? rupees(p.mistake_value) : "—"],
+      })),
+      [1, 2, 3, 4, 5]
+    );
+  const groups = h.picker_groups || [{ label: "", rows: h.pickers }];
+  const pickers = groups
+    .filter((g) => g.rows.length)
+    .map((g) => `${g.label ? `<h3>${esc(g.label)}</h3>` : ""}${pickerTable(g.rows)}`)
+    .join("");
 
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Warehouse Health — ${esc(dayText(h.date))}</title>
@@ -248,6 +254,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   .sv { font-size: 13px; font-weight: bold; margin: 2px 0; }
   .warn { color: #c05621; font-weight: bold; }
   h2 { font-size: 12.5px; margin: 14px 0 4px; color: #2d3748; page-break-after: avoid; }
+  h3 { font-size: 11px; margin: 8px 0 3px; color: #553c9a; page-break-after: avoid; }
   p.note { margin: 0 0 4px; color: #718096; font-size: 9.5px; }
   table { width: 100%; border-collapse: collapse; border: 1.5px solid #4a5568; }
   th { text-align: left; font-size: 9px; text-transform: uppercase; background: #e2e8f0; border: 1px solid #718096; padding: 4px 5px; }
