@@ -109,11 +109,12 @@ class WarehouseHealth {
       // Every picking write-off line of the day: what, where, who, when.
       this.repo.jobRows(date, date, { only: "short", report_type: "PICKING" }, 3000),
     ]);
-    const [chain, stuckCartons] = await Promise.all([this.chainFor(date), typeof this.reports.stuckCartons === "function" ? this.reports.stuckCartons() : null]);
+    // Stuck cartons are not shown on their own: the same cartons are "Packed, not yet loaded" in the chain.
+    const chain = await this.chainFor(date);
     const boxChain = chain && chain.result ? chain.result.box : null;
     const stageChain = chain && chain.result ? { ...chain.result.stage, days_without_state: chain.days_without_state } : null;
     const chainStatus = chain ? { final: chain.final, status: chain.status, computed_at: chain.computed_at, progress: chain.progress, error: chain.error } : null;
-    return H.buildHealth({ chainStatus, boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
+    return H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
   }
 
   /**
