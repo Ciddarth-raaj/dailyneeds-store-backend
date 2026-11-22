@@ -190,3 +190,12 @@ test("pickers split into STA and the rest (Alloc with them), each with its own a
   // not in the PDF (on the dashboard only)
   assert.ok(!require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 }).includes("Pickers this month"));
 });
+
+test("the PDF lists picking write-off article by article with who picked - not STA", () => {
+  const W = (o) => ({ report_type: "PICKING", from_store: "warehouse", to_store: "ecr", advised_qty: 10, actual_qty: 8, short_qty: 2, nlc: 31, finished_at: "2026-11-19 10:05", ...o });
+  const h = H.buildHealth({ ...base, staffNames: { kp1: "Ravi" }, writeoffLines: [W({ article_id: "A1", article_name: "gold winner 1l", job_type: "GRN", worked_by: "kp1" }), W({ article_id: "A2", article_name: "sta only soap", job_type: "STA", worked_by: "kp1" })] });
+  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Picking write-off by article (GRN 1) - 1 line · ₹62"));
+  assert.ok(html.includes("gold winner 1l") && html.includes("Ravi") && html.includes("19 Nov, 10:05 am"));
+  assert.ok(!html.includes("sta only soap"));
+});

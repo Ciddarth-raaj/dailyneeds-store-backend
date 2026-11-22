@@ -146,6 +146,20 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       list.length > 40 ? `Biggest 40 of ${list.length} lines - all on the dashboard.` : ""
     );
   };
+  // Picking write-off article by article, with who picked - not STA (its lines are in the totals only).
+  const woLines = ((t.writeoff && t.writeoff.list) || []).filter((l) => l.job_type !== "STA");
+  const woLinesHtml = section(
+    `Picking write-off by article (${typeSplit(Object.fromEntries([...new Set(woLines.map((l) => l.job_type))].map((k) => [k, { lines: woLines.filter((l) => l.job_type === k).length }]))) || "not STA"}) - ${plural(woLines.length, "line")} · ${rupees(woLines.reduce((x, l) => x + n(l.value), 0))}`,
+    table(
+      ["Article", "Type", "From → To", "Asked", "Picked", "Short", "Value", "Picked by", "When"],
+      woLines.slice(0, 60).map((l) => ({
+        cls: "bad",
+        cells: [esc(l.article_name || l.article_id), esc(l.job_type), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.advised_qty), num(l.picked_qty), num(l.short_qty), rupees(l.value), esc(l.picker_name || "—"), esc(whenText(l.finished_at))],
+      })),
+      [3, 4, 5, 6]
+    ),
+    `STA lines are not listed (totals only).${woLines.length > 60 ? ` Biggest 60 of ${woLines.length} lines - all on the dashboard.` : ""}`
+  );
   const stageBlock = (sc, heading, cap) =>
     sc
     ? `<h2 style="margin-top:4px">${esc(heading)}</h2>
@@ -283,6 +297,7 @@ ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc
 ${needYou}
 <div class="cards">${cards}</div>
 ${section("Picking write-off by store", writeoff)}
+${woLinesHtml}
 ${stageHtml}
 ${stuckHtml}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
