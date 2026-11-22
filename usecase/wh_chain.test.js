@@ -93,3 +93,19 @@ test("a day that fails stops the days after it until it is redone", async () => 
   await uc.ensure();
   assert.deepStrictEqual([...chainRepo.days].map(([d, r]) => r.status), ["DONE", "FAILED", "TODO"]);
 });
+
+test("days stored under older matching rules are all redone on the next start", async () => {
+  const chainRepo = memChain();
+  const uc = make({ chainRepo, repo: reportsRepo([J("PICKING", "2026-10-10", { job_id: "p1" })], []), today: () => "2026-10-11", pauseMs: 0 });
+  await uc.ensure();
+  const r = JSON.parse(chainRepo.days.get("2026-10-10").result);
+  assert.strictEqual(r.logic, make.LOGIC);
+  chainRepo.days.set("2026-10-10", { ...chainRepo.days.get("2026-10-10"), result: JSON.stringify({ ...r, logic: 1 }) });
+  let computed = 0;
+  const orig = chainRepo.saveDay;
+  chainRepo.saveDay = async (...a) => ((computed += 1), orig(...a));
+  await uc.ensure();
+  assert.strictEqual(computed, 2); // both days redone
+  await uc.ensure();
+  assert.strictEqual(computed, 2); // and not again
+});

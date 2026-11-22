@@ -140,21 +140,25 @@ class WarehouseHealth {
     const article = Number(article_id);
     if (!Number.isInteger(article) || article <= 0) return { code: 422, msg: "Choose an article" };
     if (!to_store) return { code: 422, msg: "Choose the store" };
-    const { jobs, boxes } = await this.repo.trace({ article_id: article, to_store: String(to_store), stage_id: stage_id ? String(stage_id) : null, from: C.BOX_CHAIN_FROM });
-    // Boxes: keep those linked to one of the document's jobs, plus (cartons without a link) those within the document's days.
-    const jobIds = new Set(jobs.map((j) => j.job_id).filter(Boolean));
+    const t = await this.repo.trace({ article_id: article, to_store: String(to_store), stage_id: stage_id ? String(stage_id) : null, from: C.BOX_CHAIN_FROM });
+    const boxes = t.boxes;
+    // The line's own jobs: picking / packing / verification of the document.
+    const jobIds = new Set(t.jobs.map((j) => j.job_id).filter(Boolean));
     const split = (v) => String(v || "").split(",").map((x) => x.trim()).filter(Boolean);
-    const days = jobs.map((j) => j.report_date).sort();
+    const days = t.jobs.map((j) => j.report_date).sort();
     const first = days[0] || C.BOX_CHAIN_FROM;
     const last = H.addDays(days[days.length - 1] || this.today(), 10);
-    const unloadingJobs = new Set(jobs.map((j) => j.unloading_job).filter(Boolean));
-    const marked = boxes
-      .map((b) => {
-        const links = [...split(b.packing_jobs), ...split(b.picking_job)];
-        const linked = links.some((x) => jobIds.has(x)) || (b.report_type === "UNLOADING" && unloadingJobs.has(b.job_id));
-        return { ...b, links, linked };
-      })
-      .filter((b) => b.linked || (!stage_id ? true : b.report_date >= first && b.report_date <= last));
+    const withLinks = boxes.map((b) => {
+      const links = [...split(b.packing_jobs), ...split(b.picking_job)];
+      return { ...b, links, linked: links.some((x) => jobIds.has(x)) };
+    });
+    // Carton ids are reused on every delivery: when the line's boxes are linked by job, show only those;
+    // boxes pulled before job links are shown by the document's days instead.
+    const anyLinked = withLinks.some((b) => b.linked);
+    const marked = withLinks.filter((b) => (anyLinked ? b.linked : !stage_id || (b.report_date >= first && b.report_date <= last)));
+    const unloadingJobs = new Set(marked.filter((b) => b.report_type === "UNLOADING").map((b) => b.job_id).filter(Boolean));
+    // Verification: the document's lines, plus lines that name one of the line's unloading jobs.
+    const jobs = [...t.jobs, ...(t.verifs || []).filter((v) => v.unloading_job && unloadingJobs.has(v.unloading_job))];
     const all = [...new Set([...jobs.map((j) => j.report_date), ...marked.map((b) => b.report_date)])].sort();
     const ups = all.length ? await this.repo.uploads(all[0], all[all.length - 1]) : [];
     const pulled = {};

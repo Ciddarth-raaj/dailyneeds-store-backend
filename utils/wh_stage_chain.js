@@ -182,23 +182,26 @@ function buildStageChain({ jobs, boxes, date, carried = null }) {
   // System packing jobs (no person on them) can also split goods a person
   // already packed into cartons (leaf broom: picked 20, packed 20 by a
   // packer, then 4 system packing jobs of 5 - packing adds up to 40). When a
-  // picking job's packing adds up to more than was picked, its unassigned
-  // packing jobs are those splits and are not packed again.
+  // person's packing of a picking job already covers what was picked, its
+  // unassigned packing jobs are those splits and are not packed again.
   const groupOf = (r, job) => (job ? `J|${job}|${r.article_id}|${r.to_store || ""}` : r.stage_id ? `S|${r.stage_id}|${r.article_id}|${r.to_store || ""}` : null);
   const pickedQty = new Map();
   for (const r of J("PICKING", (x) => !n(x.pick_pack))) {
     for (const k of [groupOf(r, r.job_id), groupOf(r, null)].filter(Boolean)) pickedQty.set(k, (pickedQty.get(k) || 0) + n(r.qty) + n(r.short_qty));
   }
-  const packedQty = new Map();
+  // Only when a PERSON's packing already covers what was picked: system
+  // packing jobs alone are the packing (gold winner 1L: picked 120, 13
+  // system packing jobs of 10, no person's packing - those 13 are real).
+  const personPacked = new Map();
   const packGroup = (r) => (r.picking_job && pickedQty.has(groupOf(r, r.picking_job)) ? groupOf(r, r.picking_job) : groupOf(r, null));
-  for (const r of J("PACKING")) {
+  for (const r of J("PACKING", (x) => x.worked_by)) {
     const k = packGroup(r);
-    if (k) packedQty.set(k, (packedQty.get(k) || 0) + n(r.qty) + n(r.short_qty));
+    if (k) personPacked.set(k, (personPacked.get(k) || 0) + n(r.qty) + n(r.short_qty));
   }
   const cartonSplit = (r) => {
     if (r.worked_by) return false;
     const k = packGroup(r);
-    return Boolean(k && pickedQty.has(k) && packedQty.get(k) > pickedQty.get(k) + 1e-6);
+    return Boolean(k && pickedQty.has(k) && (personPacked.get(k) || 0) >= pickedQty.get(k) - 1e-6);
   };
   const picked = J("PICKING", (r) => !n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
   const pickPacked = J("PICKING", (r) => n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));

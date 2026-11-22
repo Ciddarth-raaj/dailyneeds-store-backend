@@ -8,6 +8,12 @@ const FROM = BC.BOX_CHAIN_FROM;
 /** Days of earlier reports read with a day, to tell pick-packs and carton splits apart. */
 const CONTEXT_DAYS = 7;
 const LIST_CAP = 300;
+/**
+ * The matching rules' version. Raise it whenever the rules change: days
+ * stored under an older version are all redone (in the background) on the
+ * next start, so a fix reaches every day, not only new ones.
+ */
+const LOGIC = 2;
 
 const n = (v) => Number(v) || 0;
 
@@ -38,6 +44,14 @@ class WhChain {
   /** Every day from FROM to today gets a row (new days become TODO); then work. */
   async ensure() {
     await this.chainRepo.addMissing(this.days(FROM, this.today()));
+    const first = await this.chainRepo.getDay(FROM);
+    let stored = null;
+    try {
+      stored = first && first.result ? JSON.parse(first.result).logic || 1 : null;
+    } catch (err) {
+      stored = 1;
+    }
+    if (stored !== null && stored !== LOGIC) await this.chainRepo.markTodo(this.days(FROM, this.today()));
     return this.kick();
   }
 
@@ -118,7 +132,7 @@ class WhChain {
       .filter((m) => m.reports.length);
 
     const noLinks = sc.days_without_state.includes(day);
-    await this.chainRepo.saveDay(day, { open: openRows, boxes: stillOpen, result: { stage: sc, box: bc, computed_at: new Date().toISOString() }, noLinks, gen });
+    await this.chainRepo.saveDay(day, { open: openRows, boxes: stillOpen, result: { stage: sc, box: bc, computed_at: new Date().toISOString(), logic: LOGIC }, noLinks, gen });
     return { day, open: openRows.length, boxes: stillOpen.length };
   }
 
@@ -177,3 +191,4 @@ class WhChain {
 
 module.exports = (deps) => new WhChain(deps);
 module.exports.FROM = FROM;
+module.exports.LOGIC = LOGIC;

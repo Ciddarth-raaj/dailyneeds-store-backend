@@ -517,9 +517,25 @@ class WhDailyReportsRepository {
         [article_id, to_store, from]
       ),
     ]);
+    // Verification lines of the article for the store, whatever their document: they are kept
+    // when they name one of the line's unloading jobs (a carton's verification may carry none).
+    const verifs = stage_id
+      ? await this.run(
+          "TRACE_VERIFS",
+          `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_id, r.job_state, r.stage_id,
+                  r.from_store, r.to_store, r.advised_qty, r.actual_qty, r.short_qty, r.open_jobs, r.worked_by,
+                  DATE_FORMAT(r.finished_at, '%Y-%m-%d %H:%i') AS finished_at,
+                  r.picking_job, r.packing_job, r.loading_job, r.unloading_job
+             FROM wh_report_job_rows r
+            WHERE r.report_type = 'VERIFICATION' AND r.article_id = ? AND r.to_store <=> ? AND r.report_date >= ?
+              AND NOT (r.stage_id <=> ?)`,
+          [article_id, to_store, from, stage_id]
+        )
+      : [];
     return {
       jobs: toNumbers(jobs, ["advised_qty", "actual_qty", "short_qty", "open_jobs"]),
       boxes: toNumbers(boxes, ["qty"]),
+      verifs: toNumbers(verifs, ["advised_qty", "actual_qty", "short_qty", "open_jobs"]),
     };
   }
 

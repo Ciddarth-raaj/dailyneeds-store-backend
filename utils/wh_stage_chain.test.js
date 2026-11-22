@@ -192,3 +192,13 @@ test("worked out day by day from the stored end of the day before = worked out f
   assert.deepStrictEqual(pick(step), pick(full));
   assert.deepStrictEqual(step.stages, full.stages);
 });
+
+test("system packing jobs with no person's packing behind them are the packing (gold winner 1L, 6 Nov)", () => {
+  const T = (o) => ({ stage_id: "zsEd", article_id: 103479, to_store: "moolakulam", ...o });
+  const packs = Array.from({ length: 13 }, (_, i) => `pa${i}`);
+  const jobs = [J("PICKING", "2026-11-06", T({ qty: 120, job_id: "job_88633506", worked_by: "shubham" })), ...packs.map((id) => J("PACKING", "2026-11-06", T({ qty: 10, job_id: id, picking_job: "job_88633506", worked_by: null })))];
+  const boxes = packs.map((id) => Bx("LOADING", "2026-11-06", T({ stage_id: null, qty: 10, packing_jobs: id, picking_job: "job_88633506" })));
+  const c = S.buildStageChain({ date: "2026-11-06", jobs, boxes });
+  // all 120 picked are packed; 10 more were packed than picked (shows as packed with no picking record); all loaded
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_pack").jumped.qty, g(c, "to_load").stands], [0, 10, 0]);
+});

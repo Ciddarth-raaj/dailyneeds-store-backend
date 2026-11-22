@@ -177,6 +177,11 @@ test("trace: one line through every stage, boxes linked by packing job, which re
       boxes: [
         { report_type: "LOADING", report_date: "2026-10-14", job_id: "job_58254998", box_id: "2061252838", planned_to_store: "moolakulam", qty: 4, packing_jobs: "job_84969325" },
         { report_type: "LOADING", report_date: "2026-11-05", job_id: "job_x", box_id: "2061252838", planned_to_store: "moolakulam", qty: 4, packing_jobs: "job_other" },
+        { report_type: "UNLOADING", report_date: "2026-10-14", job_id: "job_u1", box_id: "2061252838", planned_to_store: "moolakulam", qty: 4, packing_jobs: "job_84969325" },
+      ],
+      verifs: [
+        { report_type: "VERIFICATION", report_date: "2026-10-14", job_id: "job_v1", stage_id: null, unloading_job: "job_u1", actual_qty: 4 },
+        { report_type: "VERIFICATION", report_date: "2026-11-05", job_id: "job_v2", stage_id: null, unloading_job: "job_u_other", actual_qty: 4 },
       ],
     }),
     uploads: async () => [{ report_type: "PICKING", report_date: "2026-10-13" }, { report_type: "PACKING", report_date: "2026-10-13" }],
@@ -185,6 +190,8 @@ test("trace: one line through every stage, boxes linked by packing job, which re
   assert.strictEqual(r.code, 200);
   assert.deepStrictEqual(r.data.stages.LOADING.map((b) => [b.job_id, b.linked]), [["job_58254998", true]]); // the 5 Nov reuse of the carton is not this line
   assert.deepStrictEqual(r.data.pulled, { "2026-10-13": ["PICKING", "PACKING"], "2026-10-14": [] }); // 14 Oct: nothing pulled - the gap shows
+  // verification found through the line's unloading job, not another delivery's
+  assert.deepStrictEqual(r.data.stages.VERIFICATION.map((v) => v.job_id), ["job_v1"]);
   assert.strictEqual((await uc.trace({ article_id: "x", to_store: "ecr" })).code, 422);
 });
 
