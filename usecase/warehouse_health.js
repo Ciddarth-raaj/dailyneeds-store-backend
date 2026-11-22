@@ -55,7 +55,7 @@ class WarehouseHealth {
   async build(date) {
     const week = H.addDays(date, -6);
     const month = H.monthStart(date);
-    const [uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames] = await Promise.all([
+    const [uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines] = await Promise.all([
       this.repo.uploads(date, date),
       this.repo.jobBreakdown(date, date, ["report_type"]),
       this.repo.jobBreakdown(date, date, ["report_type", "job_type"]),
@@ -69,13 +69,15 @@ class WarehouseHealth {
       this.repo.jobBreakdown(month, date, ["worked_by"], { report_type: "PICKING" }),
       this.repo.pickerMistakes(month, date),
       this.reports._staffNames(),
+      // Every picking write-off line of the day: what, where, who, when.
+      this.repo.jobRows(date, date, { only: "short", report_type: "PICKING" }, 3000),
     ]);
     const [boxChain, stageChain, stuckCartons] = await Promise.all([
       this.boxChain(date),
       this.stageChain(date),
       typeof this.reports.stuckCartons === "function" ? this.reports.stuckCartons() : null,
     ]);
-    return H.buildHealth({ boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames });
+    return H.buildHealth({ boxChain, stageChain, stuckCartons, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
   }
 
   /**

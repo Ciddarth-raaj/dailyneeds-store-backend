@@ -5,7 +5,7 @@ const make = require("./warehouse_health");
 const repo = {
   uploads: async () => [{ report_type: "PICKING", report_date: "2026-11-20" }],
   jobBreakdown: async (f, t, dims) => (dims[0] === "report_type" && dims.length === 1 ? [{ report_type: "PICKING", short_lines: 2, short_qty: 9, short_value: 90 }] : []),
-  jobRows: async () => [],
+  jobRows: async (f, t, o) => (o && o.only === "short" ? [{ article_id: 5, article_name: "Atta", job_type: "STA", to_store: "ecr", short_qty: 2, nlc: 10, worked_by: "kp1", finished_at: "2026-11-20 10:00" }] : []),
   remarksPending: async () => [],
   shortArticles: async () => [],
   pickerMistakes: async () => [],
@@ -137,4 +137,10 @@ test("stuck cartons head 'things need you'; a RetailPilot refusal shows as a not
   assert.match(r.data.need_you[0].text, /^Stuck cartons: 1 packed, loading job open more than 2 days \(20 units · ₹1,100 · oldest 36 days\)/);
   uc.reports = { ...reports, stuckCartons: async () => ({ ok: false, msg: "RetailPilot: whitelist_violation" }) };
   assert.deepStrictEqual((await uc.health({ date: "2026-11-20" })).data.stuck_cartons, { ok: false, msg: "RetailPilot: whitelist_violation" });
+});
+
+test("the write-off lines come with the health of the day", async () => {
+  const { uc } = setup([]);
+  const r = await uc.health({ date: "2026-11-20" });
+  assert.deepStrictEqual(r.data.tiles.writeoff.list.map((l) => [l.article_name, l.value, l.finished_at]), [["Atta", 20, "2026-11-20 10:00"]]);
 });

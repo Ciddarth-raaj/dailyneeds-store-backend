@@ -20,7 +20,7 @@ const {
 const JOB_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "to_store", "article_id", "article_name",
   "department", "category", "recommended_qty", "planned_qty", "advised_qty", "actual_qty", "short_qty",
-  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by", "stage_id", "picking_job", "job_state",
+  "returned_qty", "jobs", "open_jobs", "nlc", "nlc_source", "job_id", "worked_by", "stage_id", "picking_job", "job_state", "finished_at",
 ];
 const BOX_COLS = [
   "upload_id", "report_type", "report_date", "job_type", "from_store", "planned_to_store", "unloaded_store",
@@ -371,7 +371,8 @@ class WhDailyReportsRepository {
       `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_type, r.from_store, r.to_store,
               r.article_id, r.article_name, r.department, r.category, r.recommended_qty, r.planned_qty, r.advised_qty,
               r.actual_qty, r.short_qty, r.returned_qty, r.jobs, r.open_jobs, r.nlc, r.nlc_source,
-              r.short_qty * r.nlc AS short_value, r.job_id, r.worked_by
+              r.short_qty * r.nlc AS short_value, r.job_id, r.worked_by, r.stage_id,
+              DATE_FORMAT(r.finished_at, '%Y-%m-%d %H:%i') AS finished_at
          FROM wh_report_job_rows r
         WHERE ${where}${extra}
         ORDER BY r.report_date DESC, r.report_type, r.to_store, short_value DESC, r.article_id

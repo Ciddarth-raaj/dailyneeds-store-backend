@@ -215,7 +215,7 @@ function withBoxChain(h, c) {
   return h;
 }
 
-function buildHealthBase({ date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines: rawBoxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
+function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines: rawBoxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames }) {
   // The day looked at is over: a box put on a truck and not unloaded is a
   // problem, even if the next day's unloading is not pulled yet - not "still
   // awaiting". Only damage / returns going back to the warehouse are apart.
@@ -357,7 +357,30 @@ function buildHealthBase({ date, uploads, summary, byJobType, byStore, yetToVeri
     missing_reports: Object.keys(LABEL).filter((k) => !reports[k]).map((k) => LABEL[k]),
     need_you: items,
     tiles: {
-      writeoff: { lines: job.PICKING.short_lines, qty: job.PICKING.short_qty, value: r2(job.PICKING.short_value), by_job_type: writeoffByType, packing_lines: job.PACKING.short_lines, packing_qty: job.PACKING.short_qty, packing_value: r2(job.PACKING.short_value) },
+      writeoff: {
+        // Every line: what (article), where (from -> store), who (picker), when (job finished), which job / document.
+        list: (writeoffLines || [])
+          .map((l) => ({
+            article_id: l.article_id,
+            article_name: l.article_name || null,
+            department: l.department || null,
+            job_type: String(l.job_type || "Other").toUpperCase(),
+            from_store: l.from_store || null,
+            to_store: l.to_store || null,
+            advised_qty: n(l.advised_qty),
+            picked_qty: n(l.actual_qty),
+            short_qty: n(l.short_qty),
+            nlc: l.nlc == null ? null : n(l.nlc),
+            value: r2(n(l.short_qty) * n(l.nlc)),
+            picker: l.worked_by || null,
+            picker_name: l.worked_by ? staffLabel(l.worked_by, staffNames) : null,
+            picker_mapped: Boolean(l.worked_by && staffNames && staffNames[l.worked_by]),
+            finished_at: l.finished_at || null,
+            job_id: l.job_id || null,
+            stage_id: l.stage_id || null,
+          }))
+          .sort((a, b) => b.value - a.value || b.short_qty - a.short_qty),
+        lines: job.PICKING.short_lines, qty: job.PICKING.short_qty, value: r2(job.PICKING.short_value), by_job_type: writeoffByType, packing_lines: job.PACKING.short_lines, packing_qty: job.PACKING.short_qty, packing_value: r2(job.PACKING.short_value) },
       boxes: { not_on_truck: countBy("NOT_ON_TRUCK"), not_unloaded: countBy("NOT_UNLOADED"), wrong_store: countBy("WRONG_STORE"), qty_diff: countBy("QTY_DIFF"), not_loaded: countBy("NOT_LOADED"), list: issues.slice(0, 200) },
       // Loading and unloading, each on its own.
       loading: { boxes: listBoxes.size, on_truck: onTruck.size, trucks: trucks.size, not_on_truck: countBy("NOT_ON_TRUCK"), list: issues.filter((x) => x.status === "NOT_ON_TRUCK").slice(0, 200) },

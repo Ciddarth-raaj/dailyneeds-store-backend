@@ -76,6 +76,9 @@ describe("mapping", () => {
     assert.equal(R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED" })], STORES).rows[0].returned_qty, 2);
     const v = R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED", stage_id: "sta_5", meta: '{"picking_job":"job_0"}' })], STORES).rows[0];
     assert.deepEqual([v.stage_id, v.picking_job], ["sta_5", "job_0"]);
+    // when the job finished, in IST; none for an open job
+    assert.equal(R.mapJobLines("PICKING", [line({ updated_at: "2026-11-21T05:30:00Z" })], STORES).rows[0].finished_at, "2026-11-21 11:00:00");
+    assert.equal(R.mapJobLines("PICKING", [line({ state: "PICKING", updated_at: "2026-11-21T05:30:00Z" })], STORES).rows[0].finished_at, null);
   });
   it("goods that stay at the store they are at (GRN kept at the warehouse, auto-picked) are not write-off", () => {
     const { rows } = R.mapJobLines("PICKING", [line({ job_type: "GRN", state: "PICKED_PACKED", destination: "wh1", advised_qty: "10000", actual_qty: "0" })], STORES);

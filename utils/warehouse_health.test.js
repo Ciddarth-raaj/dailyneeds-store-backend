@@ -146,3 +146,16 @@ test("telegram text", () => {
   assert.match(t, /Not pulled yet: Packing, Unloading/);
   assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");
 });
+
+test("picking write-off: every line with what, where, who and when, most value first", () => {
+  const h = H.buildHealth({
+    ...base,
+    writeoffLines: [
+      { article_id: 5, article_name: "Atta 5kg", job_type: "sta", from_store: "warehouse", to_store: "ecr", advised_qty: 10, actual_qty: 7, short_qty: 3, nlc: 200, worked_by: "u1", finished_at: "2026-11-19 11:05", job_id: "job_1", stage_id: "sta_9" },
+      { article_id: 6, article_name: "Salt", job_type: "DAMG", from_store: "ecr", to_store: "warehouse", advised_qty: 4, actual_qty: 0, short_qty: 4, nlc: 20, worked_by: "zz", finished_at: null, job_id: "job_2", stage_id: null },
+    ],
+  });
+  const [a, b] = h.tiles.writeoff.list;
+  assert.deepStrictEqual([a.article_name, a.job_type, a.to_store, a.short_qty, a.value, a.picker_name, a.picker_mapped, a.finished_at, a.job_id], ["Atta 5kg", "STA", "ecr", 3, 600, "Ravi", true, "2026-11-19 11:05", "job_1"]);
+  assert.deepStrictEqual([b.picker_name, b.picker_mapped, b.value], ["zz", false, 80]);
+});

@@ -293,6 +293,7 @@ function mapJobLines(type, lines, stores) {
       // A verification line names the picking job its goods came from: how a store's shortage finds its picker.
       picking_job: clean(meta(l.meta).picking_job).slice(0, 64) || null,
       job_state: clean(l.state).toUpperCase().slice(0, 30) || null,
+      finished_at: done ? istDateTime(l.updated_at) : null,
       job_type: clean(l.job_type).toUpperCase() || null,
       from_store: name(l.origin),
       to_store: name(l.destination),
