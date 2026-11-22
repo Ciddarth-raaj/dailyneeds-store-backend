@@ -67,3 +67,32 @@ test("days the chain cannot follow by job state are listed", () => {
   const c = S.buildStageChain({ date: "2026-11-20", jobs: [J("PICKING", "2026-11-12", { no_state: 3 })], boxes: [] });
   assert.deepStrictEqual(c.days_without_state, ["2026-11-12"]);
 });
+
+test("cartons follow their job: a reused carton barcode, packed one day and loaded the next, to two stores", () => {
+  // Fortune 5L, INV-SuLhMeH5daqg: picked 13 Oct, 7 packing jobs at 18:45, 7 loading jobs loaded 14 Oct, all box 2061252838.
+  const P = (job, store) => J("PACKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, article_name: "fortune sunflower oil 5ltr can", to_store: store, qty: 4, job_id: job, picking_job: "job_50616283" });
+  const packs = [P("job_p1", "moolakulam"), P("job_p2", "moolakulam"), P("job_p3", "ecr")];
+  // the loading box carries no document and the same carton id; it names its packing job
+  const L = (job, store) => Bx("LOADING", "2026-10-14", { stage_id: null, article_id: 103506, to_store: store, qty: 4, packing_jobs: job, job_id: `load_${job}` });
+  const c = S.buildStageChain({ date: "2026-10-14", jobs: [J("PICKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, to_store: "moolakulam", qty: 8, job_id: "job_50616283" }), J("PICKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, to_store: "ecr", qty: 4, job_id: "job_50616283" }), ...packs], boxes: [L("job_p1", "moolakulam"), L("job_p2", "moolakulam"), L("job_p3", "ecr")] });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").from_earlier, g(c, "to_load").moved_on, g(c, "to_load").stands, g(c, "to_load").jumped.qty], [0, 12, 12, 0, 0]);
+});
+
+test("a loading box links to the right packing job, not the oldest of the same article and store", () => {
+  const packs = [J("PACKING", "2026-11-10", { stage_id: null, job_id: "old_pack" }), J("PACKING", "2026-11-19", { stage_id: null, job_id: "new_pack" })];
+  const c = S.buildStageChain({ date: "2026-11-20", jobs: packs, boxes: [Bx("LOADING", "2026-11-20", { stage_id: null, packing_jobs: "new_pack" })] });
+  const l = g(c, "to_load");
+  assert.deepStrictEqual(l.list.map((x) => [x.since, x.days]), [["2026-11-10", 10]]);
+});
+
+test("a merged crate lists several packing jobs; verification follows its unloading job", () => {
+  const jobs = [J("PACKING", "2026-11-12", { job_id: "pa", qty: 6 }), J("PACKING", "2026-11-14", { job_id: "pb", article_id: 2, qty: 4 }), J("VERIFICATION", "2026-11-16", { stage_id: null, qty: 10, unloading_job: "u1" })];
+  const boxes = [Bx("LOADING", "2026-11-15", { stage_id: null, article_id: 1, qty: 6, packing_jobs: "pa,pb" }), Bx("LOADING", "2026-11-15", { stage_id: null, article_id: 2, qty: 4, packing_jobs: "pa,pb" }), Bx("UNLOADING", "2026-11-15", { stage_id: null, qty: 10, job_id: "u1" })];
+  const c = S.buildStageChain({ date: "2026-11-16", jobs, boxes });
+  assert.deepStrictEqual([g(c, "to_load").stands, g(c, "to_verify").moved_on, g(c, "to_verify").stands], [0, 10, 0]);
+});
+
+test("loading days pulled before job links were kept are listed to pull again", () => {
+  const c = S.buildStageChain({ date: "2026-11-20", jobs: [], boxes: [Bx("LOADING", "2026-10-14", { no_link: 7 })] });
+  assert.deepStrictEqual(c.days_without_state, ["2026-10-14"]);
+});

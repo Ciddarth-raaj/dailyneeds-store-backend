@@ -8,11 +8,15 @@
  *
  *   waiting from earlier days + arrived today - moved on today = stands tonight
  *
- * "Moved on" includes what the next stage recorded short (lost). Matching:
- * the next stage takes from the same document + article + store, oldest
- * first; where it has no document (cartons, uploaded files) or nothing is
- * waiting under it, from any document of that article + store, oldest
- * first. What the next stage records with nothing waiting for it at all
+ * "Moved on" includes what the next stage recorded short (lost). Matching,
+ * in this order:
+ *   1. by job: RetailPilot records which job each line came from - a packing
+ *      line its picking_job, a loading box its packing_job(s) (or the
+ *      pick-pack picking_job), a verification line its unloading_job. Carton
+ *      barcodes are reused on every delivery and loading is often the day
+ *      after packing, so the job link is the only exact one;
+ *   2. else the same document + article + store, oldest first;
+ *   3. else any document of that article + store, oldest first. What the next stage records with nothing waiting for it at all
  * "jumped" a stage. Goods that stay put (from = to store) never move on and
  * are left out. Loaded -> Unloaded is followed by box in utils/wh_box_chain.js.
  *
@@ -40,13 +44,20 @@ const staysPut = (e) => e.from_store && e.to_store && e.from_store === e.to_stor
 function follow(ins, outs, cutoff) {
   const layers = new Map(); // exact key -> [{...in, left}]
   const byLane = new Map(); // lane -> Set(exact key)
+  const byLink = new Map(); // job id | article -> [layer]
   for (const e of ins) {
     if (e.report_date > cutoff || n(e.qty) <= 0) continue;
     const k = exact(e);
+    const layer = { ...e, left: n(e.qty) };
     if (!layers.has(k)) layers.set(k, []);
-    layers.get(k).push({ ...e, left: n(e.qty) });
+    layers.get(k).push(layer);
     if (!byLane.has(lane(e))) byLane.set(lane(e), new Set());
     byLane.get(lane(e)).add(k);
+    if (e.link) {
+      const lk = `${e.link}|${e.article_id}`;
+      if (!byLink.has(lk)) byLink.set(lk, []);
+      byLink.get(lk).push(layer);
+    }
   }
   for (const list of layers.values()) list.sort((a, b) => a.report_date.localeCompare(b.report_date));
   const jumped = [];
@@ -64,7 +75,12 @@ function follow(ins, outs, cutoff) {
   const sorted = outs.filter((o) => o.report_date <= cutoff && n(o.qty) > 0).sort((a, b) => a.report_date.localeCompare(b.report_date));
   for (const o of sorted) {
     let need = n(o.qty);
-    if (o.stage_id && layers.has(exact(o))) need = take(layers.get(exact(o)), o, need);
+    for (const id of o.links || []) {
+      if (need <= 0) break;
+      const list = byLink.get(`${id}|${o.article_id}`);
+      if (list) need = take(list, o, need);
+    }
+    if (need > 0 && o.stage_id && layers.has(exact(o))) need = take(layers.get(exact(o)), o, need);
     if (need > 0 && byLane.has(lane(o))) {
       const all = [...byLane.get(lane(o))].flatMap((k) => layers.get(k)).sort((a, b) => a.report_date.localeCompare(b.report_date));
       need = take(all, o, need);
@@ -125,12 +141,14 @@ function buildStageChain({ jobs, boxes, date }) {
   const J = (t, pred = () => true) => (jobs || []).filter((r) => r.report_type === t && pred(r));
   const B = (t) => (boxes || []).filter((r) => r.report_type === t);
   const shortOf = (rows) => rows.filter((r) => n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty) }));
-  const picked = J("PICKING", (r) => !n(r.pick_pack));
-  const pickPacked = J("PICKING", (r) => n(r.pick_pack));
-  const packing = J("PACKING");
-  const verification = J("VERIFICATION");
-  const loaded = B("LOADING");
-  const unloaded = B("UNLOADING");
+  // `link`: this stage's job id; `links`: the job(s) of the stage before that this line came from.
+  const ids = (...vals) => [...new Set(vals.flatMap((v) => String(v || "").split(",")).map((v) => v.trim()).filter(Boolean))];
+  const picked = J("PICKING", (r) => !n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
+  const pickPacked = J("PICKING", (r) => n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
+  const packing = J("PACKING").map((r) => ({ ...r, link: r.job_id || null, links: ids(r.picking_job) }));
+  const verification = J("VERIFICATION").map((r) => ({ ...r, links: ids(r.unloading_job) }));
+  const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
+  const unloaded = B("UNLOADING").map((r) => ({ ...r, link: r.job_id || null }));
   const today = (rows) => r3(rows.filter((r) => r.report_date === date && !staysPut(r)).reduce((s, r) => s + n(r.qty), 0));
   const gaps = [
     gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: picked, outs: [...packing, ...shortOf(packing)], lost: shortOf(packing), date }),
@@ -138,7 +156,13 @@ function buildStageChain({ jobs, boxes, date }) {
     gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: unloaded, outs: [...verification, ...shortOf(verification)], lost: shortOf(verification), date }),
   ];
   // Days the chain cannot follow by job state (uploaded files, or pulled before states were kept).
-  const noState = [...new Set((jobs || []).filter((r) => r.report_type === "PICKING" && n(r.no_state) > 0).map((r) => r.report_date))].sort();
+  // ... or by job link (loading boxes pulled before the packing job was kept).
+  const noState = [
+    ...new Set([
+      ...(jobs || []).filter((r) => r.report_type === "PICKING" && n(r.no_state) > 0).map((r) => r.report_date),
+      ...(boxes || []).filter((r) => r.report_type === "LOADING" && n(r.no_link) > 0).map((r) => r.report_date),
+    ]),
+  ].sort();
   return {
     date,
     from: BOX_CHAIN_FROM,

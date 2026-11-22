@@ -76,6 +76,8 @@ describe("mapping", () => {
     assert.equal(R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED" })], STORES).rows[0].returned_qty, 2);
     const v = R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED", stage_id: "sta_5", meta: '{"picking_job":"job_0"}' })], STORES).rows[0];
     assert.deepEqual([v.stage_id, v.picking_job], ["sta_5", "job_0"]);
+    const chain = R.mapJobLines("VERIFICATION", [line({ state: "VERIFIED", meta: { picking_job: "p", packing_job: "k", loading_job: "l", unloading_job: "u" } })], STORES).rows[0];
+    assert.deepEqual([chain.picking_job, chain.packing_job, chain.loading_job, chain.unloading_job], ["p", "k", "l", "u"]);
     // when the job finished, in IST; none for an open job
     assert.equal(R.mapJobLines("PICKING", [line({ updated_at: "2026-11-21T05:30:00Z" })], STORES).rows[0].finished_at, "2026-11-21 11:00:00");
     assert.equal(R.mapJobLines("PICKING", [line({ state: "PICKING", updated_at: "2026-11-21T05:30:00Z" })], STORES).rows[0].finished_at, null);
@@ -94,6 +96,10 @@ describe("mapping", () => {
     );
     const loading = R.mapBoxLines("LOADING", [box({ state: "LOADED", meta: {}, unloaded_store: null })], STORES).rows[0];
     assert.equal(R.mapBoxLines("LOADING", [box({ state: "LOADED", stage_id: "sta_77", unloaded_store: null })], STORES).rows[0].stage_id, "sta_77");
+    const linked = R.mapBoxLines("LOADING", [box({ state: "LOADED", unloaded_store: null, meta: { packing_job: "job_84969325", picking_job: "job_50616283" } })], STORES).rows[0];
+    assert.deepEqual([linked.packing_job, linked.packing_jobs, linked.picking_job], ["job_84969325", "job_84969325", "job_50616283"]);
+    const merged = R.mapBoxLines("LOADING", [box({ state: "LOADED", unloaded_store: null, meta: { packing_jobs: ["job_a", "job_b"] } })], STORES).rows[0];
+    assert.equal(merged.packing_jobs, "job_a,job_b");
     assert.deepEqual([loading.planned_to_store, loading.unloaded_store, loading.box_status], ["ecr", null, "Loaded"]);
   });
 });

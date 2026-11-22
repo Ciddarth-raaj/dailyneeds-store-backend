@@ -292,6 +292,9 @@ function mapJobLines(type, lines, stores) {
       stage_id: clean(l.stage_id).slice(0, 64) || null,
       // A verification line names the picking job its goods came from: how a store's shortage finds its picker.
       picking_job: clean(meta(l.meta).picking_job).slice(0, 64) || null,
+      packing_job: clean(meta(l.meta).packing_job).slice(0, 64) || null,
+      loading_job: clean(meta(l.meta).loading_job).slice(0, 64) || null,
+      unloading_job: clean(meta(l.meta).unloading_job).slice(0, 64) || null,
       job_state: clean(l.state).toUpperCase().slice(0, 30) || null,
       finished_at: done ? istDateTime(l.updated_at) : null,
       job_type: clean(l.job_type).toUpperCase() || null,
@@ -322,6 +325,12 @@ function mapJobLines(type, lines, stores) {
  * on arrival, and a box kept on the truck for a later stop (no unloaded
  * store) is not unloaded yet and is left out.
  */
+/** A box joblet's packing job(s): meta.packing_jobs (a merged GRN crate) or meta.packing_job. */
+function packingJobs(m) {
+  const list = Array.isArray(m.packing_jobs) ? m.packing_jobs : [];
+  return [...new Set([...list, m.packing_job].map((v) => clean(v).slice(0, 64)).filter(Boolean))];
+}
+
 function mapBoxLines(type, lines, stores) {
   const st = BOX_STAGES[type];
   const name = (slug) => (slug ? (stores && stores.get(clean(slug))) || clean(slug).toLowerCase() : null);
@@ -341,6 +350,10 @@ function mapBoxLines(type, lines, stores) {
       report_type: type,
       job_id: clean(l.job_id) || null,
       stage_id: clean(l.stage_id).slice(0, 64) || null,
+      // The jobs this box came from: carton barcodes are reused, the job ids are not.
+      picking_job: clean(m.picking_job).slice(0, 64) || null,
+      packing_job: clean(m.packing_job).slice(0, 64) || null,
+      packing_jobs: packingJobs(m).join(",").slice(0, 1000) || null,
       job_type: clean(l.job_type).toUpperCase() || null,
       from_store: name(l.origin),
       planned_to_store: name(unloading && clean(m.original_destination) ? m.original_destination : l.destination),

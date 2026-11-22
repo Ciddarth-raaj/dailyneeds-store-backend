@@ -1,0 +1,9 @@
+-- Reverses 20261230120000-wh-job-links-up.sql.
+ALTER TABLE wh_report_box_rows
+  DROP COLUMN packing_jobs,
+  DROP COLUMN packing_job,
+  DROP COLUMN picking_job;
+ALTER TABLE wh_report_job_rows
+  DROP COLUMN unloading_job,
+  DROP COLUMN loading_job,
+  DROP COLUMN packing_job;
