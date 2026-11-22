@@ -57,10 +57,6 @@ const section = (heading, body, note = "") => (body ? `<h2>${esc(heading)}</h2>$
 
 function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const t = h.tiles;
-  const remarksPending = t.remarks.write_off.pending + t.remarks.verification.pending;
-  const waitBy = new Map();
-  for (const x of t.unloading.waiting || []) waitBy.set(x.status, (waitBy.get(x.status) || 0) + 1);
-  const gapWaiting = [...waitBy].map(([st, c]) => `${num(c)} ${(BOX_LABEL[st] || st).toLowerCase()}`).join(" · ");
   const card = (label, value, sub, tone) =>
     `<div class="card ${tone}"><div class="cl">${esc(label)}</div><div class="cv">${esc(value)}</div><div class="cs">${sub}</div></div>`;
   const cards = [
@@ -69,33 +65,6 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       plural(t.writeoff.lines, "line"),
       `${rupees(t.writeoff.value)} at NLC · ${num(t.writeoff.qty)} qty${typeSplit(t.writeoff.by_job_type) ? `<br><b>${typeSplit(t.writeoff.by_job_type)}</b>` : ""}`,
       t.writeoff.lines ? "red" : "green"
-    ),
-    card(
-      "Loading",
-      plural(t.loading.not_on_truck, "problem"),
-      `${num(t.loading.not_on_truck)} not on a truck<br>${plural(t.loading.boxes, "box", "boxes")} on ${plural(t.loading.trucks, "truck")}`,
-      t.loading.not_on_truck ? "red" : "green"
-    ),
-    card(
-      "Unloading",
-      plural(t.unloading.problems, "problem"),
-      t.unloading.chain
-        ? `${num(t.unloading.chain.opening.boxes)} open from earlier + ${num(t.unloading.chain.loaded.boxes)} loaded<br>− ${num(t.unloading.chain.unloaded.boxes)} unloaded = <b>${num(t.unloading.chain.still_open.boxes)} still open</b>`
-        : `${num(t.unloading.unloaded_boxes)} of ${num(t.unloading.loaded_boxes)} unloaded<br>${num(t.unloading.not_unloaded)} not unloaded · ${num(t.unloading.wrong_store)} wrong store${gapWaiting ? `<br>${esc(gapWaiting)}` : ""}`,
-      t.unloading.problems ? "red" : "green"
-    ),
-    card(
-      "Verification",
-      plural(t.verification.short_lines, "line"),
-      `short (${rupees(t.verification.short_value)})<br>${num(t.verification.yet_to_verify_qty)} qty yet to verify`,
-      t.verification.short_lines ? "red" : t.verification.yet_to_verify_qty ? "amber" : "green"
-    ),
-    card("Remarks pending", num(remarksPending), `Write Off ${num(t.remarks.write_off.pending)}<br>Verification ${num(t.remarks.verification.pending)}`, remarksPending ? "amber" : "green"),
-    card(
-      "Jobs not finished",
-      num(t.jobs.picking_open + t.jobs.packing_open),
-      `picking ${num(t.jobs.picking_open)} · packing ${num(t.jobs.packing_open)}`,
-      t.jobs.picking_open + t.jobs.packing_open ? "amber" : "green"
     ),
   ].join("");
 
@@ -230,17 +199,8 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     [3, 4]
   );
 
-  const remarks = table(
-    ["Page", "Lines that day", "Without remark", "Older, still without (30 days)"],
-    [
-      { cells: ["Write Off", num(t.remarks.write_off.total), num(t.remarks.write_off.pending), num(t.remarks.write_off.backlog)] },
-      { cells: ["Verification", num(t.remarks.verification.total), num(t.remarks.verification.pending), num(t.remarks.verification.backlog)] },
-    ],
-    [1, 2, 3]
-  );
-
   const stores = table(
-    ["Store", "Picking write-off", "Short at verification", "Yet to verify", "Box problems", "Open lines"],
+    ["Store", "Picking write-off", "Short at verification", "Yet to verify", "Box problems"],
     h.stores
       .filter((s) => s.store !== "warehouse" || s.needs_look)
       .map((s) => ({
@@ -251,10 +211,9 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
           s.verification_short_qty ? `${num(s.verification_short_qty)} qty` : "—",
           s.yet_to_verify_qty ? `${num(s.yet_to_verify_qty)} qty` : "—",
           s.box_issues ? num(s.box_issues) : "—",
-          num(s.open_lines),
         ],
       })),
-    [5]
+    []
   );
 
   const repeats = table(
@@ -349,7 +308,6 @@ ${chainHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
-${section("Remarks pending", remarks)}
 ${section("Stores", stores)}
 ${section("Short again and again", repeats, "Picking write-off on 2 or more of the last 7 days - check the stock / bin.")}
 <h2>Picking write-off, last 7 days (lines)</h2>${trend}

@@ -159,3 +159,11 @@ test("picking write-off: every line with what, where, who and when, most value f
   assert.deepStrictEqual([a.article_name, a.job_type, a.to_store, a.short_qty, a.value, a.picker_name, a.picker_mapped, a.finished_at, a.job_id], ["Atta 5kg", "STA", "ecr", 3, 600, "Ravi", true, "2026-11-19 11:05", "job_1"]);
   assert.deepStrictEqual([b.picker_name, b.picker_mapped, b.value], ["zz", false, 80]);
 });
+
+test("remarks (written next day) and open jobs (every night) are not things that need you, nor cards in the PDF", () => {
+  const h = H.buildHealth(base);
+  assert.deepStrictEqual(h.need_you.filter((i) => ["remarks", "jobs"].includes(i.key)), []);
+  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
+  for (const t of ["Remarks pending", "Jobs not finished", "Open lines", '<div class="cl">Loading', '<div class="cl">Unloading', '<div class="cl">Verification']) assert.ok(!html.includes(t), t);
+  assert.ok(html.includes('<div class="cl">Picking write-off'));
+});

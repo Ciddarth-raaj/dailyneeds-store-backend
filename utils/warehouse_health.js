@@ -340,7 +340,6 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
     trendRows.push({ date: d, has_report: pickedDays.has(d), short_lines: t ? n(t.short_lines) : 0, short_qty: t ? n(t.short_qty) : 0, short_value: t ? r2(t.short_value) : 0 });
   }
 
-  const openLines = job.PICKING.open_lines + job.PACKING.open_lines;
   const items = [];
   // Picking write-off is counted in lines (articles short), not units.
   if (job.PICKING.short_lines) items.push({ key: "writeoff", tone: "red", text: `Picking write-off ${fmt(job.PICKING.short_lines)} line${job.PICKING.short_lines === 1 ? "" : "s"} · ${rupees(job.PICKING.short_value)} (${fmt(job.PICKING.short_qty)} qty)${writeoffByType.length > 1 || (writeoffByType[0] && writeoffByType[0].job_type !== "OTHER") ? ` - ${writeoffByType.map((t) => `${t.job_type} ${fmt(t.lines)}`).join(", ")}` : ""}` });
@@ -349,8 +348,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
   if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded or wrong store)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
   if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
-  if (rm.WRITE_OFF.pending + rm.VERIFICATION.pending) items.push({ key: "remarks", tone: rm.WRITE_OFF.backlog + rm.VERIFICATION.backlog ? "red" : "amber", text: `${rm.WRITE_OFF.pending + rm.VERIFICATION.pending} lines without remark` });
-  if (openLines) items.push({ key: "jobs", tone: "amber", text: `${fmt(openLines)} picking / packing lines still open` });
+  // Remarks (written the next day) and jobs still open (every night) are normal: not listed here.
 
   const monthPickers = pickers(pickerWork, pickerMistakes, staffNames);
   return {
