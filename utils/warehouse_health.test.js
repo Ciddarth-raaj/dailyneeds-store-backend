@@ -142,7 +142,7 @@ test("telegram text", () => {
   const t = H.formatTelegram(H.buildHealth(base));
   assert.match(t, /Picking write-off 115 lines/);
   assert.match(t, /Yet to verify at: Warehouse \(returns\) 5/);
-  assert.match(t, /Pickers below 98% this month - Others \(Alloc, GRN, DAMG\): u2 97.0%/);
+  assert.doesNotMatch(t, /Pickers/); // pickers are on the dashboard only
   assert.match(t, /Not pulled yet: Packing, Unloading/);
   assert.strictEqual(H.formatTelegram(H.buildHealth({ date: "2026-11-19" })), "Warehouse Health - Thu, 19 Nov\nNo reports for this day yet.");
 });
@@ -186,7 +186,7 @@ test("pickers split into STA and the rest (Alloc with them), each with its own a
   assert.deepStrictEqual(sta.rows.map((p) => [p.id, p.lines, p.mistake_lines, p.below_target]), [["u1", 90, 3, true]]); // 96.7%
   assert.deepStrictEqual(other.rows.map((p) => [p.id, p.lines, p.mistake_lines]), [["u1", 60, 0], ["u2", 20, 0]]); // Alloc 10 + GRN 50
   assert.strictEqual(h.pickers.find((p) => p.id === "u1").lines, 150); // all together still adds up
-  assert.match(H.formatTelegram(h), /Pickers below 98% this month - STA: Ravi 96\.6%/);
+  assert.doesNotMatch(H.formatTelegram(h), /Pickers/); // dashboard only
   // not in the PDF (on the dashboard only)
   assert.ok(!require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 }).includes("Pickers this month"));
 });

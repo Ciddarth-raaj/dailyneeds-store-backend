@@ -479,11 +479,7 @@ function formatTelegram(h) {
     lines.push(`Yet to verify at: ${[...where].map(([s, q]) => `${s} ${fmt(q)}`).join(", ")}`);
   }
   if (h.repeats.length) lines.push(`Short again and again: ${h.repeats.slice(0, 5).map((a) => title(a.article_name || a.article_id)).join(", ")}`);
-  const acc = (p) => `${p.name} ${(Math.floor(p.accuracy * 1000) / 10).toFixed(1)}%`;
-  for (const g of h.picker_groups || []) {
-    const below = g.rows.filter((p) => p.below_target);
-    if (below.length) lines.push(`Pickers below ${Math.round(h.accuracy_target * 100)}% this month - ${g.label}: ${below.slice(0, 5).map(acc).join(", ")}`);
-  }
+  // Pickers are on the dashboard only, not in the message.
   if (h.missing_reports.length) lines.push(`Not pulled yet: ${h.missing_reports.join(", ")}`);
   return lines.join("\n");
 }
