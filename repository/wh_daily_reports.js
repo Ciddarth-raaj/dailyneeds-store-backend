@@ -444,6 +444,7 @@ class WhDailyReportsRepository {
         "STAGE_FLOWS_JOBS",
         `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.stage_id, r.article_id,
                 MAX(r.article_name) AS article_name, r.from_store, r.to_store, r.job_id, r.picking_job, r.unloading_job,
+                MAX(r.worked_by) AS worked_by,
                 MAX(r.job_state = 'PICKED_PACKED') AS pick_pack,
                 SUM(COALESCE(r.actual_qty, 0)) AS qty, SUM(COALESCE(r.short_qty, 0)) AS short_qty, MAX(r.nlc) AS nlc,
                 SUM(r.job_state IS NULL) AS no_state

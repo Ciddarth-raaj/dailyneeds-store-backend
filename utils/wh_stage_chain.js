@@ -53,8 +53,8 @@ function follow(ins, outs, cutoff) {
     layers.get(k).push(layer);
     if (!byLane.has(lane(e))) byLane.set(lane(e), new Set());
     byLane.get(lane(e)).add(k);
-    if (e.link) {
-      const lk = `${e.link}|${e.article_id}|${e.to_store || ""}`;
+    for (const id of [].concat(e.link || [])) {
+      const lk = `${id}|${e.article_id}|${e.to_store || ""}`;
       if (!byLink.has(lk)) byLink.set(lk, []);
       byLink.get(lk).push(layer);
     }
@@ -159,9 +159,31 @@ function buildStageChain({ jobs, boxes, date }) {
   const splitsPickPack = (r) =>
     (r.picking_job && pickPackJobs.has(`${r.picking_job}|${r.article_id}|${r.to_store || ""}`)) ||
     (!r.picking_job && r.stage_id && pickPackLanes.has(`${r.stage_id}|${r.article_id}|${r.to_store || ""}`));
+  // System packing jobs (no person on them) can also split goods a person
+  // already packed into cartons (leaf broom: picked 20, packed 20 by a
+  // packer, then 4 system packing jobs of 5 - packing adds up to 40). When a
+  // picking job's packing adds up to more than was picked, its unassigned
+  // packing jobs are those splits and are not packed again.
+  const groupOf = (r, job) => (job ? `J|${job}|${r.article_id}|${r.to_store || ""}` : r.stage_id ? `S|${r.stage_id}|${r.article_id}|${r.to_store || ""}` : null);
+  const pickedQty = new Map();
+  for (const r of J("PICKING", (x) => !n(x.pick_pack))) {
+    for (const k of [groupOf(r, r.job_id), groupOf(r, null)].filter(Boolean)) pickedQty.set(k, (pickedQty.get(k) || 0) + n(r.qty) + n(r.short_qty));
+  }
+  const packedQty = new Map();
+  const packGroup = (r) => (r.picking_job && pickedQty.has(groupOf(r, r.picking_job)) ? groupOf(r, r.picking_job) : groupOf(r, null));
+  for (const r of J("PACKING")) {
+    const k = packGroup(r);
+    if (k) packedQty.set(k, (packedQty.get(k) || 0) + n(r.qty) + n(r.short_qty));
+  }
+  const cartonSplit = (r) => {
+    if (r.worked_by) return false;
+    const k = packGroup(r);
+    return Boolean(k && pickedQty.has(k) && packedQty.get(k) > pickedQty.get(k) + 1e-6);
+  };
   const picked = J("PICKING", (r) => !n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
   const pickPacked = J("PICKING", (r) => n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
-  const packing = J("PACKING", (r) => !splitsPickPack(r)).map((r) => ({ ...r, link: r.job_id || null, links: ids(r.picking_job) }));
+  // A packed line is reached by its own job, or - for cartons split from it - by its picking job.
+  const packing = J("PACKING", (r) => !splitsPickPack(r) && !cartonSplit(r)).map((r) => ({ ...r, link: ids(r.job_id, r.picking_job), links: ids(r.picking_job) }));
   const splitShort = J("PACKING", (r) => splitsPickPack(r) && n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty), links: ids(r.picking_job) }));
   const verification = J("VERIFICATION").map((r) => ({ ...r, links: ids(r.unloading_job) }));
   const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));

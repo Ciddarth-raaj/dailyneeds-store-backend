@@ -138,3 +138,22 @@ test("a pick-pack partly split into cartons by packing jobs: all of it packed on
   const day1 = S.buildStageChain({ date: "2026-10-14", jobs, boxes });
   assert.deepStrictEqual([g(day1, "to_pack").stands, g(day1, "to_load").stands], [0, 423]); // packed on the 14th, loaded on the 15th
 });
+
+test("system packing jobs that split already-packed goods into cartons are not packed again (leaf broom, 29 Oct)", () => {
+  const T = (o) => ({ stage_id: "H4Pu", article_id: 105540, to_store: "kathirkamam", ...o });
+  const splits = ["job_55906958", "job_65123727", "job_71352978", "job_95801560"];
+  const jobs = [
+    J("PICKING", "2026-10-29", T({ qty: 20, job_id: "job_10506470", worked_by: "vignesh" })),
+    J("PACKING", "2026-10-29", T({ qty: 20, job_id: "job_31683379", picking_job: "job_10506470", worked_by: "ravisankar" })),
+    ...splits.map((id) => J("PACKING", "2026-10-29", T({ qty: 5, job_id: id, picking_job: "job_10506470", worked_by: null }))),
+  ];
+  const boxes = splits.map((id) => Bx("LOADING", "2026-10-29", T({ stage_id: null, qty: 5, packing_jobs: id, picking_job: "job_10506470" })));
+  const c = S.buildStageChain({ date: "2026-10-29", jobs, boxes });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_pack").jumped.qty, g(c, "to_load").arrived, g(c, "to_load").stands, g(c, "to_load").jumped.qty], [0, 0, 20, 0, 0]);
+});
+
+test("unassigned packing jobs that do not over-count what was picked are real packing", () => {
+  const jobs = [J("PICKING", "2026-11-20", { qty: 10, job_id: "pk" }), J("PACKING", "2026-11-20", { qty: 10, job_id: "sys", picking_job: "pk", worked_by: null })];
+  const c = S.buildStageChain({ date: "2026-11-20", jobs, boxes: [] });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").stands], [0, 10]);
+});
