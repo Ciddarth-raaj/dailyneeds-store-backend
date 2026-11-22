@@ -53,6 +53,14 @@ function table(head, rows, numCols = []) {
   const tr = rows.map((r) => `<tr${r.cls ? ` class="${r.cls}"` : ""}>${r.cells.map((c, i) => `<td${numCols.includes(i) ? ' class="num"' : ""}>${c}</td>`).join("")}</tr>`).join("");
   return `<table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table>`;
 }
+/** "2026-11-21 19:35" -> "21 Nov, 7:35 pm" (already IST). */
+function whenText(v) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(v || ""));
+  if (!m) return v ? esc(v) : "—";
+  const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][Number(m[2]) - 1];
+  const hr = Number(m[4]);
+  return `${Number(m[3])} ${mon}, ${hr % 12 || 12}:${m[5]} ${hr < 12 ? "am" : "pm"}`;
+}
 const section = (heading, body, note = "") => (body ? `<h2>${esc(heading)}</h2>${note ? `<p class="note">${note}</p>` : ""}${body}` : "");
 
 function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
@@ -131,7 +139,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
         ["Article", "Document", "From → To", "Short", "Value", "By", "When"],
         list.slice(0, 40).map((l) => ({
           cls: "bad",
-          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc(l.worker_name || "—"), esc(l.finished_at || "—")],
+          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc(l.worker_name || "—"), esc(whenText(l.finished_at))],
         })),
         [3, 4]
       ),
@@ -169,7 +177,6 @@ ${sc.gaps.map((g) => foundShort(g)).join("")}`
     : "";
   const mainTitle = h.main_title ? `${h.main_title} - where everything stands tonight` : "Where everything stands tonight";
   const stageHtml = stageBlock(h.stage_chain, mainTitle, 40);
-  const secondHtml = h.second ? stageBlock(h.second.stage_chain, `${h.second.title} - where everything stands tonight`, 20) : "";
   const c = t.unloading.chain;
   const tripItems = (x) =>
     (x.items || []).length
@@ -180,6 +187,14 @@ ${sc.gaps.map((g) => foundShort(g)).join("")}`
       cls: n(x[f]) >= 2 ? "bad" : "",
       cells: [`${esc(x.box_id)}${tripItems(x)}`, `${esc(title(x.from_store))} → ${esc(title(x.to_store))}`, esc(x.truck_no || "—"), esc(dayText(x.loaded_on)), num(x[f]), num(x.articles), num(x.qty), rupees(x.value)],
     }));
+  // The other direction (store returns at the warehouse), with its boxes still open 2 days or more.
+  const secondOpen = h.second ? ((h.second.unloading && h.second.unloading.still_open) || []).filter((x) => n(x.days_open) >= 2) : [];
+  const secondHtml = h.second
+    ? `${stageBlock(h.second.stage_chain, `${h.second.title} - where everything stands tonight`, 20)}${section(
+        `${h.second.title} - still open, loaded 2 days or more ago`,
+        table(["Box", "From → To", "Truck", "Loaded", "Days open", "Articles", "Qty", "Value"], tripRows(secondOpen, "days_open"), [4, 5, 6, 7])
+      )}`
+    : "";
   const chainHtml = c
     ? `<h2>Unloading - box chain since ${esc(dayText(c.from))}</h2>
 ${c.missing_days.length ? `<p class="note warn">${c.missing_days.length} day(s) since ${esc(dayText(c.from))} have no Loading or Unloading report - the chain may miss boxes.</p>` : ""}

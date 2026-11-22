@@ -304,7 +304,7 @@ test("the PDF lists the lines found short at verification (who, when), not only 
   const h = H.buildHealth({ date: "2026-11-21", uploads: [], summary: [], byJobType: [], byStore: [], yetToVerify: [], remarks: [], boxLines: [], repeats: [], trend: [], trendUploads: [], pickerWork: [], pickerMistakes: [], staffNames: { kp9: "Meena" }, writeoffLines: [], stageChain: { ...sc, days_without_state: [] } });
   const html = P.buildHtml(h, { nowMs: 0 });
   assert.ok(html.includes("Verified with issues - found short at the store - 1 line · 2 qty"));
-  assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Meena") && html.includes("2026-11-21 18:05"));
+  assert.ok(html.includes("nescafe sunrise 8g") && html.includes("Meena") && html.includes("21 Nov, 6:05 pm"));
 });
 
 test("the PDF lists only lines waiting 2 days or more (the newer ones are on the dashboard)", () => {
@@ -317,4 +317,19 @@ test("the PDF lists only lines waiting 2 days or more (the newer ones are on the
   assert.ok(html.includes("Packed, not yet loaded - 40 qty")); // the total still counts everything
   assert.deepStrictEqual(["old soap", "two day oil", "one day dal", "fresh ghee"].map((a) => html.includes(a)), [true, true, false, false]);
   assert.ok(html.includes("Only lines waiting 2 days or more (2 lines)"));
+});
+
+test("the PDF lists the boxes sent to the warehouse still open 2 days or more, under Received at the warehouse", () => {
+  const P = require("../utils/warehouse_health_pdf");
+  const H = require("../utils/warehouse_health");
+  const L = (d, id, name) => ({ report_date: d, box_id: id, planned_to_store: "warehouse", from_store: "moolakulam", truck_no: "EV3", articles: 1, qty: 569, value: 21622, job_id: id, items: [{ article_name: name, qty: 569 }] });
+  const box = BC.buildChain({ loads: [L("2026-11-19", "RP031488", "bambino badam soan papdi 200g"), L("2026-11-21", "RP09", "fresh return")], unloads: [], date: "2026-11-21" });
+  box.lists.still_open.forEach((b) => (b.items = [{ article_name: b.box_id === "RP031488" ? "bambino badam soan papdi 200g" : "fresh return", qty: 1 }]));
+  const base = { date: "2026-11-21", uploads: [], summary: [], byJobType: [], byStore: [], yetToVerify: [], remarks: [], boxLines: [], repeats: [], trend: [], trendUploads: [], pickerWork: [], pickerMistakes: [], staffNames: {}, writeoffLines: [] };
+  const h = H.buildHealth(base);
+  H.withSecondChain(h, { stage: SC.buildStageChain({ jobs: [], boxes: [], date: "2026-11-21" }), box }, { title: "Received at the warehouse", direction: "to", staffNames: {} });
+  const html = P.buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Received at the warehouse - still open, loaded 2 days or more ago"));
+  assert.ok(html.includes("RP031488") && html.includes("bambino badam soan papdi 200g"));
+  assert.ok(!html.includes("RP09")); // loaded today: on the dashboard
 });
