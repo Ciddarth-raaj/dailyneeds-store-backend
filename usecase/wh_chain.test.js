@@ -8,7 +8,11 @@ function memChain() {
   const days = new Map(); // day -> { status, gen, result, no_links, error, computed_at }
   const open = new Map();
   const boxes = new Map();
+  const results = new Map(); // `${day}|${view}` -> JSON text
   return {
+    results,
+    getView: async (d, v) => results.get(`${d}|${v}`) || null,
+    viewsOn: async (d) => [...results.keys()].filter((k) => k.startsWith(`${d}|`)).map((k) => k.slice(11)).sort(),
     days,
     addMissing: async (list) => list.forEach((d) => days.has(d) || days.set(d, { status: "TODO", gen: 0 })),
     markTodo: async (list) => list.forEach((d) => days.set(d, { ...(days.get(d) || { gen: 0 }), status: "TODO", gen: ((days.get(d) || {}).gen || 0) + 1 })),
@@ -17,9 +21,11 @@ function memChain() {
     progress: async () => ({ todo: [...days.values()].filter((r) => r.status === "TODO").length, done: [...days.values()].filter((r) => r.status === "DONE").length, failed: 0, first_todo: null }),
     noLinkDays: async () => [],
     version: async () => "v",
-    loadOpen: async (d) => open.get(d) || [],
-    loadOpenBoxes: async (d) => boxes.get(d) || [],
-    saveDay: async (d, { open: o, boxes: b, result, gen }) => {
+    loadOpen: async (d) => (open.get(d) || []).map((x) => ({ ...x, view_key: x.view })),
+    loadOpenBoxes: async (d) => (boxes.get(d) || []).map((x) => ({ ...x, view_key: x.view })),
+    saveDay: async (d, { open: o, boxes: b, result, views = {}, gen }) => {
+      for (const k of [...results.keys()]) if (k.startsWith(`${d}|`)) results.delete(k);
+      for (const [v, r] of Object.entries(views)) results.set(`${d}|${v}`, JSON.stringify(r));
       open.set(d, o.map((x) => ({ ...x })));
       boxes.set(d, b.map((x) => ({ ...x })));
       const cur = days.get(d) || { gen: 0 };
@@ -108,4 +114,22 @@ test("days stored under older matching rules are all redone on the next start", 
   assert.strictEqual(computed, 2); // both days redone
   await uc.ensure();
   assert.strictEqual(computed, 2); // and not again
+});
+
+test("each site is worked out both ways: what it sent and what was sent to it", async () => {
+  const jobs = [
+    J("PICKING", "2026-10-10", { job_id: "p1" }), // warehouse -> ecr, 10
+    J("PICKING", "2026-10-10", { job_id: "p2", from_store: "ecr", to_store: "warehouse", qty: 3 }), // a return
+    J("PICKING", "2026-10-10", { job_id: "p3", to_store: "moolakulam", qty: 4 }),
+  ];
+  const chainRepo = memChain();
+  const uc = make({ chainRepo, repo: reportsRepo(jobs, []), today: () => "2026-10-11", pauseMs: 0 });
+  await uc.ensure();
+  const stands = async (day, view) => (await uc.read(day, view)).result.stage.gaps.find((x) => x.key === "to_pack").stands;
+  assert.deepStrictEqual(await uc.sites("2026-10-11"), ["ecr", "moolakulam", "warehouse"]);
+  assert.strictEqual(await stands("2026-10-11", "from:warehouse"), 14); // ecr 10 + moolakulam 4, not the return
+  assert.strictEqual(await stands("2026-10-11", "to:ecr"), 10);
+  assert.strictEqual(await stands("2026-10-11", "from:ecr"), 3);
+  assert.strictEqual(await stands("2026-10-11", "to:warehouse"), 3);
+  assert.strictEqual((await uc.read("2026-10-11", "to:nowhere")).result, null);
 });

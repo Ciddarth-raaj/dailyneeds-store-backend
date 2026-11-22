@@ -18,7 +18,7 @@ describe("stored stage chain", { skip: !URL && "WH_TEST_MYSQL not set" }, () => 
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_chain_open_boxes, wh_chain_open, wh_chain_days, wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
+    await q(`DROP TABLE IF EXISTS wh_chain_results, wh_chain_open_boxes, wh_chain_open, wh_chain_days, wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL, resignation_date DATE NULL);
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100), is_active TINYINT DEFAULT 1);
@@ -26,7 +26,7 @@ describe("stored stage chain", { skip: !URL && "WH_TEST_MYSQL not set" }, () => 
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
              CREATE TABLE pick_pack_write_off (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);
              CREATE TABLE pick_pack_verifications (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);`);
-    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up", "20261231120000-wh-chain-store-up"]) {
+    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up", "20261231120000-wh-chain-store-up", "20270101120000-wh-chain-views-up"]) {
       // eslint-disable-next-line no-await-in-loop
       await q(MIG(m));
     }
@@ -49,7 +49,11 @@ describe("stored stage chain", { skip: !URL && "WH_TEST_MYSQL not set" }, () => 
     let r = await uc.read("2026-10-12");
     let g = Object.fromEntries(r.result.stage.gaps.map((x) => [x.key, x]));
     assert.deepEqual([g.to_load.from_earlier, g.to_load.stands, g.to_load.oldest_days], [8, 8, 2]); // pick-packed 8 on 10 Oct, not loaded
-    assert.equal((await q("SELECT COUNT(*) AS c FROM wh_chain_open WHERE chain_date = '2026-10-12'"))[0].c, "1");
+    // waiting both ways: sent by the warehouse, and on its way to Moolakulam
+    assert.deepEqual((await q("SELECT view_key FROM wh_chain_open WHERE chain_date = '2026-10-12' ORDER BY view_key")).map((x) => x.view_key), ["from:warehouse", "to:moolakulam"]);
+    assert.deepEqual(await uc.sites("2026-10-12"), ["moolakulam", "warehouse"]);
+    const to = await uc.read("2026-10-12", "to:moolakulam");
+    assert.equal(to.result.stage.gaps.find((x) => x.key === "to_load").stands, 8);
 
     // 11 Oct pulled again, now with the loading: 11 and 12 Oct are redone
     await repo.replaceUpload({ report_type: "LOADING", report_date: "2026-10-11", source: "RETAILPILOT", shape: "BOX", file_name: "rp", uploaded_by: null, rows: [
@@ -67,6 +71,8 @@ describe("stored stage chain", { skip: !URL && "WH_TEST_MYSQL not set" }, () => 
   });
 
   it("down migration", async () => {
+    await q(MIG("20270101120000-wh-chain-views-down"));
+    assert.equal((await q("SHOW TABLES LIKE 'wh_chain_results'")).length, 0);
     await q(MIG("20261231120000-wh-chain-store-down"));
     assert.equal((await q("SHOW TABLES LIKE 'wh_chain%'")).length, 0);
   });

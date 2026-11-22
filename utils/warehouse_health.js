@@ -160,6 +160,26 @@ function withStuck(h, s) {
   return h;
 }
 
+/**
+ * The site's other direction, below the main chain: at the warehouse, what
+ * the stores sent to it (returns); at a store, what the store itself sent.
+ * Shown only when something moved or waits; what needs a look is added to
+ * "things need you", named by the title.
+ */
+function withSecondChain(h, result, { title: heading, direction, staffNames }) {
+  h.second = null;
+  if (!result || !result.stage) return h;
+  const mini = { tiles: { unloading: {}, loading: {} }, flow: {}, need_you: [] };
+  withStageChain(withBoxChain(mini, result.box), { ...result.stage, days_without_state: [] }, staffNames);
+  const sc = mini.stage_chain;
+  const b = sc.boxes;
+  const moved = Object.entries(sc.stages).some(([k, v]) => !k.endsWith("_boxes") && n(v) > 0) || sc.gaps.some((g) => n(g.stands) > 0 || n(g.arrived) > 0) || (b && (b.loaded.boxes || b.unloaded.boxes || b.still_open.boxes));
+  if (!moved) return h;
+  h.second = { title: heading, direction, stage_chain: sc, unloading: mini.tiles.unloading };
+  for (const i of mini.need_you) h.need_you.push({ ...i, key: `second_${i.key}`, text: `${heading} - ${i.text}` });
+  return h;
+}
+
 function withStageChain(h, sc, staffNames) {
   if (!sc) return h;
   // The stage chain heads the page: what stands between each two stages tonight.
@@ -445,7 +465,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
 
 /** The 9 am Telegram message (plain text). */
 function formatTelegram(h) {
-  const lines = [`Warehouse Health - ${dayText(h.date)}`];
+  const lines = [`${h.site && h.site !== "warehouse" ? `${h.site_name} Store Health` : "Warehouse Health"} - ${dayText(h.date)}`];
   if (h.missing_reports.length === 5) return `${lines[0]}\nNo reports for this day yet.`;
   lines.push(h.need_you.length ? `${h.need_you.length} thing${h.need_you.length === 1 ? "" : "s"} need you:` : "All clear.");
   for (const i of h.need_you) lines.push(`- ${i.text}`);
@@ -468,4 +488,4 @@ function formatTelegram(h) {
   return lines.join("\n");
 }
 
-module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, pickerGroups, buildHealth, formatTelegram };
+module.exports = { ACCURACY_TARGET, addDays, monthStart, staffLabel, boxIssues, pickers, pickerGroups, buildHealth, withSecondChain, formatTelegram, title };

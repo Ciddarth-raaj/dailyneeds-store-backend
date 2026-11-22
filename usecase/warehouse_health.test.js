@@ -9,9 +9,14 @@ const BC = require("../utils/wh_box_chain");
 function fullChain(repo) {
   return {
     version: async () => "v",
-    read: async (d) => {
-      const { jobs, boxes } = await repo.stageFlows("2026-10-10", d);
-      const box = BC.buildChain({ loads: await repo.boxSummary("LOADING", "2026-10-10", d), unloads: await repo.boxSummary("UNLOADING", "2026-10-10", d), date: d });
+    sites: async () => ["ecr", "moolakulam", "warehouse"],
+    read: async (d, view = "from:warehouse") => {
+      const [dir, site] = view.split(":");
+      const mine = (r) => (dir === "from" ? (r.from_store || "warehouse") === site : r.to_store === site);
+      const mineBox = (b) => (dir === "from" ? (b.from_store || "warehouse") === site : b.planned_to_store === site);
+      const all = await repo.stageFlows("2026-10-10", d);
+      const [jobs, boxes] = [all.jobs.filter(mine), all.boxes.filter(mine)];
+      const box = BC.buildChain({ loads: (await repo.boxSummary("LOADING", "2026-10-10", d)).filter(mineBox), unloads: (await repo.boxSummary("UNLOADING", "2026-10-10", d)).filter(mineBox), date: d });
       const keys = box.lists.still_open.map((b) => ({ report_date: b.loaded_on, box_id: b.box_id, planned_to_store: b.to_store, job_id: b.job_id }));
       const items = await repo.boxArticles("LOADING", keys);
       box.lists.still_open.forEach((b, i) => (b.items = items[i] ? [items[i]] : []));
@@ -36,7 +41,7 @@ const repo = {
           { report_date: "2026-11-20", box_id: "B1", planned_to_store: "moolakulam", from_store: "warehouse", truck_no: "T1", articles: 1, qty: 5, value: 100 },
         ]
       : [
-          { report_date: "2026-11-20", box_id: "R1", planned_to_store: "warehouse", unloaded_store: "warehouse", articles: 1, qty: 24 },
+          { report_date: "2026-11-20", box_id: "R1", planned_to_store: "warehouse", unloaded_store: "warehouse", from_store: "ecr", articles: 1, qty: 24 },
           { report_date: "2026-11-20", box_id: "B1", planned_to_store: "ecr", unloaded_store: "ecr", articles: 2, qty: 10 },
         ],
   stageFlows: async () => ({
@@ -131,9 +136,12 @@ test("the box chain: open from earlier + loaded - unloaded = still open, a box b
   const { uc } = setup([]);
   const r = await uc.health({ date: "2026-11-20" });
   const u = r.data.tiles.unloading;
-  assert.deepStrictEqual([u.chain.opening.boxes, u.chain.loaded.boxes, u.chain.unloaded.boxes, u.chain.unloaded.from_earlier, u.chain.still_open.boxes], [1, 2, 2, 1, 1]);
+  // the warehouse's own boxes only
+  assert.deepStrictEqual([u.chain.opening.boxes, u.chain.loaded.boxes, u.chain.unloaded.boxes, u.chain.unloaded.from_earlier, u.chain.still_open.boxes], [0, 2, 1, 0, 1]);
   assert.deepStrictEqual(u.still_open.map((b) => [b.box_id, b.to_store, b.items[0].article_name]), [["B1", "moolakulam", "Milk"]]);
-  assert.deepStrictEqual(u.closed_old.map((b) => [b.box_id, b.days_late]), [["R1", 1]]);
+  // ECR's return to the warehouse is under "Received at the warehouse"
+  assert.strictEqual(r.data.second.title, "Received at the warehouse");
+  assert.deepStrictEqual(r.data.second.unloading.closed_old.map((b) => [b.box_id, b.days_late]), [["R1", 1]]);
   assert.ok(r.data.need_you.some((i) => /1 box loaded and not unloaded/.test(i.text)));
   // days since 10 Oct with no Loading / Unloading report are listed
   assert.strictEqual(u.chain.missing_days[0].date, "2026-10-10");
@@ -227,4 +235,58 @@ test("the chains are read as stored, with when they were worked out and how far 
   uc.built = null;
   const p = await uc.health({ date: "2026-11-20" });
   assert.deepStrictEqual([p.data.stage_chain, p.data.chain_status.progress.todo], [undefined, 12]);
+});
+
+test("a store's page: what it received first, what it sent below; its own pickers and write-off", async () => {
+  const calls = [];
+  const { uc } = setup([]);
+  uc.repo = { ...repo, jobBreakdown: async (...a) => (calls.push(["jb", a[3]]), repo.jobBreakdown(...a)), jobRows: async (...a) => (calls.push(["rows", a[2]]), repo.jobRows(...a)), pickerMistakes: async (...a) => (calls.push(["pm", a[2]]), []) };
+  const r = await uc.health({ date: "2026-11-20", site: "ECR" });
+  assert.deepStrictEqual([r.data.site, r.data.site_name, r.data.main_title], ["ecr", "ECR", "Received at ECR"]);
+  // received: B1 loaded for ECR and unloaded there; the Atta picked for ECR is waiting to be packed
+  assert.deepStrictEqual([r.data.tiles.unloading.chain.loaded.boxes, r.data.tiles.unloading.chain.unloaded.boxes], [1, 1]);
+  assert.strictEqual(r.data.stage_chain.gaps.find((g) => g.key === "to_pack").stands, 12);
+  // sent: the return R1, below
+  assert.strictEqual(r.data.second.title, "Sent from ECR");
+  assert.strictEqual(r.data.second.unloading.chain.unloaded.boxes, 1);
+  // picking (write-off, pickers) is ECR's own; verification is what ECR found
+  assert.ok(calls.some(([k, o]) => k === "pm" && o.site === "ecr"));
+  assert.ok(calls.some(([k, o]) => k === "rows" && o.only === "short" && o.from_store === "ecr"));
+  assert.ok(calls.some(([k, o]) => k === "rows" && o.report_type === "VERIFICATION" && o.to_store === "ecr"));
+  assert.deepStrictEqual(r.data.sites.map((x) => x.site), ["warehouse", "ecr", "moolakulam"]);
+  assert.strictEqual((await uc.health({ date: "2026-11-20", site: "<script>" })).code, 422);
+});
+
+test("store managers get their own store's summary, found by their store's name; others are skipped with the reason", async () => {
+  const { uc, sent, docs, recorded } = setup([{ employee_id: 1, private_chat_id: "c1" }]);
+  uc.summaryRepo.storeRecipients = async () => [
+    { employee_id: 10, outlet_name: "ECR", private_chat_id: "s10" },
+    { employee_id: 11, outlet_name: "Moola Kulam", private_chat_id: "s11" },
+    { employee_id: 12, outlet_name: "Lawspet", private_chat_id: "s12" },
+    { employee_id: 13, outlet_name: "ECR", private_chat_id: null },
+  ];
+  const out = await uc.run();
+  assert.deepStrictEqual([out.sent, out.skipped, out.stores], [3, 2, { ecr: 1, moolakulam: 1 }]);
+  const to = (chat) => sent.find((m) => m.chat === chat);
+  assert.match(to("c1").text, /^Warehouse Health - /);
+  assert.match(to("s10").text, /^ECR Store Health - /);
+  assert.match(to("s11").text, /^Moolakulam Store Health - /);
+  assert.strictEqual(to("s10").options.replyMarkup.inlineKeyboard[0][0].url, "https://x/d?site=ecr");
+  assert.deepStrictEqual(recorded.filter((r) => r.status !== "SENT").map((r) => [r.employee_id, r.reason]), [[12, 'Store "Lawspet" not found in the reports'], [13, "Telegram not linked"]]);
+  assert.deepStrictEqual(recorded.filter((r) => r.status === "SENT").map((r) => [r.employee_id, r.site]), [[1, "warehouse"], [10, "ecr"], [11, "moolakulam"]]);
+  assert.strictEqual(docs.length, 0);
+});
+
+test("site helpers: an outlet's name to the reports' site; the dashboard link on a site", () => {
+  const sites = ["ecr", "moolakulam", "vallalar salai", "warehouse"];
+  assert.deepStrictEqual(["Vallalar Salai", "VALLALAR-SALAI", "Moolakulam Store", "ecr", "", "Lawspet"].map((o) => make.siteForOutlet(o, sites)), ["vallalar salai", "vallalar salai", "moolakulam", "ecr", null, null]);
+  assert.strictEqual(make.siteUrl("https://d/p#warehouse-health", "vallalar salai"), "https://d/p?site=vallalar%20salai#warehouse-health");
+  assert.strictEqual(make.siteUrl("https://d/p", "warehouse"), "https://d/p");
+});
+
+test("send me: the site I am looking at", async () => {
+  const { uc, sent } = setup([]);
+  const r = await uc.sendToMe(1, "ecr");
+  assert.strictEqual(r.code, 200);
+  assert.match(sent[0].text, /^ECR Store Health - /);
 });

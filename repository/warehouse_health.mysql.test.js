@@ -19,8 +19,9 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, employee_telegram_identity, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
+    await q(`DROP TABLE IF EXISTS wh_chain_results, wh_chain_open_boxes, wh_chain_open, wh_chain_days, outlets, wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, employee_telegram_identity, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL, resignation_date DATE NULL);
+             CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80));
              CREATE TABLE employee_telegram_identity (employee_id INT, private_chat_id BIGINT NULL, disconnected_at DATETIME NULL);
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100), is_active TINYINT DEFAULT 1);
@@ -28,7 +29,7 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
              CREATE TABLE pick_pack_write_off (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);
              CREATE TABLE pick_pack_verifications (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);`);
-    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up"]) {
+    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up", "20261231120000-wh-chain-store-up", "20270101120000-wh-chain-views-up"]) {
       // eslint-disable-next-line no-await-in-loop
       await q(MIG(m));
     }
@@ -61,6 +62,12 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     ] });
     const m = await repo.pickerMistakes(day, day);
     assert.deepEqual(m.map((x) => [x.worked_by, x.article_id, x.short_qty]).sort(), [["kp-1", 1, 2], ["kp-2", 2, 1]]);
+    // only pickers working at the site (the picking's from-store), with the kind of job
+    assert.equal((await repo.pickerMistakes(day, day, { site: "ecr" })).length, 0);
+    const own = await repo.pickerMistakes(day, day, { site: (await q("SELECT from_store FROM wh_report_job_rows WHERE job_id = 'PJ1'"))[0].from_store });
+    assert.equal(own.length, 2);
+    assert.ok(own.every((x) => x.job_type));
+    assert.equal((await repo.jobBreakdown(day, day, ["worked_by"], { report_type: "PICKING", from_store: "nowhere" })).length, 0);
     const work = await repo.jobBreakdown(day, day, ["worked_by"], { report_type: "PICKING" });
     const k2 = work.find((w) => w.worked_by === "kp-2");
     assert.equal(k2.actual_value, 140);
@@ -86,6 +93,19 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await summary.record({ day: "2026-11-20", employee_id: 1, status: "SENT", chat_id: 998877665544 });
     assert.deepEqual([...(await summary.sentOn("2026-11-20"))], [1]);
     assert.equal(String(await summary.chatOf(1)), "998877665544");
+  });
+
+  it("store managers: the right, their store's name, not those who get the warehouse summary; the site is recorded", async () => {
+    await q(`INSERT INTO outlets VALUES (3, 'Vallalar Salai'), (4, 'ECR');
+             INSERT INTO new_employee (employee_id, employee_name, designation_id, store_id) VALUES (20, 'SM Vallalar', 7, 3), (21, 'SM ECR', 7, 4), (22, 'Both', 8, 4);
+             INSERT INTO permissions VALUES (7, 'receive_store_health_summary', 1), (8, 'receive_store_health_summary', 1), (8, 'receive_warehouse_health_summary', 1);
+             INSERT INTO employee_telegram_identity VALUES (21, 11223344, NULL);`);
+    const rec = await summary.storeRecipients("2026-11-21");
+    assert.deepEqual(rec.map((r) => [Number(r.employee_id), r.outlet_name, r.private_chat_id == null ? null : String(r.private_chat_id)]), [[20, "Vallalar Salai", null], [21, "ECR", "11223344"]]);
+    assert.equal(await summary.storeOf(20), "Vallalar Salai");
+    await summary.record({ day: "2026-11-20", employee_id: 21, site: "ecr", status: "SENT", chat_id: 11223344 });
+    assert.equal((await q("SELECT site FROM wh_health_summary_sends WHERE employee_id = 21"))[0].site, "ecr");
+    assert.equal((await q("SELECT COUNT(*) AS c FROM all_permissions WHERE permission_key = 'receive_store_health_summary'"))[0].c, "1");
   });
 
   it("box trips: one row per loading / unloading job, with the document; articles of chosen trips", async () => {

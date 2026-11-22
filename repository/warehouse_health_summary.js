@@ -51,6 +51,37 @@ class WarehouseHealthSummaryRepository {
     );
   }
 
+  /**
+   * Store managers: employees whose designation holds
+   * receive_store_health_summary (switched on), not resigned before `day`,
+   * with their store's name (outlets, by the employee's store) and their
+   * private chat with the bot (null when not linked). Someone who also gets
+   * the warehouse summary is left out here (they get that one).
+   */
+  storeRecipients(day) {
+    return this.run(
+      "STORE_RECIPIENTS",
+      `SELECT DISTINCT ne.employee_id, ne.employee_name, o.outlet_name, i.private_chat_id
+         FROM new_employee ne
+         LEFT JOIN outlets o ON o.outlet_id = ne.store_id
+         LEFT JOIN employee_telegram_identity i
+                ON i.employee_id = ne.employee_id AND i.disconnected_at IS NULL
+        WHERE ne.designation_id IN (SELECT p.designation_id FROM permissions p
+                                     WHERE p.permission_key = 'receive_store_health_summary' AND p.is_active = 1)
+          AND ne.designation_id NOT IN (SELECT p.designation_id FROM permissions p
+                                     WHERE p.permission_key = 'receive_warehouse_health_summary' AND p.is_active = 1)
+          AND (ne.resignation_date IS NULL OR ne.resignation_date >= ?)
+        ORDER BY ne.employee_id`,
+      [day]
+    );
+  }
+
+  /** One employee's store name (outlets), or null. */
+  async storeOf(employeeId) {
+    const rows = await this.run("STORE_OF", "SELECT o.outlet_name FROM new_employee ne JOIN outlets o ON o.outlet_id = ne.store_id WHERE ne.employee_id = ? LIMIT 1", [employeeId]);
+    return rows.length ? rows[0].outlet_name : null;
+  }
+
   /** One employee's active private chat with the bot, or null. */
   async chatOf(employeeId) {
     const rows = await this.run(
@@ -68,13 +99,13 @@ class WarehouseHealthSummaryRepository {
   }
 
   /** Record one outcome; a later SENT replaces an earlier FAILED or SKIPPED. */
-  record({ day, employee_id, status, reason = null, chat_id = null }) {
+  record({ day, employee_id, status, reason = null, chat_id = null, site = null }) {
     return this.run(
       "RECORD",
-      `INSERT INTO wh_health_summary_sends (summary_date, employee_id, status, reason, telegram_chat_id)
-       VALUES (?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE status = VALUES(status), reason = VALUES(reason), telegram_chat_id = VALUES(telegram_chat_id)`,
-      [day, employee_id, status, reason, chat_id == null ? null : String(chat_id)]
+      `INSERT INTO wh_health_summary_sends (summary_date, employee_id, site, status, reason, telegram_chat_id)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE site = VALUES(site), status = VALUES(status), reason = VALUES(reason), telegram_chat_id = VALUES(telegram_chat_id)`,
+      [day, employee_id, site, status, reason, chat_id == null ? null : String(chat_id)]
     );
   }
 }

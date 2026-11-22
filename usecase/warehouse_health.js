@@ -14,6 +14,30 @@ const C = require("../utils/wh_box_chain");
  */
 const chainsOn = () => String(process.env.WAREHOUSE_HEALTH_CHAINS || "").toLowerCase() !== "off";
 
+/** The site the page opens on, and the warehouse's name in the reports. */
+const WAREHOUSE = "warehouse";
+/** A site name as the reports have it (lower case), the warehouse when none; null when not a name. */
+function cleanSite(v) {
+  const s = String(v == null ? "" : v).trim().toLowerCase();
+  if (!s) return WAREHOUSE;
+  return /^[a-z0-9 ._&()'-]{1,100}$/.test(s) ? s : null;
+}
+
+/** The dashboard link opened on a site (the warehouse needs no parameter). */
+function siteUrl(url, site) {
+  if (!site || site === WAREHOUSE) return url;
+  const [base, hash] = String(url).split("#");
+  return `${base}${base.includes("?") ? "&" : "?"}site=${encodeURIComponent(site)}${hash ? `#${hash}` : ""}`;
+}
+
+/** The reports' site for an employee's store name ("Vallalar Salai" -> "vallalar salai"), or null. */
+function siteForOutlet(outletName, sites) {
+  const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const o = norm(outletName);
+  if (!o) return null;
+  return sites.find((x) => norm(x) === o) || sites.find((x) => norm(x) && (o.includes(norm(x)) || norm(x).includes(o))) || null;
+}
+
 /** How long a built day is reused when no report changed (the build reads every report since BOX_CHAIN_FROM). */
 const BUILD_TTL_MS = 10 * 60 * 1000;
 
@@ -68,7 +92,7 @@ class WarehouseHealth {
    * so it is kept for BUILD_TTL_MS and shared by everyone asking meanwhile -
    * unless a report was pulled, uploaded or removed since (dataVersion).
    */
-  async build(date) {
+  async build(date, site = WAREHOUSE) {
     const now = Date.now();
     let version = null;
     try {
@@ -79,42 +103,79 @@ class WarehouseHealth {
       version = null;
     }
     if (!this.built) this.built = new Map();
-    const hit = this.built.get(date);
+    const key = `${date}|${site}`;
+    const hit = this.built.get(key);
     if (hit && version !== null && hit.version === version && now - hit.at < BUILD_TTL_MS) return hit.promise;
-    const promise = this._build(date);
-    this.built.set(date, { at: now, version, promise });
-    promise.catch(() => this.built.delete(date));
-    // Keep the last few days only.
-    while (this.built.size > 8) this.built.delete(this.built.keys().next().value);
+    const promise = this._build(date, site);
+    this.built.set(key, { at: now, version, promise });
+    promise.catch(() => this.built.delete(key));
+    // Keep the last few days / sites only.
+    while (this.built.size > 24) this.built.delete(this.built.keys().next().value);
     return promise;
   }
 
-  async _build(date) {
+  /**
+   * One site's day. The warehouse: what it SENT (picked, packed, loaded there,
+   * and how the stores found it), with what was sent TO it (store returns)
+   * below. A store: what was sent TO it (unloading, verification there), with
+   * what it SENT (its own picking, pickers) below.
+   */
+  async _build(date, site = WAREHOUSE) {
     const week = H.addDays(date, -6);
     const month = H.monthStart(date);
-    const [uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines] = await Promise.all([
+    const isWh = site === WAREHOUSE;
+    const sent = { from_store: site };
+    // Verification: of the warehouse's goods at the stores; at a store, of the goods it received.
+    const checked = isWh ? { from_store: site } : { to_store: site };
+    const [uploads, pickSummary, checkSummary, byJobType, byStore, yetToVerify, remarks, boxLinesAll, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines, sites] = await Promise.all([
       this.repo.uploads(date, date),
-      this.repo.jobBreakdown(date, date, ["report_type"]),
-      this.repo.jobBreakdown(date, date, ["report_type", "job_type"]),
-      this.repo.jobBreakdown(date, date, ["report_type", "to_store", "job_type"]),
-      this.repo.jobRows(date, date, { only: "open", report_type: "VERIFICATION" }, 500),
+      this.repo.jobBreakdown(date, date, ["report_type"], sent),
+      this.repo.jobBreakdown(date, date, ["report_type"], { ...checked, report_type: "VERIFICATION" }),
+      this.repo.jobBreakdown(date, date, ["report_type", "job_type"], sent),
+      this.repo.jobBreakdown(date, date, ["report_type", "to_store", "job_type"], sent),
+      this.repo.jobRows(date, date, { only: "open", report_type: "VERIFICATION", ...checked }, 500),
       this.repo.remarksPending(date),
       this.reports._boxes(date, date, null),
-      this.repo.shortArticles(week, date, { report_type: "PICKING" }, 50),
-      this.repo.jobBreakdown(week, date, ["report_date", "report_type"]),
+      this.repo.shortArticles(week, date, { report_type: "PICKING", ...sent }, 50),
+      this.repo.jobBreakdown(week, date, ["report_date", "report_type"], sent),
       this.repo.uploads(week, date),
-      this.repo.jobBreakdown(month, date, ["worked_by", "job_type"], { report_type: "PICKING" }),
-      this.repo.pickerMistakes(month, date),
+      this.repo.jobBreakdown(month, date, ["worked_by", "job_type"], { report_type: "PICKING", ...sent }),
+      this.repo.pickerMistakes(month, date, { site }),
       this.reports._staffNames(),
       // Every picking write-off line of the day: what, where, who, when.
-      this.repo.jobRows(date, date, { only: "short", report_type: "PICKING" }, 3000),
+      this.repo.jobRows(date, date, { only: "short", report_type: "PICKING", ...sent }, 3000),
+      this.sitesOn(date),
     ]);
+    const summary = [...pickSummary.filter((r) => r.report_type !== "VERIFICATION"), ...checkSummary];
+    const boxLines = boxLinesAll.filter((l) => (l.from_store || WAREHOUSE) === site);
     // Stuck cartons are not shown on their own: the same cartons are "Packed, not yet loaded" in the chain.
-    const chain = await this.chainFor(date);
+    const mainView = isWh ? `from:${site}` : `to:${site}`;
+    const otherView = isWh ? `to:${site}` : `from:${site}`;
+    const [chain, other] = await Promise.all([this.chainFor(date, mainView), this.chainFor(date, otherView)]);
     const boxChain = chain && chain.result ? chain.result.box : null;
     const stageChain = chain && chain.result ? { ...chain.result.stage, days_without_state: chain.days_without_state } : null;
     const chainStatus = chain ? { final: chain.final, status: chain.status, computed_at: chain.computed_at, progress: chain.progress, error: chain.error } : null;
-    return H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
+    const h = H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines });
+    const title = isWh ? "Received at the warehouse" : `Sent from ${H.title(site)}`;
+    H.withSecondChain(h, other && other.result ? other.result : null, { title, direction: isWh ? "to" : "from", staffNames });
+    // At a store it is the store itself that found the shortage.
+    if (!isWh) for (const i of h.need_you) i.text = i.text.replace(/^Stores found /, "Found ");
+    h.site = site;
+    h.site_name = H.title(site);
+    h.main_title = isWh ? "Sent from the warehouse" : `Received at ${H.title(site)}`;
+    h.sites = sites;
+    return h;
+  }
+
+  /** Every site with a stored chain on `date` (the warehouse first). */
+  async sitesOn(date) {
+    let list = [];
+    try {
+      list = this.chain && typeof this.chain.sites === "function" && chainsOn() ? await this.chain.sites(date) : [];
+    } catch (err) {
+      list = [];
+    }
+    return [WAREHOUSE, ...list.filter((x) => x !== WAREHOUSE)].map((x) => ({ site: x, name: H.title(x) }));
   }
 
   /**
@@ -122,10 +183,10 @@ class WarehouseHealth {
    * (worked out once per day, in the background) - only read here, never
    * worked out on a page view. WAREHOUSE_HEALTH_CHAINS=off hides them.
    */
-  async chainFor(date) {
+  async chainFor(date, view = `from:${WAREHOUSE}`) {
     if (!chainsOn() || !this.chain || date < C.BOX_CHAIN_FROM) return null;
     try {
-      return await this.chain.read(date);
+      return await this.chain.read(date, view);
     } catch (err) {
       logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.CHAIN", description: err.toString(), category: "", ref: { date } });
       return null;
@@ -185,11 +246,13 @@ class WarehouseHealth {
   }
 
   /** The dashboard for `date` (default yesterday). Not a day in the future. */
-  async health({ date = null } = {}) {
+  async health({ date = null, site = null } = {}) {
     const d = date || this.yesterday();
     if (!W.validDate(d)) return { code: 422, msg: "Choose a valid date" };
     if (d > this.today()) return { code: 422, msg: "That day has not happened yet" };
-    return { code: 200, data: { ...(await this.build(d)), today: this.today(), yesterday: this.yesterday() } };
+    const st = cleanSite(site);
+    if (st === null) return { code: 422, msg: "Choose a valid store" };
+    return { code: 200, data: { ...(await this.build(d, st)), today: this.today(), yesterday: this.yesterday() } };
   }
 
   /**
@@ -197,16 +260,17 @@ class WarehouseHealth {
    * and, when PDFs are set up, the PDF's link. A PDF that fails is logged and
    * left out - the message still goes.
    */
-  async message(date) {
+  async message(date, site = WAREHOUSE) {
     let text;
     let h = null;
+    const name = site === WAREHOUSE ? "Warehouse Health" : `${H.title(site)} Store Health`;
     try {
-      h = await this.build(date);
+      h = await this.build(date, site);
       text = H.formatTelegram(h);
     } catch (err) {
-      text = `Warehouse Health - ${date}\nCould not be built: ${err.message}`;
+      text = `${name} - ${date}\nCould not be built: ${err.message}`;
     }
-    const keyboard = this.dashboardUrl ? { inlineKeyboard: [[{ text: "Open Warehouse Health", url: this.dashboardUrl }]] } : null;
+    const keyboard = this.dashboardUrl ? { inlineKeyboard: [[{ text: `Open ${name}`, url: siteUrl(this.dashboardUrl, site) }]] } : null;
     const options = keyboard ? { parseMode: null, replyMarkup: keyboard } : { parseMode: null };
     let pdfUrl = null;
     if (h && this.pdf && this.s3) {
@@ -214,7 +278,8 @@ class WarehouseHealth {
         const nowMs = this.now();
         const html = P.buildHtml(h, { nowMs, logoDataUri: this.logo });
         const file = await this.pdf.withBrowser((session) => session.renderPdf(html, A4));
-        pdfUrl = await this.s3.uploadFile(undefined, `warehouse_health/${date}_${nowMs}.pdf`, "application/pdf", file);
+        const tag = site === WAREHOUSE ? "" : `_${site.replace(/[^a-z0-9]+/g, "-")}`;
+        pdfUrl = await this.s3.uploadFile(undefined, `warehouse_health/${date}${tag}_${nowMs}.pdf`, "application/pdf", file);
       } catch (err) {
         logger.Log({
           level: logger.LEVEL.ERROR,
@@ -222,11 +287,11 @@ class WarehouseHealth {
           code: "USECASE.WAREHOUSE_HEALTH.PDF",
           description: err.toString(),
           category: "",
-          ref: { date },
+          ref: { date, site },
         });
       }
     }
-    return { text, options, pdfUrl, caption: `Warehouse Health - ${date} (PDF)` };
+    return { text, options, pdfUrl, caption: `${name} - ${date} (PDF)` };
   }
 
   /** The message, then the PDF when there is one. */
@@ -236,12 +301,14 @@ class WarehouseHealth {
   }
 
   /** "Send me the summary": yesterday's, to the caller's own Telegram. Not recorded. */
-  async sendToMe(employeeId) {
+  async sendToMe(employeeId, site = null) {
     if (!employeeId) return { code: 403, msg: "Only an employee login can receive the summary" };
     if (!this.summaryRepo || !this.telegram) return { code: 400, msg: "The summary is not set up" };
+    const st = cleanSite(site);
+    if (st === null) return { code: 422, msg: "Choose a valid store" };
     const chat = await this.summaryRepo.chatOf(employeeId);
     if (!chat) return { code: 422, msg: "Your Telegram is not linked to the bot yet" };
-    const m = await this.message(this.yesterday());
+    const m = await this.message(this.yesterday(), st);
     try {
       await this._send(chat, m);
     } catch (err) {
@@ -266,14 +333,14 @@ class WarehouseHealth {
       }
       if (!r.private_chat_id) {
         outcome.skipped += 1;
-        await this.summaryRepo.record({ day, employee_id: employeeId, status: "SKIPPED", reason: "Telegram not linked" });
+        await this.summaryRepo.record({ day, employee_id: employeeId, site: WAREHOUSE, status: "SKIPPED", reason: "Telegram not linked" });
         continue;
       }
       try {
         // eslint-disable-next-line no-await-in-loop
         await this._send(r.private_chat_id, m);
         outcome.sent += 1;
-        await this.summaryRepo.record({ day, employee_id: employeeId, status: "SENT", chat_id: r.private_chat_id });
+        await this.summaryRepo.record({ day, employee_id: employeeId, site: WAREHOUSE, status: "SENT", chat_id: r.private_chat_id });
       } catch (err) {
         outcome.failed += 1;
         logger.Log({
@@ -284,11 +351,65 @@ class WarehouseHealth {
           category: "",
           ref: { employee_id: employeeId },
         });
-        await this.summaryRepo.record({ day, employee_id: employeeId, status: "FAILED", reason: String(err.message || err).slice(0, 255), chat_id: r.private_chat_id });
+        await this.summaryRepo.record({ day, employee_id: employeeId, site: WAREHOUSE, status: "FAILED", reason: String(err.message || err).slice(0, 255), chat_id: r.private_chat_id });
       }
     }
+    if (typeof this.summaryRepo.storeRecipients === "function") await this.runStores(day, done, outcome);
     return outcome;
+  }
+
+  /**
+   * Store managers (receive_store_health_summary): each gets their own
+   * store's summary, the store found by the name of the employee's store
+   * among the sites in the reports.
+   */
+  async runStores(day, done, outcome) {
+    const recipients = await this.summaryRepo.storeRecipients(this.today());
+    if (!recipients.length) return;
+    const sites = (await this.sitesOn(day)).map((x) => x.site);
+    const messages = new Map();
+    outcome.stores = {};
+    for (const r of recipients) {
+      const employeeId = Number(r.employee_id);
+      if (done.has(employeeId)) {
+        outcome.already += 1;
+        continue;
+      }
+      const site = siteForOutlet(r.outlet_name, sites);
+      const skip = (reason) => this.summaryRepo.record({ day, employee_id: employeeId, site, status: "SKIPPED", reason });
+      if (!site) {
+        outcome.skipped += 1;
+        // eslint-disable-next-line no-await-in-loop
+        await skip(r.outlet_name ? `Store "${r.outlet_name}" not found in the reports` : "No store set for the employee");
+        continue;
+      }
+      if (!r.private_chat_id) {
+        outcome.skipped += 1;
+        // eslint-disable-next-line no-await-in-loop
+        await skip("Telegram not linked");
+        continue;
+      }
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        if (!messages.has(site)) messages.set(site, await this.message(day, site));
+        // eslint-disable-next-line no-await-in-loop
+        await this._send(r.private_chat_id, messages.get(site));
+        outcome.sent += 1;
+        outcome.stores[site] = (outcome.stores[site] || 0) + 1;
+        // eslint-disable-next-line no-await-in-loop
+        await this.summaryRepo.record({ day, employee_id: employeeId, site, status: "SENT", chat_id: r.private_chat_id });
+      } catch (err) {
+        outcome.failed += 1;
+        logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.SEND_STORE", description: err.toString(), category: "", ref: { employee_id: employeeId, site } });
+        // eslint-disable-next-line no-await-in-loop
+        await this.summaryRepo.record({ day, employee_id: employeeId, site, status: "FAILED", reason: String(err.message || err).slice(0, 255), chat_id: r.private_chat_id });
+      }
+    }
   }
 }
 
 module.exports = (deps) => new WarehouseHealth(deps);
+module.exports.cleanSite = cleanSite;
+module.exports.siteForOutlet = siteForOutlet;
+module.exports.siteUrl = siteUrl;
+module.exports.WAREHOUSE = WAREHOUSE;

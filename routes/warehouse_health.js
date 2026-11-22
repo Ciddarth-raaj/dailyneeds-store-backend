@@ -4,7 +4,7 @@ const respondError = require("../utils/http");
  * Warehouse Health (/warehouse-health): the warehouse manager's dashboard
  * under Dashboard -> Invoice Pipeline, and its 9 am Telegram summary.
  *
- *   GET  /?date=YYYY-MM-DD   the day's health (default yesterday, IST)   view_warehouse_health
+ *   GET  /?date=YYYY-MM-DD&site=<store>   the day's health (default yesterday, IST; the warehouse)   view_warehouse_health
  *   GET  /trace?article_id&to_store&stage_id   one line through every stage     view_warehouse_health
  *   POST /summary/send-me    yesterday's summary to my own Telegram      receive_warehouse_health_summary
  *                                                                        or view_warehouse_health
@@ -28,7 +28,8 @@ class WarehouseHealthRoutes {
     this.router.get("/", need("view_warehouse_health"), async (req, res) => {
       try {
         const date = req.query.date == null ? null : String(req.query.date).trim() || null;
-        send(res, await this.usecase.health({ date }));
+        const site = req.query.site == null ? null : String(req.query.site).trim() || null;
+        send(res, await this.usecase.health({ date, site }));
       } catch (err) {
         respondError(res, err);
       }
@@ -44,9 +45,10 @@ class WarehouseHealthRoutes {
       }
     });
 
-    this.router.post("/summary/send-me", need("receive_warehouse_health_summary", "view_warehouse_health"), async (req, res) => {
+    this.router.post("/summary/send-me", need("receive_warehouse_health_summary", "receive_store_health_summary", "view_warehouse_health"), async (req, res) => {
       try {
-        send(res, await this.usecase.sendToMe((req.decoded && req.decoded.employee_id) || null));
+        const site = req.body && req.body.site != null ? String(req.body.site).trim() || null : null;
+        send(res, await this.usecase.sendToMe((req.decoded && req.decoded.employee_id) || null, site));
       } catch (err) {
         respondError(res, err);
       }

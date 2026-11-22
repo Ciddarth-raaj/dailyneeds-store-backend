@@ -119,9 +119,9 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
             : `<p class="note">No carton is stuck.</p>`,
           "Live from RetailPilot when the report was made."
         );
-  const sc = h.stage_chain;
-  const stageHtml = sc
-    ? `<h2 style="margin-top:4px">Where everything stands tonight</h2>
+  const stageBlock = (sc, heading, cap) =>
+    sc
+    ? `<h2 style="margin-top:4px">${esc(heading)}</h2>
 ${table(
   ["Waiting to be", "From earlier", "+ Arrived", "− Moved on", "= Tonight", "Oldest"],
   [
@@ -138,14 +138,17 @@ ${sc.gaps
       `${g.label} - ${num(g.stands)} qty · ${rupees(g.value)}`,
       table(
         ["Article", "Document", "From → To", "Qty", "Value", "Waiting"],
-        g.list.slice(0, 40).map((l) => ({ cls: l.days > 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
+        g.list.slice(0, cap).map((l) => ({ cls: l.days > 2 ? "bad" : "", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), l.days ? plural(l.days, "day") : "today"] })),
         [3, 4, 5]
       ),
-      g.list.length > 40 ? `Oldest 40 of ${g.list.length} lines - all on the dashboard.` : ""
+      g.list.length > cap ? `Oldest ${cap} of ${g.list.length} lines - all on the dashboard.` : ""
     )
   )
   .join("")}`
     : "";
+  const mainTitle = h.main_title ? `${h.main_title} - where everything stands tonight` : "Where everything stands tonight";
+  const stageHtml = stageBlock(h.stage_chain, mainTitle, 40);
+  const secondHtml = h.second ? stageBlock(h.second.stage_chain, `${h.second.title} - where everything stands tonight`, 20) : "";
   const c = t.unloading.chain;
   const tripItems = (x) =>
     (x.items || []).length
@@ -257,7 +260,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
 </style></head>
 <body>
 <header>
-  <div class="brand">${logoDataUri ? `<div class="logo"><img src="${esc(logoDataUri)}" alt="Daily Needs"></div><div class="title">` : `<div>`}<h1>Warehouse Health</h1><div class="kicker">Daily report · Values at NLC</div></div></div>
+  <div class="brand">${logoDataUri ? `<div class="logo"><img src="${esc(logoDataUri)}" alt="Daily Needs"></div><div class="title">` : `<div>`}<h1>${esc(h.site && h.site !== "warehouse" ? `${h.site_name} Store Health` : "Warehouse Health")}</h1><div class="kicker">Daily report · Values at NLC</div></div></div>
   <div class="meta"><div class="day">${esc(dayText(h.date))}</div>Made ${esc(istTime(nowMs))} IST<br>Source: RetailPilot</div>
 </header>
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
@@ -268,6 +271,7 @@ ${needYou}
 ${section("Picking write-off by store", writeoff)}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${chainHtml}
+${secondHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}

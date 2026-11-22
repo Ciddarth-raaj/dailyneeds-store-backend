@@ -326,12 +326,20 @@ class WhDailyReportsRepository {
     return res.affectedRows > 0;
   }
 
-  _jobWhere(from, to, { store = null, report_type = null } = {}) {
+  _jobWhere(from, to, { store = null, report_type = null, from_store = null, to_store = null } = {}) {
     const where = ["r.report_date BETWEEN ? AND ?"];
     const params = [from, to];
     if (store) {
       where.push("r.to_store = ?");
       params.push(store);
+    }
+    if (from_store) {
+      where.push("r.from_store = ?");
+      params.push(from_store);
+    }
+    if (to_store) {
+      where.push("r.to_store = ?");
+      params.push(to_store);
     }
     if (report_type) {
       where.push("r.report_type = ?");
@@ -613,7 +621,10 @@ class WhDailyReportsRepository {
    * of the goods: through the line's picking job, or - where RetailPilot gave
    * none - the picking line of the same document, article and store.
    */
-  async pickerMistakes(from, to) {
+  async pickerMistakes(from, to, { site = null } = {}) {
+    // Only pickers working at `site` (the picking's from-store), when given.
+    const at = site ? " AND from_store = ?" : "";
+    const siteP = site ? [site] : [];
     const cols = `DATE_FORMAT(v.report_date, '%Y-%m-%d') AS report_date, v.to_store, v.article_id, v.article_name,
                   v.short_qty, v.nlc, p.worked_by, p.job_type`;
     const byJob = await this.run(
@@ -621,21 +632,21 @@ class WhDailyReportsRepository {
       `SELECT ${cols}
          FROM wh_report_job_rows v
          JOIN (SELECT DISTINCT job_id, worked_by, job_type FROM wh_report_job_rows
-                WHERE report_type = 'PICKING' AND job_id IS NOT NULL AND worked_by IS NOT NULL) p
+                WHERE report_type = 'PICKING' AND job_id IS NOT NULL AND worked_by IS NOT NULL${at}) p
            ON p.job_id = v.picking_job
         WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0`,
-      [from, to]
+      [...siteP, from, to]
     );
     const byDoc = await this.run(
       "PICKER_MISTAKES_DOC",
       `SELECT ${cols}
          FROM wh_report_job_rows v
          JOIN (SELECT DISTINCT stage_id, article_id, to_store, worked_by, job_type FROM wh_report_job_rows
-                WHERE report_type = 'PICKING' AND stage_id IS NOT NULL AND worked_by IS NOT NULL) p
+                WHERE report_type = 'PICKING' AND stage_id IS NOT NULL AND worked_by IS NOT NULL${at}) p
            ON p.stage_id = v.stage_id AND p.article_id = v.article_id AND p.to_store = v.to_store
         WHERE v.report_type = 'VERIFICATION' AND v.report_date BETWEEN ? AND ? AND v.short_qty > 0
           AND v.picking_job IS NULL`,
-      [from, to]
+      [...siteP, from, to]
     );
     return toNumbers([...byJob, ...byDoc], ["short_qty", "nlc"]);
   }

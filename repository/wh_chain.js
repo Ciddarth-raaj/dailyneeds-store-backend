@@ -88,7 +88,7 @@ class WhChainRepository {
   async loadOpen(day) {
     const rows = await this.run(
       "LOAD_OPEN",
-      `SELECT gap, DATE_FORMAT(since, '%Y-%m-%d') AS since, stage_id, article_id, article_name, from_store, to_store, links, qty, nlc
+      `SELECT view_key, gap, DATE_FORMAT(since, '%Y-%m-%d') AS since, stage_id, article_id, article_name, from_store, to_store, links, qty, nlc
          FROM wh_chain_open WHERE chain_date = ?`,
       [day]
     );
@@ -98,7 +98,7 @@ class WhChainRepository {
   async loadOpenBoxes(day) {
     const rows = await this.run(
       "LOAD_OPEN_BOXES",
-      `SELECT DATE_FORMAT(loaded_on, '%Y-%m-%d') AS loaded_on, box_id, job_id, stage_id, from_store, to_store, job_type, truck_no,
+      `SELECT view_key, DATE_FORMAT(loaded_on, '%Y-%m-%d') AS loaded_on, box_id, job_id, stage_id, from_store, to_store, job_type, truck_no,
               articles, qty, value, loaded_at
          FROM wh_chain_open_boxes WHERE chain_date = ?`,
       [day]
@@ -106,27 +106,49 @@ class WhChainRepository {
     return rows.map((r) => ({ ...r, articles: Number(r.articles) || 0, qty: Number(r.qty) || 0, value: Number(r.value) || 0 }));
   }
 
-  /** Store a worked-out day: what is still open tonight, and the day's result. */
-  async saveDay(day, { open, boxes, result, noLinks, gen = 0 }) {
+  /** One site's stored result for `day` (JSON text), or null. */
+  async getView(day, view) {
+    const rows = await this.run("GET_VIEW", "SELECT result FROM wh_chain_results WHERE chain_date = ? AND view_key = ?", [day, view]);
+    return rows.length ? rows[0].result : null;
+  }
+
+  /** The sites with a stored result on `day`. */
+  async viewsOn(day) {
+    const rows = await this.run("VIEWS_ON", "SELECT view_key FROM wh_chain_results WHERE chain_date = ? ORDER BY view_key", [day]);
+    return rows.map((r) => r.view_key);
+  }
+
+  /**
+   * Store a worked-out day: what is still open tonight (per view), each
+   * view's result, and the day's own row (`result`: when and under which
+   * rules it was worked out).
+   */
+  async saveDay(day, { open, boxes, result, views = {}, noLinks, gen = 0 }) {
     const conn = await new Promise((resolve, reject) => this.db.getConnection((err, c) => (err ? reject(err) : resolve(c))));
     const q = (code, sql, params) => this.run(code, sql, params, conn);
     try {
       await q("BEGIN", "START TRANSACTION");
       await q("CLEAR_OPEN", "DELETE FROM wh_chain_open WHERE chain_date = ?", [day]);
       await q("CLEAR_BOXES", "DELETE FROM wh_chain_open_boxes WHERE chain_date = ?", [day]);
+      await q("CLEAR_VIEWS", "DELETE FROM wh_chain_results WHERE chain_date = ?", [day]);
+      const viewRows = Object.entries(views).map(([v, r]) => [day, v, JSON.stringify(r)]);
+      for (let i = 0; i < viewRows.length; i += 20) {
+        // eslint-disable-next-line no-await-in-loop
+        await q("SAVE_VIEWS", "INSERT INTO wh_chain_results (chain_date, view_key, result) VALUES ?", [viewRows.slice(i, i + 20)]);
+      }
       if (open.length) {
         await insertRowsInBatches(
           conn,
-          "INSERT INTO wh_chain_open (chain_date, gap, since, stage_id, article_id, article_name, from_store, to_store, links, qty, nlc) VALUES ?",
-          open.map((o) => [day, o.gap, o.since, o.stage_id, o.article_id, o.article_name ? String(o.article_name).slice(0, 255) : null, o.from_store, o.to_store, o.links ? String(o.links).slice(0, 1000) : null, o.qty, o.nlc]),
+          "INSERT INTO wh_chain_open (chain_date, view_key, gap, since, stage_id, article_id, article_name, from_store, to_store, links, qty, nlc) VALUES ?",
+          open.map((o) => [day, o.view || "all", o.gap, o.since, o.stage_id, o.article_id, o.article_name ? String(o.article_name).slice(0, 255) : null, o.from_store, o.to_store, o.links ? String(o.links).slice(0, 1000) : null, o.qty, o.nlc]),
           2000
         );
       }
       if (boxes.length) {
         await insertRowsInBatches(
           conn,
-          "INSERT INTO wh_chain_open_boxes (chain_date, loaded_on, box_id, job_id, stage_id, from_store, to_store, job_type, truck_no, articles, qty, value, loaded_at) VALUES ?",
-          boxes.map((b) => [day, b.loaded_on, b.box_id, b.job_id, b.stage_id, b.from_store, b.to_store, b.job_type, b.truck_no, b.articles, b.qty, b.value, b.loaded_at]),
+          "INSERT INTO wh_chain_open_boxes (chain_date, view_key, loaded_on, box_id, job_id, stage_id, from_store, to_store, job_type, truck_no, articles, qty, value, loaded_at) VALUES ?",
+          boxes.map((b) => [day, b.view || "all", b.loaded_on, b.box_id, b.job_id, b.stage_id, b.from_store, b.to_store, b.job_type, b.truck_no, b.articles, b.qty, b.value, b.loaded_at]),
           2000
         );
       }
