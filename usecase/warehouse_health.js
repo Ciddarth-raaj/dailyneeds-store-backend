@@ -129,6 +129,54 @@ class WarehouseHealth {
     return SC.buildStageChain({ jobs, boxes, date });
   }
 
+  /**
+   * Trace one waiting line - document (stage_id, optional) + article + store -
+   * through every stage since BOX_CHAIN_FROM: what we hold at each stage, how
+   * the rows link by job, and which reports were pulled on those days.
+   */
+  async trace({ stage_id = null, article_id, to_store }) {
+    const article = Number(article_id);
+    if (!Number.isInteger(article) || article <= 0) return { code: 422, msg: "Choose an article" };
+    if (!to_store) return { code: 422, msg: "Choose the store" };
+    const { jobs, boxes } = await this.repo.trace({ article_id: article, to_store: String(to_store), stage_id: stage_id ? String(stage_id) : null, from: C.BOX_CHAIN_FROM });
+    // Boxes: keep those linked to one of the document's jobs, plus (cartons without a link) those within the document's days.
+    const jobIds = new Set(jobs.map((j) => j.job_id).filter(Boolean));
+    const split = (v) => String(v || "").split(",").map((x) => x.trim()).filter(Boolean);
+    const days = jobs.map((j) => j.report_date).sort();
+    const first = days[0] || C.BOX_CHAIN_FROM;
+    const last = H.addDays(days[days.length - 1] || this.today(), 10);
+    const unloadingJobs = new Set(jobs.map((j) => j.unloading_job).filter(Boolean));
+    const marked = boxes
+      .map((b) => {
+        const links = [...split(b.packing_jobs), ...split(b.picking_job)];
+        const linked = links.some((x) => jobIds.has(x)) || (b.report_type === "UNLOADING" && unloadingJobs.has(b.job_id));
+        return { ...b, links, linked };
+      })
+      .filter((b) => b.linked || (!stage_id ? true : b.report_date >= first && b.report_date <= last));
+    const all = [...new Set([...jobs.map((j) => j.report_date), ...marked.map((b) => b.report_date)])].sort();
+    const ups = all.length ? await this.repo.uploads(all[0], all[all.length - 1]) : [];
+    const pulled = {};
+    for (const d of all) pulled[d] = [];
+    for (const u of ups) if (pulled[u.report_date]) pulled[u.report_date].push(u.report_type);
+    const names = await this.reports._staffNames();
+    return {
+      code: 200,
+      data: {
+        stage_id,
+        article_id: article,
+        to_store,
+        stages: {
+          PICKING: jobs.filter((j) => j.report_type === "PICKING").map((j) => ({ ...j, worker_name: names[j.worked_by] || null })),
+          PACKING: jobs.filter((j) => j.report_type === "PACKING").map((j) => ({ ...j, worker_name: names[j.worked_by] || null })),
+          LOADING: marked.filter((b) => b.report_type === "LOADING"),
+          UNLOADING: marked.filter((b) => b.report_type === "UNLOADING"),
+          VERIFICATION: jobs.filter((j) => j.report_type === "VERIFICATION").map((j) => ({ ...j, worker_name: names[j.worked_by] || null })),
+        },
+        pulled,
+      },
+    };
+  }
+
   /** The dashboard for `date` (default yesterday). Not a day in the future. */
   async health({ date = null } = {}) {
     const d = date || this.yesterday();

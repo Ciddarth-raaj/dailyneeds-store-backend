@@ -144,3 +144,26 @@ test("the write-off lines come with the health of the day", async () => {
   const r = await uc.health({ date: "2026-11-20" });
   assert.deepStrictEqual(r.data.tiles.writeoff.list.map((l) => [l.article_name, l.value, l.finished_at]), [["Atta", 20, "2026-11-20 10:00"]]);
 });
+
+test("trace: one line through every stage, boxes linked by packing job, which reports were pulled", async () => {
+  const { uc } = setup([]);
+  uc.repo = {
+    ...repo,
+    trace: async () => ({
+      jobs: [
+        { report_type: "PICKING", report_date: "2026-10-13", job_id: "job_50616283", stage_id: "INV-Su", to_store: "moolakulam", actual_qty: 8, worked_by: "tux" },
+        { report_type: "PACKING", report_date: "2026-10-13", job_id: "job_84969325", stage_id: "INV-Su", to_store: "moolakulam", actual_qty: 4, picking_job: "job_50616283" },
+      ],
+      boxes: [
+        { report_type: "LOADING", report_date: "2026-10-14", job_id: "job_58254998", box_id: "2061252838", planned_to_store: "moolakulam", qty: 4, packing_jobs: "job_84969325" },
+        { report_type: "LOADING", report_date: "2026-11-05", job_id: "job_x", box_id: "2061252838", planned_to_store: "moolakulam", qty: 4, packing_jobs: "job_other" },
+      ],
+    }),
+    uploads: async () => [{ report_type: "PICKING", report_date: "2026-10-13" }, { report_type: "PACKING", report_date: "2026-10-13" }],
+  };
+  const r = await uc.trace({ stage_id: "INV-Su", article_id: "103506", to_store: "moolakulam" });
+  assert.strictEqual(r.code, 200);
+  assert.deepStrictEqual(r.data.stages.LOADING.map((b) => [b.job_id, b.linked]), [["job_58254998", true]]); // the 5 Nov reuse of the carton is not this line
+  assert.deepStrictEqual(r.data.pulled, { "2026-10-13": ["PICKING", "PACKING"], "2026-10-14": [] }); // 14 Oct: nothing pulled - the gap shows
+  assert.strictEqual((await uc.trace({ article_id: "x", to_store: "ecr" })).code, 422);
+});

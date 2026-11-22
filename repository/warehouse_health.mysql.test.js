@@ -130,6 +130,13 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.deepEqual(boxes.map((b) => [b.job_id, b.packing_jobs, b.picking_job, b.no_link]), [["job_58254998", "job_84969325", "job_50616283", 0]]);
   });
 
+  it("trace: the article's lines and boxes for that store, narrowed to the document", async () => {
+    const t = await repo.trace({ article_id: 103506, to_store: "moolakulam", stage_id: null, from: "2026-10-10" });
+    assert.deepEqual(t.boxes.map((b) => [b.report_type, b.box_id, b.job_id, b.qty, b.packing_jobs]), [["LOADING", "2061252838", "job_58254998", 4, "job_84969325"]]);
+    const j = await repo.trace({ article_id: 1, to_store: "ecr", stage_id: "sta_1", from: "2026-10-10" });
+    assert.ok(j.jobs.length > 0 && j.jobs.every((x) => x.stage_id === "sta_1"));
+  });
+
   it("down migration", async () => {
     await q(MIG("20261230120000-wh-job-links-down"));
     assert.equal((await q("SHOW COLUMNS FROM wh_report_box_rows LIKE 'packing_jobs'")).length, 0);

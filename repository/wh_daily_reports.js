@@ -467,6 +467,46 @@ class WhDailyReportsRepository {
     return { jobs: toNumbers(jobs, ["qty", "short_qty", "nlc", "pick_pack", "no_state"]), boxes: toNumbers(boxes, ["qty", "nlc", "no_link"]) };
   }
 
+  /**
+   * Trace one line through the chain: every Picking / Packing / Verification
+   * line and every Loading / Unloading box row of `article_id` going to
+   * `to_store` from `from`, with job ids, states, links, qty and times; job
+   * lines narrowed to the document when one is given (boxes are kept by
+   * article and store - cartons carry no document - and marked when they
+   * link to one of the document's jobs). Plus which reports exist per day.
+   */
+  async trace({ article_id, to_store, stage_id = null, from }) {
+    const [jobs, boxes] = await Promise.all([
+      this.run(
+        "TRACE_JOBS",
+        `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_id, r.job_state, r.stage_id,
+                r.from_store, r.to_store, r.advised_qty, r.actual_qty, r.short_qty, r.open_jobs, r.worked_by,
+                DATE_FORMAT(r.finished_at, '%Y-%m-%d %H:%i') AS finished_at,
+                r.picking_job, r.packing_job, r.loading_job, r.unloading_job
+           FROM wh_report_job_rows r
+          WHERE r.article_id = ? AND r.to_store <=> ? AND r.report_date >= ? AND (? IS NULL OR r.stage_id = ?)
+          ORDER BY r.report_date, FIELD(r.report_type, 'PICKING', 'PACKING', 'VERIFICATION'), r.job_id`,
+        [article_id, to_store, from, stage_id, stage_id]
+      ),
+      this.run(
+        "TRACE_BOXES",
+        `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_id, r.box_id, r.stage_id,
+                MAX(r.from_store) AS from_store, r.planned_to_store, MAX(r.unloaded_store) AS unloaded_store,
+                MAX(r.truck_no) AS truck_no, SUM(r.box_qty) AS qty, r.packing_jobs, r.picking_job,
+                DATE_FORMAT(MAX(r.finished_at), '%Y-%m-%d %H:%i') AS finished_at
+           FROM wh_report_box_rows r
+          WHERE r.article_id = ? AND r.planned_to_store <=> ? AND r.report_date >= ?
+          GROUP BY r.report_type, r.report_date, r.job_id, r.box_id, r.stage_id, r.planned_to_store, r.packing_jobs, r.picking_job
+          ORDER BY r.report_date, FIELD(r.report_type, 'LOADING', 'UNLOADING'), r.job_id`,
+        [article_id, to_store, from]
+      ),
+    ]);
+    return {
+      jobs: toNumbers(jobs, ["advised_qty", "actual_qty", "short_qty", "open_jobs"]),
+      boxes: toNumbers(boxes, ["qty"]),
+    };
+  }
+
   /** The articles in some box trips: keys [{ report_date, box_id, planned_to_store, job_id }]. */
   async boxArticles(reportType, keys) {
     if (!keys || !keys.length) return [];

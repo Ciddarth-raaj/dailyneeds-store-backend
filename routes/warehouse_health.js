@@ -5,6 +5,7 @@ const respondError = require("../utils/http");
  * under Dashboard -> Invoice Pipeline, and its 9 am Telegram summary.
  *
  *   GET  /?date=YYYY-MM-DD   the day's health (default yesterday, IST)   view_warehouse_health
+ *   GET  /trace?article_id&to_store&stage_id   one line through every stage     view_warehouse_health
  *   POST /summary/send-me    yesterday's summary to my own Telegram      receive_warehouse_health_summary
  *                                                                        or view_warehouse_health
  */
@@ -28,6 +29,16 @@ class WarehouseHealthRoutes {
       try {
         const date = req.query.date == null ? null : String(req.query.date).trim() || null;
         send(res, await this.usecase.health({ date }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    // One waiting line, traced through every stage: ?article_id&to_store&stage_id
+    this.router.get("/trace", need("view_warehouse_health"), async (req, res) => {
+      try {
+        const q = (k) => (req.query[k] == null ? null : String(req.query[k]).trim() || null);
+        send(res, await this.usecase.trace({ stage_id: q("stage_id"), article_id: q("article_id"), to_store: q("to_store") }));
       } catch (err) {
         respondError(res, err);
       }
