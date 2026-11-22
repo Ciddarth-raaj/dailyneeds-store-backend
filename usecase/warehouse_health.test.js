@@ -2,6 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert");
 const make = require("./warehouse_health");
 
+process.env.WAREHOUSE_HEALTH_CHAINS = "on"; // the chains are tested here; on the server they are off until made lighter
+
 const repo = {
   uploads: async () => [{ report_type: "PICKING", report_date: "2026-11-20" }],
   jobBreakdown: async (f, t, dims) => (dims[0] === "report_type" && dims.length === 1 ? [{ report_type: "PICKING", short_lines: 2, short_qty: 9, short_value: 90 }] : []),
@@ -182,4 +184,14 @@ test("a built day is shared and reused until a report is pulled, uploaded or rem
   assert.ok(builds > once, "rebuilt after new data");
   await uc.health({ date: "2026-11-20" });
   assert.strictEqual(builds, once * 2);
+});
+
+test("the chains are off unless WAREHOUSE_HEALTH_CHAINS is on: the page still loads without them", async () => {
+  process.env.WAREHOUSE_HEALTH_CHAINS = "";
+  const { uc } = setup([]);
+  const r = await uc.health({ date: "2026-11-21" });
+  assert.strictEqual(r.code, 200);
+  assert.strictEqual(r.data.stage_chain, undefined);
+  assert.strictEqual(r.data.tiles.unloading.chain, undefined);
+  process.env.WAREHOUSE_HEALTH_CHAINS = "on";
 });

@@ -7,6 +7,13 @@ const { istToday } = require("../utils/istDate");
 const P = require("../utils/warehouse_health_pdf");
 const C = require("../utils/wh_box_chain");
 
+/**
+ * The stage chain and box chain read every report since BOX_CHAIN_FROM and
+ * took the site down. OFF unless WAREHOUSE_HEALTH_CHAINS is "on", until a
+ * lighter version is in place.
+ */
+const chainsOn = () => String(process.env.WAREHOUSE_HEALTH_CHAINS || "").toLowerCase() === "on";
+
 /** How long a built day is reused when no report changed (the build reads every report since BOX_CHAIN_FROM). */
 const BUILD_TTL_MS = 10 * 60 * 1000;
 const SC = require("../utils/wh_stage_chain");
@@ -116,6 +123,7 @@ class WarehouseHealth {
    * the days pulled).
    */
   async boxChain(date) {
+    if (!chainsOn()) return null;
     if (date < C.BOX_CHAIN_FROM) return null;
     const [loads, unloads, ups] = await Promise.all([
       this.repo.boxSummary("LOADING", C.BOX_CHAIN_FROM, date),
@@ -152,6 +160,7 @@ class WarehouseHealth {
 
   /** The stage chain for `date` (utils/wh_stage_chain.js), from BOX_CHAIN_FROM. */
   async stageChain(date) {
+    if (!chainsOn()) return null;
     if (date < C.BOX_CHAIN_FROM || typeof this.repo.stageFlows !== "function") return null;
     const { jobs, boxes } = await this.repo.stageFlows(C.BOX_CHAIN_FROM, date);
     return SC.buildStageChain({ jobs, boxes, date });
