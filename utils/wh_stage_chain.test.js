@@ -96,3 +96,26 @@ test("loading days pulled before job links were kept are listed to pull again", 
   const c = S.buildStageChain({ date: "2026-11-20", jobs: [], boxes: [Bx("LOADING", "2026-10-14", { no_link: 7 })] });
   assert.deepStrictEqual(c.days_without_state, ["2026-10-14"]);
 });
+
+test("a pick-pack followed by packing jobs is not packed twice (GRN cartons: Fortune 5L, 13 Oct)", () => {
+  // picked-packed 8 for Moolakulam in job_50616283, then two packing jobs of 4, both loaded 14 Oct
+  const jobs = [
+    J("PICKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, to_store: "moolakulam", qty: 8, pick_pack: 1, job_id: "job_50616283" }),
+    J("PACKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, to_store: "moolakulam", qty: 4, job_id: "job_74080794", picking_job: "job_50616283" }),
+    J("PACKING", "2026-10-13", { stage_id: "INV-Su", article_id: 103506, to_store: "moolakulam", qty: 4, job_id: "job_99894856", picking_job: "job_50616283" }),
+  ];
+  const boxes = [
+    Bx("LOADING", "2026-10-14", { stage_id: null, article_id: 103506, to_store: "moolakulam", qty: 4, packing_jobs: "job_74080794", picking_job: "job_50616283" }),
+    Bx("LOADING", "2026-10-14", { stage_id: null, article_id: 103506, to_store: "moolakulam", qty: 4, packing_jobs: "job_99894856", picking_job: "job_50616283" }),
+  ];
+  const c = S.buildStageChain({ date: "2026-10-14", jobs, boxes });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_pack").jumped.qty, g(c, "to_load").stands, g(c, "to_load").jumped.qty], [0, 0, 0, 0]);
+  // same on a day pulled before job links: matched by document, article and store
+  const old = S.buildStageChain({ date: "2026-10-14", jobs: jobs.map((j) => ({ ...j, picking_job: null })), boxes: boxes.map((b) => ({ ...b, packing_jobs: null, picking_job: null })) });
+  assert.deepStrictEqual([g(old, "to_pack").stands, g(old, "to_load").stands], [0, 0]);
+});
+
+test("a pick-pack with no packing job after it still goes straight to waiting to be loaded", () => {
+  const c = S.buildStageChain({ date: "2026-11-20", jobs: [J("PICKING", "2026-11-20", { pick_pack: 1, job_id: "pp1", qty: 9 })], boxes: [] });
+  assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_load").stands], [0, 9]);
+});

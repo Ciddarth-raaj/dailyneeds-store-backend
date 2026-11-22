@@ -143,8 +143,20 @@ function buildStageChain({ jobs, boxes, date }) {
   const shortOf = (rows) => rows.filter((r) => n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty) }));
   // `link`: this stage's job id; `links`: the job(s) of the stage before that this line came from.
   const ids = (...vals) => [...new Set(vals.flatMap((v) => String(v || "").split(",")).map((v) => v.trim()).filter(Boolean))];
-  const picked = J("PICKING", (r) => !n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
-  const pickPacked = J("PICKING", (r) => n(r.pick_pack)).map((r) => ({ ...r, link: r.job_id || null }));
+  // A PICKED_PACKED picking job is packed in the same job only when no packing
+  // job follows it. RetailPilot also makes packing jobs after a pick-pack (GRN
+  // cartons: picked-packed, then one packing job per carton) - then those
+  // packing jobs are the packing, and the pick-pack counts as picked, or the
+  // same goods would be counted packed twice and wait for ever.
+  const packedAfter = new Set();
+  for (const r of J("PACKING")) {
+    if (r.picking_job) packedAfter.add(`J|${r.picking_job}|${r.article_id}`);
+    if (r.stage_id) packedAfter.add(`S|${r.stage_id}|${r.article_id}|${r.to_store || ""}`);
+  }
+  const followedByPacking = (r) => packedAfter.has(`J|${r.job_id}|${r.article_id}`) || (r.stage_id && packedAfter.has(`S|${r.stage_id}|${r.article_id}|${r.to_store || ""}`));
+  const pickPack = (r) => n(r.pick_pack) && !followedByPacking(r);
+  const picked = J("PICKING", (r) => !pickPack(r)).map((r) => ({ ...r, link: r.job_id || null }));
+  const pickPacked = J("PICKING", (r) => pickPack(r)).map((r) => ({ ...r, link: r.job_id || null }));
   const packing = J("PACKING").map((r) => ({ ...r, link: r.job_id || null, links: ids(r.picking_job) }));
   const verification = J("VERIFICATION").map((r) => ({ ...r, links: ids(r.unloading_job) }));
   const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
