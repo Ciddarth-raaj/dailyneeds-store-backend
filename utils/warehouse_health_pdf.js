@@ -212,21 +212,6 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
     [1, 2, 3]
   );
 
-  const pickerTable = (rows) =>
-    table(
-      ["Picker", "Lines", "Value (NLC)", "Accuracy", "Mistakes", "Mistake value"],
-      rows.map((p) => ({
-        cls: p.below_target ? "bad" : "",
-        cells: [`${esc(p.name)}${p.mapped ? "" : ' <span class="sub">not mapped</span>'}`, num(p.lines), rupees(p.value), `<b>${pct(p.accuracy)}</b>`, num(p.mistake_lines), p.mistake_value ? rupees(p.mistake_value) : "—"],
-      })),
-      [1, 2, 3, 4, 5]
-    );
-  const groups = h.picker_groups || [{ label: "", rows: h.pickers }];
-  const pickers = groups
-    .filter((g) => g.rows.length)
-    .map((g) => `${g.label ? `<h3>${esc(g.label)}</h3>` : ""}${pickerTable(g.rows)}`)
-    .join("");
-
   return `<!doctype html>
 <html><head><meta charset="utf-8"><title>Warehouse Health — ${esc(dayText(h.date))}</title>
 <style>
@@ -296,11 +281,6 @@ ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
 ${section("Yet to verify", yet)}
 ${section("Short again and again", repeats, "Picking write-off on 2 or more of the last 7 days - check the stock / bin.")}
-${section(
-  `Pickers this month (${dayText(h.month_from)} to ${dayText(h.date)})`,
-  pickers,
-  `Mistakes = shortages the store found at verification in goods they picked. Below ${Math.round(h.accuracy_target * 100)}% accuracy is shaded.`
-)}
 <footer>The same figures are on dnds.co.in → Dashboard → Invoice Pipeline → Warehouse Health.</footer>
 </body></html>`;
 }

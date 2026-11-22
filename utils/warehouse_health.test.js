@@ -187,6 +187,6 @@ test("pickers split into STA and the rest (Alloc with them), each with its own a
   assert.deepStrictEqual(other.rows.map((p) => [p.id, p.lines, p.mistake_lines]), [["u1", 60, 0], ["u2", 20, 0]]); // Alloc 10 + GRN 50
   assert.strictEqual(h.pickers.find((p) => p.id === "u1").lines, 150); // all together still adds up
   assert.match(H.formatTelegram(h), /Pickers below 98% this month - STA: Ravi 96\.6%/);
-  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
-  assert.ok(html.includes("<h3>STA</h3>") && html.includes("<h3>Others (Alloc, GRN, DAMG)</h3>"));
+  // not in the PDF (on the dashboard only)
+  assert.ok(!require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 }).includes("Pickers this month"));
 });
