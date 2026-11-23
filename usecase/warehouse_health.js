@@ -390,9 +390,11 @@ class WarehouseHealth {
 
   /**
    * The Telegram groups the daily report goes to: active groups in Master ->
-   * Telegram Groups whose "Used for" mentions "Pick Pack Daily Report" - the
-   * warehouse's, or a store's when the store's name follows ("Pick Pack Daily
-   * Report ECR"). -> [{ site, chatId, group_name }]
+   * Telegram Groups whose "Used for" mentions "Pick Pack Daily Report". The
+   * group's Store says whose report: a store's group gets that store's, the
+   * Warehouse's (or a group with no store) the warehouse's. Without a Store,
+   * a store named in "Used for" ("Pick Pack Daily Report ECR") also works.
+   * -> [{ site, chatId, group_name }]
    */
   async groups(day) {
     if (!this.registryRepo) return [];
@@ -408,8 +410,14 @@ class WarehouseHealth {
     const sites = (await this.sitesOn(day)).map((x) => x.site);
     const out = [];
     for (const g of mine) {
+      // The group's Store (in Master -> Telegram Groups) says whose report it gets; else a store
+      // named after the words in "Used for"; else (no store anywhere) the warehouse's.
       const rest = String(g.used_for).toLowerCase().replace(/\s+/g, " ").replace(GROUP_USED_FOR, " ").replace(/[^a-z0-9 ]+/g, " ").trim();
-      const site = rest ? siteForOutlet(rest, sites.filter((x) => x !== WAREHOUSE)) || (/warehouse/.test(rest) ? WAREHOUSE : null) : WAREHOUSE;
+      const site = g.outlet_name
+        ? siteForOutlet(g.outlet_name, sites) || (/warehouse/i.test(g.outlet_name) ? WAREHOUSE : null)
+        : rest
+          ? siteForOutlet(rest, sites.filter((x) => x !== WAREHOUSE)) || (/warehouse/.test(rest) ? WAREHOUSE : null)
+          : WAREHOUSE;
       if (site) out.push({ site, chatId: g.chat_id, group_name: g.group_name || null });
       else logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.GROUP_STORE", description: `No store matches the group's "Used for": ${g.used_for}`, category: "", ref: { group: g.group_name } });
     }

@@ -355,8 +355,9 @@ test("the daily report goes to the Telegram groups set in Master -> Telegram Gro
   uc.summaryRepo.storeRecipients = async () => [{ employee_id: 10, outlet_name: "ECR", private_chat_id: "s10" }, { employee_id: 11, outlet_name: "Moolakulam", private_chat_id: "s11" }];
   uc.registryRepo = {
     getAll: async () => [
-      { group_name: "DN Warehouse", chat_id: "-1001", used_for: "Pick Pack Daily Report" },
-      { group_name: "ECR team", chat_id: "-1002", used_for: "pick pack daily report - ECR" },
+      { group_name: "DN Warehouse", chat_id: "-1001", used_for: "Pick Pack Daily Report", outlet_name: "Warehouse" },
+      { group_name: "ECR team", chat_id: "-1002", used_for: "Pick Pack Daily Report", outlet_name: "ECR" },
+      { group_name: "Moola text", chat_id: "-1005", used_for: "Pick Pack Daily Report Moolakulam" },
       { group_name: "Purchase", chat_id: "-1003", used_for: "Invoice pipeline EOD" },
       { group_name: "Nowhere", chat_id: "-1004", used_for: "Pick Pack Daily Report Lawspet" },
     ],
@@ -367,9 +368,10 @@ test("the daily report goes to the Telegram groups set in Master -> Telegram Gro
   assert.match(to("-1001")[0], /^Pick Pack Daily Report – Warehouse · /);
   assert.match(to("-1002")[0], /^Pick Pack Daily Report – ECR · /);
   assert.deepStrictEqual([to("-1003").length, to("-1004").length], [0, 0]); // not for this report / no such store
-  // the warehouse manager and ECR's manager get it in their group, not privately; Moolakulam has no group
-  assert.deepStrictEqual([to("c1").length, to("s10").length, to("s11").length], [0, 0, 1]);
-  assert.deepStrictEqual(out.groups.map((g) => [g.group, g.site, g.ok]), [["DN Warehouse", "warehouse", true], ["ECR team", "ecr", true]]);
+  assert.match(to("-1005")[0], /^Pick Pack Daily Report – Moolakulam · /); // store named in "Used for"
+  // every manager here gets it in their group, not privately
+  assert.deepStrictEqual([to("c1").length, to("s10").length, to("s11").length], [0, 0, 0]);
+  assert.deepStrictEqual(out.groups.map((g) => [g.group, g.site, g.ok]), [["DN Warehouse", "warehouse", true], ["ECR team", "ecr", true], ["Moola text", "moolakulam", true]]);
   assert.ok(!recorded.some((r) => r.employee_id === 1 || r.employee_id === 10));
 });
 
