@@ -38,6 +38,9 @@ function siteForOutlet(outletName, sites) {
   return sites.find((x) => norm(x) === o) || sites.find((x) => norm(x) && (o.includes(norm(x)) || norm(x).includes(o))) || null;
 }
 
+/** A Telegram group in Master -> Telegram Groups gets the report when its "Used for" mentions this (any case). */
+const GROUP_USED_FOR = "pick pack daily report";
+
 /** How long a built day is reused when no report changed (the build reads every report since BOX_CHAIN_FROM). */
 const BUILD_TTL_MS = 10 * 60 * 1000;
 
@@ -68,7 +71,7 @@ class WarehouseHealth {
    * @param dashboardUrl    the page the summary's button opens
    * @param pdf / s3        services/pdf (withBrowser) and services/s3 (uploadFile): the PDF sent after the message
    */
-  constructor({ chain = null, repo, reports, summaryRepo = null, telegramService = null, dashboardUrl = null, pdf = null, s3 = null, today = () => istToday(), now = () => Date.now() }) {
+  constructor({ chain = null, repo, reports, summaryRepo = null, telegramService = null, registryRepo = null, dashboardUrl = null, pdf = null, s3 = null, today = () => istToday(), now = () => Date.now() }) {
     this.pdf = pdf;
     this.s3 = s3;
     this.now = now;
@@ -78,6 +81,7 @@ class WarehouseHealth {
     this.summaryRepo = summaryRepo;
     this.chain = chain; // usecase/wh_chain.js: the stored chains
     this.telegram = telegramService;
+    this.registryRepo = registryRepo; // Master -> Telegram Groups: where the daily report goes
     this.dashboardUrl = dashboardUrl;
     this.today = today;
   }
@@ -347,7 +351,9 @@ class WarehouseHealth {
     const outcome = { date: day, sent: 0, failed: 0, skipped: 0, already: 0 };
     const m = await this.message(day);
     outcome.pdf = Boolean(m.pdfUrl);
-    const recipients = await this.summaryRepo.recipients(this.today());
+    // Groups first: a site with its own Telegram group gets the report there INSTEAD of privately.
+    const groupSites = await this.runGroups(day, m, outcome);
+    const recipients = groupSites.has(WAREHOUSE) ? [] : await this.summaryRepo.recipients(this.today());
     const done = await this.summaryRepo.sentOn(day);
     for (const r of recipients) {
       const employeeId = Number(r.employee_id);
@@ -378,8 +384,60 @@ class WarehouseHealth {
         await this.summaryRepo.record({ day, employee_id: employeeId, site: WAREHOUSE, status: "FAILED", reason: String(err.message || err).slice(0, 255), chat_id: r.private_chat_id });
       }
     }
-    if (typeof this.summaryRepo.storeRecipients === "function") await this.runStores(day, done, outcome);
+    if (typeof this.summaryRepo.storeRecipients === "function") await this.runStores(day, done, outcome, groupSites);
     return outcome;
+  }
+
+  /**
+   * The Telegram groups the daily report goes to: active groups in Master ->
+   * Telegram Groups whose "Used for" mentions "Pick Pack Daily Report" - the
+   * warehouse's, or a store's when the store's name follows ("Pick Pack Daily
+   * Report ECR"). -> [{ site, chatId, group_name }]
+   */
+  async groups(day) {
+    if (!this.registryRepo) return [];
+    let rows = [];
+    try {
+      rows = await this.registryRepo.getAll({ is_active: true });
+    } catch (err) {
+      logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.GROUPS", description: err.toString(), category: "", ref: {} });
+      return [];
+    }
+    const mine = (rows || []).filter((g) => g.chat_id && String(g.used_for || "").toLowerCase().replace(/\s+/g, " ").includes(GROUP_USED_FOR));
+    if (!mine.length) return [];
+    const sites = (await this.sitesOn(day)).map((x) => x.site);
+    const out = [];
+    for (const g of mine) {
+      const rest = String(g.used_for).toLowerCase().replace(/\s+/g, " ").replace(GROUP_USED_FOR, " ").replace(/[^a-z0-9 ]+/g, " ").trim();
+      const site = rest ? siteForOutlet(rest, sites.filter((x) => x !== WAREHOUSE)) || (/warehouse/.test(rest) ? WAREHOUSE : null) : WAREHOUSE;
+      if (site) out.push({ site, chatId: g.chat_id, group_name: g.group_name || null });
+      else logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.GROUP_STORE", description: `No store matches the group's "Used for": ${g.used_for}`, category: "", ref: { group: g.group_name } });
+    }
+    return out;
+  }
+
+  /** The daily report (message + PDF) to each group; the sites that have a group. */
+  async runGroups(day, warehouseMessage, outcome) {
+    const list = await this.groups(day);
+    const sites = new Set();
+    const messages = new Map([[WAREHOUSE, warehouseMessage]]);
+    outcome.groups = [];
+    for (const g of list) {
+      sites.add(g.site);
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        if (!messages.has(g.site)) messages.set(g.site, await this.message(day, g.site));
+        // eslint-disable-next-line no-await-in-loop
+        await this._send(g.chatId, messages.get(g.site));
+        outcome.sent += 1;
+        outcome.groups.push({ group: g.group_name, site: g.site, ok: true });
+      } catch (err) {
+        outcome.failed += 1;
+        outcome.groups.push({ group: g.group_name, site: g.site, ok: false, error: String(err.message || err).slice(0, 200) });
+        logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.SEND_GROUP", description: err.toString(), category: "", ref: { group: g.group_name, site: g.site } });
+      }
+    }
+    return sites;
   }
 
   /**
@@ -387,7 +445,7 @@ class WarehouseHealth {
    * store's summary, the store found by the name of the employee's store
    * among the sites in the reports.
    */
-  async runStores(day, done, outcome) {
+  async runStores(day, done, outcome, groupSites = new Set()) {
     const recipients = await this.summaryRepo.storeRecipients(this.today());
     if (!recipients.length) return;
     const sites = (await this.sitesOn(day)).map((x) => x.site);
@@ -400,6 +458,7 @@ class WarehouseHealth {
         continue;
       }
       const site = siteForOutlet(r.outlet_name, sites);
+      if (site && groupSites.has(site)) continue; // the store's group gets it instead
       const skip = (reason) => this.summaryRepo.record({ day, employee_id: employeeId, site, status: "SKIPPED", reason });
       if (!site) {
         outcome.skipped += 1;

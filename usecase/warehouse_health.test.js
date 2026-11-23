@@ -95,7 +95,7 @@ test("run sends yesterday once per person, skips unlinked, records failures", as
     "c4"
   );
   const out = await uc.run();
-  assert.deepStrictEqual(out, { date: "2026-11-20", pdf: false, sent: 1, failed: 1, skipped: 1, already: 1 });
+  assert.deepStrictEqual(out, { date: "2026-11-20", pdf: false, groups: [], sent: 1, failed: 1, skipped: 1, already: 1 });
   assert.strictEqual(sent[0].chat, "c1");
   assert.match(sent[0].text, /Picking write-off 2 lines/);
   assert.strictEqual(sent[0].options.replyMarkup.inlineKeyboard[0][0].url, "https://x/d");
@@ -348,4 +348,34 @@ test("lines found short at verification show who picked them", async () => {
   assert.deepStrictEqual(lost.map((l) => [l.article_name, l.picked_by]), [["narasus coffee", "S.vignesh"]]);
   const html = require("../utils/warehouse_health_pdf").buildHtml(r.data, { nowMs: 0 });
   assert.ok(html.includes("S.vignesh"));
+});
+
+test("the daily report goes to the Telegram groups set in Master -> Telegram Groups, instead of privately", async () => {
+  const { uc, sent, recorded } = setup([{ employee_id: 1, private_chat_id: "c1" }]);
+  uc.summaryRepo.storeRecipients = async () => [{ employee_id: 10, outlet_name: "ECR", private_chat_id: "s10" }, { employee_id: 11, outlet_name: "Moolakulam", private_chat_id: "s11" }];
+  uc.registryRepo = {
+    getAll: async () => [
+      { group_name: "DN Warehouse", chat_id: "-1001", used_for: "Pick Pack Daily Report" },
+      { group_name: "ECR team", chat_id: "-1002", used_for: "pick pack daily report - ECR" },
+      { group_name: "Purchase", chat_id: "-1003", used_for: "Invoice pipeline EOD" },
+      { group_name: "Nowhere", chat_id: "-1004", used_for: "Pick Pack Daily Report Lawspet" },
+    ],
+  };
+  const out = await uc.run();
+  const to = (chat) => sent.filter((m) => m.chat === chat).map((m) => m.text.split("\n")[0]);
+  assert.deepStrictEqual(to("-1001"), [sent.find((m) => m.chat === "-1001").text.split("\n")[0]]);
+  assert.match(to("-1001")[0], /^Pick Pack Daily Report – Warehouse · /);
+  assert.match(to("-1002")[0], /^Pick Pack Daily Report – ECR · /);
+  assert.deepStrictEqual([to("-1003").length, to("-1004").length], [0, 0]); // not for this report / no such store
+  // the warehouse manager and ECR's manager get it in their group, not privately; Moolakulam has no group
+  assert.deepStrictEqual([to("c1").length, to("s10").length, to("s11").length], [0, 0, 1]);
+  assert.deepStrictEqual(out.groups.map((g) => [g.group, g.site, g.ok]), [["DN Warehouse", "warehouse", true], ["ECR team", "ecr", true]]);
+  assert.ok(!recorded.some((r) => r.employee_id === 1 || r.employee_id === 10));
+});
+
+test("without a group the report still goes privately", async () => {
+  const { uc, sent } = setup([{ employee_id: 1, private_chat_id: "c1" }]);
+  uc.registryRepo = { getAll: async () => [] };
+  await uc.run();
+  assert.deepStrictEqual(sent.map((m) => m.chat), ["c1"]);
 });
