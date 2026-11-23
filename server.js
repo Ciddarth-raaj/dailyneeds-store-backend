@@ -1344,6 +1344,7 @@ class Server {
       summaryRepo: require("./repository/warehouse_health_summary")(this.mysql.connection),
       telegramService: require("./services/telegram")(),
       dashboardUrl: process.env.WAREHOUSE_HEALTH_URL || "https://dnds.co.in/pick-pack/daily-report",
+      registryRepo: this.telegramGroupRegistryRepo,
       pdf: require("./services/pdf"),
       s3: require("./services/s3"),
     });
@@ -3013,7 +3014,7 @@ class Server {
         }
         try {
           const r = await this.warehouseHealth.run();
-          console.log(`[CRON] warehouse_health_telegram ${r.date} (pdf ${r.pdf ? "yes" : "no"}): ${r.sent} sent, ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
+          console.log(`[CRON] warehouse_health_telegram ${r.date} (pdf ${r.pdf ? "yes" : "no"}): ${r.sent} sent (groups: ${(r.groups || []).map((g) => `${g.group} ${g.ok ? "ok" : "FAILED"}`).join(", ") || "none"}), ${r.failed} failed, ${r.skipped} skipped, ${r.already} already sent`);
         } catch (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
