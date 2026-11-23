@@ -89,6 +89,24 @@ describe("report", () => {
     assert.match(html, /<tr class="critical">/);
   });
 
+  it("attention is split into invoices, allocation and gate pass, each grouped by status", () => {
+    const now = Date.parse("2026-11-20T15:30:00Z");
+    const secs = R.attentionSections(R.attentionRows(FLOW, now));
+    assert.deepEqual(
+      secs.map((s) => [s.title, s.count, s.groups.map((g) => [g.status, g.rows.map((r) => r.ref)])]),
+      [
+        ["Invoices — GRN", 3, [["Yet to start", ["d3", "d1"]], ["Cost variance detected", ["d2"]]]],
+        ["Allocation", 2, [["Not allocated", ["INV-a"]], ["Allocated", ["INV-b"]]]],
+        ["Gate pass & inspection", 2, [["No inspection yet", ["GP-1"]], ["Invoice not uploaded", ["GP-7"]]]],
+      ]
+    );
+    const html = R.buildReport(FLOW, { nowMs: now }).html;
+    const at = (t) => html.indexOf(t);
+    assert.ok(at("Invoices — GRN") < at("Allocation <span") && at("Allocation <span") < at("Gate pass &amp; inspection"));
+    assert.ok(at(">Yet to start <span") < at(">Cost variance detected <span"), "statuses in RetailPilot's order");
+    assert.doesNotMatch(html, /<th>Status<\/th>/, "the status is the group, not a column");
+  });
+
   it("nothing over 48h says so", () => {
     const fresh = { ...FLOW, stages: FLOW.stages.map((s) => ({ ...s, rows: (s.rows || []).filter((r) => Date.parse(r.since) > NOW - 47 * 3600000) })) };
     assert.deepEqual(R.attentionRows(fresh, NOW), []);

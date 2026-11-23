@@ -14,14 +14,6 @@ const STEP_ORDER = ["gate_pass", "inspection", "grn", "allocation"];
 /** Waiting this long or more is "attention required". */
 const ATTENTION_HOURS = 48;
 
-const STEP_NAME = {
-  gate_pass: "Gate pass",
-  inspection: "Inspection",
-  grn: "GRN",
-  allocation: "Allocation",
-  no_invoice: "Invoice not uploaded",
-};
-
 // RetailPilot's GRN stages, in the order an invoice moves through them.
 const GRN_STAGES = [
   ["no_template", "Yet to start"],
@@ -122,16 +114,6 @@ function statusText(stepKey, r) {
   return titleCase(r.state);
 }
 
-/** What a step's date means. */
-const SINCE_LABEL = {
-  gate_pass: "In at",
-  inspection: "Started",
-  grn: "Uploaded",
-  allocation: "GRN entered",
-  no_invoice: "Inspected",
-  written_off: "Written off",
-};
-
 /**
  * Everything waiting ATTENTION_HOURS or more, from every step (and inspected
  * passes with no invoice uploaded), oldest first, each tagged with its step.
@@ -184,30 +166,66 @@ function summarize(flow, nowMs) {
   return out;
 }
 
-function tableHtml(stepKey, rows, storeName, nowMs, { withStep = false } = {}) {
-  if (!rows.length) return `<p class="none">Nothing here.</p>`;
-  const body = rows
-    .slice()
-    .sort(byOldest)
-    .map((r) => {
-      const rowStep = withStep ? r.step : stepKey;
-      const h = hoursSince(r.since, nowMs);
-      const tone = (h || 0) >= ATTENTION_HOURS ? "critical" : (h || 0) >= 24 ? "late" : "";
-      const extra = [];
-      if (rowStep === "allocation" && r.retries) extra.push(`${r.retries} retr${r.retries === 1 ? "y" : "ies"}`);
-      if (r.invoice_amount !== null && r.invoice_amount !== undefined && rowStep === "allocation") extra.push(inr(r.invoice_amount));
-      return `<tr class="${tone}">${withStep ? `\n  <td class="nw step">${esc(STEP_NAME[rowStep] || rowStep)}</td>` : ""}
+/**
+ * The attention list in sections - invoices at GRN, allocation, and anything
+ * not yet an invoice (gate pass, inspection, invoice not uploaded) - each
+ * grouped by status in the order work moves through it, oldest first within
+ * a status. Empty sections and statuses are left out.
+ */
+function attentionSections(rows) {
+  const SECTIONS = [
+    { key: "grn", title: "Invoices — GRN", ref: "Invoice", since: "Uploaded", steps: ["grn"] },
+    { key: "allocation", title: "Allocation", ref: "Invoice", since: "GRN entered", steps: ["allocation"] },
+    { key: "before_invoice", title: "Gate pass & inspection", ref: "Gate pass", since: "Since", steps: ["gate_pass", "inspection", "no_invoice"] },
+  ];
+  const statusOrder = [
+    ...GRN_STAGES.map(([, label]) => label),
+    "Not allocated",
+    "Allocated",
+    "No inspection yet",
+    "Invoice not uploaded",
+  ];
+  const rank = (label) => {
+    const i = statusOrder.indexOf(label);
+    return i === -1 ? statusOrder.length : i;
+  };
+  return SECTIONS.map((sec) => {
+    const groups = new Map();
+    rows
+      .filter((r) => sec.steps.includes(r.step))
+      .forEach((r) => {
+        const label = statusText(r.step, r);
+        if (!groups.has(label)) groups.set(label, []);
+        groups.get(label).push(r);
+      });
+    const list = [...groups.entries()]
+      .map(([status, rs]) => ({ status, rows: rs.slice().sort(byOldest) }))
+      .sort((a, b) => rank(a.status) - rank(b.status) || a.status.localeCompare(b.status));
+    return { ...sec, count: list.reduce((n, g) => n + g.rows.length, 0), groups: list };
+  }).filter((sec) => sec.count);
+}
+
+function sectionHtml(sec, storeName, nowMs) {
+  const rowHtml = (r) => {
+    const h = hoursSince(r.since, nowMs);
+    const extra = [];
+    if (r.step === "allocation" && r.retries) extra.push(`${r.retries} retr${r.retries === 1 ? "y" : "ies"}`);
+    if (r.step === "allocation" && r.invoice_amount !== null && r.invoice_amount !== undefined) extra.push(inr(r.invoice_amount));
+    return `<tr class="critical">
   <td class="sup">${esc(r.supplier_name || r.supplier_id || "Unknown supplier")}</td>
   <td class="ref">${esc(refText(r))}${extra.length ? `<div class="sub">${esc(extra.join(" · "))}</div>` : ""}</td>
   <td>${esc(storeName(r.store))}</td>
   <td class="nw">${esc(istTime(r.since))}</td>
   <td class="nw num">${esc(ageText(h))}</td>
-  <td>${esc(statusText(rowStep, r))}</td>
 </tr>`;
-    })
+  };
+  const body = sec.groups
+    .map((g) => `<tr class="grp"><td colspan="5">${esc(g.status)} <span class="gc">${g.rows.length}</span></td></tr>\n${g.rows.map(rowHtml).join("\n")}`)
     .join("\n");
-  return `<table>
-<thead><tr>${withStep ? "<th>Step</th>" : ""}<th>Supplier</th><th>Invoice</th><th>Store</th><th>${esc(withStep ? "Since" : SINCE_LABEL[stepKey] || "Since")}</th><th class="num">Waiting</th><th>Status</th></tr></thead>
+  return `<h3>${esc(sec.title)} <span class="count">${sec.count}</span></h3>
+<table class="grouped">
+<colgroup><col class="c-sup"><col class="c-ref"><col class="c-store"><col class="c-since"><col class="c-wait"></colgroup>
+<thead><tr><th>Supplier</th><th>${esc(sec.ref)}</th><th>Store</th><th>${esc(sec.since)}</th><th class="num">Waiting</th></tr></thead>
 <tbody>
 ${body}
 </tbody>
@@ -249,7 +267,7 @@ function buildReport(flow, { nowMs = Date.now(), logoDataUri = null } = {}) {
   const attentionHtml = `
 <div class="attention">
 <h2><span class="bang">!</span> Attention required — waiting over ${ATTENTION_HOURS}h <span class="count">${urgent.length}</span></h2>
-${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: true }) : `<p class="none">Nothing has waited over ${ATTENTION_HOURS} hours.</p>`}
+${urgent.length ? attentionSections(urgent).map((sec) => sectionHtml(sec, storeName, nowMs)).join("\n") : `<p class="none">Nothing has waited over ${ATTENTION_HOURS} hours.</p>`}
 </div>`;
 
   const html = `<!doctype html>
@@ -285,17 +303,18 @@ ${urgent.length ? tableHtml("attention", urgent, storeName, nowMs, { withStep: t
   th { text-align: left; font-size: 9px; text-transform: uppercase; color: #1a202c; background: #e2e8f0; border: 1px solid #718096; padding: 4px 5px; }
   td { border: 1px solid #a0aec0; padding: 4px 5px; vertical-align: top; }
   tr { page-break-inside: avoid; }
-  tr.late td { background: #fffaf0; }
-  tr.late td.num { color: #c05621; font-weight: bold; }
   tr.critical td { background: #fff5f5; }
   tr.critical td.num { color: #c53030; font-weight: bold; }
   .attention { margin: 10px 0 4px; }
+  h3 { font-size: 11.5px; margin: 10px 0 4px; color: #322659; page-break-after: avoid; }
+  h3 .count { display: inline-block; background: #e9d8fd; border-radius: 9px; padding: 0 7px; font-size: 10px; color: #44337a; }
+  /* Every section's table lines up: same column widths. */
+  table.grouped { table-layout: fixed; }
+  col.c-sup { width: 34%; } col.c-ref { width: 22%; } col.c-store { width: 14%; } col.c-since { width: 18%; } col.c-wait { width: 12%; }
+  tr.grp td { background: #edf2f7; font-weight: bold; color: #2d3748; border-top: 1.5px solid #718096; page-break-after: avoid; }
+  tr.grp .gc { font-weight: normal; color: #4a5568; }
   .attention h2 { color: #c53030; margin-top: 8px; }
-  td.step { font-weight: bold; color: #4a5568; }
   .bang { display: inline-block; width: 15px; height: 15px; line-height: 15px; border-radius: 50%; background: #c53030; color: #fff; text-align: center; font-size: 11px; margin-right: 4px; vertical-align: 1px; }
-  .sw { display: inline-block; width: 10px; height: 10px; vertical-align: middle; border: 1px solid #e2e8f0; }
-  .sw.late { background: #fffaf0; }
-  .sw.critical { background: #fff5f5; border-color: #feb2b2; }
   .sup { font-weight: bold; text-transform: capitalize; }
   .ref { overflow-wrap: anywhere; }
   .sub { color: #718096; font-size: 9.5px; }
@@ -332,4 +351,4 @@ function captionText(summary, nowMs) {
     .slice(0, 1000);
 }
 
-module.exports = { ATTENTION_HOURS, attentionRows, buildReport, captionText, summarize, ageText, istTime, istDay, inr, esc };
+module.exports = { attentionSections, ATTENTION_HOURS, attentionRows, buildReport, captionText, summarize, ageText, istTime, istDay, inr, esc };
