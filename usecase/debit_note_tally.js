@@ -3,13 +3,21 @@ class PurchaseTallyUsecase {
     this.purchaseTallyRepo = purchaseTallyRepo;
   }
 
+  /**
+   * Stores Tally's response linked to its debit note (debit_note_id), so
+   * the Debit Note screen shows it as pushed - as purchase responses are
+   * linked to their purchase. A response that cannot be linked is still
+   * stored, unlinked, as before (the screen then matches it to a GoFrugal
+   * debit note by voucher number + outlet).
+   */
   async create(data) {
-    try {
-      const result = await this.purchaseTallyRepo.create(data);
-      return result;
-    } catch (error) {
-      throw error;
-    }
+    const { debitNoteId, ambiguous } = await this.purchaseTallyRepo.resolveDebitNoteForTallyResponse(data);
+    const result = await this.purchaseTallyRepo.create({ ...data, debit_note_id: debitNoteId });
+    return {
+      ...result,
+      debit_note_id: debitNoteId,
+      ...(ambiguous ? { ambiguous_debit_note_ids: ambiguous } : {}),
+    };
   }
 
   async getAll(filters) {

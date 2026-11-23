@@ -6,16 +6,14 @@ const {
 const moment = require("moment");
 
 /**
- * Tally's response to a debit note. A RetailPilot debit note (mprh_pr_no
- * REC-...) can share its number with an older GoFrugal one at the same
- * outlet - RetailPilot numbers continue into GoFrugal's - so it is matched
- * on the MasterID the export sent for it (debitNoteEntryMasterId: always
- * plain for these new rows). GoFrugal debit notes keep the voucher number
- * + outlet match they always had, less any response whose plain MasterID
- * names another debit note (one that shares the number).
+ * Tally's response to a debit note: the one linked to it when it came in
+ * (debit_note_tally_response.debit_note_id - usecase/debit_note_tally.js,
+ * as purchase responses are linked to their purchase), or, for a response
+ * stored before that link existed, the old voucher number + outlet match -
+ * GoFrugal debit notes only, since a RetailPilot debit note (REC-...) can
+ * share its number with an older one.
  */
-const RETAILPILOT_DN = "(dn.mprh_pr_no LIKE 'REC-%')";
-const TALLY_VOUCHER = "COALESCE(dntr.VoucherNo, dntr_rp.VoucherNo)";
+const TALLY_VOUCHER = "COALESCE(dntr.VoucherNo, dntr_old.VoucherNo)";
 
 class DebitNoteRepository {
   constructor(db) {
@@ -149,9 +147,9 @@ class DebitNoteRepository {
           dni.round_off,
           dni.mmh_mrc_refno,
           ${TALLY_VOUCHER} AS VoucherNo,
-          COALESCE(dntr.InvoiceValue, dntr_rp.InvoiceValue) AS InvoiceValue,
-          COALESCE(dntr.SupplierName, dntr_rp.SupplierName) AS SupplierName,
-          COALESCE(dntr.CostCentre, dntr_rp.CostCentre) AS CostCentre,
+          COALESCE(dntr.InvoiceValue, dntr_old.InvoiceValue) AS InvoiceValue,
+          COALESCE(dntr.SupplierName, dntr_old.SupplierName) AS SupplierName,
+          COALESCE(dntr.CostCentre, dntr_old.CostCentre) AS CostCentre,
           o.outlet_name,
           o.outlet_id,
           ${mergedCol("mmh_dist_bill_dt")} AS mmh_dist_bill_dt,
@@ -159,12 +157,10 @@ class DebitNoteRepository {
         FROM debit_note dn
         LEFT JOIN debit_note_internal dni ON dn.debit_note_id = dni.debit_note_id
         LEFT JOIN outlets o ON dn.store_id = o.outlet_id
-        LEFT JOIN debit_note_tally_response dntr ON ${RETAILPILOT_DN} = 0
-          AND dntr.VoucherNo = dn.mprh_pr_refno AND dntr.CostCentre = o.outlet_name
-          AND NOT (dntr.MasterID REGEXP '^[0-9]+-purchase-entry$'
-                   AND dntr.MasterID <> CONCAT(dn.debit_note_id, '-purchase-entry'))
-        LEFT JOIN debit_note_tally_response dntr_rp ON ${RETAILPILOT_DN} = 1
-          AND dntr_rp.MasterID = CONCAT(dn.debit_note_id, '-purchase-entry')
+        LEFT JOIN debit_note_tally_response dntr ON dntr.debit_note_id = dn.debit_note_id
+        LEFT JOIN debit_note_tally_response dntr_old ON dntr_old.debit_note_id IS NULL
+          AND dn.mprh_pr_no NOT LIKE 'REC-%'
+          AND dntr_old.VoucherNo = dn.mprh_pr_refno AND dntr_old.CostCentre = o.outlet_name
         LEFT JOIN purchase p ON p.mmh_mrc_refno = dni.mmh_mrc_refno AND p.retail_outlet_id = o.outlet_id
         ${purchaseOverlayJoins("p")}
         ${whereClause}
