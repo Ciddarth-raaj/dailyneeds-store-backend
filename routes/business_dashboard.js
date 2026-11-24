@@ -34,6 +34,26 @@ class BusinessDashboardRoutes {
         }
       }
     );
+
+    // Debit notes and replacements raised in the period, and open returns now.
+    this.router.get(
+      "/purchase-returns",
+      this.dashboards.requireDashboardAccess(DASHBOARD_PERMISSION.SALES),
+      async (req, res) => {
+        try {
+          const result = await this.usecase.getPurchaseReturns({
+            from_date: req.query.from_date,
+            to_date: req.query.to_date,
+            refresh: String(req.query.refresh || "") === "1",
+            store_ids: this.dashboards.storeIdsFor(req),
+          });
+          if (result.code !== 200) return res.status(result.code === 422 ? 422 : 400).json(result);
+          res.json({ ...result, dashboard_scope: scopeForClient(req.dashboardScope) });
+        } catch (err) {
+          respondError(res, err);
+        }
+      }
+    );
   }
 
   getRouter() {

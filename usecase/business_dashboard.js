@@ -1,5 +1,6 @@
 const logger = require("../utils/logger");
 const B = require("../utils/business_dashboard");
+const PR = require("../utils/purchase_returns");
 
 /** How long one RetailPilot answer is reused before it is asked again. */
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -105,6 +106,55 @@ class BusinessDashboard {
         },
         stock: { ok: stock.ok, error: stock.error || null, fetched_at: stock.fetched_at || null, rows: scoped(stockRows) },
         margin: { ok: margin.ok, error: margin.error || null, fetched_at: margin.fetched_at || null, rows: scoped(marginRows) },
+      },
+    };
+  }
+
+  /**
+   * Purchase returns (utils/purchase_returns.js): debit notes and
+   * replacements raised in the period, and every open return now (not
+   * affected by the period). Same store scope as getSummary.
+   */
+  async getPurchaseReturns({ from_date, to_date, refresh = false, store_ids = null }) {
+    const range = B.validRange(from_date, to_date);
+    if (range.error) return { code: 422, msg: range.error };
+    const { from, to } = range;
+
+    // Open returns are "now": cached for the same 5 minutes, refreshed with the rest.
+    const [branches, settled, open] = await Promise.all([
+      this.loadBranches(),
+      this._section("pr_settled", this.runwaySpectra, `pr_settled|${from}|${to}`, PR.buildSettledQuery(from, to), refresh),
+      this._section("pr_open", this.runwaySpectra, "pr_open", PR.buildOpenQuery(), refresh),
+    ]);
+
+    const { resolve, stores } = B.storeResolver(branches);
+    const scoped = (rows) => B.scopeRows(rows, store_ids, stores);
+    const settledRows = scoped(PR.mapSettledRows(settled.rows, resolve));
+    const openAt = open.fetched_at ? Date.parse(open.fetched_at) : this.now();
+    const openRows = scoped(PR.mapOpenRows(open.rows, resolve, openAt));
+    const allStores = store_ids === null || store_ids === undefined;
+    const visibleStores = [...stores.values()]
+      .filter((s) => (allStores ? true : s.mapped && store_ids.map(Number).includes(s.outlet_id)))
+      .sort((a, b) => Number(b.mapped) - Number(a.mapped) || a.name.localeCompare(b.name));
+
+    return {
+      code: 200,
+      data: {
+        from_date: from,
+        to_date: to,
+        stores: visibleStores,
+        settled: {
+          ok: settled.ok,
+          error: settled.error || null,
+          fetched_at: settled.fetched_at || null,
+          rows: settledRows,
+        },
+        open: {
+          ok: open.ok,
+          error: open.error || null,
+          fetched_at: open.fetched_at || null,
+          rows: openRows,
+        },
       },
     };
   }
