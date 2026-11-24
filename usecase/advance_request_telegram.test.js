@@ -40,7 +40,14 @@ function harness({ canApprove = true, linked = true, approvalError = null, group
     employeeTelegramRepo: {
       getActiveIdentityByTelegramUser: async () => (linked ? { employee_id: 5 } : null),
     },
-    advanceRequestRepo: { isEmployeeAdmin: async () => canApprove },
+    advanceRequestRepo: {
+      isEmployeeAdmin: async () => canApprove,
+      getAll: async (filters) =>
+        ({
+          pending_approval: [{ ...REQUEST, advance_request_id: 2, created_at: "2026-11-20" }],
+          on_hold: [{ ...REQUEST, advance_request_id: 1, status: "on_hold", created_at: "2026-11-10" }],
+        })[filters.status] || [],
+    },
     advanceRequestUsecase: {
       approval: async (id, data, employeeId) => {
         decisions.push({ id, data, employeeId });
@@ -164,6 +171,22 @@ describe("advance request approval on Telegram", () => {
     await h.usecase.handle(tap("ar:42:A"));
     assert.match(h.answers[0], /already been actioned/);
     assert.equal(h.edits.length, 1);
+  });
+
+  it("send pending posts a card for every request already waiting, oldest first", async () => {
+    const h = harness();
+    const result = await h.usecase.sendPending();
+    assert.deepEqual(result, { requests: 2, sent: 2 });
+    assert.equal(h.sent.length, 2);
+    assert.match(h.sent[0].text, /ON HOLD/);
+    assert.match(h.sent[0].text, /Request #1/);
+    assert.match(h.sent[1].text, /approval needed/);
+    assert.match(h.sent[1].text, /Request #2/);
+  });
+
+  it("send pending reports a missing group rather than sending nowhere", async () => {
+    const h = harness({ groups: [] });
+    assert.equal((await h.usecase.sendPending()).reason, "NO_APPROVAL_GROUP");
   });
 
   it("claims nothing that is not its own", () => {

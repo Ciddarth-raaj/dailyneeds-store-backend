@@ -54,6 +54,9 @@ const PROMPT_PATTERN = /^(Hold|Reject) advance request #(\d+)/;
 
 const MIN_NOTE = 3;
 
+/** At most this many cards per status in one "send pending". */
+const PENDING_LIMIT = 50;
+
 const BALANCE_ACTION_LABEL = {
   less_and_pay: "Less and pay",
   defer: "Deduct next time",
@@ -89,7 +92,7 @@ module.exports = ({
   /** PLAIN TEXT, no parse mode: supplier names and reasons may contain `_` or `*`. */
   const composeMessage = (request) => {
     const lines = [
-      "Advance request - approval needed",
+      request.status === "on_hold" ? "Advance request - ON HOLD, awaiting decision" : "Advance request - approval needed",
       "",
       `Supplier: ${request.supplier_name || "-"}`,
       `Invoice No.: ${request.invoice_number || "-"}`,
@@ -335,8 +338,36 @@ module.exports = ({
     return Boolean(query && CALLBACK_PATTERN.test(String(query.data || "")));
   };
 
+  /**
+   * Post a card for every request already waiting on the admin - Awaiting
+   * Approval or On Hold - oldest first. For requests that reached the admin
+   * before the card existed, or whose card has scrolled away. Each card is
+   * an ordinary card, so a request decided elsewhere meanwhile is answered
+   * "already actioned" when tapped.
+   */
+  const sendPending = async () => {
+    if (!configured()) return { requests: 0, sent: 0, reason: "TELEGRAM_NOT_CONFIGURED" };
+    const groups = registryRepo ? await approvalGroups() : [];
+    if (groups.length === 0) return { requests: 0, sent: 0, reason: "NO_APPROVAL_GROUP" };
+
+    const pending = [];
+    for (const status of ["pending_approval", "on_hold"]) {
+      const rows = (await advanceRequestRepo.getAll({ status }, PENDING_LIMIT, 0, "created_at", "asc")) || [];
+      pending.push(...rows);
+    }
+    pending.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+    let sent = 0;
+    for (const request of pending) {
+      const result = await notifyApprovers(request);
+      if (result && result.sent > 0) sent += 1;
+    }
+    return { requests: pending.length, sent };
+  };
+
   return {
     CALLBACK_PREFIX,
+    sendPending,
     GROUP_USED_FOR,
     PROMPT,
     updateTypes: ["callback_query", "message"],

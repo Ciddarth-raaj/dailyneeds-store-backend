@@ -87,8 +87,9 @@ const documentSchema = {
 };
 
 class AdvanceRequestRoutes {
-  constructor(advanceRequestUsecase, permissions) {
+  constructor(advanceRequestUsecase, permissions, advanceRequestTelegram = null) {
     this.advanceRequestUsecase = advanceRequestUsecase;
+    this.advanceRequestTelegram = advanceRequestTelegram;
     this.permissions = permissions;
     this.init();
   }
@@ -332,6 +333,32 @@ class AdvanceRequestRoutes {
       res.end();
     });
 
+    // ------------------------------------------ A2 · send pending to Telegram
+
+    // Posts a card to the approval group for every request already waiting
+    // on the admin. Deciding is admin-only in the group; sending is not.
+    router.post("/telegram/send-pending", canApprove, async (req, res) => {
+      try {
+        if (!this.advanceRequestTelegram) {
+          return res.status(503).json({ code: 503, msg: "Telegram is not set up for advance requests" });
+        }
+        const result = await this.advanceRequestTelegram.sendPending();
+        if (result.reason === "TELEGRAM_NOT_CONFIGURED") {
+          return res.status(503).json({ code: 503, msg: "Telegram is not configured on the server" });
+        }
+        if (result.reason === "NO_APPROVAL_GROUP") {
+          return res.status(409).json({
+            code: 409,
+            msg: "No active Telegram group has 'Urgent payments' or 'Advance Request' in Used For",
+          });
+        }
+        res.json({ requests: result.requests, sent: result.sent });
+      } catch (err) {
+        this.fail(res, err);
+      }
+      res.end();
+    });
+
     // ----------------------------------------------------------- documents
 
     // Guarded per stage rather than by one key: accounts file the A3
@@ -373,6 +400,6 @@ class AdvanceRequestRoutes {
   }
 }
 
-module.exports = (advanceRequestUsecase, permissions) => {
-  return new AdvanceRequestRoutes(advanceRequestUsecase, permissions);
+module.exports = (advanceRequestUsecase, permissions, advanceRequestTelegram = null) => {
+  return new AdvanceRequestRoutes(advanceRequestUsecase, permissions, advanceRequestTelegram);
 };

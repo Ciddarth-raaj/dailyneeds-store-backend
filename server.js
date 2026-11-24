@@ -2089,7 +2089,8 @@ class Server {
     );
     const advanceRequestRouter = require("./routes/advance_request")(
       this.advanceRequestUsecase,
-      this.permissions
+      this.permissions,
+      this.advanceRequestTelegramUsecase
     );
     // LR Follow-up's OWN branch rule (utils/lr_followup_scope.js), not the
     // dashboard scope: the follow-up desk is company-wide by its own key,
