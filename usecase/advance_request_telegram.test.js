@@ -40,7 +40,7 @@ function harness({ canApprove = true, linked = true, approvalError = null, group
     employeeTelegramRepo: {
       getActiveIdentityByTelegramUser: async () => (linked ? { employee_id: 5 } : null),
     },
-    advanceRequestRepo: { canEmployeeApprove: async () => canApprove },
+    advanceRequestRepo: { isEmployeeAdmin: async () => canApprove },
     advanceRequestUsecase: {
       approval: async (id, data, employeeId) => {
         decisions.push({ id, data, employeeId });
@@ -110,11 +110,11 @@ describe("advance request approval on Telegram", () => {
     assert.match(h.sent.at(-1).text, /approved by Vijay/);
   });
 
-  it("refuses a group member who may not approve, and records nothing", async () => {
+  it("refuses a group member who is not an admin, and records nothing", async () => {
     const h = harness({ canApprove: false });
     await h.usecase.handle(tap("ar:42:A"));
     assert.equal(h.decisions.length, 0);
-    assert.match(h.answers[0], /permission/);
+    assert.match(h.answers[0], /Only an admin/);
   });
 
   it("refuses an unlinked Telegram account", async () => {
@@ -136,6 +136,13 @@ describe("advance request approval on Telegram", () => {
     await h.usecase.handle(update);
     assert.deepEqual(h.decisions[0].data, { decision: "reject", approval_note: "Supplier already has 50k with us" });
     assert.match(h.sent.at(-1).text, /rejected by Vijay/);
+  });
+
+  it("a non-admin's reason reply decides nothing either", async () => {
+    const h = harness({ canApprove: false });
+    await h.usecase.handle(reply("Reject advance request #42\n\n...", "Supplier already paid"));
+    assert.equal(h.decisions.length, 0);
+    assert.match(h.sent.at(-1).text, /Only an admin/);
   });
 
   it("Hold asks for a reason too", async () => {

@@ -12,10 +12,11 @@ const { callbackQueryOf, replyToOf, messageIdOf } = require("../utils/telegram_u
  * "Urgent payments" or "Advance Request" (the same way the Pick Pack Daily Report finds its
  * groups). Nobody is messaged privately.
  *
- * Anyone in the group can see the card; only a member whose Telegram is
- * linked to an employee who may decide A2 (an administrator, or a
- * designation holding `approve_advance_request`) can act on it. Everyone
- * else's tap is refused with a toast and changes nothing.
+ * Anyone in the group can see the card; ONLY AN ADMIN can act on it - a
+ * member whose Telegram is linked to an employee with an active Admin login
+ * (user_type 2). A designation holding `approve_advance_request` is enough
+ * in the web app but not here. Everyone else's tap or reply is refused and
+ * changes nothing.
  *
  * ================================= THE SAME RECORD, FROM EITHER SURFACE ====
  *
@@ -173,13 +174,13 @@ module.exports = ({
     }
   };
 
-  /** The employee behind a Telegram account, if they may decide A2. */
+  /** The employee behind a Telegram account, and whether they are an admin. */
   const approverFor = async (telegramUserId) => {
     if (!telegramUserId) return { employeeId: null, allowed: false };
     const identity = await employeeTelegramRepo.getActiveIdentityByTelegramUser(telegramUserId);
     if (!identity || !identity.employee_id) return { employeeId: null, allowed: false };
     const employeeId = Number(identity.employee_id);
-    return { employeeId, allowed: await advanceRequestRepo.canEmployeeApprove(employeeId) };
+    return { employeeId, allowed: await advanceRequestRepo.isEmployeeAdmin(employeeId) };
   };
 
   /** Who tapped, as Telegram shows them - for the group's confirmation line. */
@@ -257,7 +258,7 @@ module.exports = ({
       return { handled: true, outcome: "NOT_LINKED" };
     }
     if (!allowed) {
-      await answer("You do not have permission to approve advance requests.");
+      await answer("Only an admin can approve advance requests.");
       return { handled: true, outcome: "FORBIDDEN" };
     }
 
@@ -313,7 +314,7 @@ module.exports = ({
       return { handled: true, outcome: "NOT_LINKED" };
     }
     if (!allowed) {
-      await answer("You do not have permission to approve advance requests.");
+      await answer("Only an admin can approve advance requests.");
       return { handled: true, outcome: "FORBIDDEN" };
     }
 
