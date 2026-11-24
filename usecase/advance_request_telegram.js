@@ -62,6 +62,27 @@ const BALANCE_ACTION_LABEL = {
   defer: "Deduct next time",
 };
 
+/**
+ * "24-11-2026", in India time - the same DD-MM-YYYY the web list shows. The
+ * server's own clock zone is not assumed.
+ */
+const indianDate = (value) => {
+  if (!value) return "-";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    })
+      .formatToParts(date)
+      .map((p) => [p.type, p.value])
+  );
+  return `${parts.day}-${parts.month}-${parts.year}`;
+};
+
 const money = (value) => {
   const n = Number(value);
   if (!Number.isFinite(n)) return "-";
@@ -99,6 +120,7 @@ module.exports = ({
       `Amount: ${money(request.amount)}`,
     ];
     if (request.outlet_name) lines.push(`Outlet: ${request.outlet_name}`);
+    lines.push(`Date requested: ${indianDate(request.created_at)}`);
     lines.push(`Requested by: ${request.created_by_name || "-"}`);
     if (request.reason) lines.push(`Reason: ${request.reason}`);
 

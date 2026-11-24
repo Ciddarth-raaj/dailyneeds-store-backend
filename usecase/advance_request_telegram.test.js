@@ -12,6 +12,8 @@ const REQUEST = {
   outlet_name: "Warehouse",
   created_by_name: "Prashanth D",
   previous_advance_balance: "0.00",
+  // 23 Nov 22:00 UTC is already 24 Nov in India.
+  created_at: new Date("2026-11-23T22:00:00Z"),
 };
 
 const GROUPS = [
@@ -92,6 +94,7 @@ describe("advance request approval on Telegram", () => {
     assert.match(h.sent[0].text, /SRI HOME CONSUMABLES PVT_LTD/);
     assert.match(h.sent[0].text, /Rs\. 1,35,869\.00/);
     assert.match(h.sent[0].text, /Request #42/);
+    assert.match(h.sent[0].text, /Date requested: 24-11-2026/);
     const [row, view] = h.sent[0].options.replyMarkup.inline_keyboard;
     assert.deepEqual(row.map((b) => b.callback_data), ["ar:42:A", "ar:42:H", "ar:42:R"]);
     assert.equal(view[0].url, "https://dnds.co.in/advance-request/view/42");
