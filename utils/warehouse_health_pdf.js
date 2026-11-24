@@ -61,6 +61,12 @@ function whenText(v) {
   const hr = Number(m[4]);
   return `${Number(m[3])} ${mon}, ${hr % 12 || 12}:${m[5]} ${hr < 12 ? "am" : "pm"}`;
 }
+/** "103506 · fortune 5l": the article id in front of every article's name. */
+const artText = (a) => {
+  const id = a && a.article_id != null && a.article_id !== "" ? String(a.article_id) : "";
+  const name = a && a.article_name ? String(a.article_name) : "";
+  return id && name ? `${id} · ${name}` : name || id || "—";
+};
 const section = (heading, body, note = "") => (body ? `<h2>${esc(heading)}</h2>${note ? `<p class="note">${note}</p>` : ""}${body}` : "");
 
 const { reportName } = require("./warehouse_health");
@@ -95,7 +101,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     list.map((x) => ({
       cls: ["OPEN", "RETURN"].includes(x.status) ? "" : "bad",
       cells: [
-        `${esc(x.box_id)}${(x.items || []).length ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(it.article_name || it.article_id)} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>` : ""}`,
+        `${esc(x.box_id)}${(x.items || []).length ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(artText(it))} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>` : ""}`,
         esc(BOX_LABEL[x.status] || x.status), esc(title(x.store)), esc(x.truck_no || "—"), num(x.articles), num(x.qty), rupees(x.value)],
     }));
   const loadingT = table(["Box", "Problem", "Store", "Truck", "Articles", "Qty", "Value"], boxRows(t.loading.list || []), [4, 5, 6]);
@@ -117,7 +123,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
                     esc(title(c.to_store)),
                     esc((c.waiting_since || "").slice(0, 16)),
                     num(c.days),
-                    esc(c.items.map((i) => `${i.article_name || i.article_id} × ${num(i.qty)}`).join("; ")),
+                    esc(c.items.map((i) => `${artText(i)} × ${num(i.qty)}`).join("; ")),
                     num(c.units),
                     rupees(c.value),
                     esc(c.packer_name || c.packer || "—"),
@@ -141,7 +147,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
         ["Article", "Document", "From → To", "Short", "Value", g.key === "to_verify" ? "Picked by" : "By", "When"],
         list.slice(0, 40).map((l) => ({
           cls: "bad",
-          cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc((g.key === "to_verify" ? l.picked_by : l.worker_name) || "—"), esc(whenText(l.finished_at))],
+          cells: [esc(artText(l)), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), esc((g.key === "to_verify" ? l.picked_by : l.worker_name) || "—"), esc(whenText(l.finished_at))],
         })),
         [3, 4]
       ),
@@ -156,7 +162,7 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
       ["Article", "Type", "From → To", "Asked", "Picked", "Short", "Value", "Picked by", "When"],
       woLines.slice(0, 60).map((l) => ({
         cls: "bad",
-        cells: [esc(l.article_name || l.article_id), esc(l.job_type), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.advised_qty), num(l.picked_qty), num(l.short_qty), rupees(l.value), esc(l.picker_name || "—"), esc(whenText(l.finished_at))],
+        cells: [esc(artText(l)), esc(l.job_type), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.advised_qty), num(l.picked_qty), num(l.short_qty), rupees(l.value), esc(l.picker_name || "—"), esc(whenText(l.finished_at))],
       })),
       [3, 4, 5, 6]
     ),
@@ -182,7 +188,7 @@ ${sc.gaps
       `${g.label} - ${num(g.stands)} qty · ${rupees(g.value)}`,
       table(
         ["Article", "Document", "From → To", "Qty", "Value", "Waiting"],
-        old.slice(0, cap).map((l) => ({ cls: "bad", cells: [esc(l.article_name || l.article_id), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), plural(l.days, "day")] })),
+        old.slice(0, cap).map((l) => ({ cls: "bad", cells: [esc(artText(l)), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.qty), rupees(l.value), plural(l.days, "day")] })),
         [3, 4, 5]
       ),
       `Only lines waiting 2 days or more${old.length > cap ? ` - oldest ${cap} of ${old.length}` : ` (${plural(old.length, "line")})`}; the newer ones are on the dashboard.`
@@ -196,7 +202,7 @@ ${sc.gaps.map((g) => foundShort(g)).join("")}`
   const c = t.unloading.chain;
   const tripItems = (x) =>
     (x.items || []).length
-      ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(it.article_name || it.article_id)} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>`
+      ? `<div class="sub">${x.items.slice(0, 12).map((it) => `${esc(artText(it))} × ${num(it.qty)}`).join("<br>")}${x.items.length > 12 ? `<br>+${x.items.length - 12} more` : ""}</div>`
       : "";
   const tripRows = (list, f) =>
     list.map((x) => ({
@@ -233,7 +239,7 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   const yet = table(
     ["Where", "From", "Item", "Qty", "Value"],
     t.verification.yet_to_verify.map((p) => ({
-      cells: [`${esc(title(p.to_store))}${p.is_return ? ' <span class="tag">Return to warehouse</span>' : ""}`, esc(title(p.from_store)), esc(p.article_name || p.article_id), num(p.qty), rupees(p.value)],
+      cells: [`${esc(title(p.to_store))}${p.is_return ? ' <span class="tag">Return to warehouse</span>' : ""}`, esc(title(p.from_store)), esc(artText(p)), num(p.qty), rupees(p.value)],
     })),
     [3, 4]
   );
