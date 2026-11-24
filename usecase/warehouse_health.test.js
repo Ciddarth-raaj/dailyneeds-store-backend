@@ -359,7 +359,7 @@ test("the daily report goes to the Telegram groups set in Master -> Telegram Gro
       { group_name: "ECR team", chat_id: "-1002", used_for: "Pick Pack Daily Report", outlet_name: "ECR" },
       { group_name: "Moola text", chat_id: "-1005", used_for: "Pick Pack Daily Report Moolakulam" },
       { group_name: "Purchase", chat_id: "-1003", used_for: "Invoice pipeline EOD" },
-      { group_name: "Nowhere", chat_id: "-1004", used_for: "Pick Pack Daily Report Lawspet" },
+      { group_name: "Nowhere", chat_id: "-1004", used_for: "Pick Pack Daily Report", outlet_name: "Lawspet" },
     ],
   };
   const out = await uc.run();
@@ -380,4 +380,15 @@ test("without a group the report still goes privately", async () => {
   uc.registryRepo = { getAll: async () => [] };
   await uc.run();
   assert.deepStrictEqual(sent.map((m) => m.chat), ["c1"]);
+});
+
+test("an 'All Outlets' group gets every report: the warehouse first, then each store", async () => {
+  const { uc, sent } = setup([{ employee_id: 1, private_chat_id: "c1" }]);
+  uc.summaryRepo.storeRecipients = async () => [{ employee_id: 10, outlet_name: "ECR", private_chat_id: "s10" }];
+  uc.registryRepo = { getAll: async () => [{ group_name: "Dn Pick n Pack Issues", chat_id: "-100396", used_for: "Dn Pick n Pack Issues · Pick Pack Daily Report", outlet_name: null }] };
+  const out = await uc.run();
+  const titles = sent.filter((m) => m.chat === "-100396").map((m) => m.text.split(" · ")[0]);
+  assert.deepStrictEqual(titles, ["Pick Pack Daily Report – Warehouse", "Pick Pack Daily Report – ECR", "Pick Pack Daily Report – Moolakulam"]);
+  assert.deepStrictEqual([sent.filter((m) => m.chat === "c1").length, sent.filter((m) => m.chat === "s10").length], [0, 0]); // in the group instead
+  assert.strictEqual(out.groups.length, 3);
 });

@@ -392,8 +392,9 @@ class WarehouseHealth {
    * The Telegram groups the daily report goes to: active groups in Master ->
    * Telegram Groups whose "Used for" mentions "Pick Pack Daily Report". The
    * group's Store says whose report: a store's group gets that store's, the
-   * Warehouse's (or a group with no store) the warehouse's. Without a Store,
-   * a store named in "Used for" ("Pick Pack Daily Report ECR") also works.
+   * Warehouse's the warehouse's; a group with no Store ("All Outlets") gets
+   * every report - the warehouse's and every store's - unless "Used for" names
+   * exactly one site after the words ("Pick Pack Daily Report ECR").
    * -> [{ site, chatId, group_name }]
    */
   async groups(day) {
@@ -409,17 +410,22 @@ class WarehouseHealth {
     if (!mine.length) return [];
     const sites = (await this.sitesOn(day)).map((x) => x.site);
     const out = [];
+    const norm = (v) => String(v || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
     for (const g of mine) {
-      // The group's Store (in Master -> Telegram Groups) says whose report it gets; else a store
-      // named after the words in "Used for"; else (no store anywhere) the warehouse's.
+      // Whose report: the group's Store (Master -> Telegram Groups) - that store's, or the
+      // warehouse's for "Warehouse". With no Store ("All Outlets"): every report - the warehouse
+      // and every store - unless "Used for" names exactly one site after "Pick Pack Daily Report".
       const rest = String(g.used_for).toLowerCase().replace(/\s+/g, " ").replace(GROUP_USED_FOR, " ").replace(/[^a-z0-9 ]+/g, " ").trim();
-      const site = g.outlet_name
-        ? siteForOutlet(g.outlet_name, sites) || (/warehouse/i.test(g.outlet_name) ? WAREHOUSE : null)
-        : rest
-          ? siteForOutlet(rest, sites.filter((x) => x !== WAREHOUSE)) || (/warehouse/.test(rest) ? WAREHOUSE : null)
-          : WAREHOUSE;
-      if (site) out.push({ site, chatId: g.chat_id, group_name: g.group_name || null });
-      else logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.GROUP_STORE", description: `No store matches the group's "Used for": ${g.used_for}`, category: "", ref: { group: g.group_name } });
+      let list;
+      if (g.outlet_name) {
+        const one = siteForOutlet(g.outlet_name, sites) || (/warehouse/i.test(g.outlet_name) ? WAREHOUSE : null);
+        list = one ? [one] : [];
+      } else {
+        const named = sites.find((x) => norm(x) === norm(rest)) || (norm(rest) === "warehouse" ? WAREHOUSE : null);
+        list = named ? [named] : [WAREHOUSE, ...sites.filter((x) => x !== WAREHOUSE)];
+      }
+      for (const site of list) out.push({ site, chatId: g.chat_id, group_name: g.group_name || null });
+      if (!list.length) logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WAREHOUSE_HEALTH", code: "USECASE.WAREHOUSE_HEALTH.GROUP_STORE", description: `No site in the reports matches the group's Store: ${g.outlet_name}`, category: "", ref: { group: g.group_name } });
     }
     return out;
   }
