@@ -57,12 +57,15 @@ class BusinessDashboardRoutes {
       }
     );
 
-    // The 9:15 am Open returns Telegram message: preview it, or send it now.
-    this.router.get("/open-returns/message", requireAdmin, async (req, res) => {
+    // The 9:15 am Open returns PDF: preview it, or send it to the group now.
+    this.router.get("/open-returns/report.pdf", requireAdmin, async (req, res) => {
       try {
         if (!this.openReturnsReport) return res.status(503).json({ code: 503, msg: "The open returns report is not available" });
         const r = await this.openReturnsReport.build();
-        res.status(r.code === 200 ? 200 : 502).json(r);
+        if (r.code !== 200) return res.status(502).json(r);
+        res.set("Content-Type", "application/pdf");
+        res.set("Content-Disposition", 'inline; filename="open-returns.pdf"');
+        res.send(r.pdf);
       } catch (err) {
         respondError(res, err);
       }

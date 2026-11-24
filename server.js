@@ -1387,9 +1387,11 @@ class Server {
       chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
       registryRepo: this.telegramGroupRegistryRepo,
     });
-    // 9:15 am Open returns message to the same Purchase Telegram group (cron below).
+    // 9:15 am Open returns PDF to the same Purchase Telegram group (cron below).
     this.openReturnsReportUsecase = require("./usecase/open_returns_report")({
       dashboard: this.businessDashboardUsecase,
+      pdf: require("./services/pdf"),
+      s3: require("./services/s3"),
       telegram: require("./services/telegram")(),
       chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
       registryRepo: this.telegramGroupRegistryRepo,
@@ -3111,8 +3113,8 @@ class Server {
       );
     }
 
-    // 9:15 AM everyday - Open returns (goods back with suppliers, not yet
-    // settled) to the Purchase Telegram group. ON unless
+    // 9:15 AM everyday - the Open returns PDF (goods back with suppliers, not
+    // yet settled) to the Purchase Telegram group. ON unless
     // OPEN_RETURNS_TELEGRAM_ENABLED is "false". Logged to api_sync_log as
     // open_returns_telegram.
     {

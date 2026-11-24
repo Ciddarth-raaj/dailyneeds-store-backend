@@ -1,5 +1,5 @@
 /**
- * The 9:15 am Open returns Telegram message and its sender.
+ * The 9:15 am Open returns PDF, its caption, and its sender.
  *
  *   node --test utils/open_returns_report.test.js
  */
@@ -20,28 +20,37 @@ const ROWS = [
 ];
 const NOW = Date.parse("2026-11-24T03:45:00Z"); // 9:15 am India
 
-describe("message", () => {
+describe("report", () => {
   it("one line per supplier per location, oldest first, names escaped, bands counted", () => {
-    const { text, summary } = R.buildMessage(ROWS, STORES, NOW);
-    assert.match(text, /Open returns — 24 Nov 2026, 09:15/);
-    assert.match(text, /₹1,060<\/b> · 4 claims · 3 suppliers · oldest 40d/);
-    assert.match(text, /Over 15 days: 2 \(₹1,050\) · 🟠 8–15 days: 1 \(₹10\)/);
-    const lines = text.split("\n").filter((l) => /^(🔴|🟠|🟢) <b>/.test(l));
-    assert.equal(lines.length, 3);
-    assert.match(lines[0], /^🔴 <b>40d<\/b> · ₹900 · B · Kathirkamam$/);
-    assert.match(lines[1], /A &amp; Sons &lt;Pvt&gt; · Warehouse \(2 claims\)/);
-    assert.equal(summary.lines, 3);
+    const { html, summary } = R.buildReport(ROWS, STORES, { nowMs: NOW });
+    assert.deepEqual(summary.groups.map((g) => [g.supplier, g.location, g.claims, g.value, g.age_days]), [
+      ["B", "Kathirkamam", 1, 900, 40],
+      ["A & Sons <Pvt>", "Warehouse", 2, 150, 23],
+      ["C", "Kathirkamam", 1, 10, 10],
+    ]);
+    assert.equal(summary.value, 1060);
+    assert.equal(summary.suppliers, 3);
+    assert.deepEqual(summary.red, { lines: 2, claims: 3, value: 1050 });
+    assert.deepEqual(summary.amber, { lines: 1, claims: 1, value: 10 });
+    assert.match(html, /A &amp; Sons &lt;Pvt&gt;/);
+    assert.doesNotMatch(html, /<Pvt>/);
+    assert.match(html, /<tr class="red">/);
+    assert.match(html, /15 Oct 2026/);
+  });
+
+  it("caption: headline numbers and the oldest three, under Telegram's 1024", () => {
+    const { summary } = R.buildReport(ROWS, STORES, { nowMs: NOW });
+    const c = R.captionText(summary, NOW);
+    assert.match(c, /Open returns — 24 Nov 2026, 09:15/);
+    assert.match(c, /₹1,060 · 4 claims · 3 suppliers · oldest 40d/);
+    assert.match(c, /Over 15 days: 3 claims \(₹1,050\)/);
+    assert.ok(c.length <= 1024);
   });
 
   it("says so when there are none", () => {
-    assert.match(R.buildMessage([], STORES, NOW).text, /No open returns/);
-  });
-
-  it("stays under Telegram's limit and says how many more", () => {
-    const many = Array.from({ length: 400 }, (_, i) => ({ supplier_id: String(i), supplier_name: `Supplier number ${i}`, store: "outlet:9", amount: 10, raised_on: "2026-11-01", age_days: 23 }));
-    const { text } = R.buildMessage(many, STORES, NOW);
-    assert.ok(text.length <= R.MAX_CHARS, String(text.length));
-    assert.match(text, /\+\d+ more on the Business Dashboard$/);
+    const { html, summary } = R.buildReport([], STORES, { nowMs: NOW });
+    assert.match(html, /No open returns/);
+    assert.match(R.captionText(summary, NOW), /No open returns/);
   });
 });
 
@@ -53,11 +62,16 @@ describe("sender", () => {
     },
   });
 
-  it("sends HTML to the registered group, preferring one for Open returns", async () => {
+  const pdf = { withBrowser: async (fn) => fn({ renderPdf: async (html) => Buffer.from(html) }) };
+  const s3 = { uploadFile: async (_b, name) => `https://s3/${name}` };
+
+  it("renders, uploads and sends the PDF to the registered group", async () => {
     const sent = [];
     const uc = usecaseFactory({
       dashboard: dashboard({ ok: true, rows: ROWS }),
-      telegram: { sendMessage: async (chat, text, opts) => sent.push({ chat, text, opts }) },
+      pdf,
+      s3,
+      telegram: { sendDocument: async (chat, url, caption) => sent.push({ chat, url, caption }) },
       chatId: "-100fallback",
       registryRepo: { getAll: async () => [{ used_for: "Invoice pipeline EOD", chat_id: "-100purchase", group_name: "Purchase" }] },
       now: () => NOW,
@@ -65,14 +79,17 @@ describe("sender", () => {
     const r = await uc.run({ trigger: "manual" });
     assert.equal(r.code, 200);
     assert.equal(sent[0].chat, "-100purchase");
-    assert.equal(sent[0].opts.parseMode, "HTML");
+    assert.match(sent[0].url, /^https:\/\/s3\/open_returns\/open_returns_2026-11-24_\d+\.pdf$/);
+    assert.match(sent[0].caption, /Open returns/);
   });
 
   it("does not send when RetailPilot could not be read", async () => {
     const sent = [];
     const uc = usecaseFactory({
       dashboard: dashboard({ ok: false, error: "not allowed", rows: [] }),
-      telegram: { sendMessage: async () => sent.push(1) },
+      pdf,
+      s3,
+      telegram: { sendDocument: async () => sent.push(1) },
       chatId: "-100fallback",
       now: () => NOW,
     });
