@@ -323,6 +323,12 @@ class WarehouseHealth {
   }
 
   /** The message, then the PDF when there is one. */
+  /** Groups get the PDF only; the message only when there is no PDF (so the group still hears). */
+  async _sendPdfOnly(chat, m) {
+    if (m.pdfUrl) await this.telegram.sendDocument(chat, m.pdfUrl, m.caption);
+    else await this.telegram.sendMessage(chat, m.text, m.options);
+  }
+
   async _send(chat, m) {
     await this.telegram.sendMessage(chat, m.text, m.options);
     if (m.pdfUrl) await this.telegram.sendDocument(chat, m.pdfUrl, m.caption);
@@ -464,7 +470,7 @@ class WarehouseHealth {
         // eslint-disable-next-line no-await-in-loop
         if (!messages.has(g.site)) messages.set(g.site, await this.message(day, g.site));
         // eslint-disable-next-line no-await-in-loop
-        await this._send(g.chatId, messages.get(g.site));
+        await this._sendPdfOnly(g.chatId, messages.get(g.site));
         outcome.sent += 1;
         outcome.groups.push({ group: g.group_name, site: g.site, ok: true });
       } catch (err) {

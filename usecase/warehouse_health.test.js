@@ -403,3 +403,13 @@ test("send to groups now: yesterday's reports to the groups, not to anyone priva
   assert.deepStrictEqual(r.data.groups.map((g) => g.site), ["warehouse", "ecr", "moolakulam"]);
   assert.ok(sent.every((m) => m.chat === "-100396"));
 });
+
+test("groups get the PDF only (the message only when there is no PDF)", async () => {
+  const pdf = { withBrowser: async (fn) => fn({ renderPdf: async () => Buffer.from("pdf") }) };
+  const s3 = { uploadFile: async (_, name) => `https://s3/${name}` };
+  const { uc, sent, docs } = setup([], null, { pdf, s3, now: () => 1 });
+  uc.registryRepo = { getAll: async () => [{ group_name: "G", chat_id: "-100396", used_for: "Pick Pack Daily Reports", outlet_name: "Warehouse" }] };
+  await uc.sendToGroups();
+  assert.deepStrictEqual([sent.filter((m) => m.chat === "-100396").length, docs.filter((d) => d.chat === "-100396").length], [0, 1]);
+  assert.match(docs[0].caption, /^Pick Pack Daily Report – Warehouse · /);
+});
