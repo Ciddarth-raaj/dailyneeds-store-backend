@@ -6,6 +6,7 @@ const respondError = require("../utils/http");
  *
  *   GET  /?date=YYYY-MM-DD&site=<store>   the day's health (default yesterday, IST; the warehouse)   view_warehouse_health
  *   GET  /trace?article_id&to_store&stage_id   one line through every stage     view_warehouse_health
+ *   POST /summary/send-groups yesterday's reports to the Telegram groups set   receive_warehouse_health_summary
  *   POST /summary/send-me    yesterday's summary to my own Telegram      receive_warehouse_health_summary
  *                                                                        or view_warehouse_health
  */
@@ -40,6 +41,14 @@ class WarehouseHealthRoutes {
       try {
         const q = (k) => (req.query[k] == null ? null : String(req.query[k]).trim() || null);
         send(res, await this.usecase.trace({ stage_id: q("stage_id"), article_id: q("article_id"), to_store: q("to_store") }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/summary/send-groups", need("receive_warehouse_health_summary"), async (req, res) => {
+      try {
+        send(res, await this.usecase.sendToGroups());
       } catch (err) {
         respondError(res, err);
       }

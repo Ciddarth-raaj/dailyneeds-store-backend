@@ -345,6 +345,28 @@ class WarehouseHealth {
     return { code: 200, data: { text: m.text, pdf: Boolean(m.pdfUrl) } };
   }
 
+  /**
+   * "Send to Telegram group" on the page: yesterday's reports to the groups
+   * set for them now (as at 9 am), without touching the private sends.
+   */
+  async sendToGroups() {
+    if (!this.telegram) return { code: 400, msg: "Telegram is not set up" };
+    if (this.groupSending) return { code: 409, msg: "Already sending - wait a minute" };
+    this.groupSending = true;
+    try {
+      const day = this.yesterday();
+      const outcome = { date: day, sent: 0, failed: 0 };
+      const m = await this.message(day);
+      await this.runGroups(day, m, outcome);
+      if (!outcome.groups.length) {
+        return { code: 422, msg: 'No Telegram group is set. In Master -> Telegram Groups, set a group\'s "Used For" to "Pick Pack Daily Report" (and it must be Active).' };
+      }
+      return { code: outcome.failed ? 502 : 200, msg: outcome.failed ? "Some reports could not be sent" : "Sent", data: outcome };
+    } finally {
+      this.groupSending = false;
+    }
+  }
+
   /** The 9 am send: yesterday's summary to every recipient not yet sent it. */
   async run() {
     const day = this.yesterday();

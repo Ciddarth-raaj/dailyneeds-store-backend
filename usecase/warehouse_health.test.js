@@ -392,3 +392,14 @@ test("an 'All Outlets' group gets every report: the warehouse first, then each s
   assert.deepStrictEqual([sent.filter((m) => m.chat === "c1").length, sent.filter((m) => m.chat === "s10").length], [0, 0]); // in the group instead
   assert.strictEqual(out.groups.length, 3);
 });
+
+test("send to groups now: yesterday's reports to the groups, not to anyone privately; says when no group is set", async () => {
+  const { uc, sent } = setup([{ employee_id: 1, private_chat_id: "c1" }]);
+  uc.registryRepo = { getAll: async () => [] };
+  assert.strictEqual((await uc.sendToGroups()).code, 422);
+  uc.registryRepo = { getAll: async () => [{ group_name: "Dn Pick n Pack Issues", chat_id: "-100396", used_for: "Pick Pack Daily Reports", outlet_name: null }] };
+  const r = await uc.sendToGroups();
+  assert.strictEqual(r.code, 200);
+  assert.deepStrictEqual(r.data.groups.map((g) => g.site), ["warehouse", "ecr", "moolakulam"]);
+  assert.ok(sent.every((m) => m.chat === "-100396"));
+});
