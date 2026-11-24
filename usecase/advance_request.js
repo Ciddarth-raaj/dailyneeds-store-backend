@@ -73,6 +73,29 @@ class AdvanceRequestUsecase {
   constructor(advanceRequestRepo, { lrFollowup = null } = {}) {
     this.advanceRequestRepo = advanceRequestRepo;
     this.lrFollowup = lrFollowup;
+    this.approvalNotifier = null;
+  }
+
+  /**
+   * Who to tell when a request reaches the approver (Telegram, in practice).
+   * Injected after construction because the notifier calls back into this
+   * usecase to record a decision.
+   */
+  setApprovalNotifier(notifier) {
+    this.approvalNotifier = notifier;
+  }
+
+  /**
+   * Tell the approvers a request is waiting for them. Never awaited by the
+   * stage and never thrown into it: the transition has already committed,
+   * and a Telegram outage must not turn a recorded step into an error.
+   */
+  notifyIfAwaitingApproval(request) {
+    if (!this.approvalNotifier || !request) return;
+    if (request.status !== "pending_approval") return;
+    Promise.resolve()
+      .then(() => this.approvalNotifier.notifyApprovers(request))
+      .catch(() => {});
   }
 
   async create(request) {
@@ -171,10 +194,10 @@ class AdvanceRequestUsecase {
    * anything outstanding has to go back to purchase to be settled one way
    * or the other, and nothing outstanding has nothing to settle.
    */
-  balanceCheck(id, data, employeeId) {
+  async balanceCheck(id, data, employeeId) {
     const balance = Number(data.previous_advance_balance) || 0;
 
-    return this.applyStage(
+    const result = await this.applyStage(
       id,
       "balanceCheck",
       balance > 0 ? "pending_purchase_decision" : "pending_approval",
@@ -186,6 +209,8 @@ class AdvanceRequestUsecase {
       },
       employeeId
     );
+    this.notifyIfAwaitingApproval(result);
+    return result;
   }
 
   /**
@@ -194,8 +219,8 @@ class AdvanceRequestUsecase {
    * clarified with the supplier later. Only the decision is recorded -
    * accounts work the payable figure out in Tally.
    */
-  balanceAction(id, data, employeeId) {
-    return this.applyStage(
+  async balanceAction(id, data, employeeId) {
+    const result = await this.applyStage(
       id,
       "balanceAction",
       "pending_approval",
@@ -207,6 +232,8 @@ class AdvanceRequestUsecase {
       },
       employeeId
     );
+    this.notifyIfAwaitingApproval(result);
+    return result;
   }
 
   /**

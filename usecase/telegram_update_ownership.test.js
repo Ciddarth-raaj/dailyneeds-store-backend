@@ -226,13 +226,14 @@ describe("the dispatcher", () => {
       Object.fromEntries([...claimersByType.entries()].map(([k, v]) => [k, v.sort()])),
       {
         message: [
+          "advance_request_approval",
           "attendance_ot_approval",
           "attendance_shift_change",
           "employee_telegram_link",
           "telegram_employee_menu",
         ],
         chat_join_request: ["employee_telegram_join_request"],
-        callback_query: ["attendance_ot_approval", "attendance_shift_change"],
+        callback_query: ["advance_request_approval", "attendance_ot_approval", "attendance_shift_change"],
       }
     );
 
@@ -262,6 +263,12 @@ describe("the dispatcher", () => {
       telegram: { isConfigured: () => false, sendMessage: async () => ({}) },
     });
 
+    // Advance request approval claims its own Hold / Reject prompt replies
+    // (in the Dn Urgent payments group) and nothing else.
+    const advance = require("../usecase/advance_request_telegram")({
+      telegram: { isConfigured: () => false, sendMessage: async () => ({}) },
+    });
+
     const privateMsg = (text, extra = {}) => ({
       message: { chat: { id: 1, type: "private" }, from: { id: 5 }, text, ...extra },
     });
@@ -283,6 +290,17 @@ describe("the dispatcher", () => {
       privateMsg("Worked without manager sign-off", {
         reply_to_message: { text: "Reject OT request #78\n\nReply to this message with the reason." },
       }),
+      {
+        message: {
+          chat: { id: -100, type: "supergroup" },
+          from: { id: 5 },
+          text: "Supplier holds 50k already",
+          reply_to_message: { text: "Reject advance request #79\n\nReply to this message with the reason." },
+        },
+      },
+      privateMsg("Check with supplier", {
+        reply_to_message: { text: "Hold advance request #79\n\nReply to this message with the reason." },
+      }),
       privateMsg("/ot"),
       privateMsg("/pendingot"),
       privateMsg("/ot@dnds_bot"),
@@ -300,6 +318,7 @@ describe("the dispatcher", () => {
       ["employee_telegram_link", (u) => link.claims(u)],
       ["attendance_shift_change", (u) => shift.claims(u)],
       ["attendance_ot_approval", (u) => ot.claims(u)],
+      ["advance_request_approval", (u) => advance.claims(u)],
     ];
 
     for (const update of corpus) {
@@ -326,6 +345,11 @@ describe("the dispatcher", () => {
     assert.equal(ot.claims(privateMsg("Worked late", { reply_to_message: { text: "Reject OT request #78" } })), true);
     assert.equal(ot.claims(privateMsg("/ot")), true);
     assert.equal(ot.claims({ message: { chat: { id: -100, type: "group" }, from: { id: 5 }, text: "/ot" } }), false, "groups are not approval chats");
+    assert.equal(advance.claims(privateMsg("x", { reply_to_message: { text: "Reject advance request #79" } })), true);
+    assert.equal(advance.claims({ callback_query: { data: "ar:79:H" } }), true);
+    assert.equal(advance.claims({ callback_query: { data: "ot:78:A:60" } }), false);
+    assert.equal(ot.claims({ callback_query: { data: "ar:79:A" } }), false);
+    assert.equal(shift.claims({ callback_query: { data: "ar:79:A" } }), false);
     assert.equal(ot.claims({ callback_query: { data: "ot:78:A:60" } }), true);
     assert.equal(ot.claims({ callback_query: { data: "ot:78:R" } }), true);
     // The two button namespaces are disjoint.

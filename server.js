@@ -1132,6 +1132,14 @@ class Server {
       claims: (update) => this.attendanceOtTelegramUsecase.claims(update),
       handle: (update) => this.attendanceOtTelegramUsecase.handle(update),
     });
+    // Advance request approval buttons and the reply carrying a hold or
+    // rejection reason. Claims exactly those.
+    this.telegramUpdateDispatcher.register({
+      name: "advance_request_approval",
+      updateTypes: ["callback_query", "message"],
+      claims: (update) => this.advanceRequestTelegramUsecase.claims(update),
+      handle: (update) => this.advanceRequestTelegramUsecase.handle(update),
+    });
     // EMPLOYEE TELEGRAM LINKING. Registered on the same dispatcher, and it is
     // the first handler that CLAIMS: an employee deep link is `/start e_…`,
     // and password-reset linking must not also answer it - `completeLink`
@@ -1481,6 +1489,19 @@ class Server {
       this.advanceRequestRepo,
       { lrFollowup: this.lrFollowupUsecase }
     );
+    // A2 ON TELEGRAM. A card with Approve / Hold / Reject is posted to the
+    // group(s) whose "Used For" in Master -> Telegram Groups contains
+    // "Urgent payments" (Dn Urgent payments) or "Advance Request" when a request reaches "Awaiting Approval"; every
+    // button calls `approval` above, so the web app's guards decide.
+    this.advanceRequestTelegramUsecase = require("./usecase/advance_request_telegram")({
+      advanceRequestUsecase: this.advanceRequestUsecase,
+      advanceRequestRepo: this.advanceRequestRepo,
+      employeeTelegramRepo: this.employeeTelegramRepo,
+      registryRepo: this.telegramGroupRegistryRepo,
+      telegram: require("./services/telegram")(),
+      webBaseUrl: process.env.WEB_APP_BASE_URL || null,
+    });
+    this.advanceRequestUsecase.setApprovalNotifier(this.advanceRequestTelegramUsecase);
     this.ticketUsecase = require("./usecase/ticket")(
       this.ticketRepo,
       this.employeeUsecase,

@@ -264,6 +264,36 @@ class AdvanceRequestRepository {
       [requestId]
     );
   }
+
+  /**
+   * Whether this employee may decide A2 right now, asked at the moment they
+   * tap a Telegram button so a permission removed after the card went out is
+   * honoured. Mirrors middlewares/permissions.js: user_type 2 is an admin
+   * and holds every permission; user_type 1 reads the designation's active
+   * permission rows. System and service accounts are never people.
+   */
+  async canEmployeeApprove(employeeId) {
+    const rows = await this.run(
+      "CAN-EMPLOYEE-APPROVE",
+      `SELECT 1
+         FROM \`user\` u
+         JOIN new_employee ne
+           ON ne.employee_id = u.employee_id
+          AND ne.status = 1
+         LEFT JOIN permissions p
+           ON p.designation_id = ne.designation_id
+          AND p.permission_key = 'approve_advance_request'
+          AND p.is_active = 1
+        WHERE u.employee_id = ?
+          AND u.status = 1
+          AND u.is_system_account = 0
+          AND u.is_service_account = 0
+          AND (u.user_type = 2 OR (u.user_type = 1 AND p.permission_key IS NOT NULL))
+        LIMIT 1`,
+      [employeeId]
+    );
+    return rows.length > 0;
+  }
 }
 
 module.exports = (db) => {
