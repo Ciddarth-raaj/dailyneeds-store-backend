@@ -30,8 +30,8 @@ const istDayOf = (ms) => new Date(ms).toLocaleDateString("en-CA", { timeZone: "A
 /**
  * The 9:15 am Open returns PDF (utils/open_returns_report.js): open returns
  * read fresh from RetailPilot for all stores, rendered to PDF, uploaded to S3
- * and sent as a document with the headline numbers as its caption - the same
- * route as the Invoice pipeline report.
+ * and sent as a document on its own, with no caption - the same route as the
+ * Invoice pipeline report.
  */
 class OpenReturnsReport {
   /**
@@ -100,7 +100,8 @@ class OpenReturnsReport {
         const fileName = `open_returns/open_returns_${istDayOf(report.nowMs)}_${report.nowMs}.pdf`;
         const url = await this.s3.uploadFile(undefined, fileName, "application/pdf", report.pdf);
         try {
-          await this.telegram.sendDocument(dest.chatId, url, R.captionText(report.summary, report.nowMs));
+          // Just the PDF: no caption.
+          await this.telegram.sendDocument(dest.chatId, url);
         } catch (err) {
           const text = String((err && err.message) || err);
           const groupProblem = /chat not found|bot was kicked|not a member|group chat was upgraded|have no rights/i.test(text);

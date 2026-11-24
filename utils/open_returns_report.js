@@ -1,5 +1,5 @@
 /**
- * The 9:15 am Open returns PDF and its Telegram caption: every return whose goods are
+ * The 9:15 am Open returns PDF for Telegram: every return whose goods are
  * back with the supplier and not yet settled (GET
  * /business-dashboard/purchase-returns `open`), one line per supplier per
  * location, oldest first - the same list as the Business Dashboard's Open
@@ -46,7 +46,7 @@ const longDay = (day) => {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-IN", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" });
 };
 
-/** Headline figures, shared by the PDF and the caption. */
+/** Headline figures for the PDF's cards. */
 function summarize(rows, stores) {
   const groups = groupOpen(rows, stores);
   const value = (gs) => Math.round(gs.reduce((s, g) => s + g.value, 0) * 100) / 100;
@@ -170,20 +170,4 @@ ${locations}
   return { html, summary: sum };
 }
 
-/** The Telegram caption (at most 1024 characters): the headline numbers. */
-function captionText(sum, nowMs) {
-  const lines = [`↩️ Open returns — ${istDay(nowMs)}, ${istClock(nowMs)}`];
-  if (!sum.groups.length) lines.push("✅ No open returns.");
-  else {
-    lines.push(
-      `${inr(sum.value)} · ${sum.claims} claims · ${sum.suppliers} suppliers · oldest ${sum.oldest_days}d`,
-      `🔴 Over ${AGE_RED} days: ${sum.red.claims} claims (${inr(sum.red.value)})`,
-      `🟠 ${AGE_AMBER + 1}–${AGE_RED} days: ${sum.amber.claims} claims (${inr(sum.amber.value)})`
-    );
-    const top = sum.groups.slice(0, 3).map((g) => `• ${g.age_days}d ${inr(g.value)} ${g.supplier}`);
-    if (top.length) lines.push("Oldest:", ...top);
-  }
-  return lines.join("\n").slice(0, 1000);
-}
-
-module.exports = { groupOpen, summarize, buildReport, captionText };
+module.exports = { groupOpen, summarize, buildReport };

@@ -1,5 +1,5 @@
 /**
- * The 9:15 am Open returns PDF, its caption, and its sender.
+ * The 9:15 am Open returns PDF and its sender.
  *
  *   node --test utils/open_returns_report.test.js
  */
@@ -38,19 +38,10 @@ describe("report", () => {
     assert.match(html, /15 Oct 2026/);
   });
 
-  it("caption: headline numbers and the oldest three, under Telegram's 1024", () => {
-    const { summary } = R.buildReport(ROWS, STORES, { nowMs: NOW });
-    const c = R.captionText(summary, NOW);
-    assert.match(c, /Open returns — 24 Nov 2026, 09:15/);
-    assert.match(c, /₹1,060 · 4 claims · 3 suppliers · oldest 40d/);
-    assert.match(c, /Over 15 days: 3 claims \(₹1,050\)/);
-    assert.ok(c.length <= 1024);
-  });
-
   it("says so when there are none", () => {
     const { html, summary } = R.buildReport([], STORES, { nowMs: NOW });
     assert.match(html, /No open returns/);
-    assert.match(R.captionText(summary, NOW), /No open returns/);
+    assert.equal(summary.claims, 0);
   });
 });
 
@@ -71,7 +62,7 @@ describe("sender", () => {
       dashboard: dashboard({ ok: true, rows: ROWS }),
       pdf,
       s3,
-      telegram: { sendDocument: async (chat, url, caption) => sent.push({ chat, url, caption }) },
+      telegram: { sendDocument: async (...args) => sent.push({ chat: args[0], url: args[1], args }) },
       chatId: "-100fallback",
       registryRepo: { getAll: async () => [{ used_for: "Invoice pipeline EOD", chat_id: "-100purchase", group_name: "Purchase" }] },
       now: () => NOW,
@@ -80,7 +71,7 @@ describe("sender", () => {
     assert.equal(r.code, 200);
     assert.equal(sent[0].chat, "-100purchase");
     assert.match(sent[0].url, /^https:\/\/s3\/open_returns\/open_returns_2026-11-24_\d+\.pdf$/);
-    assert.match(sent[0].caption, /Open returns/);
+    assert.equal(sent[0].args.length, 2, "no caption");
   });
 
   it("does not send when RetailPilot could not be read", async () => {
