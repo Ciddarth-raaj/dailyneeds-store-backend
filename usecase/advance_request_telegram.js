@@ -54,6 +54,15 @@ const PROMPT_PATTERN = /^(Hold|Reject) advance request #(\d+)/;
 
 const MIN_NOTE = 3;
 
+/** Telegram's stand-in sender for a group admin posting anonymously. */
+const GROUP_ANONYMOUS_BOT_ID = 1087968824;
+
+const isAnonymous = (message) => {
+  const senderChat = message && (message.sender_chat || message.senderChat);
+  if (senderChat && senderChat.id !== undefined) return true;
+  return Boolean(message && message.from && Number(message.from.id) === GROUP_ANONYMOUS_BOT_ID);
+};
+
 /** At most this many cards per status in one "send pending". */
 const PENDING_LIMIT = 50;
 
@@ -331,6 +340,17 @@ module.exports = ({
     if (note.length < MIN_NOTE) {
       await answer(`Please give a reason of at least ${MIN_NOTE} characters. Tap ${verb} again to retry.`);
       return { handled: true, outcome: "REASON_TOO_SHORT" };
+    }
+
+    // A group admin with "Remain anonymous" posts AS THE GROUP: Telegram
+    // hides who wrote it, so the reply cannot be matched to an employee.
+    // Button taps are never anonymous, which is why the tap worked.
+    if (isAnonymous(message)) {
+      await answer(
+        `Your reply was sent anonymously as the group, so I can't tell who you are. ` +
+          `Turn off "Remain anonymous" in your admin rights for this group, then tap ${verb} again.`
+      );
+      return { handled: true, outcome: "ANONYMOUS" };
     }
 
     const { employeeId, allowed } = await approverFor(message.from ? message.from.id : null);

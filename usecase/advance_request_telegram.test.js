@@ -155,6 +155,17 @@ describe("advance request approval on Telegram", () => {
     assert.match(h.sent.at(-1).text, /Only an admin/);
   });
 
+  it("an ANONYMOUS admin's reply decides nothing and says why", async () => {
+    const h = harness();
+    const update = reply("Reject advance request #6\n\n...", "Test reason");
+    update.message.from = { id: 1087968824, username: "GroupAnonymousBot" };
+    update.message.sender_chat = { id: -1004317755669, title: "Dn Urgent payments" };
+    await h.usecase.handle(update);
+    assert.equal(h.decisions.length, 0);
+    assert.match(h.sent.at(-1).text, /anonymously/);
+    assert.match(h.sent.at(-1).text, /Remain anonymous/);
+  });
+
   it("Hold asks for a reason too", async () => {
     const h = harness();
     await h.usecase.handle(tap("ar:42:H"));
