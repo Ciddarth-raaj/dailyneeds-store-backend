@@ -27,7 +27,7 @@ function loadLogo() {
 }
 
 /**
- * The 9 pm end-of-day Invoice pipeline PDF (utils/invoice_pipeline_report.js),
+ * The 9:10 am Invoice pipeline PDF (utils/invoice_pipeline_report.js),
  * sent to the Telegram group registered for it (see REGISTRY_USED_FOR): the pipeline is read fresh from
  * RetailPilot for all stores, rendered to PDF, uploaded to S3, and sent as a
  * document with the headline numbers as its caption - the same route the

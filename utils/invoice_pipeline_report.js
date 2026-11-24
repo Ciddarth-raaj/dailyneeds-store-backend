@@ -1,7 +1,7 @@
 /**
  * The end-of-day Invoice pipeline report: the step tiles and everything
  * waiting over 48 hours (from what GET /warehouse-flow/flow returns), for the
- * 9 pm PDF sent to the Purchase Telegram group. The full step lists are on the
+ * 9:10 am PDF sent to the Purchase Telegram group. The full step lists are on the
  * Invoice Pipeline page, not in the PDF.
  *
  * PURE: data in, HTML out. No network, no fonts or images fetched - the logo

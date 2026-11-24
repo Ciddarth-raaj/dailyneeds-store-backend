@@ -1378,11 +1378,18 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       () => this.outletRepo.getRetailPilotIds()
     );
-    // 9 pm end-of-day Invoice pipeline PDF to the Purchase Telegram group.
+    // 9:10 am Invoice pipeline PDF to the Purchase Telegram group (cron below).
     this.invoicePipelineReportUsecase = require("./usecase/invoice_pipeline_report")({
       flow: this.warehouseFlowUsecase,
       pdf: require("./services/pdf"),
       s3: require("./services/s3"),
+      telegram: require("./services/telegram")(),
+      chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
+      registryRepo: this.telegramGroupRegistryRepo,
+    });
+    // 9:15 am Open returns message to the same Purchase Telegram group (cron below).
+    this.openReturnsReportUsecase = require("./usecase/open_returns_report")({
+      dashboard: this.businessDashboardUsecase,
       telegram: require("./services/telegram")(),
       chatId: require("./constants/telegram").PURCHASE_TELEGRAM_CHAT_ID,
       registryRepo: this.telegramGroupRegistryRepo,
@@ -2242,7 +2249,8 @@ class Server {
     );
     const businessDashboardRouter = require("./routes/business_dashboard")(
       this.businessDashboardUsecase,
-      this.dashboardScope
+      this.dashboardScope,
+      this.openReturnsReportUsecase
     );
     const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions, this.poDailySummary);
     const whDailyReportsRouter = require("./routes/wh_daily_reports")(this.whDailyReportsUsecase, this.permissions);
@@ -3080,7 +3088,7 @@ class Server {
       { preventOverlap: true }
     );
 
-    // 9PM everyday - the end-of-day Invoice pipeline PDF to the Purchase
+    // 9:10 AM everyday - the Invoice pipeline PDF to the Purchase
     // Telegram group. ON unless INVOICE_PIPELINE_EOD_TELEGRAM_ENABLED is "false".
     // Logged to api_sync_log as invoice_pipeline_eod_telegram.
     {
@@ -3095,10 +3103,34 @@ class Server {
       };
       this.cronService.register(
         "invoice_pipeline_eod_telegram",
-        "0 21 * * *",
+        "10 9 * * *",
         this.apiSyncLogger
           ? this.apiSyncLogger.wrapCron("invoice_pipeline_eod_telegram", "/warehouse-flow/eod-report/send", runInvoicePipelineEod)
           : runInvoicePipelineEod,
+        { preventOverlap: true }
+      );
+    }
+
+    // 9:15 AM everyday - Open returns (goods back with suppliers, not yet
+    // settled) to the Purchase Telegram group. ON unless
+    // OPEN_RETURNS_TELEGRAM_ENABLED is "false". Logged to api_sync_log as
+    // open_returns_telegram.
+    {
+      const runOpenReturns = async () => {
+        if (String(process.env.OPEN_RETURNS_TELEGRAM_ENABLED || "").toLowerCase() === "false") {
+          console.log("[CRON] open_returns_telegram - OPEN_RETURNS_TELEGRAM_ENABLED is 'false'; nothing sent");
+          return { code: 200, msg: "Disabled" };
+        }
+        const r = await this.openReturnsReportUsecase.run({ trigger: "cron" });
+        if (r.code !== 200) throw new Error(r.msg);
+        return r;
+      };
+      this.cronService.register(
+        "open_returns_telegram",
+        "15 9 * * *",
+        this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("open_returns_telegram", "/business-dashboard/open-returns/send", runOpenReturns)
+          : runOpenReturns,
         { preventOverlap: true }
       );
     }
