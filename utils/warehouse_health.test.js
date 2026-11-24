@@ -196,6 +196,6 @@ test("the PDF lists picking write-off article by article with who picked - not S
   const h = H.buildHealth({ ...base, staffNames: { kp1: "Ravi" }, writeoffLines: [W({ article_id: "A1", article_name: "gold winner 1l", job_type: "GRN", worked_by: "kp1" }), W({ article_id: "A2", article_name: "sta only soap", job_type: "STA", worked_by: "kp1" })] });
   const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
   assert.ok(html.includes("Picking write-off by article (GRN 1) - 1 line · ₹62"));
-  assert.ok(html.includes("gold winner 1l") && html.includes("Ravi") && html.includes("19 Nov, 10:05 am"));
+  assert.ok(html.includes("A1 · gold winner 1l") && html.includes("Ravi") && html.includes("19 Nov, 10:05 am"));
   assert.ok(!html.includes("sta only soap"));
 });
