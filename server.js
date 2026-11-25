@@ -1344,7 +1344,15 @@ class Server {
     });
     this.whDailyReportsUsecase.onChange = (day) => this.whChain.markFrom(day);
     // Catch up a while after a (re)start: days not worked out yet, redo left half-done.
-    setTimeout(() => this.whChain.ensure().catch(() => {}), 90 * 1000).unref();
+    // Boxes written off since 10 Oct (once, before they were pulled nightly), then the stored chain.
+    setTimeout(
+      () =>
+        Promise.resolve(this.whDailyReportsUsecase.backfillWriteoffs(require("./utils/wh_box_chain").BOX_CHAIN_FROM))
+          .catch(() => {})
+          .then(() => this.whChain.ensure())
+          .catch(() => {}),
+      90 * 1000
+    ).unref();
     this.warehouseHealth = require("./usecase/warehouse_health")({
       chain: this.whChain,
       repo: this.whDailyReportsUsecase.repo,

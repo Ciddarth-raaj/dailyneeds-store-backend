@@ -92,6 +92,64 @@ ORDER BY j.job_id, b.box_id, a.article_id`;
 }
 
 /**
+ * Boxes written off at loading: loading jobs that ended LOADING_WRITEOFF on
+ * from..to (IST days), every article in each box. Kept flat (no WITH /
+ * sub-queries).
+ */
+function buildBoxWriteoffQuery(from, to) {
+  const f = validDay(from);
+  const t = validDay(to);
+  if (!f || !t) throw new Error("Invalid day");
+  return `
+SELECT j.job_id, j.job_type, j.state, j.updated_at,
+  b.slug AS box_row, b.box_id, b.origin, b.destination, b.stage_id, b.meta,
+  a.article_id, a.qty
+FROM picknpack.state_machine j
+JOIN picknpack.box_dimension_joblets b ON b.job_id = j.job_id
+JOIN picknpack.box_articles a ON a.joblet_id = b.slug
+WHERE j.job_type <> 'SO' AND j.state = 'LOADING_WRITEOFF'
+  AND ${istDay("j.updated_at")} BETWEEN DATE '${f}' AND DATE '${t}'
+ORDER BY j.updated_at, b.box_id, a.article_id`;
+}
+
+/**
+ * Written-off box lines -> wh_box_writeoffs rows, one per loading job, box
+ * and article (a box id can carry several loading jobs - each its own lot,
+ * e.g. 2 x 60 of an allocation written off together).
+ */
+function mapBoxWriteoffs(lines, stores) {
+  const name = (slug) => (slug ? (stores && stores.get(clean(slug))) || clean(slug).toLowerCase() : null);
+  const by = new Map();
+  for (const l of lines || []) {
+    const article = articleNo(l.article_id);
+    const box = clean(l.box_id);
+    if (!article || !box) continue;
+    const m = meta(l.meta);
+    const row = {
+      report_date: istDateTime(l.updated_at).slice(0, 10),
+      job_id: clean(l.job_id) || null,
+      box_id: box.slice(0, 64),
+      stage_id: clean(l.stage_id).slice(0, 64) || null,
+      job_type: clean(l.job_type).toUpperCase() || null,
+      from_store: name(l.origin),
+      to_store: name(l.destination),
+      article_id: article,
+      article_name: null,
+      qty: num(l.qty),
+      nlc: null,
+      picking_job: clean(m.picking_job).slice(0, 64) || null,
+      packing_jobs: packingJobs(m).join(",").slice(0, 1000) || null,
+      finished_at: istDateTime(l.updated_at),
+    };
+    const k = `${row.job_id || ""}|${clean(l.box_row)}|${row.article_id}`;
+    const had = by.get(k);
+    if (had) had.qty += row.qty;
+    else by.set(k, row);
+  }
+  return [...by.values()];
+}
+
+/**
  * Stuck cartons: loading jobs still open (state LOADING) that were created
  * before `cutoff` (an IST day), with the articles in each carton. Kept flat
  * (no WITH / sub-queries); buildBoxPackQuery finds who packed each carton.
@@ -385,6 +443,8 @@ module.exports = {
   nlcByArticle,
   buildJobLinesQuery,
   buildBoxLinesQuery,
+  buildBoxWriteoffQuery,
+  mapBoxWriteoffs,
   storeNames,
   buildStuckLoadingQuery,
   buildBoxPackQuery,

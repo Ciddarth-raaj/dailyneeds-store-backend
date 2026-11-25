@@ -193,6 +193,17 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     ),
     `Often a short from another store or box. ${ex.length > 40 ? `Biggest 40 of ${ex.length} lines - all on the dashboard.` : ""}`
   );
+  // Other exceptions: boxes written off at loading, outside the app's normal flow.
+  const wb = (t.writeoff_boxes && t.writeoff_boxes.list) || [];
+  const writeoffBoxesHtml = section(
+    `Other exceptions - boxes written off outside the app - ${plural(t.writeoff_boxes ? t.writeoff_boxes.boxes : 0, "box", "boxes")} · ${num(t.writeoff_boxes ? t.writeoff_boxes.qty : 0)} qty · ${rupees(t.writeoff_boxes ? t.writeoff_boxes.value : 0)}`,
+    table(
+      ["Box", "Article", "Document", "From → To", "Qty", "Value", "When"],
+      wb.map((w) => ({ cls: "bad", cells: [esc(w.box_id), esc(artText(w)), esc(w.stage_id || "—"), `${esc(title(w.from_store))} → ${esc(title(w.to_store))}`, num(w.qty), rupees(w.value), esc(whenText(w.finished_at))] })),
+      [4, 5]
+    ),
+    "Loading job ended LOADING_WRITEOFF in RetailPilot. Trace the box and escalate to tech."
+  );
   const stageBlock = (sc, heading, cap) =>
     sc
     ? `<h2 style="margin-top:4px">${esc(heading)}</h2>
@@ -334,6 +345,7 @@ ${woLinesHtml}
 ${packingHtml}
 ${stageHtml}
 ${extrasHtml}
+${writeoffBoxesHtml}
 ${stuckHtml}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${chainHtml}

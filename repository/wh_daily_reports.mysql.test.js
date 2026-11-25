@@ -28,7 +28,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
   before(async () => {
     // Same options as drivers/mysql.js.
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_health_summary_sends, wh_rp_staff_map, outlets, designation, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
+    await q(`DROP TABLE IF EXISTS wh_box_writeoffs, wh_health_summary_sends, wh_rp_staff_map, outlets, designation, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, all_permissions, permissions, retailpilot_grn_lines, retailpilot_grn_headers, pick_pack_verifications, product_table, product_images, pick_pack_verification_remarks, pick_pack_write_off, pick_pack_remarks, department, categories`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL); CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80)); CREATE TABLE designation (designation_id INT PRIMARY KEY, designation_name VARCHAR(80)); INSERT INTO outlets VALUES (1, 'Warehouse'); INSERT INTO designation VALUES (3, 'Picker');
              CREATE TABLE all_permissions (permission_key VARCHAR(100));
              CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100));
@@ -66,6 +66,7 @@ describe("wh_daily_reports repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261228120000-wh-job-state-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261229120000-wh-job-finished-at-up.sql"), "utf8"));
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261230120000-wh-job-links-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20270102120000-wh-box-writeoffs-up.sql"), "utf8"));
     repo = require("./wh_daily_reports")(pool);
     // RetailPilot as far as NLC goes: article 2 has NLC 45; article 1 none.
     nlcSpectra = {

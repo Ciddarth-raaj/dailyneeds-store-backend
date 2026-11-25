@@ -220,3 +220,14 @@ test("extras at stores, packing short and picked-0 write-off: in things need you
   assert.ok(html.includes("Packing short - 1 line · 2 qty · ₹1,200") && html.includes("7 · ghee 1l"));
   assert.ok(html.includes("had nothing picked at all"));
 });
+
+test("boxes written off outside the app: in things need you and listed in the PDF", () => {
+  const h = H.buildHealth({ ...base, boxWriteoffs: [
+    { report_date: "2026-11-23", job_id: "job_12134893", box_id: "127577", stage_id: "ADA-febc6cc0aff2", from_store: "warehouse", to_store: "moolakulam", article_id: 127577, article_name: "sri dairy milk halwa 200g", qty: 60, nlc: 78.98, finished_at: "2026-11-23 18:25:47" },
+    { report_date: "2026-11-23", job_id: "job_12275517", box_id: "127577", stage_id: "ADA-febc6cc0aff2", from_store: "warehouse", to_store: "moolakulam", article_id: 127577, article_name: "sri dairy milk halwa 200g", qty: 60, nlc: 78.98, finished_at: "2026-11-23 18:25:47" },
+  ] });
+  assert.deepStrictEqual([h.tiles.writeoff_boxes.boxes, h.tiles.writeoff_boxes.qty], [2, 120]);
+  assert.ok(h.need_you.some((i) => /^Written off outside the app: 2 boxes at loading \(120 qty · ₹9,478\) - trace and escalate$/.test(i.text)));
+  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Other exceptions - boxes written off outside the app") && html.includes("127577 · sri dairy milk halwa 200g") && html.includes("23 Nov, 6:25 pm"));
+});

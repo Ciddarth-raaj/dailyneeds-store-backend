@@ -69,9 +69,9 @@ class WhDailyReportsRepository {
     this.db = db;
   }
 
-  run(code, sql, params = []) {
+  run(code, sql, params = [], conn = this.db) {
     return new Promise((resolve, reject) => {
-      this.db.query(sql, params, (err, result) => {
+      conn.query(sql, params, (err, result) => {
         if (err) {
           logger.Log({
             level: logger.LEVEL.ERROR,
@@ -462,7 +462,7 @@ class WhDailyReportsRepository {
    * the qty in the boxes, the box's document where it has one.
    */
   async stageFlows(from, to) {
-    const [jobs, boxes] = await Promise.all([
+    const [jobs, boxes, writeoffs] = await Promise.all([
       this.run(
         "STAGE_FLOWS_JOBS",
         `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.stage_id, r.article_id,
@@ -487,8 +487,75 @@ class WhDailyReportsRepository {
           GROUP BY r.report_type, r.report_date, r.stage_id, r.article_id, r.from_store, r.planned_to_store, r.job_id, r.picking_job, r.packing_jobs`,
         [from, to]
       ),
+      // Boxes written off at loading (wh_box_writeoffs): their goods leave "packed, not yet loaded".
+      this.run(
+        "STAGE_FLOWS_WRITEOFFS",
+        `SELECT 'WRITEOFF' AS report_type, DATE_FORMAT(w.report_date, '%Y-%m-%d') AS report_date, w.stage_id, w.article_id,
+                MAX(w.article_name) AS article_name, w.from_store, w.to_store, w.job_id, w.picking_job, w.packing_jobs,
+                SUM(w.qty) AS qty, MAX(w.nlc) AS nlc, 0 AS no_link
+           FROM wh_box_writeoffs w
+          WHERE w.report_date BETWEEN ? AND ?
+          GROUP BY w.report_date, w.stage_id, w.article_id, w.from_store, w.to_store, w.job_id, w.picking_job, w.packing_jobs`,
+        [from, to]
+      ),
     ]);
-    return { jobs: toNumbers(jobs, ["qty", "short_qty", "nlc", "pick_pack", "no_state"]), boxes: toNumbers(boxes, ["qty", "nlc", "no_link"]) };
+    return { jobs: toNumbers(jobs, ["qty", "short_qty", "nlc", "pick_pack", "no_state"]), boxes: toNumbers([...boxes, ...writeoffs], ["qty", "nlc", "no_link"]) };
+  }
+
+  /** Written-off boxes from..to: replace what is stored for those days. */
+  async replaceWriteoffs(from, to, rows) {
+    const conn = await new Promise((resolve, reject) => this.db.getConnection((err, c) => (err ? reject(err) : resolve(c))));
+    const q = (code, sql, params) => this.run(code, sql, params, conn);
+    try {
+      await q("WO_BEGIN", "START TRANSACTION");
+      await q("WO_CLEAR", "DELETE FROM wh_box_writeoffs WHERE report_date BETWEEN ? AND ?", [from, to]);
+      const list = (rows || []).filter((r) => r.report_date >= from && r.report_date <= to);
+      for (let i = 0; i < list.length; i += 1000) {
+        // eslint-disable-next-line no-await-in-loop
+        await q(
+          "WO_SAVE",
+          "INSERT INTO wh_box_writeoffs (report_date, job_id, box_id, stage_id, job_type, from_store, to_store, article_id, article_name, qty, nlc, picking_job, packing_jobs, finished_at) VALUES ?",
+          [list.slice(i, i + 1000).map((r) => [r.report_date, r.job_id, r.box_id, r.stage_id, r.job_type, r.from_store, r.to_store, r.article_id, r.article_name ? String(r.article_name).slice(0, 255) : null, r.qty, r.nlc == null ? null : r.nlc, r.picking_job, r.packing_jobs, r.finished_at])]
+        );
+      }
+      await q("WO_COMMIT", "COMMIT");
+      return list.length;
+    } catch (err) {
+      await new Promise((r) => conn.query("ROLLBACK", () => r()));
+      throw err;
+    } finally {
+      conn.release();
+    }
+  }
+
+  /** Written-off boxes from..to (optionally from / to a store), one row per box, job and article. */
+  async writeoffs(from, to, { from_store = null, to_store = null } = {}) {
+    const where = ["w.report_date BETWEEN ? AND ?"];
+    const params = [from, to];
+    if (from_store) {
+      where.push("w.from_store = ?");
+      params.push(from_store);
+    }
+    if (to_store) {
+      where.push("w.to_store = ?");
+      params.push(to_store);
+    }
+    const rows = await this.run(
+      "WRITEOFFS",
+      `SELECT DATE_FORMAT(w.report_date, '%Y-%m-%d') AS report_date, w.job_id, w.box_id, w.stage_id, w.job_type, w.from_store, w.to_store,
+              w.article_id, w.article_name, w.qty, w.nlc, w.finished_at
+         FROM wh_box_writeoffs w
+        WHERE ${where.join(" AND ")}
+        ORDER BY w.finished_at, w.box_id, w.article_id`,
+      params
+    );
+    return toNumbers(rows, ["qty", "nlc"]);
+  }
+
+  /** How many written-off box rows are stored (0: never pulled yet). */
+  async writeoffCount() {
+    const [row] = await this.run("WRITEOFF_COUNT", "SELECT COUNT(*) AS c FROM wh_box_writeoffs");
+    return Number(row && row.c) || 0;
   }
 
   /**

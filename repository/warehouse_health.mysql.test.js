@@ -19,7 +19,7 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
 
   before(async () => {
     pool = require("mysql").createPool(`${URL}?multipleStatements=true&supportBigNumbers=true&bigNumberStrings=true`);
-    await q(`DROP TABLE IF EXISTS wh_chain_results, wh_chain_open_boxes, wh_chain_open, wh_chain_days, outlets, wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, employee_telegram_identity, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
+    await q(`DROP TABLE IF EXISTS wh_box_writeoffs, wh_chain_results, wh_chain_open_boxes, wh_chain_open, wh_chain_days, outlets, wh_health_summary_sends, wh_rp_staff_map, wh_report_box_rows, wh_report_job_rows, wh_report_uploads, new_employee, employee_telegram_identity, all_permissions, permissions, pick_pack_write_off, pick_pack_verifications, retailpilot_grn_lines, retailpilot_grn_headers`);
     await q(`CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80), status INT DEFAULT 1, store_id INT NULL, designation_id INT NULL, resignation_date DATE NULL);
              CREATE TABLE outlets (outlet_id INT PRIMARY KEY, outlet_name VARCHAR(80));
              CREATE TABLE employee_telegram_identity (employee_id INT, private_chat_id BIGINT NULL, disconnected_at DATETIME NULL);
@@ -29,7 +29,7 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
              CREATE TABLE retailpilot_grn_lines (line_id VARCHAR(64) PRIMARY KEY, invoice_slug VARCHAR(64), product_id INT, mrp DECIMAL(15,2));
              CREATE TABLE pick_pack_write_off (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, reason_employee_id INT NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);
              CREATE TABLE pick_pack_verifications (id INT AUTO_INCREMENT PRIMARY KEY, product_id INT, mismatch_qty INT, date DATE, store VARCHAR(100), remark_id INT NULL, remark_str VARCHAR(500) NULL, is_verified TINYINT(1) NOT NULL DEFAULT 0);`);
-    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up", "20261231120000-wh-chain-store-up", "20270101120000-wh-chain-views-up"]) {
+    for (const m of ["20261217120000-warehouse-daily-reports-up", "20261223120000-wh-report-retailpilot-up", "20261224120000-wh-report-nlc-up", "20261225120000-wh-staff-map-up", "20261226120000-warehouse-health-up", "20261227120000-wh-box-stage-up", "20261228120000-wh-job-state-up", "20261229120000-wh-job-finished-at-up", "20261230120000-wh-job-links-up", "20261231120000-wh-chain-store-up", "20270101120000-wh-chain-views-up", "20270102120000-wh-box-writeoffs-up"]) {
       // eslint-disable-next-line no-await-in-loop
       await q(MIG(m));
     }
@@ -73,6 +73,15 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     await repo.replaceUpload({ report_type: "VERIFICATION", report_date: "2025-01-01", source: "RETAILPILOT", shape: "JOB", file_name: "rp", uploaded_by: null, rows: [row({ report_type: "VERIFICATION", job_id: "VJ9", stage_id: "S1", article_id: 5, advised_qty: 4, actual_qty: 10, short_qty: 0 })] });
     const ex = await repo.jobRows("2025-01-01", "2025-01-01", { only: "extra", report_type: "VERIFICATION", from_store: "warehouse" });
     assert.deepEqual(ex.map((r) => [r.job_id, r.advised_qty, r.actual_qty]), [["VJ9", 4, 10]]);
+    // boxes written off at loading: stored per day, read per store, and in the stage flows as WRITEOFF
+    const wo = (o) => ({ report_date: "2025-02-01", job_id: "job_1", box_id: "127577", stage_id: "ADA-1", job_type: "ALLOC", from_store: "warehouse", to_store: "moolakulam", article_id: 127577, article_name: "halwa", qty: 60, nlc: 78.98, picking_job: null, packing_jobs: "job_9", finished_at: "2025-02-01 18:25:47", ...o });
+    assert.strictEqual(await repo.replaceWriteoffs("2025-02-01", "2025-02-01", [wo(), wo({ job_id: "job_2" })]), 2);
+    assert.strictEqual(await repo.replaceWriteoffs("2025-02-01", "2025-02-01", [wo(), wo({ job_id: "job_2" })]), 2); // replaced, not added
+    assert.deepStrictEqual((await repo.writeoffs("2025-02-01", "2025-02-01", { to_store: "moolakulam" })).map((x) => [x.job_id, x.qty]), [["job_1", 60], ["job_2", 60]]);
+    assert.strictEqual((await repo.writeoffs("2025-02-01", "2025-02-01", { to_store: "ecr" })).length, 0);
+    const flows = await repo.stageFlows("2025-02-01", "2025-02-01");
+    assert.deepStrictEqual(flows.boxes.filter((b) => b.report_type === "WRITEOFF").map((b) => [b.job_id, b.qty, b.packing_jobs]), [["job_1", 60, "job_9"], ["job_2", 60, "job_9"]]);
+    assert.strictEqual(await repo.writeoffCount(), 2);
     // who picked each verification line: by its picking job, else by the document
     const who = await repo.pickersOfVerified([{ job_id: "VJ1" }, { job_id: "VJ2" }, { job_id: "VJ3" }]);
     assert.deepEqual(who.map((x) => [x.job_id, Number(x.article_id), x.pickers]).sort(), [["VJ1", 1, "kp-1"], ["VJ2", 2, "kp-2"]]);

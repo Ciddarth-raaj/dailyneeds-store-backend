@@ -204,3 +204,14 @@ test("system packing jobs with no person's packing behind them are the packing (
   // all 120 picked are packed; 10 more were packed than picked (shows as packed with no picking record); all loaded
   assert.deepStrictEqual([g(c, "to_pack").stands, g(c, "to_pack").jumped.qty, g(c, "to_load").stands], [0, 10, 0]);
 });
+
+test("a box written off at loading takes its goods out of 'packed, not yet loaded' (not stuck, not loaded)", () => {
+  const jobs = [J("PICKING", "2026-11-02", { job_id: "p1", qty: 120 }), J("PACKING", "2026-11-02", { job_id: "k1", picking_job: "p1", worked_by: "u", qty: 120 })];
+  const before = S.buildStageChain({ date: "2026-11-22", jobs, boxes: [] });
+  assert.deepStrictEqual([g(before, "to_load").stands, g(before, "to_load").stuck > 0], [120, true]);
+  const boxes = [Bx("WRITEOFF", "2026-11-23", { job_id: "w1", packing_jobs: "k1", qty: 60 }), Bx("WRITEOFF", "2026-11-23", { job_id: "w2", packing_jobs: "k1", qty: 60 })];
+  const c = S.buildStageChain({ date: "2026-11-23", jobs, boxes });
+  const l = g(c, "to_load");
+  assert.deepStrictEqual([l.from_earlier, l.moved_on, l.stands, c.stages.loaded], [120, 120, 0, 0]);
+  assert.ok(adds(l));
+});

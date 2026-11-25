@@ -219,13 +219,16 @@ function buildStageChain({ jobs, boxes, date, carried = null }) {
   const splitShort = J("PACKING", (r) => splitsPickPack(r) && n(r.short_qty) > 0).map((r) => ({ ...r, qty: n(r.short_qty), links: ids(r.picking_job) }));
   const verification = J("VERIFICATION").map((r) => ({ ...r, links: ids(r.unloading_job) }));
   const loaded = B("LOADING").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
+  // Boxes written off at loading (outside the normal flow): their goods leave "packed, not yet loaded" -
+  // found by the same links as a loaded box - and are listed as an exception, not as stuck.
+  const writtenOff = B("WRITEOFF").map((r) => ({ ...r, links: ids(r.packing_jobs, r.picking_job) }));
   const unloaded = B("UNLOADING").map((r) => ({ ...r, link: r.job_id || null }));
   const today = (rows) => r3(rows.filter((r) => r.report_date === date && !staysPut(r)).reduce((s, r) => s + n(r.qty), 0));
   const T = (rows) => rows.filter(isNew);
   const C = (k) => (carried && carried[k]) || [];
   const gaps = [
     gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: T(picked), outs: T([...packing, ...shortOf(packing)]), lost: T(shortOf(packing)), date, carried: C("to_pack") }),
-    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: T([...packing, ...pickPacked]), outs: T([...loaded, ...splitShort]), lost: T(splitShort), date, carried: C("to_load") }),
+    gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: T([...packing, ...pickPacked]), outs: T([...loaded, ...splitShort, ...writtenOff]), lost: T(splitShort), date, carried: C("to_load") }),
     gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: T(unloaded), outs: T([...verification, ...shortOf(verification)]), lost: T(shortOf(verification)), date, carried: C("to_verify") }),
   ];
   // Days the chain cannot follow by job state (uploaded files, or pulled before states were kept).

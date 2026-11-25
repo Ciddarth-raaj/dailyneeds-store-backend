@@ -181,7 +181,42 @@ class WhDailyReports {
       }
       days.push({ date: d, reports });
     }
-    return { code: 200, data: { from: r.from, to: r.to, days } };
+    // With Loading: the boxes written off at loading on those days, too (kept apart, see pullWriteoffs).
+    let writeoffs = null;
+    if (wanted.includes("LOADING")) writeoffs = await this.pullWriteoffs(r.from, r.to, stores);
+    return { code: 200, data: { from: r.from, to: r.to, days, writeoffs } };
+  }
+
+  /**
+   * Boxes written off at loading in RetailPilot (loading jobs ending
+   * LOADING_WRITEOFF) on from..to, with names and NLC, replacing what is
+   * stored for those days (wh_box_writeoffs). The stage chain redoes from
+   * `from`. Answers { ok, rows } - never fails the pull.
+   */
+  async pullWriteoffs(from, to, stores = null) {
+    try {
+      const names = stores || R.storeNames(await this.spectra.queryAll(R.STORES_QUERY));
+      const rows = R.mapBoxWriteoffs(await this.spectra.queryAll(R.buildBoxWriteoffQuery(from, to)), names);
+      const ids = rows.map((x) => x.article_id);
+      const [info, nlc] = await Promise.all([this.repo.productInfo(ids), this._nlc(ids)]);
+      const full = rows.map((x) => ({ ...x, article_name: (info.get(x.article_id) || {}).article_name || null, nlc: nlc.has(x.article_id) ? nlc.get(x.article_id) : null }));
+      const saved = await this.repo.replaceWriteoffs(from, to, full);
+      this._changed(from);
+      return { ok: true, rows: saved };
+    } catch (err) {
+      logger.Log({ level: logger.LEVEL.ERROR, component: "USECASE.WH_DAILY_REPORTS", code: "USECASE.WH_DAILY_REPORTS.WRITEOFFS", description: err.toString(), category: "", ref: { from, to } });
+      return { ok: false, msg: err.message };
+    }
+  }
+
+  /**
+   * Once: the boxes written off since BOX_CHAIN_FROM, when none are stored yet
+   * (before the nightly pull kept them). Run before the stored chain is worked out.
+   */
+  async backfillWriteoffs(from) {
+    if (!this.spectra || !this.spectra.isConfigured() || typeof this.repo.writeoffCount !== "function") return null;
+    if ((await this.repo.writeoffCount()) > 0) return null;
+    return this.pullWriteoffs(from, this.today());
   }
 
   /**

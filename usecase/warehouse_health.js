@@ -131,7 +131,7 @@ class WarehouseHealth {
     const sent = { from_store: site };
     // Verification: of the warehouse's goods at the stores; at a store, of the goods it received.
     const checked = isWh ? { from_store: site } : { to_store: site };
-    const [uploads, pickSummary, checkSummary, byJobType, byStore, yetToVerify, remarks, boxLinesAll, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines, sites, extraLines, packingLines] = await Promise.all([
+    const [uploads, pickSummary, checkSummary, byJobType, byStore, yetToVerify, remarks, boxLinesAll, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines, sites, extraLines, packingLines, boxWriteoffs] = await Promise.all([
       this.repo.uploads(date, date),
       this.repo.jobBreakdown(date, date, ["report_type"], sent),
       this.repo.jobBreakdown(date, date, ["report_type"], { ...checked, report_type: "VERIFICATION" }),
@@ -152,6 +152,7 @@ class WarehouseHealth {
       // Store counted more than was sent (warehouse: at the stores it sent to; a store: at itself).
       this.repo.jobRows(date, date, { only: "extra", report_type: "VERIFICATION", ...checked }, 1000),
       this.repo.jobRows(date, date, { only: "short", report_type: "PACKING", ...sent }, 1000),
+      typeof this.repo.writeoffs === "function" ? this.repo.writeoffs(date, date, checked) : [],
     ]);
     const summary = [...pickSummary.filter((r) => r.report_type !== "VERIFICATION"), ...checkSummary];
     const boxLines = boxLinesAll.filter((l) => (l.from_store || WAREHOUSE) === site);
@@ -162,7 +163,7 @@ class WarehouseHealth {
     const boxChain = chain && chain.result ? chain.result.box : null;
     const stageChain = chain && chain.result ? { ...chain.result.stage, days_without_state: chain.days_without_state } : null;
     const chainStatus = chain ? { final: chain.final, status: chain.status, computed_at: chain.computed_at, progress: chain.progress, error: chain.error } : null;
-    const h = H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines, extraLines, packingLines });
+    const h = H.buildHealth({ chainStatus, boxChain, stageChain, date, uploads, summary, byJobType, byStore, yetToVerify, remarks, boxLines, repeats, trend, trendUploads, pickerWork, pickerMistakes, staffNames, writeoffLines, extraLines, packingLines, boxWriteoffs });
     const title = isWh ? "Received at the warehouse" : `Sent from ${H.title(site)}`;
     H.withSecondChain(h, other && other.result ? other.result : null, { title, direction: isWh ? "to" : "from", staffNames });
     await this.addPickers(h, staffNames);
