@@ -2227,6 +2227,7 @@ class Server {
         debit_notes: () => this.retailPilotDebitNoteSyncUsecase.running,
         grn: () => this.retailPilotGrnSyncUsecase.running,
         article_store_master: () => Boolean(this.articleStoreMasterUsecase.running),
+        suppliers: () => Boolean(this.retailPilotSupplierSyncUsecase.running),
       },
       startStockSync: (employeeId) => this.retailPilotStockSyncUsecase.startManual(employeeId),
       startGrnSync: (employeeId) => {
@@ -2254,6 +2255,26 @@ class Server {
           : run;
         logged().catch(() => {});
         return { started: true, msg: "Article Store Master build started" };
+      },
+      // Logged like the scheduled run (source "manual"), so the Distributors
+      // card on the RetailPilot Sync page shows it.
+      startSupplierSync: (employeeId) => {
+        if (this.retailPilotSupplierSyncUsecase.running) {
+          return { started: false, msg: "The distributor sync is already running" };
+        }
+        const run = async () => {
+          const r = await this.retailPilotSupplierSyncUsecase.run();
+          if (r.code !== 200) throw new Error(r.msg);
+          return r;
+        };
+        const logged = this.apiSyncLogger
+          ? this.apiSyncLogger.wrapCron("retailpilot_supplier_sync", "/retailpilot/supplier-sync", run, {
+              source: "manual",
+              employee_id: employeeId,
+            })
+          : run;
+        logged().catch(() => {});
+        return { started: true, msg: "Distributor sync started" };
       },
       permissions: this.permissions,
     });
@@ -2557,7 +2578,7 @@ class Server {
     // holding days kept), each product's supplier follows RetailPilot. On
     // unless RETAILPILOT_SUPPLIER_SYNC_ENABLED=false; POST
     // /product-distributors/retailpilot-sync runs it by hand either way.
-    if (String(process.env.RETAILPILOT_SUPPLIER_SYNC_ENABLED || "").toLowerCase() !== "false") {
+    if (require("./config/retailpilot").supplierSyncEnabled) {
       const runSupplierSync = async () => {
         const r = await this.retailPilotSupplierSyncUsecase.run({ scheduled: true });
         if (r.code !== 200) throw new Error(r.msg);

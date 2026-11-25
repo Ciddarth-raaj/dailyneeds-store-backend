@@ -72,6 +72,8 @@ module.exports = {
     String(process.env.RETAILPILOT_GRN_SYNC_ENABLED || "").toLowerCase() !== "false",
   grnOutletId: parseInt(process.env.RETAILPILOT_GRN_OUTLET_ID, 10) || 2,
   purchaseLookbackDays: Number.isInteger(lookback) && lookback >= 0 ? lookback : 3,
+  supplierSyncEnabled:
+    String(process.env.RETAILPILOT_SUPPLIER_SYNC_ENABLED || "").toLowerCase() !== "false",
   debitNoteSyncEnabled:
     String(process.env.RETAILPILOT_DEBIT_NOTE_SYNC_ENABLED || "").toLowerCase() !== "false",
   debitNoteLookbackDays:

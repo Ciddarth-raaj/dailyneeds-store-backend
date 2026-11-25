@@ -27,6 +27,7 @@ describe("GET /status", () => {
     { log_type: "retailpilot_purchase_sync", source: "manual", status: "success", created_at: "2026-11-25T22:19:00Z" },
     { log_type: "retailpilot_purchase_sync", source: "cron", status: "success", created_at: "2026-11-25T11:30:00Z" },
     { log_type: "product_sync", source: "manual", status: "success", created_at: "2026-11-20T03:43:00Z" },
+    { log_type: "retailpilot_supplier_sync", source: "cron", status: "success", created_at: "2026-11-26T04:30:00Z" },
     { log_type: "retailpilot_stock_sync", source: "cron", status: "success", created_at: "2026-11-25T00:32:00Z" },
   ];
   const repo = {
@@ -41,7 +42,7 @@ describe("GET /status", () => {
       "/retailpilot",
       retailpilotRoutes({
         apiSyncLogRepo: repo,
-        config: { grnSyncEnabled: true, stockSyncEnabled: true, purchaseSyncEnabled: true, debitNoteSyncEnabled: true, articleStoreMasterEnabled: false },
+        config: { grnSyncEnabled: true, stockSyncEnabled: true, purchaseSyncEnabled: true, debitNoteSyncEnabled: true, articleStoreMasterEnabled: false, supplierSyncEnabled: true },
         isRunning: {},
       }).getRouter()
     );
@@ -72,6 +73,14 @@ describe("GET /status", () => {
     const p = (await status()).find((s) => s.key === "products");
     assert.equal(p.last_run.source, "manual");
     assert.equal(p.last_scheduled.at, "2026-11-25T00:32:00Z");
+  });
+
+  it("distributors: a card with the 10:00 / 12:30 / 4:00 schedule", async () => {
+    const d = (await status()).find((s) => s.key === "suppliers");
+    assert.equal(d.label, "Distributors");
+    assert.equal(d.schedule, "Daily 10:00 AM, 12:30 PM, 4:00 PM");
+    assert.equal(d.last_scheduled.at, "2026-11-26T04:30:00Z");
+    assert.equal(d.permission, "add_product_distributor");
   });
 
   it("a sync that is switched off has no next run", async () => {

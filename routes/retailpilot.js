@@ -5,7 +5,7 @@ const { getNextCronRun } = require("../utils/api_sync_log_helpers");
 /**
  * The RetailPilot Sync page: when each RetailPilot sync last ran, whether it
  * is running now, and manual starts for the stock & price sync, the GRN
- * sync and the Article Store Master build. The product, purchase and debit
+ * sync, the Article Store Master build and the supplier (distributor) sync. The product, purchase and debit
  * note syncs keep their own endpoints (POST /product/sync,
  * POST /purchase/retailpilot-sync, POST /debit-note/retailpilot-sync).
  */
@@ -67,6 +67,15 @@ const SYNCS = [
     crons: (c) => (c.articleStoreMasterEnabled ? ["45 5 * * *"] : []),
     permission: "view_products",
   },
+  {
+    key: "suppliers",
+    log_type: "retailpilot_supplier_sync",
+    label: "Distributors",
+    description: "Suppliers from RetailPilot into Product Distributors (buyer and holding days kept), each product's supplier",
+    schedule: (c) => (c.supplierSyncEnabled ? "Daily 10:00 AM, 12:30 PM, 4:00 PM" : "Not scheduled"),
+    crons: (c) => (c.supplierSyncEnabled ? ["0 10 * * *", "30 12 * * *", "0 16 * * *"] : []),
+    permission: "add_product_distributor",
+  },
 ];
 
 /** The soonest next run (ISO) of a list of cron expressions, IST; null if none. */
@@ -79,7 +88,8 @@ function nextRun(crons, from = new Date()) {
 class RetailPilotRoutes {
   /**
    * @param deps { apiSyncLogRepo, config, isRunning: { [key]: () => boolean },
-   *   startStockSync / startGrnSync / startArticleStoreMaster: (employeeId) => { started, msg },
+   *   startStockSync / startGrnSync / startArticleStoreMaster / startSupplierSync:
+   *   (employeeId) => { started, msg },
    *   permissions }
    */
   constructor(deps) {
@@ -143,6 +153,7 @@ class RetailPilotRoutes {
     startRoute("/stock-sync", "sync_retailpilot_stock", (id) => this.deps.startStockSync(id));
     startRoute("/grn-sync", "sync_retailpilot_purchases", (id) => this.deps.startGrnSync(id));
     startRoute("/article-store-master-sync", "view_products", (id) => this.deps.startArticleStoreMaster(id));
+    startRoute("/supplier-sync", "add_product_distributor", (id) => this.deps.startSupplierSync(id));
   }
 
   getRouter() {
