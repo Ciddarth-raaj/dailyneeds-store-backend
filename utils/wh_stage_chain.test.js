@@ -215,3 +215,16 @@ test("a box written off at loading takes its goods out of 'packed, not yet loade
   assert.deepStrictEqual([l.from_earlier, l.moved_on, l.stands, c.stages.loaded], [120, 120, 0, 0]);
   assert.ok(adds(l));
 });
+
+test("gold winner: another document's extra packing does not 'pack' a stuck line (linked lines stay on their own document)", () => {
+  const P = (d, doc, job, qty) => J("PICKING", d, { stage_id: doc, job_id: job, article_id: 103479, to_store: "moolakulam", qty });
+  const K = (d, doc, pick, i) => J("PACKING", d, { stage_id: doc, job_id: `${pick}_k${i}`, picking_job: pick, article_id: 103479, to_store: "moolakulam", qty: 10 });
+  const jobs = [P("2026-11-05", "pCK8q6adQLCt", "job_18803959", 200)];
+  for (let i = 0; i < 19; i += 1) jobs.push(K("2026-11-05", "pCK8q6adQLCt", "job_18803959", i)); // 190 of 200 packed; the 20th still open
+  jobs.push(P("2026-11-12", "OTHER", "job_p2", 120));
+  for (let i = 0; i < 13; i += 1) jobs.push(K("2026-11-12", "OTHER", "job_p2", i)); // 130 packed of 120 picked
+  const c = S.buildStageChain({ date: "2026-11-24", jobs, boxes: [] });
+  const p = g(c, "to_pack");
+  assert.deepStrictEqual(p.list.map((l) => [l.stage_id, l.qty, l.days]), [["pCK8q6adQLCt", 10, 19]]);
+  assert.strictEqual(p.stuck, 1);
+});

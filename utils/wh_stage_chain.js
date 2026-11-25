@@ -16,7 +16,10 @@
  *      barcodes are reused on every delivery and loading is often the day
  *      after packing, so the job link is the only exact one;
  *   2. else the same document + article + store, oldest first;
- *   3. else any document of that article + store, oldest first. What the next stage records with nothing waiting for it at all
+ *   3. else - only for a line with no job link (pulled before links were
+ *      kept) - any document of that article + store, oldest first. A linked
+ *      line never takes another document's goods.
+ * What the next stage records with nothing waiting for it at all
  * "jumped" a stage. Goods that stay put (from = to store) never move on and
  * are left out. Loaded -> Unloaded is followed by box in utils/wh_box_chain.js.
  *
@@ -98,7 +101,11 @@ function follow(ins, outs, cutoff) {
       if (list) need = take(list, o, need);
     }
     if (need > 0 && o.stage_id && layers.has(exact(o))) need = take(layers.get(exact(o)), o, need);
-    if (need > 0 && byLane.has(lane(o))) need = take(byLane.get(lane(o)), o, need);
+    // Any document of the article + store only for lines that carry no job link (pulled before
+    // links were kept). A linked line's extra must not eat another document's goods: it took the
+    // oldest - the really stuck ones - off the list (gold winner 1l, pCK8q6adQLCt, 10 left 19 days).
+    const linked = (o.links || []).length > 0;
+    if (need > 0 && !linked && byLane.has(lane(o))) need = take(byLane.get(lane(o)), o, need);
     if (need > 0) jumped.push({ ...o, qty: need });
   }
   if (before === null) before = snapshot();
