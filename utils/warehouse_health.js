@@ -144,12 +144,12 @@ function buildHealth(args) {
  *  - picked 0: picking write-off lines where nothing at all was picked.
  */
 function withLines(h, { extraLines, packingLines, boxWriteoffs, staffNames }) {
-  // Boxes written off at loading in RetailPilot (outside the app's normal flow): every one is an incident.
+  // Boxes written off at loading in RetailPilot (done on request): listed, so the write-off is seen.
   const wo = (boxWriteoffs || []).map((w) => ({ ...w, value: r2(n(w.qty) * n(w.nlc)) }));
   const boxes = new Set(wo.map((w) => `${w.box_id}|${w.job_id}`)).size;
   h.tiles.writeoff_boxes = { boxes, qty: r2(wo.reduce((t, w) => t + n(w.qty), 0)), value: r2(wo.reduce((t, w) => t + w.value, 0)), list: wo.slice(0, 300) };
   if (wo.length) {
-    h.need_you.push({ key: "writeoff_boxes", tone: "red", text: `Written off outside the app: ${boxes} box${boxes === 1 ? "" : "es"} at loading (${fmt(h.tiles.writeoff_boxes.qty)} qty · ${rupees(h.tiles.writeoff_boxes.value)}) - trace and escalate` });
+    h.need_you.push({ key: "writeoff_boxes", tone: "amber", text: `Boxes written off at loading: ${boxes} box${boxes === 1 ? "" : "es"} (${fmt(h.tiles.writeoff_boxes.qty)} qty · ${rupees(h.tiles.writeoff_boxes.value)})` });
   }
   const extras = (extraLines || [])
     .map((l) => {
