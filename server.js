@@ -1604,13 +1604,14 @@ class Server {
     // SPECTRA address, same key), stock from runway.
     // Suppliers from RetailPilot (masterhub vendors) replace the old DNDS /
     // GoFrugal distributor list; each product's supplier follows RetailPilot.
+    const retailPilotSuppliersRepo = require("./repository/retailpilot_suppliers")(this.mysql.connection);
     this.retailPilotSupplierSyncUsecase = require("./usecase/retailpilot_supplier_sync")(
       require("./services/retailpilot_spectra")({
         ...require("./config/retailpilot"),
         baseUrl: require("./config/retailpilot").masterhubBaseUrl,
         product: require("./config/retailpilot").masterhubProduct,
       }),
-      require("./repository/retailpilot_suppliers")(this.mysql.connection)
+      retailPilotSuppliersRepo
     );
     this.articleStoreMasterUsecase = require("./usecase/article_store_master")(
       require("./services/retailpilot_spectra")({
@@ -1618,7 +1619,9 @@ class Server {
         baseUrl: require("./config/retailpilot").masterhubBaseUrl,
         product: require("./config/retailpilot").masterhubProduct,
       }),
-      retailPilotSpectra
+      retailPilotSpectra,
+      // buyer_name column: the buyer set on each supplier in DNDS.
+      { buyers: () => retailPilotSuppliersRepo.buyerNames() }
     );
     this.retailPilotArticleSyncUsecase = require("./usecase/retailpilot_article_sync")(
       retailPilotSpectra,
@@ -2560,7 +2563,9 @@ class Server {
     // 6:45 AM (Asia/Kolkata) - suppliers from RetailPilot: masterhub's
     // vendors become the supplier list (buyer and holding days kept), each
     // product's supplier follows RetailPilot. After the 6:00 article sync, so
-    // a product created this morning gets its supplier today. On unless
+    // a product created this morning gets its supplier today. Again at
+    // 10:00 AM, 12:30 PM and 4:00 PM so suppliers added in RetailPilot during
+    // the day reach DNDS (and can be given a buyer) the same day. On unless
     // RETAILPILOT_SUPPLIER_SYNC_ENABLED=false; POST
     // /product-distributors/retailpilot-sync runs it by hand either way.
     if (String(process.env.RETAILPILOT_SUPPLIER_SYNC_ENABLED || "").toLowerCase() !== "false") {
@@ -2569,14 +2574,13 @@ class Server {
         if (r.code !== 200) throw new Error(r.msg);
         return r;
       };
-      this.cronService.register(
-        "retailpilot_supplier_sync",
-        "45 6 * * *",
-        this.apiSyncLogger
-          ? this.apiSyncLogger.wrapCron("retailpilot_supplier_sync", "/retailpilot/supplier-sync-run", runSupplierSync)
-          : runSupplierSync,
-        { preventOverlap: true }
-      );
+      const supplierSyncJob = this.apiSyncLogger
+        ? this.apiSyncLogger.wrapCron("retailpilot_supplier_sync", "/retailpilot/supplier-sync-run", runSupplierSync)
+        : runSupplierSync;
+      // Same job name on every schedule: one overlap guard covers them all.
+      for (const schedule of ["45 6 * * *", "0 10 * * *", "30 12 * * *", "0 16 * * *"]) {
+        this.cronService.register("retailpilot_supplier_sync", schedule, supplierSyncJob, { preventOverlap: true });
+      }
     }
 
     // 5:45 AM (Asia/Kolkata) - build the Article Store Master report (the

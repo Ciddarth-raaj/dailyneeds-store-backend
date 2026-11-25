@@ -28,6 +28,20 @@ class RetailPilotSuppliersRepository {
     this.db = db;
   }
 
+  /** DNDS's buyer per supplier: [{ cid, buyer_name }] (read-only). */
+  async buyerNames() {
+    return new Promise((resolve, reject) =>
+      this.db.query(
+        `SELECT pd.cid, ne.employee_name AS buyer_name
+         FROM ${BUYERS} pd
+         JOIN new_employee ne ON ne.employee_id = pd.buyer_id
+         WHERE pd.cid IS NOT NULL`,
+        [],
+        (err, r) => (err ? reject(err) : resolve(r || []))
+      )
+    );
+  }
+
   /** How many RetailPilot suppliers DNDS has (0 until the first switch). */
   async countRetailPilotSuppliers() {
     const rows = await new Promise((resolve, reject) =>

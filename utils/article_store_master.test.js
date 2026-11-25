@@ -38,6 +38,11 @@ const DATA = {
     { article_id: 42953, store_id: "dn1slug", supplier_id: "10002" },
     { article_id: 42953, store_id: "whslug", supplier_id: "10003" },
   ],
+  buyers: [
+    { cid: "RP10001", buyer_name: "C Saravanan" },
+    { cid: "RP10002", buyer_name: "Prashanth D" },
+    { cid: "RP10003", buyer_name: null },
+  ],
   vendors: [
     { id: "10001", name: "akshaya agencies pvt ltd", trade_name: "akshaya agencies (zyro)" },
     { id: "10002", name: "x", trade_name: "dn1 supplier" },
@@ -116,6 +121,13 @@ describe("the rows", () => {
     assert.equal(byId[900].supplier_name, "");
   });
 
+  it("buyer: DNDS's buyer of the shown supplier; blank when none is set", () => {
+    assert.equal(byId[51156].buyer_name, "C Saravanan");
+    assert.equal(byId[42953].buyer_name, "", "the warehouse supplier has no buyer; the store supplier's is not borrowed");
+    assert.equal(byId[900].buyer_name, "");
+    assert.equal(buildReport({ ...DATA, buyers: undefined }).rows[0].buyer_name, "", "no buyers given: blank");
+  });
+
   it("a repack shows its bulk item, its name and the quantity; others 0 as in the old report", () => {
     assert.deepEqual([byId[900].purchase_item, byId[900].purchase_item_name, byId[900].repackage_conversion], [901, "sugar bulk 50kg", 1]);
     assert.deepEqual([byId[51156].purchase_item, byId[51156].purchase_item_name, byId[51156].repackage_conversion], [0, "", 0]);
@@ -131,7 +143,7 @@ describe("the rows", () => {
   it("the columns are in the old report's order, without MRP, cost or sale rate", () => {
     const headers = report.columns.map((c) => c.header);
     assert.deepEqual(headers, [
-      "article_id", "article_name", "supplier_name", "brand_name", "department_name", "category_name", "subcategory_name",
+      "article_id", "article_name", "supplier_name", "buyer_name", "brand_name", "department_name", "category_name", "subcategory_name",
       "allow_purchase", "purchase_type", "preparation_type", "repackage_conversion", "purchase_item", "purchase_item_name", "subcategory_id", "Hsn code", "Tax",
       "Dn1", "Dn2", "Wh", "Total", "Pur uom", "Supply uom",
     ]);
@@ -194,7 +206,7 @@ describe("the file", () => {
 
   it("builds a real .xlsx named for the India day, with the header and every row", async () => {
     const calls = [];
-    const r = reportFactory(fakeClient(DATA, calls), fakeClient(DATA, calls), { dir, now: () => new Date("2026-10-22T00:30:00Z") });
+    const r = reportFactory(fakeClient(DATA, calls), fakeClient(DATA, calls), { dir, now: () => new Date("2026-10-22T00:30:00Z"), buyers: async () => DATA.buyers });
     const res = await r.build();
     assert.equal(res.code, 200, res.msg);
     assert.equal(res.file, "article-store-master-2026-10-22.xlsx", "00:30 UTC is 06:00 IST on the 22nd");
@@ -205,10 +217,11 @@ describe("the file", () => {
     await wb.xlsx.readFile(path.join(dir, res.file));
     const ws = wb.worksheets[0];
     assert.equal(ws.getRow(1).getCell(1).value, "article_id");
-    assert.equal(ws.getRow(1).getCell(17).value, "Dn1");
+    assert.equal(ws.getRow(1).getCell(18).value, "Dn1");
     assert.equal(ws.getRow(2).getCell(2).value, "zyro zero sugar tonic water drink 250ml tin");
-    assert.equal(ws.getRow(2).getCell(20).value, 36.5);
-    assert.equal(ws.getRow(2).getCell(8).value, "true", "allow_purchase");
+    assert.equal(ws.getRow(2).getCell(21).value, 36.5);
+    assert.equal(ws.getRow(2).getCell(4).value, "C Saravanan", "buyer_name");
+    assert.equal(ws.getRow(2).getCell(9).value, "true", "allow_purchase");
     assert.equal(ws.rowCount, 5);
     assert.equal(r.status().latest.file, res.file);
   });

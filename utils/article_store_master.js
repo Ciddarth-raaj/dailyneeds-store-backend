@@ -4,7 +4,7 @@
  * laid out like the old system's article_store_master sheet.
  *
  * Not in it for now, by the owner's decision: MRP, net cost, sale rate. Not
- * in it: buyer and status - masterhub has no attribute for either; allow
+ * in it: status - masterhub has no attribute for it; allow
  * negative - not wanted. Allow purchase and purchase type are masterhub
  * article attributes (derived.article_store_attributes: purchase_allowed,
  * purchase_type).
@@ -17,6 +17,11 @@
  *              constants.tax_rates
  *   runway     public.batch_stock_positions + public.inventory_batches,
  *              main stock location only (the sellable stock)
+ *
+ *
+ * Buyer is DNDS's own, not RetailPilot's: the buyer set on the shown
+ * supplier(s) on the Product Distributors page (product_distributor.buyer_id
+ * by cid "RP<vendor id>" -> new_employee), passed in as data.buyers.
  *
  * Every query is plain and ordered, so SPECTRA's paging is stable; joining
  * them happens here, in buildReport.
@@ -133,18 +138,34 @@ function storeColumns(stores, stockRows) {
 }
 
 /**
- * The supplier(s) shown for an article: the all-stores rule (store_id NULL)
- * when there is one, else the warehouse's, else every store's; names
- * de-duplicated, joined with ", ".
+ * The supplier rows shown for an article: the all-stores rule (store_id NULL)
+ * when there is one, else the warehouse's, else every store's.
  */
-function supplierNames(rows, vendorName, warehouseSlugs) {
-  if (!rows || !rows.length) return "";
+function shownSupplierRows(rows, warehouseSlugs) {
+  if (!rows || !rows.length) return [];
   const all = rows.filter((r) => r.store_id == null || str(r.store_id) === "");
   const wh = rows.filter((r) => warehouseSlugs.has(str(r.store_id)));
-  const pick = all.length ? all : wh.length ? wh : rows;
+  return all.length ? all : wh.length ? wh : rows;
+}
+
+/** Names of the shown supplier(s), de-duplicated, joined with ", ". */
+function supplierNames(rows, vendorName, warehouseSlugs) {
   const names = [];
-  for (const r of pick) {
+  for (const r of shownSupplierRows(rows, warehouseSlugs)) {
     const name = vendorName.get(str(r.supplier_id)) || str(r.supplier_id);
+    if (name && !names.includes(name)) names.push(name);
+  }
+  return names.join(", ");
+}
+
+/**
+ * Buyer(s) of the shown supplier(s): DNDS's buyer for cid "RP<vendor id>",
+ * de-duplicated, joined with ", ". No buyer set: blank.
+ */
+function buyerNames(rows, buyerOfCid, warehouseSlugs) {
+  const names = [];
+  for (const r of shownSupplierRows(rows, warehouseSlugs)) {
+    const name = buyerOfCid.get(`RP${str(r.supplier_id)}`);
     if (name && !names.includes(name)) names.push(name);
   }
   return names.join(", ");
@@ -179,6 +200,7 @@ const COLUMNS_BEFORE_STOCK = [
   { key: "article_id", header: "article_id", width: 10 },
   { key: "article_name", header: "article_name", width: 50 },
   { key: "supplier_name", header: "supplier_name", width: 36 },
+  { key: "buyer_name", header: "buyer_name", width: 22 },
   { key: "brand_name", header: "brand_name", width: 20 },
   { key: "department_name", header: "department_name", width: 22 },
   { key: "category_name", header: "category_name", width: 24 },
@@ -200,7 +222,8 @@ const COLUMNS_AFTER_STOCK = [
 
 /**
  * @param data { articles, taxonomy, suppliers, vendors, taxRates,
- *   preparation, stores, stock } - the query results above
+ *   preparation, stores, stock } - the query results above - and buyers:
+ *   [{ cid, buyer_name }] from DNDS
  * @returns { columns: [{key, header, width}], rows: [{...}], stores, totals }
  */
 function buildReport(data) {
@@ -229,6 +252,7 @@ function buildReport(data) {
     return { hsn, tax: (hsnTax.get(hsn) || []).map(taxLabel).join(" / ") };
   };
   const vendorName = new Map((data.vendors || []).map((v) => [str(v.id), str(v.trade_name) || str(v.name)]));
+  const buyerOfCid = new Map((data.buyers || []).filter((b) => str(b.buyer_name)).map((b) => [str(b.cid), str(b.buyer_name)]));
   const articleName = new Map(articles.map((a) => [str(a.article_id), str(a.article_name)]));
 
   const taxonomy = new Map();
@@ -287,6 +311,7 @@ function buildReport(data) {
       article_id: intOrNull(a.article_id) ?? id,
       article_name: str(a.article_name),
       supplier_name: supplierNames(suppliersOf.get(id), vendorName, warehouseSlugs),
+      buyer_name: buyerNames(suppliersOf.get(id), buyerOfCid, warehouseSlugs),
       brand_name: t.brand ? t.brand.name : "",
       department_name: t.department ? t.department.name : "",
       category_name: t.category ? t.category.name : "",
@@ -333,6 +358,7 @@ module.exports = {
   levelOf,
   storeColumns,
   supplierNames,
+  buyerNames,
   attributeValue,
   buildReport,
 };

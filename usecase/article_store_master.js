@@ -17,14 +17,17 @@ function istDay(date) {
  * The Article Store Master report (utils/article_store_master.js): built once
  * a morning by the cron and on demand by "Refresh now", kept as an .xlsx on
  * disk so a download is instant. Read-only towards RetailPilot and the
- * database - it writes nothing but its own files.
+ * database (it reads only the suppliers' buyers) - it writes nothing but its own files.
  */
 class ArticleStoreMaster {
   /**
    * @param masterhub SPECTRA client for masterhub (catalogue)
    * @param runway    SPECTRA client for runway (stock)
+   * @param buyers    optional async () => [{ cid, buyer_name }] - DNDS's
+   *                  buyer per supplier (Product Distributors page)
    */
-  constructor(masterhub, runway, { dir = DEFAULT_DIR, now = () => new Date() } = {}) {
+  constructor(masterhub, runway, { dir = DEFAULT_DIR, now = () => new Date(), buyers = null } = {}) {
+    this.buyers = buyers;
     this.masterhub = masterhub;
     this.runway = runway;
     this.dir = dir;
@@ -85,6 +88,7 @@ class ArticleStoreMaster {
         data[key] = await this.masterhub.queryAll(query, 2000);
       }
       data.stock = await this.runway.queryAll(RUNWAY_QUERIES.stock, 2000);
+      data.buyers = this.buyers ? await this.buyers() : [];
       if (!data.articles.length) throw new Error("masterhub returned no articles - report not replaced");
 
       const report = buildReport(data);
