@@ -1640,9 +1640,6 @@ class Server {
     this.hqOffersUsecase = require("./usecase/hq_offers")(
       this.hqOffersRepo
     );
-    this.apiSyncLogUsecase = require("./usecase/api_sync_log")(
-      this.apiSyncLogRepo
-    );
     const ApiSyncLogger = require("./utils/api_sync_logger");
     this.apiSyncLogger = new ApiSyncLogger(this.apiSyncLogRepo);
     this.synker = require("./services/synker")(
@@ -2334,9 +2331,6 @@ class Server {
     const priceCheckerRouter = require("./routes/price_checker")(
       this.priceCheckerUsecase
     );
-    const apiSyncLogRouter = require("./routes/api_sync_log")(
-      this.apiSyncLogUsecase
-    );
     const hqOffersRouter = require("./routes/hq_offers")(
       this.hqOffersUsecase
     );
@@ -2497,7 +2491,6 @@ class Server {
     app.use("/purchase-ref", purchaseRefRouter.getRouter());
     app.use("/stock-holding-report", stockHoldingReportRouter.getRouter());
     app.use("/price-checker", priceCheckerRouter.getRouter());
-    app.use("/api-sync-log", apiSyncLogRouter.getRouter());
     app.use("/hq-offers", hqOffersRouter.getRouter());
 
     app.use(require("./middlewares/errorHandler"));
