@@ -3,8 +3,10 @@
  * its catalogue details (masterhub) and its stock at every store (runway),
  * laid out like the old system's article_store_master sheet.
  *
- * Not in it for now, by the owner's decision: MRP, net cost, sale rate. Not
- * in it: status - masterhub has no attribute for it; allow
+ * MRP, net cost and selling price are the article's LATEST batch's (runway
+ * RUNWAY_QUERIES.latestPrices): the newest batch by created_at, or by batch
+ * id where batches carry no created_at. Not in it: status - masterhub has
+ * no attribute for it; allow
  * negative - not wanted. Allow purchase and purchase type are masterhub
  * article attributes (derived.article_store_attributes: purchase_allowed,
  * purchase_type).
@@ -78,6 +80,25 @@ SELECT s.slug, s.shortname, s.name, s.type, s.is_active
 FROM public.stores s
 ORDER BY s.slug`,
 };
+
+/**
+ * One row per article: its newest batch's MRP, net landing cost and selling
+ * price (the all-stores in-store retail price, else the batch's default).
+ * `byCreatedAt` false orders by batch id instead, for a runway whose batches
+ * have no created_at.
+ */
+function latestPricesQuery(byCreatedAt = true) {
+  return `
+SELECT DISTINCT ON (b.article_id)
+  b.article_id, b.batch_id, b.mrp, b.net_landing_cost,
+  COALESCE(si.selling_price, sp.selling_price) AS selling_price
+FROM public.inventory_batches b
+LEFT JOIN public.batch_selling_price sp ON sp.batch_id = b.batch_id
+     AND sp.channel_type IS NULL AND sp.customer_type IS NULL AND sp.store_id IS NULL
+LEFT JOIN public.batch_selling_price si ON si.batch_id = b.batch_id
+     AND si.channel_type = 'instore' AND si.customer_type = 'retail' AND si.store_id IS NULL
+ORDER BY b.article_id, ${byCreatedAt ? "b.created_at DESC NULLS LAST, " : ""}b.batch_id DESC`;
+}
 
 const RUNWAY_QUERIES = {
   // Main location only, by the owner's decision: other locations (damage,
@@ -234,6 +255,9 @@ const COLUMNS_BEFORE_STOCK = [
   { key: "subcategory_id", header: "subcategory_id", width: 12 },
   { key: "hsn_code", header: "Hsn code", width: 12 },
   { key: "tax", header: "Tax", width: 10 },
+  { key: "mrp", header: "MRP", width: 10 },
+  { key: "net_cost", header: "Net cost", width: 10 },
+  { key: "selling_price", header: "Selling price", width: 12 },
 ];
 const COLUMNS_AFTER_STOCK = [
   { key: "pur_uom", header: "Pur uom", width: 10 },
@@ -242,7 +266,7 @@ const COLUMNS_AFTER_STOCK = [
 
 /**
  * @param data { articles, taxonomy, suppliers, vendors, taxRates,
- *   preparation, stores, stock } - the query results above - and buyers:
+ *   preparation, stores, stock, latestPrices } - the query results above - and buyers:
  *   [{ cid, buyer_name }] from DNDS
  * @returns { columns: [{key, header, width}], rows: [{...}], stores, totals }
  */
@@ -273,6 +297,8 @@ function buildReport(data) {
   };
   const vendorName = new Map((data.vendors || []).map((v) => [str(v.id), str(v.trade_name) || str(v.name)]));
   const buyerOfCid = new Map((data.buyers || []).filter((b) => str(b.buyer_name)).map((b) => [str(b.cid), str(b.buyer_name)]));
+  const priceOf = new Map((data.latestPrices || []).map((r) => [str(r.article_id), r]));
+  const money = (v) => (v == null || str(v) === "" ? null : Math.round(num(v) * 100) / 100);
   const articleName = new Map(articles.map((a) => [str(a.article_id), str(a.article_name)]));
 
   const taxonomy = new Map();
@@ -346,6 +372,9 @@ function buildReport(data) {
       subcategory_id: t.subcategory ? t.subcategory.id : null,
       hsn_code: hsnAndTax(a).hsn,
       tax: hsnAndTax(a).tax,
+      mrp: money(priceOf.get(id)?.mrp),
+      net_cost: money(priceOf.get(id)?.net_landing_cost),
+      selling_price: money(priceOf.get(id)?.selling_price),
     };
     // Numbers stay numbers in the sheet: a purchase item / conversion with
     // one line is written as that number, several as text "a; b".
@@ -375,6 +404,7 @@ function buildReport(data) {
 module.exports = {
   MASTERHUB_QUERIES,
   RUNWAY_QUERIES,
+  latestPricesQuery,
   mainStockFromBatches,
   levelOf,
   storeColumns,

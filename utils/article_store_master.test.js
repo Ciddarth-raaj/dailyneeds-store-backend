@@ -14,7 +14,7 @@ const http = require("http");
 const express = require("express");
 const ExcelJS = require("exceljs");
 
-const { buildReport, storeColumns, levelOf, attributeValue, MASTERHUB_QUERIES, RUNWAY_QUERIES } = require("./article_store_master");
+const { buildReport, storeColumns, levelOf, attributeValue, MASTERHUB_QUERIES, RUNWAY_QUERIES, latestPricesQuery } = require("./article_store_master");
 const reportFactory = require("../usecase/article_store_master");
 const routesFactory = require("../routes/article_store_master");
 const buildPermissions = require("../middlewares/permissions");
@@ -37,6 +37,10 @@ const DATA = {
     { article_id: 51156, store_id: null, supplier_id: "10001" },
     { article_id: 42953, store_id: "dn1slug", supplier_id: "10002" },
     { article_id: 42953, store_id: "whslug", supplier_id: "10003" },
+  ],
+  latestPrices: [
+    { article_id: 51156, batch_id: "b9", mrp: "40", net_landing_cost: 28.456, selling_price: 38 },
+    { article_id: 900, batch_id: "b2", mrp: 55, net_landing_cost: null, selling_price: null },
   ],
   buyers: [
     { cid: "RP10001", buyer_name: "C Saravanan" },
@@ -140,14 +144,26 @@ describe("the rows", () => {
     assert.deepEqual([byId[901]["stock:dn1slug"], byId[901].total], [0, 0]);
   });
 
-  it("the columns are in the old report's order, without MRP, cost or sale rate", () => {
+  it("the columns: the old report's order, with the latest MRP, net cost and selling price after Tax", () => {
     const headers = report.columns.map((c) => c.header);
     assert.deepEqual(headers, [
       "article_id", "article_name", "supplier_name", "buyer_name", "brand_name", "department_name", "category_name", "subcategory_name",
       "allow_purchase", "purchase_type", "preparation_type", "repackage_conversion", "purchase_item", "purchase_item_name", "subcategory_id", "Hsn code", "Tax",
+      "MRP", "Net cost", "Selling price",
       "Dn1", "Dn2", "Wh", "Total", "Pur uom", "Supply uom",
     ]);
-    assert.ok(!headers.some((h) => /mrp|cost|sale_rate/i.test(h)));
+  });
+
+  it("MRP / net cost / selling price: the latest batch's, 2 decimals; none known: blank", () => {
+    assert.deepEqual([byId[51156].mrp, byId[51156].net_cost, byId[51156].selling_price], [40, 28.46, 38]);
+    assert.deepEqual([byId[900].mrp, byId[900].net_cost, byId[900].selling_price], [55, null, null]);
+    assert.deepEqual([byId[901].mrp, byId[901].net_cost, byId[901].selling_price], [null, null, null]);
+  });
+
+  it("the latest-price query: one row per article, newest batch first", () => {
+    assert.match(latestPricesQuery(true), /DISTINCT ON \(b\.article_id\)/);
+    assert.match(latestPricesQuery(true), /b\.created_at DESC NULLS LAST, b\.batch_id DESC/);
+    assert.doesNotMatch(latestPricesQuery(false), /created_at/);
   });
 
   it("allow purchase and purchase type: the article-wide value, else the warehouse's, else the stores' if they agree", () => {
@@ -193,6 +209,7 @@ const fakeClient = (byQuery, calls) => ({
     for (const [key, query] of Object.entries({ ...MASTERHUB_QUERIES, ...RUNWAY_QUERIES })) {
       if (q === query) return byQuery[key];
     }
+    if (q === latestPricesQuery(true) || q === latestPricesQuery(false)) return byQuery.latestPrices || [];
     throw new Error("unexpected query");
   },
 });
@@ -220,16 +237,44 @@ describe("the file", () => {
   });
   after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
+  it("prices: falls back to batch id order; if that fails too, the report is built with blank prices", async () => {
+    for (const failures of [1, 2]) {
+      const own = fs.mkdtempSync(path.join(os.tmpdir(), "asm-prices-"));
+      let n = 0;
+      const runway = {
+        isConfigured: () => true,
+        queryAll: async (q) => {
+          if (q === RUNWAY_QUERIES.stock) return DATA.stock;
+          n += 1;
+          if (n <= failures) throw new Error("column b.created_at does not exist");
+          return DATA.latestPrices;
+        },
+      };
+      const r = reportFactory(fakeClient(DATA, []), runway, { dir: own, now: () => new Date("2026-10-24T00:30:00Z") });
+      const res = await r.build();
+      assert.equal(res.code, 200, res.msg);
+      if (failures === 1) assert.equal(res.prices_error, undefined);
+      else assert.match(r.status().prices_error, /created_at/);
+      fs.rmSync(own, { recursive: true, force: true });
+    }
+  });
+
   it("given the stock sync's batch rows, it does not read runway's stock again", async () => {
     const calls = [];
-    const runway = { isConfigured: () => false, queryAll: async () => { throw new Error("runway must not be read"); } };
+    const runway = {
+      isConfigured: () => true,
+      queryAll: async (q) => {
+        if (q === RUNWAY_QUERIES.stock) throw new Error("runway stock must not be read again");
+        return DATA.latestPrices;
+      },
+    };
     const own = fs.mkdtempSync(path.join(os.tmpdir(), "asm-batches-"));
     const r = reportFactory(fakeClient(DATA, calls), runway, { dir: own, now: () => new Date("2026-10-23T00:30:00Z") });
     const batches = DATA.stock.map((x) => ({ ...x, stock_location: "main" }));
     const res = await r.build({ stockBatches: batches });
     assert.equal(res.code, 200, res.msg);
     assert.equal(res.stock_from, "stock_sync");
-    assert.equal(calls.length, Object.keys(MASTERHUB_QUERIES).length, "masterhub only");
+    assert.equal(calls.length, Object.keys(MASTERHUB_QUERIES).length, "masterhub; runway only for prices");
     fs.rmSync(own, { recursive: true, force: true });
   });
 
@@ -240,15 +285,16 @@ describe("the file", () => {
     assert.equal(res.code, 200, res.msg);
     assert.equal(res.file, "article-store-master-2026-10-22.xlsx", "00:30 UTC is 06:00 IST on the 22nd");
     assert.equal(res.rows, 4);
-    assert.equal(calls.length, Object.keys(MASTERHUB_QUERIES).length + 1);
+    assert.equal(calls.length, Object.keys(MASTERHUB_QUERIES).length + 2, "catalogue, stock and latest prices");
 
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.readFile(path.join(dir, res.file));
     const ws = wb.worksheets[0];
     assert.equal(ws.getRow(1).getCell(1).value, "article_id");
-    assert.equal(ws.getRow(1).getCell(18).value, "Dn1");
+    assert.equal(ws.getRow(1).getCell(21).value, "Dn1");
     assert.equal(ws.getRow(2).getCell(2).value, "zyro zero sugar tonic water drink 250ml tin");
-    assert.equal(ws.getRow(2).getCell(21).value, 36.5);
+    assert.equal(ws.getRow(2).getCell(24).value, 36.5);
+    assert.equal(ws.getRow(2).getCell(18).value, 40, "MRP");
     assert.equal(ws.getRow(2).getCell(4).value, "C Saravanan", "buyer_name");
     assert.equal(ws.getRow(2).getCell(9).value, "true", "allow_purchase");
     assert.equal(ws.rowCount, 5);

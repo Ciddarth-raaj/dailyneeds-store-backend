@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const ExcelJS = require("exceljs");
 const logger = require("../utils/logger");
-const { MASTERHUB_QUERIES, RUNWAY_QUERIES, buildReport, mainStockFromBatches } = require("../utils/article_store_master");
+const { MASTERHUB_QUERIES, RUNWAY_QUERIES, buildReport, mainStockFromBatches, latestPricesQuery } = require("../utils/article_store_master");
 
 const DEFAULT_DIR = path.join(__dirname, "..", "tmp", "reports", "article-store-master");
 const KEEP_FILES = 7;
@@ -64,6 +64,7 @@ class ArticleStoreMaster {
       latest: latest ? { file: latest.file, day: latest.day, built_at: latest.built_at, size: latest.size } : null,
       last_error: this.lastError,
       last_error_at: this.lastErrorAt,
+      prices_error: this.pricesError || null,
     };
   }
 
@@ -84,8 +85,8 @@ class ArticleStoreMaster {
   async _build(stockBatches) {
     const started = Date.now();
     try {
-      const clients = stockBatches ? [["masterhub", this.masterhub]] : [["masterhub", this.masterhub], ["runway", this.runway]];
-      for (const [name, client] of clients) {
+      // Runway is read either way now, for the latest prices.
+      for (const [name, client] of [["masterhub", this.masterhub], ["runway", this.runway]]) {
         if (!client.isConfigured()) throw new Error(`RetailPilot ${name} is not configured (RETAILPILOT_SPECTRA_URL / RETAILPILOT_SPECTRA_KEY)`);
       }
       const data = {};
@@ -94,6 +95,7 @@ class ArticleStoreMaster {
       }
       data.stock = stockBatches ? mainStockFromBatches(stockBatches) : await this.runway.queryAll(RUNWAY_QUERIES.stock, 2000);
       data.buyers = this.buyers ? await this.buyers() : [];
+      data.latestPrices = await this._latestPrices();
       if (!data.articles.length) throw new Error("masterhub returned no articles - report not replaced");
 
       const report = buildReport(data);
@@ -101,7 +103,7 @@ class ArticleStoreMaster {
       const file = await this._write(report, day);
       this.lastError = null;
       this.lastErrorAt = null;
-      return { code: 200, file, day, rows: report.rows.length, stock_from: stockBatches ? "stock_sync" : "runway", stores: report.stores.map((s) => s.header), seconds: Math.round((Date.now() - started) / 1000) };
+      return { code: 200, file, day, rows: report.rows.length, stock_from: stockBatches ? "stock_sync" : "runway", prices_error: this.pricesError || undefined, stores: report.stores.map((s) => s.header), seconds: Math.round((Date.now() - started) / 1000) };
     } catch (err) {
       this.lastError = err.message;
       this.lastErrorAt = this.now().toISOString();
@@ -114,6 +116,34 @@ class ArticleStoreMaster {
         ref: {},
       });
       return { code: 502, msg: err.message };
+    }
+  }
+
+  /**
+   * MRP / net cost / selling price of each article's newest batch. Newest is
+   * by created_at; if that query fails (e.g. runway's batches have no such
+   * column) it is repeated by batch id. If both fail the report is still
+   * built, with those three columns blank, and the error is kept in status.
+   */
+  async _latestPrices() {
+    this.pricesError = null;
+    try {
+      return await this.runway.queryAll(latestPricesQuery(true), 2000);
+    } catch (first) {
+      try {
+        return await this.runway.queryAll(latestPricesQuery(false), 2000);
+      } catch (err) {
+        this.pricesError = err.message;
+        logger.Log({
+          level: logger.LEVEL.ERROR,
+          component: "USECASE.ARTICLE_STORE_MASTER",
+          code: "USECASE.ARTICLE_STORE_MASTER.PRICES",
+          description: `${first.message} / ${err.message}`,
+          category: "",
+          ref: {},
+        });
+        return [];
+      }
     }
   }
 
