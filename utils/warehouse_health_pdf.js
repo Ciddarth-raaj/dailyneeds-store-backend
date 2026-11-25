@@ -262,11 +262,11 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
   const waitingT = table(["Box", "Why", "To", "Truck", "Articles", "Qty", "Value"], boxRows(t.unloading.waiting || []), [4, 5, 6]);
 
   const yet = table(
-    ["Where", "From", "Item", "Sent", "Counted so far", "Value"],
+    ["Where", "From", "Item", "Qty", "Value"],
     t.verification.yet_to_verify.map((p) => ({
-      cells: [`${esc(title(p.to_store))}${p.is_return ? ' <span class="tag">Return to warehouse</span>' : ""}`, esc(title(p.from_store)), esc(artText(p)), num(p.qty), num(p.counted_qty), rupees(p.value)],
+      cells: [`${esc(title(p.to_store))}${p.is_return ? ' <span class="tag">Return to warehouse</span>' : ""}`, esc(title(p.from_store)), esc(artText(p)), num(p.qty), rupees(p.value)],
     })),
-    [3, 4, 5]
+    [3, 4]
   );
 
 
@@ -340,7 +340,7 @@ ${chainHtml}
 ${secondHtml}
 ${t.unloading.chain ? "" : section("Unloading problems", unloadingT, "Checked by box: on a truck but not unloaded, unloaded at the wrong store, or unloaded but never loaded. Articles inside a box are checked at store verification.")}
 ${t.unloading.chain ? "" : section("Damage returns going back to the warehouse - not a problem", waitingT)}
-${section("Yet to verify - verification not finished", yet, "The store has not finished (submitted) verification of these lines - even where it has counted them.")}
+${section("Yet to verify", yet)}
 <footer>The same figures are on dnds.co.in → WMS → Pick and Pack → Pick Pack Daily Report.</footer>
 </body></html>`;
 }

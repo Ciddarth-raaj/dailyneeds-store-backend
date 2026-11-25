@@ -221,13 +221,13 @@ test("extras at stores, packing short and picked-0 write-off: in things need you
   assert.ok(html.includes("had nothing picked at all"));
 });
 
-test("yet to verify: every line of an unfinished verification, with what was sent and counted so far", () => {
+test("yet to verify leaves out lines with nothing left to verify (qty 0)", () => {
   const h = H.buildHealth({ ...base, yetToVerify: [
-    { to_store: "vallalar salai", from_store: "warehouse", article_id: 1, article_name: "counted not finished", advised_qty: 5, actual_qty: 5, nlc: 10 },
+    { to_store: "vallalar salai", from_store: "warehouse", article_id: 1, article_name: "done already", advised_qty: 5, actual_qty: 5, nlc: 10 },
     { to_store: "vallalar salai", from_store: "warehouse", article_id: 2, article_name: "chettinadu appalam", advised_qty: 1, actual_qty: 0, nlc: 24 },
   ] });
-  assert.deepStrictEqual(h.tiles.verification.yet_to_verify.map((p) => [p.article_id, p.qty, p.counted_qty]), [[1, 5, 5], [2, 1, 0]]);
-  assert.ok(h.need_you.some((i) => i.text === "2 lines (6 qty) yet to verify - verification not finished"));
+  assert.deepStrictEqual(h.tiles.verification.yet_to_verify.map((p) => [p.article_id, p.qty]), [[2, 1]]);
+  assert.strictEqual(h.tiles.verification.yet_to_verify_qty, 1);
   const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
-  assert.ok(html.includes("counted not finished") && html.includes("Counted so far"));
+  assert.ok(!html.includes("done already") && html.includes("chettinadu appalam"));
 });
