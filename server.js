@@ -491,9 +491,6 @@ class Server {
     this.employeeTelegramRepo = require("./repository/employee_telegram")(
       this.mysql.connection
     );
-    this.jobWorksheetRepo = require("./repository/job_worksheet")(
-      this.mysql.connection
-    );
     this.stickerTypesRepo = require("./repository/sticker_types")(
       this.mysql.connection
     );
@@ -1525,9 +1522,6 @@ class Server {
       this.outletUsecase,
       this.telegramDepartmentsUsecase
     );
-    this.jobWorksheetUsecase = require("./usecase/job_worksheet")(
-      this.jobWorksheetRepo
-    );
     this.stickerTypesUsecase = require("./usecase/sticker_types")(
       this.stickerTypesRepo
     );
@@ -2138,9 +2132,6 @@ class Server {
     const telegramDepartmentsRouter = require("./routes/telegram_departments")(
       this.telegramDepartmentsUsecase
     );
-    const jobWorksheetRouter = require("./routes/job_worksheet")(
-      this.jobWorksheetUsecase
-    );
     const stickerTypesRouter = require("./routes/sticker_types")(
       this.stickerTypesUsecase
     );
@@ -2456,7 +2447,6 @@ class Server {
     app.use("/lr-followup", lrFollowupRouter.getRouter());
     app.use("/transporter-master", transporterMasterRouter.getRouter());
     app.use("/telegram-departments", telegramDepartmentsRouter.getRouter());
-    app.use("/job-worksheet", jobWorksheetRouter.getRouter());
     app.use("/sticker-types", stickerTypesRouter.getRouter());
     app.use("/product-image-log", productImageLogRouter.getRouter());
     app.use("/gofrugal-synker", gofrugalSynkerRouter.getRouter());
