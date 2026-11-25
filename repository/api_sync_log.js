@@ -45,7 +45,7 @@ class ApiSyncLogRepository {
     });
   }
 
-  getLogs({ log_type, from_date, to_date, limit = 100, offset = 0 } = {}) {
+  getLogs({ log_type, source, from_date, to_date, limit = 100, offset = 0 } = {}) {
     return new Promise((resolve, reject) => {
       const clauses = [];
       const params = [];
@@ -53,6 +53,10 @@ class ApiSyncLogRepository {
       if (log_type) {
         clauses.push("log_type = ?");
         params.push(log_type);
+      }
+      if (source) {
+        clauses.push("source = ?");
+        params.push(source);
       }
       if (from_date) {
         clauses.push("created_at >= ?");

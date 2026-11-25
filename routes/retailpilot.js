@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const respondError = require("../utils/http");
+const { getNextCronRun } = require("../utils/api_sync_log_helpers");
 
 /**
  * The RetailPilot Sync page: when each RetailPilot sync last ran, whether it
@@ -15,6 +16,7 @@ const SYNCS = [
     label: "GRNs",
     description: "Warehouse purchase invoices into the GRN pages",
     schedule: (c) => (c.grnSyncEnabled ? "Every 15 minutes" : "Not scheduled"),
+    crons: (c) => (c.grnSyncEnabled ? ["*/15 * * * *"] : []),
     permission: "sync_retailpilot_purchases",
   },
   {
@@ -23,6 +25,7 @@ const SYNCS = [
     label: "Stock & Prices",
     description: "Products, then Offers V3 price and stock, then the Price Checker",
     schedule: (c) => (c.stockSyncEnabled ? "Daily 6:00 AM" : "Not scheduled"),
+    crons: (c) => (c.stockSyncEnabled ? ["0 6 * * *"] : []),
     permission: "sync_retailpilot_stock",
   },
   {
@@ -31,6 +34,10 @@ const SYNCS = [
     label: "Products",
     description: "Product master: new items, names, departments, categories, subcategories, brands",
     schedule: (c) => (c.stockSyncEnabled ? "Daily 6:00 AM (with Stock & Prices)" : "Not scheduled"),
+    crons: (c) => (c.stockSyncEnabled ? ["0 6 * * *"] : []),
+    // The scheduled product sync runs inside the 6:00 Stock & Prices run,
+    // which logs under its own type; product_sync rows are manual runs.
+    scheduled_log_type: "retailpilot_stock_sync",
     permission: "allow_product_sync",
   },
   {
@@ -39,6 +46,7 @@ const SYNCS = [
     label: "Purchases",
     description: "Purchase invoices into the Purchase screen",
     schedule: (c) => (c.purchaseSyncEnabled ? "Daily 9:00 AM, 2:00 PM, 5:00 PM" : "Not scheduled"),
+    crons: (c) => (c.purchaseSyncEnabled ? ["0 9,14,17 * * *"] : []),
     permission: "sync_retailpilot_purchases",
   },
   {
@@ -47,6 +55,7 @@ const SYNCS = [
     label: "Debit Notes",
     description: "Debit notes into the Debit Note screen",
     schedule: (c) => (c.debitNoteSyncEnabled ? "Daily 9:00 AM, 2:00 PM, 5:00 PM" : "Not scheduled"),
+    crons: (c) => (c.debitNoteSyncEnabled ? ["0 9,14,17 * * *"] : []),
     permission: "sync_retailpilot_purchases",
   },
   {
@@ -55,9 +64,17 @@ const SYNCS = [
     label: "Article Store Master",
     description: "The Article Store Master report (catalogue and store stock) for download",
     schedule: (c) => (c.articleStoreMasterEnabled ? "Daily 5:45 AM" : "Not scheduled"),
+    crons: (c) => (c.articleStoreMasterEnabled ? ["45 5 * * *"] : []),
     permission: "view_products",
   },
 ];
+
+/** The soonest next run (ISO) of a list of cron expressions, IST; null if none. */
+function nextRun(crons, from = new Date()) {
+  const times = crons.map((c) => getNextCronRun(c, from)).filter(Boolean);
+  if (!times.length) return null;
+  return new Date(Math.min(...times.map((t) => t.getTime()))).toISOString();
+}
 
 class RetailPilotRoutes {
   /**
@@ -70,8 +87,8 @@ class RetailPilotRoutes {
     this.init();
   }
 
-  async _lastRun(logType, status) {
-    const rows = await this.deps.apiSyncLogRepo.getLogs({ log_type: logType, limit: status ? 20 : 1 });
+  async _lastRun(logType, status, source) {
+    const rows = await this.deps.apiSyncLogRepo.getLogs({ log_type: logType, source, limit: status ? 20 : 1 });
     const row = status ? rows.find((r) => r.status === status) : rows[0];
     if (!row) return null;
     return {
@@ -98,6 +115,10 @@ class RetailPilotRoutes {
             running: Boolean(this.deps.isRunning[s.key] && this.deps.isRunning[s.key]()),
             last_run: await this._lastRun(s.log_type),
             last_success: await this._lastRun(s.log_type, "success"),
+            // The page leads with the schedule: the last run the cron made
+            // and when it runs next (a manual "Sync now" is not a schedule).
+            last_scheduled: await this._lastRun(s.scheduled_log_type || s.log_type, null, "cron"),
+            next_run: nextRun(s.crons ? s.crons(this.deps.config) : []),
           });
         }
         res.json({ code: 200, data: syncs });
@@ -130,3 +151,4 @@ class RetailPilotRoutes {
 }
 
 module.exports = (deps) => new RetailPilotRoutes(deps);
+module.exports.nextRun = nextRun;
