@@ -130,9 +130,40 @@ function pickerGroups(work, mistakes, names) {
  * still open.
  */
 function buildHealth(args) {
-  const h = withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain, args.staffNames), args.stuckCartons);
+  const h = withLines(withStuck(withStageChain(withBoxChain(buildHealthBase(args), args.boxChain), args.stageChain, args.staffNames), args.stuckCartons), args);
   // Where the stored chain stands: final, or being worked out / redone (with progress).
   h.chain_status = args.chainStatus || null;
+  return h;
+}
+
+/**
+ * Line by line, for the PDF and the page:
+ *  - extras at stores: verification lines where the store counted MORE than
+ *    was sent (actual > advised), with the extra qty and its value;
+ *  - packing short: packing lines packed less than asked;
+ *  - picked 0: picking write-off lines where nothing at all was picked.
+ */
+function withLines(h, { extraLines, packingLines, staffNames }) {
+  const extras = (extraLines || [])
+    .map((l) => {
+      const q = Math.round((n(l.actual_qty) - n(l.advised_qty)) * 1000) / 1000;
+      return { article_id: l.article_id, article_name: l.article_name || null, job_type: String(l.job_type || "").toUpperCase() || null, from_store: l.from_store || null, to_store: l.to_store || null, stage_id: l.stage_id || null, job_id: l.job_id || null, sent_qty: n(l.advised_qty), counted_qty: n(l.actual_qty), extra_qty: q, value: r2(q * n(l.nlc)), finished_at: l.finished_at || null };
+    })
+    .filter((x) => x.extra_qty > 0)
+    .sort((a, b) => b.value - a.value || b.extra_qty - a.extra_qty);
+  const sum = (list, k) => r2(list.reduce((t, x) => t + n(x[k]), 0));
+  h.tiles.verification.extra = { lines: extras.length, qty: sum(extras, "extra_qty"), value: sum(extras, "value"), list: extras.slice(0, 300) };
+  if (extras.length) {
+    const at = h.need_you.findIndex((i) => i.key === "verification");
+    const item = { key: "extras", tone: "amber", text: `Stores found ${fmt(extras.length)} line${extras.length === 1 ? "" : "s"} extra at verification (${fmt(h.tiles.verification.extra.qty)} qty more than sent · ${rupees(h.tiles.verification.extra.value)})` };
+    h.need_you.splice(at < 0 ? h.need_you.length : at + 1, 0, item);
+  }
+  const packing = (packingLines || [])
+    .map((l) => ({ article_id: l.article_id, article_name: l.article_name || null, job_type: String(l.job_type || "").toUpperCase() || null, from_store: l.from_store || null, to_store: l.to_store || null, stage_id: l.stage_id || null, asked_qty: n(l.advised_qty), packed_qty: n(l.actual_qty), short_qty: n(l.short_qty), value: r2(n(l.short_qty) * n(l.nlc)), packer: l.worked_by || null, packer_name: l.worked_by ? staffLabel(l.worked_by, staffNames) : null, finished_at: l.finished_at || null }))
+    .sort((a, b) => b.value - a.value || b.short_qty - a.short_qty);
+  h.tiles.writeoff.packing_list = packing.slice(0, 300);
+  const zero = (h.tiles.writeoff.list || []).filter((l) => n(l.picked_qty) === 0 && n(l.short_qty) > 0);
+  h.tiles.writeoff.picked_zero = { lines: zero.length, qty: sum(zero, "short_qty"), value: sum(zero, "value") };
   return h;
 }
 

@@ -388,7 +388,7 @@ class WhDailyReportsRepository {
   /** Rows of the job reports: every row, only write-offs (short), or only rows with open jobs. */
   async jobRows(from, to, { only = "all", ...opts } = {}, limit = 50000) {
     const { where, params } = this._jobWhere(from, to, opts);
-    const extra = only === "short" ? " AND r.short_qty > 0" : only === "open" ? " AND COALESCE(r.open_jobs, 0) > 0" : only === "returned" ? " AND COALESCE(r.returned_qty, 0) > 0" : "";
+    const extra = only === "extra" ? " AND r.actual_qty > r.advised_qty AND COALESCE(r.open_jobs, 0) = 0" : only === "short" ? " AND r.short_qty > 0" : only === "open" ? " AND COALESCE(r.open_jobs, 0) > 0" : only === "returned" ? " AND COALESCE(r.returned_qty, 0) > 0" : "";
     const rows = await this.run(
       "JOB_ROWS",
       `SELECT r.report_type, DATE_FORMAT(r.report_date, '%Y-%m-%d') AS report_date, r.job_type, r.from_store, r.to_store,

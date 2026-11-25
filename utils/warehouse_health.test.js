@@ -199,3 +199,24 @@ test("the PDF lists picking write-off article by article with who picked - not S
   assert.ok(html.includes("A1 · gold winner 1l") && html.includes("Ravi") && html.includes("19 Nov, 10:05 am"));
   assert.ok(!html.includes("sta only soap"));
 });
+
+test("extras at stores, packing short and picked-0 write-off: in things need you and listed in the PDF", () => {
+  const h = H.buildHealth({
+    ...base,
+    staffNames: { kp2: "Arun" },
+    writeoffLines: [{ report_type: "PICKING", article_id: 101985, article_name: "sugar 50kg", job_type: "GRN", from_store: "warehouse", to_store: "kathirkamam", advised_qty: 550, actual_qty: 0, short_qty: 550, nlc: 2362.5, worked_by: "kp2", finished_at: "2026-11-19 13:54" }],
+    extraLines: [
+      { article_id: 105074, article_name: "yummiez green peas 500g", job_type: "STA", from_store: "warehouse", to_store: "vallalar salai", stage_id: "cif44", job_id: "v9", advised_qty: 4, actual_qty: 10, nlc: 97.45, finished_at: "2026-11-19 10:52" },
+      { article_id: 1, article_name: "not extra", advised_qty: 5, actual_qty: 5, nlc: 1 },
+    ],
+    packingLines: [{ article_id: 7, article_name: "ghee 1l", job_type: "STA", from_store: "warehouse", to_store: "ecr", advised_qty: 12, actual_qty: 10, short_qty: 2, nlc: 600, worked_by: "kp2", finished_at: "2026-11-19 11:00" }],
+  });
+  const x = h.tiles.verification.extra;
+  assert.deepStrictEqual([x.lines, x.qty, x.value], [1, 6, 584.7]);
+  assert.ok(h.need_you.some((i) => /Stores found 1 line extra at verification \(6 qty more than sent · ₹585/.test(i.text)));
+  assert.deepStrictEqual([h.tiles.writeoff.picked_zero.lines, h.tiles.writeoff.packing_list[0].packer_name], [1, "Arun"]);
+  const html = require("./warehouse_health_pdf").buildHtml(h, { nowMs: 0 });
+  assert.ok(html.includes("Extras at stores - counted more than sent - 1 line · 6 qty") && html.includes("105074 · yummiez green peas 500g"));
+  assert.ok(html.includes("Packing short - 1 line · 2 qty · ₹1,200") && html.includes("7 · ghee 1l"));
+  assert.ok(html.includes("had nothing picked at all"));
+});

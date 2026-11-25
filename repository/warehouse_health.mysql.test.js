@@ -68,6 +68,11 @@ describe("warehouse health repository", { skip: !URL && "WH_TEST_MYSQL not set" 
     assert.equal(own.length, 2);
     assert.ok(own.every((x) => x.job_type));
     assert.equal((await repo.jobBreakdown(day, day, ["worked_by"], { report_type: "PICKING", from_store: "nowhere" })).length, 0);
+    // extras: verification lines counted more than sent (none here: every line is short)
+    assert.deepEqual(await repo.jobRows(day, day, { only: "extra", report_type: "VERIFICATION" }), []);
+    await repo.replaceUpload({ report_type: "VERIFICATION", report_date: "2025-01-01", source: "RETAILPILOT", shape: "JOB", file_name: "rp", uploaded_by: null, rows: [row({ report_type: "VERIFICATION", job_id: "VJ9", stage_id: "S1", article_id: 5, advised_qty: 4, actual_qty: 10, short_qty: 0 })] });
+    const ex = await repo.jobRows("2025-01-01", "2025-01-01", { only: "extra", report_type: "VERIFICATION", from_store: "warehouse" });
+    assert.deepEqual(ex.map((r) => [r.job_id, r.advised_qty, r.actual_qty]), [["VJ9", 4, 10]]);
     // who picked each verification line: by its picking job, else by the document
     const who = await repo.pickersOfVerified([{ job_id: "VJ1" }, { job_id: "VJ2" }, { job_id: "VJ3" }]);
     assert.deepEqual(who.map((x) => [x.job_id, Number(x.article_id), x.pickers]).sort(), [["VJ1", 1, "kp-1"], ["VJ2", 2, "kp-2"]]);

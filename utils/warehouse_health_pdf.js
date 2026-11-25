@@ -168,6 +168,31 @@ function buildHtml(h, { nowMs = Date.now(), logoDataUri = null } = {}) {
     ),
     `STA lines are not listed (totals only).${woLines.length > 60 ? ` Biggest 60 of ${woLines.length} lines - all on the dashboard.` : ""}`
   );
+  // Of the write-off, lines where nothing at all was picked.
+  const pz = (t.writeoff && t.writeoff.picked_zero) || { lines: 0 };
+  const pickedZeroNote = pz.lines ? `Of these, <b>${plural(pz.lines, "line")} (${num(pz.qty)} qty · ${rupees(pz.value)}) had nothing picked at all</b> (picked 0).` : "";
+  // Packing short: packed less than asked, line by line.
+  const pk = (t.writeoff && t.writeoff.packing_list) || [];
+  const packingHtml = section(
+    `Packing short - ${plural(pk.length, "line")} · ${num(pk.reduce((x, l) => x + n(l.short_qty), 0))} qty · ${rupees(pk.reduce((x, l) => x + n(l.value), 0))}`,
+    table(
+      ["Article", "Type", "From → To", "Asked", "Packed", "Short", "Value", "Packed by", "When"],
+      pk.slice(0, 40).map((l) => ({ cls: "bad", cells: [esc(artText(l)), esc(l.job_type || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.asked_qty), num(l.packed_qty), num(l.short_qty), rupees(l.value), esc(l.packer_name || "—"), esc(whenText(l.finished_at))] })),
+      [3, 4, 5, 6]
+    ),
+    pk.length > 40 ? `Biggest 40 of ${pk.length} lines - all on the dashboard.` : ""
+  );
+  // Extras at stores: the store counted more than was sent.
+  const ex = (t.verification && t.verification.extra && t.verification.extra.list) || [];
+  const extrasHtml = section(
+    `Extras at stores - counted more than sent - ${plural(ex.length, "line")} · ${num(ex.reduce((x, l) => x + n(l.extra_qty), 0))} qty · ${rupees(ex.reduce((x, l) => x + n(l.value), 0))}`,
+    table(
+      ["Article", "Document", "From → To", "Sent", "Counted", "Extra", "Value", "Picked by", "When"],
+      ex.slice(0, 40).map((l) => ({ cells: [esc(artText(l)), esc(l.stage_id || "—"), `${esc(title(l.from_store))} → ${esc(title(l.to_store))}`, num(l.sent_qty), num(l.counted_qty), `<b>${num(l.extra_qty)}</b>`, rupees(l.value), esc(l.picked_by || "—"), esc(whenText(l.finished_at))] })),
+      [3, 4, 5, 6]
+    ),
+    `Often a short from another store or box. ${ex.length > 40 ? `Biggest 40 of ${ex.length} lines - all on the dashboard.` : ""}`
+  );
   const stageBlock = (sc, heading, cap) =>
     sc
     ? `<h2 style="margin-top:4px">${esc(heading)}</h2>
@@ -304,9 +329,11 @@ ${section("Unloaded at the wrong store / with no loading", unloadingT && (t.unlo
 ${h.missing_reports.length ? `<p class="note">Not pulled yet for this day: ${esc(h.missing_reports.join(", "))}</p>` : ""}
 ${needYou}
 <div class="cards">${cards}</div>
-${section("Picking write-off by store", writeoff)}
+${section("Picking write-off by store", writeoff, pickedZeroNote)}
 ${woLinesHtml}
+${packingHtml}
 ${stageHtml}
+${extrasHtml}
 ${stuckHtml}
 ${section("Loading - not on a truck", loadingT, "On the loading list, never put on a truck (still at the warehouse).")}
 ${chainHtml}
