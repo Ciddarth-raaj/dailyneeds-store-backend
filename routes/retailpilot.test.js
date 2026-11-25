@@ -43,7 +43,7 @@ describe("GET /status", () => {
       retailpilotRoutes({
         apiSyncLogRepo: repo,
         config: { grnSyncEnabled: true, stockSyncEnabled: true, purchaseSyncEnabled: true, debitNoteSyncEnabled: true, articleStoreMasterEnabled: false, supplierSyncEnabled: true },
-        isRunning: {},
+        isRunning: { stock: () => true },
       }).getRouter()
     );
     server = app.listen(0);
@@ -81,6 +81,12 @@ describe("GET /status", () => {
     assert.equal(d.schedule, "Daily 10:00 AM, 12:30 PM, 4:00 PM");
     assert.equal(d.last_scheduled.at, "2026-11-26T04:30:00Z");
     assert.equal(d.permission, "add_product_distributor");
+  });
+
+  it("article store master waits for a running Stock & Prices (when built after it)", async () => {
+    const all = await status();
+    assert.equal(all.find((s) => s.key === "article_store_master").waiting_for, null, "switched off here");
+    assert.equal(all.find((s) => s.key === "purchases").waiting_for, null);
   });
 
   it("a sync that is switched off has no next run", async () => {

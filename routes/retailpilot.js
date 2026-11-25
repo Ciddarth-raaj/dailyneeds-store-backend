@@ -68,6 +68,9 @@ const SYNCS = [
     schedule: (c) =>
       !c.articleStoreMasterEnabled ? "Not scheduled" : c.stockSyncEnabled ? "Daily 6:00 AM (after Stock & Prices)" : "Daily 5:45 AM",
     crons: (c) => (!c.articleStoreMasterEnabled ? [] : c.stockSyncEnabled ? ["0 6 * * *"] : ["45 5 * * *"]),
+    // Built when the Stock & Prices run ends, on its stock: while that runs,
+    // the card says it is waiting.
+    waits_for: (c) => (c.articleStoreMasterEnabled && c.stockSyncEnabled ? "stock" : null),
     permission: "view_products",
   },
   {
@@ -126,6 +129,11 @@ class RetailPilotRoutes {
             schedule: s.schedule(this.deps.config),
             permission: s.permission,
             running: Boolean(this.deps.isRunning[s.key] && this.deps.isRunning[s.key]()),
+            waiting_for: (() => {
+              const key = s.waits_for ? s.waits_for(this.deps.config) : null;
+              const running = (k) => Boolean(this.deps.isRunning[k] && this.deps.isRunning[k]());
+              return key && running(key) && !running(s.key) ? SYNCS.find((x) => x.key === key).label : null;
+            })(),
             last_run: await this._lastRun(s.log_type),
             last_success: await this._lastRun(s.log_type, "success"),
             // The page leads with the schedule: the last run the cron made
