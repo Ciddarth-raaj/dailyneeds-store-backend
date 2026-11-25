@@ -197,12 +197,41 @@ const fakeClient = (byQuery, calls) => ({
   },
 });
 
+describe("stock from the Stock & Prices sync's batch rows", () => {
+  const { mainStockFromBatches } = require("./article_store_master");
+  it("main location only, summed per store and article - the same as the runway query", () => {
+    const rows = mainStockFromBatches([
+      { store_id: "dn1slug", article_id: "51156", batch_id: "b1", stock_location: "main", quantity: "3" },
+      { store_id: "dn1slug", article_id: "51156", batch_id: "b2", stock_location: "main", quantity: 1 },
+      { store_id: "dn1slug", article_id: "51156", batch_id: "b1", stock_location: "damage", quantity: 9 },
+      { store_id: "whslug", article_id: "51156", batch_id: "b3", stock_location: "main", quantity: 24 },
+    ]);
+    assert.deepEqual(rows, [
+      { store_id: "dn1slug", article_id: "51156", quantity: 4 },
+      { store_id: "whslug", article_id: "51156", quantity: 24 },
+    ]);
+  });
+});
+
 describe("the file", () => {
   let dir;
   before(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "asm-"));
   });
   after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  it("given the stock sync's batch rows, it does not read runway's stock again", async () => {
+    const calls = [];
+    const runway = { isConfigured: () => false, queryAll: async () => { throw new Error("runway must not be read"); } };
+    const own = fs.mkdtempSync(path.join(os.tmpdir(), "asm-batches-"));
+    const r = reportFactory(fakeClient(DATA, calls), runway, { dir: own, now: () => new Date("2026-10-23T00:30:00Z") });
+    const batches = DATA.stock.map((x) => ({ ...x, stock_location: "main" }));
+    const res = await r.build({ stockBatches: batches });
+    assert.equal(res.code, 200, res.msg);
+    assert.equal(res.stock_from, "stock_sync");
+    assert.equal(calls.length, Object.keys(MASTERHUB_QUERIES).length, "masterhub only");
+    fs.rmSync(own, { recursive: true, force: true });
+  });
 
   it("builds a real .xlsx named for the India day, with the header and every row", async () => {
     const calls = [];

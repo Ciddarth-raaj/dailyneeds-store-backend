@@ -91,6 +91,26 @@ GROUP BY p.store_id, b.article_id
 ORDER BY b.article_id, p.store_id`,
 };
 
+/**
+ * The report's stock (RUNWAY_QUERIES.stock's shape) from the batch rows the
+ * Stock & Prices sync already pulled (utils/retailpilot_stock.js
+ * buildStockQuery): main location only, summed per store and article. Saves
+ * reading runway's stock a second time when the report is built right after
+ * that sync.
+ */
+function mainStockFromBatches(batchRows) {
+  const sums = new Map();
+  for (const r of batchRows || []) {
+    if (String(r.stock_location) !== "main") continue;
+    const key = `${r.store_id}\u0000${r.article_id}`;
+    const prev = sums.get(key);
+    const q = Number(r.quantity) || 0;
+    if (prev) prev.quantity += q;
+    else sums.set(key, { store_id: r.store_id, article_id: r.article_id, quantity: q });
+  }
+  return [...sums.values()];
+}
+
 const str = (v) => (v == null ? "" : String(v).replace(/\s+/g, " ").trim());
 const num = (v) => {
   const n = Number(v);
@@ -355,6 +375,7 @@ function buildReport(data) {
 module.exports = {
   MASTERHUB_QUERIES,
   RUNWAY_QUERIES,
+  mainStockFromBatches,
   levelOf,
   storeColumns,
   supplierNames,

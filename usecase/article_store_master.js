@@ -2,7 +2,7 @@ const fs = require("fs");
 const path = require("path");
 const ExcelJS = require("exceljs");
 const logger = require("../utils/logger");
-const { MASTERHUB_QUERIES, RUNWAY_QUERIES, buildReport } = require("../utils/article_store_master");
+const { MASTERHUB_QUERIES, RUNWAY_QUERIES, buildReport, mainStockFromBatches } = require("../utils/article_store_master");
 
 const DEFAULT_DIR = path.join(__dirname, "..", "tmp", "reports", "article-store-master");
 const KEEP_FILES = 7;
@@ -15,7 +15,7 @@ function istDay(date) {
 
 /**
  * The Article Store Master report (utils/article_store_master.js): built once
- * a morning by the cron and on demand by "Refresh now", kept as an .xlsx on
+ * a morning right after the Stock & Prices sync (reusing its stock rows) and on demand by "Refresh now", kept as an .xlsx on
  * disk so a download is instant. Read-only towards RetailPilot and the
  * database (it reads only the suppliers' buyers) - it writes nothing but its own files.
  */
@@ -67,27 +67,32 @@ class ArticleStoreMaster {
     };
   }
 
-  /** Build today's file. A build already running is joined, not repeated. */
-  build() {
+  /**
+   * Build today's file. A build already running is joined, not repeated.
+   * @param options.stockBatches batch stock rows the Stock & Prices sync just
+   *   pulled; given, runway's stock is not read again.
+   */
+  build({ stockBatches = null } = {}) {
     if (!this.running) {
-      this.running = this._build().finally(() => {
+      this.running = this._build(stockBatches).finally(() => {
         this.running = null;
       });
     }
     return this.running;
   }
 
-  async _build() {
+  async _build(stockBatches) {
     const started = Date.now();
     try {
-      for (const [name, client] of [["masterhub", this.masterhub], ["runway", this.runway]]) {
+      const clients = stockBatches ? [["masterhub", this.masterhub]] : [["masterhub", this.masterhub], ["runway", this.runway]];
+      for (const [name, client] of clients) {
         if (!client.isConfigured()) throw new Error(`RetailPilot ${name} is not configured (RETAILPILOT_SPECTRA_URL / RETAILPILOT_SPECTRA_KEY)`);
       }
       const data = {};
       for (const [key, query] of Object.entries(MASTERHUB_QUERIES)) {
         data[key] = await this.masterhub.queryAll(query, 2000);
       }
-      data.stock = await this.runway.queryAll(RUNWAY_QUERIES.stock, 2000);
+      data.stock = stockBatches ? mainStockFromBatches(stockBatches) : await this.runway.queryAll(RUNWAY_QUERIES.stock, 2000);
       data.buyers = this.buyers ? await this.buyers() : [];
       if (!data.articles.length) throw new Error("masterhub returned no articles - report not replaced");
 
@@ -96,7 +101,7 @@ class ArticleStoreMaster {
       const file = await this._write(report, day);
       this.lastError = null;
       this.lastErrorAt = null;
-      return { code: 200, file, day, rows: report.rows.length, stores: report.stores.map((s) => s.header), seconds: Math.round((Date.now() - started) / 1000) };
+      return { code: 200, file, day, rows: report.rows.length, stock_from: stockBatches ? "stock_sync" : "runway", stores: report.stores.map((s) => s.header), seconds: Math.round((Date.now() - started) / 1000) };
     } catch (err) {
       this.lastError = err.message;
       this.lastErrorAt = this.now().toISOString();

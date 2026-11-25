@@ -63,8 +63,11 @@ const SYNCS = [
     log_type: "article_store_master_report",
     label: "Article Store Master",
     description: "The Article Store Master report (catalogue and store stock) for download",
-    schedule: (c) => (c.articleStoreMasterEnabled ? "Daily 5:45 AM" : "Not scheduled"),
-    crons: (c) => (c.articleStoreMasterEnabled ? ["45 5 * * *"] : []),
+    // Built right after Stock & Prices (on its stock); on its own at 5:45
+    // only when that sync is off.
+    schedule: (c) =>
+      !c.articleStoreMasterEnabled ? "Not scheduled" : c.stockSyncEnabled ? "Daily 6:00 AM (after Stock & Prices)" : "Daily 5:45 AM",
+    crons: (c) => (!c.articleStoreMasterEnabled ? [] : c.stockSyncEnabled ? ["0 6 * * *"] : ["45 5 * * *"]),
     permission: "view_products",
   },
   {

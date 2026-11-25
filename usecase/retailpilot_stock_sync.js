@@ -20,6 +20,16 @@ class RetailPilotStockSync {
     this.priceCheckerUsecase = priceCheckerUsecase;
     this.loadStoreMap = loadStoreMap;
     this.running = false;
+    // The batch stock rows of the last successful real run, for the Article
+    // Store Master built straight after it (takeStockRows hands them over
+    // once, so they are not kept in memory).
+    this.lastStockRows = null;
+  }
+
+  takeStockRows() {
+    const rows = this.lastStockRows;
+    this.lastStockRows = null;
+    return rows;
   }
 
   async run({ dryRun = false } = {}) {
@@ -31,6 +41,7 @@ class RetailPilotStockSync {
     }
 
     this.running = true;
+    this.lastStockRows = null;
     try {
       const storeMap = (this.loadStoreMap ? await this.loadStoreMap() : null) || {};
       if (Object.keys(storeMap).length === 0) {
@@ -69,6 +80,7 @@ class RetailPilotStockSync {
       const price = await this.offersV3Usecase.processPriceUpload(mapped.priceRows, null);
       const stockResult = await this.offersV3Usecase.processStockUpload(mapped.stockRows, null);
       const priceChecker = await this.priceCheckerUsecase.bulkReplace(mapped.priceCheckerRows, null);
+      this.lastStockRows = stock;
 
       return {
         code: 200,

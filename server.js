@@ -2196,6 +2196,27 @@ class Server {
       require("./routes/products_expiry_checker")(
         this.productsExpiryCheckerUsecase
       );
+    // The Article Store Master is built straight after every Stock & Prices
+    // run, reusing the stock rows that run pulled (so runway's stock is read
+    // once). If the sync failed there are no rows and the report reads its
+    // own stock - the morning file is built either way. Not awaited: the
+    // stock sync's log keeps its own duration; the build logs separately.
+    this.buildArticleStoreMasterAfterStock = (source, employeeId = null) => {
+      const stockBatches = this.retailPilotStockSyncUsecase.takeStockRows();
+      if (!require("./config/retailpilot").articleStoreMasterEnabled) return;
+      const run = async () => {
+        const r = await this.articleStoreMasterUsecase.build({ stockBatches });
+        if (r.code !== 200) throw new Error(r.msg);
+        return r;
+      };
+      const logged = this.apiSyncLogger
+        ? this.apiSyncLogger.wrapCron("article_store_master_report", "/retailpilot/article-store-master-run", run, {
+            source,
+            employee_id: employeeId,
+          })
+        : run;
+      logged().catch(() => {});
+    };
     // A manual stock & price sync runs past its request, so it is logged in
     // the API Sync Log when it finishes (source "manual"), like the cron.
     this.retailPilotStockSyncUsecase.startManual = (employeeId) => {
@@ -2209,7 +2230,9 @@ class Server {
             employee_id: employeeId,
           })
         : run;
-      logged().catch(() => {});
+      logged()
+        .catch(() => {})
+        .finally(() => this.buildArticleStoreMasterAfterStock("manual", employeeId));
       return { started: true, msg: "RetailPilot sync started - it takes a few minutes" };
     };
     const offersV3Router = require("./routes/offers_v3")(
@@ -2593,11 +2616,15 @@ class Server {
       }
     }
 
-    // 5:45 AM (Asia/Kolkata) - build the Article Store Master report (the
-    // catalogue from masterhub, stock from runway) so the morning download is
-    // ready. Read-only; on unless RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED=false.
-    // POST /article-store-master/refresh builds it by hand either way.
-    if (require("./config/retailpilot").articleStoreMasterEnabled) {
+    // The Article Store Master report is built right after the 6:00 Stock &
+    // Prices run (below), reusing its stock. Only when that sync is switched
+    // off does the report keep a schedule of its own: 5:45 AM, reading its
+    // own stock. Read-only; on unless RETAILPILOT_ARTICLE_STORE_MASTER_ENABLED
+    // =false. POST /article-store-master/refresh builds it by hand either way.
+    if (
+      require("./config/retailpilot").articleStoreMasterEnabled &&
+      !require("./config/retailpilot").stockSyncEnabled
+    ) {
       const buildArticleStoreMaster = async () => {
         const r = await this.articleStoreMasterUsecase.build();
         if (r.code !== 200) throw new Error(r.msg);
@@ -2620,16 +2647,20 @@ class Server {
     if (require("./config/retailpilot").stockSyncEnabled) {
       const runRetailPilotStockSync = async () =>
         await this.retailPilotStockSyncUsecase.run();
+      const stockSyncJob = this.apiSyncLogger
+        ? this.apiSyncLogger.wrapCron("retailpilot_stock_sync", "/offers-v3/retailpilot-sync", runRetailPilotStockSync)
+        : runRetailPilotStockSync;
       this.cronService.register(
         "retailpilot_stock_sync",
         "0 6 * * *",
-        this.apiSyncLogger
-          ? this.apiSyncLogger.wrapCron(
-              "retailpilot_stock_sync",
-              "/offers-v3/retailpilot-sync",
-              runRetailPilotStockSync
-            )
-          : runRetailPilotStockSync,
+        async () => {
+          try {
+            return await stockSyncJob();
+          } finally {
+            // Then the Article Store Master, on this run's stock.
+            this.buildArticleStoreMasterAfterStock("cron");
+          }
+        },
         { preventOverlap: true }
       );
     }
