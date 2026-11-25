@@ -365,9 +365,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
     qty: Math.max(0, n(r.advised_qty) - n(r.actual_qty)),
     value: r2(Math.max(0, n(r.advised_qty) - n(r.actual_qty)) * n(r.nlc)),
     is_return: Boolean(r.to_store && r.from_store && r.to_store === "warehouse"),
-  }))
-    // A line with nothing left to verify (all of it already counted) is not "yet to verify".
-    .filter((p) => p.qty > 0);
+  }));
   const pendingQty = pending.reduce((s, r) => s + r.qty, 0);
 
   // Remarks
