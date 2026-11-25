@@ -58,9 +58,13 @@ const API_SYNC_TYPES = [
     label: "Daily Attendance Recalculation",
     match: "/attendance/calculated/daily-recalculation",
   },
-  // Bulk import APIs
+  // Bulk import APIs - the old GoFrugal feeds, ALL REMOVED (routes gone,
+  // schedule rows deleted by 20270104120000-gofrugal-bulk-imports-removed).
+  // `retired: true` entries stay only so historical api_sync_log rows keep
+  // their label; they never match a request and cannot be scheduled again.
   {
     type: "purchase_bulk",
+    retired: true,
     category: "bulk",
     label: "Purchase Bulk Import",
     match: "/purchase/bulk",
@@ -112,6 +116,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "product_sales_bulk",
+    retired: true,
     category: "bulk",
     label: "Product Sales Bulk",
     match: "/product-sales/bulk",
@@ -119,6 +124,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "debit_note_bulk",
+    retired: true,
     category: "bulk",
     label: "Debit Note Bulk Import",
     match: "/debit-note/bulk",
@@ -126,6 +132,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "dead_stock_items_bulk",
+    retired: true,
     category: "bulk",
     label: "Dead Stock Bulk Import",
     match: "/dead-stock-items/bulk",
@@ -133,6 +140,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "product_distributors_hq_import",
+    retired: true,
     category: "bulk",
     label: "HQ Distributor Import",
     match: "/product-distributors/bulk/hq-import",
@@ -140,6 +148,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "item_markupdown_bulk",
+    retired: true,
     category: "bulk",
     label: "Item Markup/Down Bulk Import",
     match: "/item-markupdown/bulk",
@@ -147,6 +156,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "hq_offers_hdr_bulk",
+    retired: true,
     category: "bulk",
     label: "HQ Offers Header Bulk",
     match: "/hq-offers/hdr/bulk",
@@ -154,6 +164,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "hq_offers_products_bulk",
+    retired: true,
     category: "bulk",
     label: "HQ Offers Products Bulk",
     match: "/hq-offers/products/bulk",
@@ -161,6 +172,7 @@ const API_SYNC_TYPES = [
   },
   {
     type: "hq_offers_issue_bulk",
+    retired: true,
     category: "bulk",
     label: "HQ Offers Issue Bulk",
     match: "/hq-offers/issue/bulk",
@@ -168,7 +180,7 @@ const API_SYNC_TYPES = [
   },
 ];
 
-const TYPE_BY_MATCH = API_SYNC_TYPES.reduce((acc, item) => {
+const TYPE_BY_MATCH = API_SYNC_TYPES.filter((item) => !item.retired).reduce((acc, item) => {
   acc[item.match] = item;
   return acc;
 }, {});

@@ -25,8 +25,8 @@ test("every GoFrugal feed is refused with 410 and never reaches its route", () =
     assert.equal(res.statusCode, 410, p);
     assert.equal(res.body.code, 410);
   }
-  assert.equal(call(mw, "POST", "/purchase/bulk/?x=1").res.statusCode, 410, "trailing slash and query");
-  assert.equal(call(mw, "POST", "/Purchase/Bulk").res.statusCode, 410, "case");
+  assert.equal(call(mw, "POST", "/gofrugal-synker/sync/?x=1").res.statusCode, 410, "trailing slash and query");
+  assert.equal(call(mw, "POST", "/GoFrugal-Synker/Sync").res.statusCode, 410, "case");
 });
 
 test("RetailPilot syncs, reads and the rest still go through", () => {
@@ -44,8 +44,21 @@ test("RetailPilot syncs, reads and the rest still go through", () => {
   assert.equal(isRetired("POST", "/purchase"), false);
 });
 
+test("the removed bulk feeds are not routed at all", () => {
+  const server = fs.readFileSync(path.join(__dirname, "..", "server.js"), "utf8");
+  assert.doesNotMatch(server, /routes\/product_sales"|routes\/item_markupdown"/);
+  for (const [file, route] of [
+    ["purchase", "/bulk"], ["debit_note", "/bulk"], ["dead_stock_items", "/bulk"],
+    ["product_distributors", "/bulk/hq-import"],
+    ["hq_offers", "/hdr/bulk"], ["hq_offers", "/products/bulk"], ["hq_offers", "/issue/bulk"],
+  ]) {
+    const src = fs.readFileSync(path.join(__dirname, "..", "routes", `${file}.js`), "utf8");
+    assert.ok(!src.includes(`router.post("${route}"`), `${file} ${route}`);
+  }
+});
+
 test("GOFRUGAL_FEEDS_BLOCKED=false lets them through (rollback)", () => {
-  assert.equal(call(create({ GOFRUGAL_FEEDS_BLOCKED: "false" }), "POST", "/purchase/bulk").passed, true);
+  assert.equal(call(create({ GOFRUGAL_FEEDS_BLOCKED: "false" }), "POST", "/gofrugal-synker/sync").passed, true);
 });
 
 test("wired after the API Sync Log middleware and before the routes; the Delium stock holding cron is gone", () => {

@@ -61,8 +61,6 @@ const rowSchema = Joi.object({
   MOH_ALLOW_MAX_QTY: numField().optional(),
 });
 
-const bulkSchema = Joi.array().items(rowSchema).min(1).required();
-
 const productRowSchema = Joi.object({
   MOSP_OFFER_ID: numField().required(),
   MOSP_SUB_ID: numField().optional(),
@@ -74,8 +72,6 @@ const productRowSchema = Joi.object({
   TIMESTAMP: Joi.string().allow(null, "").optional(),
   HQ_TIMESTAMP_ID: numField().optional(),
 });
-
-const productBulkSchema = Joi.array().items(productRowSchema).min(1).required();
 
 const issueRowSchema = Joi.object({
   MOI_OFFER_ID: numField().required(),
@@ -96,8 +92,6 @@ const issueRowSchema = Joi.object({
   MOI_CONV_FACTOR: numField().optional(),
   MOI_BATCH_NO: Joi.string().allow(null, "").optional(),
 });
-
-const issueBulkSchema = Joi.array().items(issueRowSchema).min(1).required();
 
 class HqOffersRoutes {
   constructor(hqOffersUsecase) {
@@ -313,26 +307,6 @@ class HqOffersRoutes {
       res.end();
     });
 
-    router.post("/hdr/bulk", async (req, res) => {
-      try {
-        const isValid = Joi.validate(req.body, bulkSchema);
-        if (isValid.error) {
-          res.status(400).json({ code: 400, msg: isValid.error.message });
-          res.end();
-          return;
-        }
-        const result = await this.hqOffersUsecase.bulkInsert(isValid.value);
-        if (result.code === 400) {
-          res.status(400).json(result);
-          res.end();
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
 
     router.post("/products", async (req, res) => {
       try {
@@ -355,26 +329,6 @@ class HqOffersRoutes {
       res.end();
     });
 
-    router.post("/products/bulk", async (req, res) => {
-      try {
-        const isValid = Joi.validate(req.body, productBulkSchema);
-        if (isValid.error) {
-          res.status(400).json({ code: 400, msg: isValid.error.message });
-          res.end();
-          return;
-        }
-        const result = await this.hqOffersUsecase.bulkInsertProducts(isValid.value);
-        if (result.code === 400) {
-          res.status(400).json(result);
-          res.end();
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
 
     router.post("/issue", async (req, res) => {
       try {
@@ -397,26 +351,6 @@ class HqOffersRoutes {
       res.end();
     });
 
-    router.post("/issue/bulk", async (req, res) => {
-      try {
-        const isValid = Joi.validate(req.body, issueBulkSchema);
-        if (isValid.error) {
-          res.status(400).json({ code: 400, msg: isValid.error.message });
-          res.end();
-          return;
-        }
-        const result = await this.hqOffersUsecase.bulkInsertIssues(isValid.value);
-        if (result.code === 400) {
-          res.status(400).json(result);
-          res.end();
-          return;
-        }
-        res.json(result);
-      } catch (err) {
-        respondError(res, err);
-      }
-      res.end();
-    });
   }
 
   getRouter() {

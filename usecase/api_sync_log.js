@@ -30,6 +30,9 @@ class ApiSyncLogUsecase {
     if (!typeDef) {
       return { code: 400, msg: "Unknown log type" };
     }
+    if (typeDef.retired) {
+      return { code: 400, msg: "This feed has been removed" };
+    }
     await this.repo.upsertCronConfig({
       log_type,
       label: label || typeDef.label,

@@ -8,16 +8,12 @@
  *
  * GOFRUGAL_FEEDS_BLOCKED=false lets them through again (rollback only).
  */
+// The bulk feeds themselves (POST /purchase/bulk, /product-sales/bulk,
+// /debit-note/bulk, /dead-stock-items/bulk, /item-markupdown/bulk,
+// /product-distributors/bulk/hq-import, /hq-offers/{hdr,products,issue}/bulk)
+// were removed outright: no route serves them, so a script still calling
+// gets 404 and nothing is logged.
 const RETIRED = [
-  ["POST", "/purchase/bulk"],
-  ["POST", "/product-distributors/bulk/hq-import"],
-  ["POST", "/product-sales/bulk"],
-  ["POST", "/debit-note/bulk"],
-  ["POST", "/dead-stock-items/bulk"],
-  ["POST", "/item-markupdown/bulk"],
-  ["POST", "/hq-offers/hdr/bulk"],
-  ["POST", "/hq-offers/products/bulk"],
-  ["POST", "/hq-offers/issue/bulk"],
   ["POST", "/gofrugal-synker/sync"],
   ["DELETE", "/gofrugal-synker/table"],
   // The stock holding report's pull from the old Delium/GoFrugal API.

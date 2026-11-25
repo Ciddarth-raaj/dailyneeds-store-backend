@@ -11,8 +11,8 @@
  * Two separate things feed the purchase side, and neither is Digisme's:
  *
  *   the `purchase` table          written by an EXTERNAL push to
- *                                 POST /purchase and POST /purchase/bulk.
- *                                 There is no cron for it at all.
+ *                                 POST /purchase (POST /purchase/bulk, the
+ *                                 GoFrugal feed, was removed). No cron.
  *   `purchase_acknowledgement`    pulled from GoFrugal. Its cron, and then
  *                                 the whole Purchase Acknowledgement feature,
  *                                 were removed when GoFrugal was replaced by
@@ -106,9 +106,9 @@ describe("the purchase table's only cron writer is the RetailPilot pull", () => 
     );
   });
 
-  it("the two write routes are the only writers", () => {
+  it("the single-create route is the only route writer (the GoFrugal /bulk feed was removed)", () => {
     const routes = codeOf(read("routes/purchase.js"));
-    assert.match(routes, /router\.post\("\/bulk"/);
+    assert.doesNotMatch(routes, /router\.post\("\/bulk"/);
     assert.match(routes, /router\.post\("\/"/);
     // And nothing in services/ calls the bulk create.
     for (const f of fs.readdirSync(path.join(ROOT, "services")).filter((f) => f.endsWith(".js") && !f.includes("test"))) {

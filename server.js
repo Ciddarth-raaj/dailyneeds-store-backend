@@ -2257,9 +2257,6 @@ class Server {
       },
       permissions: this.permissions,
     });
-    const productSalesRouter = require("./routes/product_sales")(
-      this.productSalesUsecase
-    );
     const businessDashboardRouter = require("./routes/business_dashboard")(
       this.businessDashboardUsecase,
       this.dashboardScope,
@@ -2292,9 +2289,6 @@ class Server {
     );
     const priceCheckerRouter = require("./routes/price_checker")(
       this.priceCheckerUsecase
-    );
-    const itemMarkupdownRouter = require("./routes/item_markupdown")(
-      this.itemMarkupdownUsecase
     );
     const apiSyncLogRouter = require("./routes/api_sync_log")(
       this.apiSyncLogUsecase
@@ -2443,7 +2437,6 @@ class Server {
     );
     app.use("/offers-v3", offersV3Router.getRouter());
     app.use("/retailpilot", retailPilotRouter.getRouter());
-    app.use("/product-sales", productSalesRouter.getRouter());
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/business-dashboard", businessDashboardRouter.getRouter());
     app.use("/warehouse-flow", warehouseFlowRouter.getRouter());
@@ -2452,7 +2445,6 @@ class Server {
     app.use("/wh-daily-reports", whDailyReportsRouter.getRouter());
     app.use("/warehouse-health", warehouseHealthRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
-    app.use("/item-markupdown", itemMarkupdownRouter.getRouter());
     app.use("/grn", grnRouter.getRouter());
     app.use(
       "/article-store-master",

@@ -50,34 +50,6 @@ class PurchaseRoutes {
       cess: Joi.array().items(taxItemSchema).required(),
     });
 
-    // Define bulk purchase schema with uppercase keys
-    const bulkPurchaseSchema = Joi.array().items(
-      Joi.object({
-        STORE_ID: Joi.number().required(),
-        SUPPLIER_ID: Joi.string().max(50).required(),
-        SUPPLIER_NAME: Joi.string().max(100).required(),
-        SUPPLIER_GSTN: Joi.string().max(20).required(),
-        MRC_NO: Joi.alternatives().try(Joi.number(), Joi.string().max(50)).required(),
-        MRC_DATE: Joi.date().required(),
-        MRC_AMT: Joi.number().precision(2).required(),
-        DIST_BILL_DT: Joi.date().required(),
-        DIST_BILL_NO: Joi.string().max(50).required(),
-        MRC_REF: Joi.string().max(50).required(),
-        MANUAL_DISC: Joi.number().precision(2).required(),
-        TOT_SGST_AMT: Joi.number().precision(2).required(),
-        TOT_CGST_AMT: Joi.number().precision(2).required(),
-        TOT_IGST_AMT: Joi.number().precision(2).required(),
-        TOT_GST_CESS_AMT: Joi.number().precision(2).required(),
-        GOODS_TCS_AMT: Joi.number().precision(2).required(),
-        TOT_PUR_TAX_AMT: Joi.number().precision(2).required(), // have to add to db
-        TS: Joi.number().required(),
-        SGST: Joi.array().items(taxItemSchema).required(),
-        CGST: Joi.array().items(taxItemSchema).required(),
-        IGST: Joi.array().items(taxItemSchema).required(),
-        CESS: Joi.array().items(taxItemSchema).required(),
-      })
-    );
-
     // Schema for purchase_internal
     const internalSchema = Joi.object({
       cash_discount: Joi.number().precision(2).default(0.0),
@@ -93,21 +65,6 @@ class PurchaseRoutes {
       invoice_amount: Joi.number().precision(2).default(0.0),
     });
 
-    // Bulk create purchases
-    router.post("/bulk", async (req, res) => {
-      try {
-        const { error, value } = bulkPurchaseSchema.validate(req.body);
-        if (error) {
-          return res.json({ code: 422, msg: error.toString() });
-        }
-
-        const result = await this.purchaseUsecase.bulkCreatePurchase(value);
-        res.json(result);
-      } catch (err) {
-        console.log(err);
-        res.json({ code: 500, msg: err.message });
-      }
-    });
 
     // Pull purchase invoices from RetailPilot now. Body (all optional):
     // { days: 0-90 look-back, dry_run: true to return the mapped rows

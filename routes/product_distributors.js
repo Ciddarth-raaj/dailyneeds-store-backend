@@ -36,18 +36,6 @@ class ProductDistributorsRoutes {
       items: Joi.array().items(upsertSchema).min(1).max(2000).required(),
     });
 
-    const hqImportItemSchema = Joi.object({
-      MDM_DIST_CODE: Joi.alternatives()
-        .try(Joi.string(), Joi.number())
-        .required(),
-      MDM_DIST_NAME: Joi.string().allow(null, "").optional(),
-      MDM_SHORT_NAME: Joi.string().allow(null, "").optional(),
-      CID: Joi.string().trim().min(1).required(),
-      MDM_TAG: Joi.string().allow(null, "").optional(),
-    });
-
-    const hqImportSchema = Joi.array().items(hqImportItemSchema).required();
-
     router.post("/", async (req, res) => {
       try {
         const isValid = Joi.validate(req.body, upsertSchema);
@@ -142,29 +130,6 @@ class ProductDistributorsRoutes {
       res.end();
     });
 
-    router.post("/bulk/hq-import", async (req, res) => {
-      try {
-        const isValid = Joi.validate(req.body, hqImportSchema);
-        if (isValid.error) {
-          res.status(400).json({ code: 400, msg: isValid.error.message });
-          res.end();
-          return;
-        }
-        const result = await this.productDistributorsUsecase.bulkHqImport(
-          isValid.value
-        );
-        res.json(result);
-      } catch (err) {
-        if (err.statusCode) {
-          res
-            .status(err.statusCode)
-            .json({ code: err.statusCode, msg: err.message });
-        } else {
-          respondError(res, err);
-        }
-      }
-      res.end();
-    });
 
     router.get("/", async (req, res) => {
       try {
