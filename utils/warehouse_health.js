@@ -362,12 +362,13 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
     from_store: r.from_store,
     article_id: r.article_id,
     article_name: r.article_name,
-    qty: Math.max(0, n(r.advised_qty) - n(r.actual_qty)),
-    value: r2(Math.max(0, n(r.advised_qty) - n(r.actual_qty)) * n(r.nlc)),
+    // The verification job is not finished: the whole line is still to verify, even
+    // when the store has already counted some or all of it ("counted so far").
+    qty: n(r.advised_qty),
+    counted_qty: n(r.actual_qty),
+    value: r2(n(r.advised_qty) * n(r.nlc)),
     is_return: Boolean(r.to_store && r.from_store && r.to_store === "warehouse"),
-  }))
-    // A line with nothing left to verify (all of it already counted) is not "yet to verify".
-    .filter((p) => p.qty > 0);
+  }));
   const pendingQty = pending.reduce((s, r) => s + r.qty, 0);
 
   // Remarks
@@ -418,7 +419,7 @@ function buildHealthBase({ writeoffLines, date, uploads, summary, byJobType, byS
   const lost = notUnloadedList.length + wrongStoreList.length;
   if (lost) items.push({ key: "unloading", tone: "red", text: `Unloading: ${lost} box${lost === 1 ? "" : "es"} not right (not unloaded or wrong store)` });
   if (job.VERIFICATION.short_lines) items.push({ key: "verification", tone: "red", text: `Stores found ${fmt(job.VERIFICATION.short_lines)} line${job.VERIFICATION.short_lines === 1 ? "" : "s"} short at verification` });
-  if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pendingQty)} qty yet to verify` });
+  if (pending.length) items.push({ key: "verification", tone: "amber", text: `${fmt(pending.length)} line${pending.length === 1 ? "" : "s"} (${fmt(pendingQty)} qty) yet to verify - verification not finished` });
   // Remarks (written the next day) and jobs still open (every night) are normal: not listed here.
 
   const monthPickers = pickers(pickerWork, pickerMistakes, staffNames);
