@@ -2560,13 +2560,10 @@ class Server {
     // stock and prices into Offers V3 (price, then stock) and the Price
     // Checker, replacing the hand-uploaded sheets. On unless RETAILPILOT_STOCK_SYNC_ENABLED=false;
     // POST /offers-v3/retailpilot-sync runs it by hand either way.
-    // 6:45 AM (Asia/Kolkata) - suppliers from RetailPilot: masterhub's
-    // vendors become the supplier list (buyer and holding days kept), each
-    // product's supplier follows RetailPilot. After the 6:00 article sync, so
-    // a product created this morning gets its supplier today. Again at
-    // 10:00 AM, 12:30 PM and 4:00 PM so suppliers added in RetailPilot during
-    // the day reach DNDS (and can be given a buyer) the same day. On unless
-    // RETAILPILOT_SUPPLIER_SYNC_ENABLED=false; POST
+    // 10:00 AM, 12:30 PM and 4:00 PM (Asia/Kolkata) - suppliers from
+    // RetailPilot: masterhub's vendors become the supplier list (buyer and
+    // holding days kept), each product's supplier follows RetailPilot. On
+    // unless RETAILPILOT_SUPPLIER_SYNC_ENABLED=false; POST
     // /product-distributors/retailpilot-sync runs it by hand either way.
     if (String(process.env.RETAILPILOT_SUPPLIER_SYNC_ENABLED || "").toLowerCase() !== "false") {
       const runSupplierSync = async () => {
@@ -2578,7 +2575,7 @@ class Server {
         ? this.apiSyncLogger.wrapCron("retailpilot_supplier_sync", "/retailpilot/supplier-sync-run", runSupplierSync)
         : runSupplierSync;
       // Same job name on every schedule: one overlap guard covers them all.
-      for (const schedule of ["45 6 * * *", "0 10 * * *", "30 12 * * *", "0 16 * * *"]) {
+      for (const schedule of ["0 10 * * *", "30 12 * * *", "0 16 * * *"]) {
         this.cronService.register("retailpilot_supplier_sync", schedule, supplierSyncJob, { preventOverlap: true });
       }
     }
