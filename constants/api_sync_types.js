@@ -77,7 +77,7 @@ const API_SYNC_TYPES = [
     label: "RetailPilot Stock & Price Sync",
     match: "/retailpilot/stock-sync-run",
   },
-  // The 6:45 AM RetailPilot supplier sync; logged the same way.
+  // The RetailPilot supplier sync (10:00 AM, 12:30 PM, 4:00 PM); logged the same way.
   {
     type: "retailpilot_supplier_sync",
     category: "sync",
