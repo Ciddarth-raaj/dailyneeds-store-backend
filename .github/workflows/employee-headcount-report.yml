@@ -1,0 +1,74 @@
+# Employee HEADCOUNT report for planning (e.g. the quarterly stock audit).
+# STRICTLY READ-ONLY and COUNTS ONLY: one SELECT with GROUP BY, no names,
+# phones, salaries or any other personal field is selected or printed.
+# No INSERT/UPDATE/DELETE, no migration, no pm2 change, no deploy.
+# Credentials never leave the host: the query runs there through the repo's own
+# `mysql` module against config.json db.mysql, exactly as the API connects.
+#
+# Runs on push of this file to the agent branch, or by hand from the Actions tab.
+# Uses the same secrets as the backend deploy: SSH_PRIVATE_KEY, SSH_HOST, SSH_USER.
+
+name: Employee Headcount Report (read-only)
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/employee-headcount-report.yml]
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Headcount by store and designation (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          cd ~/dailyneeds-store-backend || { echo "::error::no checkout"; exit 1; }
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"
+          [ -n "$API_ENV" ] || API_ENV="development"
+          node - "$API_ENV" <<'NODE'
+          const fs = require("fs");
+          const mysql = require("mysql");
+          const env = process.argv[2];
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[env];
+          const conn = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username,
+            password: cfg.password, database: cfg.database, multipleStatements: false });
+          const sql = `
+            SELECT COALESCE(o.outlet_name, CONCAT('store_id ', COALESCE(e.store_id, 'none'))) AS store,
+                   COALESCE(d.designation_name, CONCAT('designation_id ', COALESCE(e.designation_id, 'none'))) AS designation,
+                   e.status AS status,
+                   (r.employee_name IS NOT NULL) AS has_resignation,
+                   COUNT(*) AS headcount
+            FROM new_employee e
+            LEFT JOIN designation d ON d.designation_id = e.designation_id
+            LEFT JOIN outlets o ON o.outlet_id = e.store_id
+            LEFT JOIN (SELECT DISTINCT employee_name FROM resignation) r ON r.employee_name = e.employee_name
+            GROUP BY store, designation, status, has_resignation
+            ORDER BY store, designation, status, has_resignation`;
+          conn.query(sql, (err, rows) => {
+            if (err) { console.log(`::error::${err.code} ${err.message}`); process.exit(2); }
+            console.log("HEADCOUNT_JSON_BEGIN");
+            console.log(JSON.stringify(rows));
+            console.log("HEADCOUNT_JSON_END");
+            conn.end();
+          });
+          NODE
+          REMOTE
