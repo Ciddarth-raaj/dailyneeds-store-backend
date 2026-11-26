@@ -16,15 +16,16 @@ name: Stock Audit SPECTRA Discovery (read-only)
   workflow_dispatch:
     inputs:
       mode:
-        description: "full | schema"
+        description: "full | schema | phase2"
         required: false
-        default: full
+        default: phase2
         type: string
   push:
     branches: [claude/new-session-71890u]
     paths:
       - .github/workflows/stock-audit-spectra-discovery.yml
       - scripts/stock_audit/spectra_discovery.js
+      - scripts/stock_audit/spectra_discovery_phase2.js
 
 jobs:
   discover:
@@ -48,11 +49,11 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          MODE: ${{ inputs.mode || 'full' }}
+          MODE: ${{ inputs.mode || 'phase2' }}
         run: |
           set -euo pipefail
-          case "$MODE" in full|schema) ;; *) echo "::error::bad mode"; exit 1;; esac
+          case "$MODE" in full|schema) SCRIPT=scripts/stock_audit/spectra_discovery.js;; phase2) SCRIPT=scripts/stock_audit/spectra_discovery_phase2.js;; *) echo "::error::bad mode"; exit 1;; esac
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             "${SSH_USER}@${SSH_HOST}" \
             "cd ~/dailyneeds-store-backend && DISCOVERY_MODE=$MODE node -" \
-            < scripts/stock_audit/spectra_discovery.js
+            < "$SCRIPT"
