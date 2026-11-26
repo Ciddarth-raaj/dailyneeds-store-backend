@@ -1,0 +1,16 @@
+DELETE FROM `permissions` WHERE `permission_key` IN ('manage_stock_audit', 'approve_stock_audit_incentive');
+DELETE FROM `all_permissions` WHERE `permission_key` IN ('manage_stock_audit', 'approve_stock_audit_incentive');
+DROP TABLE IF EXISTS `sa_approval`;
+DROP TABLE IF EXISTS `sa_variance_closure`;
+DROP TABLE IF EXISTS `sa_management_kpi`;
+DROP TABLE IF EXISTS `sa_employee_incentive`;
+DROP TABLE IF EXISTS `sa_rule_set`;
+DROP TABLE IF EXISTS `sa_incentive_article`;
+DROP TABLE IF EXISTS `sa_verification`;
+DROP TABLE IF EXISTS `sa_cycle`;
+DROP TABLE IF EXISTS `sa_sync_issue`;
+DROP TABLE IF EXISTS `sa_sync_run`;
+DROP TABLE IF EXISTS `sa_sync_state`;
+DROP TABLE IF EXISTS `sa_rp_adjustment`;
+DROP TABLE IF EXISTS `sa_rp_line`;
+DROP TABLE IF EXISTS `sa_rp_session`;
