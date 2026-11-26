@@ -135,7 +135,9 @@ function mapPurchaseOrders(rows) {
 /* ------------------------------------------------------------------ */
 
 const CHANNELS = ["CALL", "WHATSAPP", "EMAIL", "VISIT"];
-/** Days after the PO date before it needs chasing, and between chases. */
+/** Days after the PO date before the first chase (PO on 10 Nov -> 13 Nov). */
+const FIRST_FOLLOW_UP_AFTER_DAYS = 3;
+/** Days after a remark with no next follow-up date before the next chase. */
 const FOLLOW_UP_AFTER_DAYS = 2;
 const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_\/-]{0,99}$/;
 
@@ -152,8 +154,8 @@ const addDays = (isoDay, n) => {
 
 /**
  * Does this PO need chasing today? Only approved POs with nothing received
- * (Awaiting delivery and Expired), at least FOLLOW_UP_AFTER_DAYS past the
- * PO date, and either never followed up, due by the next follow-up date set
+ * (Awaiting delivery and Expired), at least FIRST_FOLLOW_UP_AFTER_DAYS past
+ * the PO date, and either never followed up, due by the next follow-up date set
  * on the last remark, or - with no such date - last chased that many days
  * ago or more.
  *
@@ -163,7 +165,7 @@ const addDays = (isoDay, n) => {
  */
 function needsFollowUp(po, last, today) {
   if (!po || po.status !== "APPROVED" || !po.po_date) return false;
-  if (po.po_date > addDays(today, -FOLLOW_UP_AFTER_DAYS)) return false;
+  if (po.po_date > addDays(today, -FIRST_FOLLOW_UP_AFTER_DAYS)) return false;
   if (!last) return true;
   if (last.next_follow_up_date) return last.next_follow_up_date <= today;
   return !last.created_day || last.created_day <= addDays(today, -FOLLOW_UP_AFTER_DAYS);
@@ -173,6 +175,7 @@ module.exports = {
   PO_TRACKER_QUERY,
   mapPurchaseOrders,
   CHANNELS,
+  FIRST_FOLLOW_UP_AFTER_DAYS,
   FOLLOW_UP_AFTER_DAYS,
   validSlug,
   addDays,

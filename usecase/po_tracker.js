@@ -80,7 +80,7 @@ class PoTracker {
     });
     return {
       code: 200,
-      data: { fetched_at: new Date(cached.at).toISOString(), today, follow_up_after_days: P.FOLLOW_UP_AFTER_DAYS, followups_error: followupsError, orders },
+      data: { fetched_at: new Date(cached.at).toISOString(), today, first_follow_up_after_days: P.FIRST_FOLLOW_UP_AFTER_DAYS, follow_up_after_days: P.FOLLOW_UP_AFTER_DAYS, followups_error: followupsError, orders },
     };
   }
 

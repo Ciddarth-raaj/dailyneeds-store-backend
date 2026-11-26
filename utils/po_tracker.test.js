@@ -52,9 +52,10 @@ describe("usecase", () => {
 describe("needsFollowUp", () => {
   const TODAY = "2026-11-16";
   const po = (o) => ({ status: "APPROVED", po_date: "2026-11-10", ...o });
-  it("only approved POs at least 2 days old", () => {
+  it("only approved POs, from the 3rd day after the PO date", () => {
     assert.equal(P.needsFollowUp(po(), null, TODAY), true);
-    assert.equal(P.needsFollowUp(po({ po_date: "2026-11-14" }), null, TODAY), true);
+    assert.equal(P.needsFollowUp(po({ po_date: "2026-11-13" }), null, TODAY), true); // 13 -> 16
+    assert.equal(P.needsFollowUp(po({ po_date: "2026-11-14" }), null, TODAY), false);
     assert.equal(P.needsFollowUp(po({ po_date: "2026-11-15" }), null, TODAY), false);
     assert.equal(P.needsFollowUp(po({ status: "PARTIALLY_FULFILLED" }), null, TODAY), false);
     assert.equal(P.needsFollowUp(po({ status: "FULFILLED" }), null, TODAY), false);
