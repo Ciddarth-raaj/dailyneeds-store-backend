@@ -246,6 +246,28 @@ class OosFollowup {
     return { code: 200, msg: "Saved" };
   }
 
+  /**
+   * One answer for several lines - an item out in several stores is answered
+   * once. Every line is checked first; nothing is saved unless all may be.
+   */
+  async answerMany({ ids, reason, note, employeeId, canChase }) {
+    const list = [...new Set((ids || []).map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (!list.length) return { code: 422, msg: "No lines chosen" };
+    const text = note == null ? "" : String(note).trim();
+    if (reason && !O.REASONS.includes(reason)) return { code: 422, msg: "Unknown reason" };
+    if (!reason && !text) return { code: 422, msg: "Choose a reason or write a note" };
+    if (!employeeId) return { code: 403, msg: "Only an employee login can update a line" };
+    for (const id of list) {
+      const { c, error } = await this._allowed(id, employeeId, canChase);
+      if (error) return error;
+      if (c.status !== "open") return { code: 409, msg: "One of these stores is back in stock; refresh and try again" };
+    }
+    for (const id of list) {
+      await this.repo.addEvent(id, { reason: reason || null, note: text ? text.slice(0, 500) : null, employeeId });
+    }
+    return { code: 200, msg: "Saved", saved: list.length };
+  }
+
   async events({ id, employeeId, canChase }) {
     const { error } = await this._allowed(id, employeeId, canChase);
     if (error) return error;

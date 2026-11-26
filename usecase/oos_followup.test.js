@@ -15,7 +15,7 @@ function memoryRepo() {
   let nextId = 1;
   return {
     cases,
-    events,
+    eventLog: events,
     uploads,
     enrichment: async (ids) =>
       new Map(
@@ -144,6 +144,17 @@ describe("out-of-stock follow-up", () => {
     assert.equal((await uc.view({ employeeId: 8, canChase: false, includeHidden: true })).data.cases.length, 1);
     assert.equal((await uc.answer({ id: id200, note: "called buyer", employeeId: 1, canChase: true })).code, 200, "the chaser notes any line");
     assert.equal((await uc.events({ id: id200, employeeId: 8, canChase: false })).data.length, 2);
+  });
+
+  it("answerMany: one answer for an item's stores; all checked before any is saved", async () => {
+    await uc.upload({ fileName: "x_2026-11-26.csv", rows: [line(200, "vallalar salai", "B", 5), line(200, "ecr", "B", 5), line(100, "warehouse", "A", 1)], employeeId: 1 });
+    const ids200 = repo.cases.filter((c) => c.article_id === 200).map((c) => c.oos_case_id);
+    const id100 = repo.cases.find((c) => c.article_id === 100).oos_case_id;
+    assert.equal((await uc.answerMany({ ids: [...ids200, id100], reason: "ordered", employeeId: 8, canChase: false })).code, 403);
+    assert.equal(repo.eventLog.length, 0, "nothing saved when one line is not theirs");
+    const r = await uc.answerMany({ ids: ids200, reason: "ordered", note: "PO raised", employeeId: 8, canChase: false });
+    assert.deepEqual([r.code, r.saved], [200, 2]);
+    assert.ok(repo.cases.filter((c) => c.article_id === 200).every((c) => c.reason === "ordered"));
   });
 
   it("PO Tracker down: the upload still goes through, with a warning", async () => {

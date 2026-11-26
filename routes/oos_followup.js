@@ -9,6 +9,7 @@ const { REASONS } = require("../utils/oos_followup");
  *   GET  /oos-followup?buyer_id=&hidden=1 chaser: everyone (+ scoreboard);          chase_oos | view_my_oos
  *                                         buyer: own lines only
  *   POST /oos-followup/cases/:id/answer   { reason?, note? }                       chase_oos | view_my_oos (own line)
+ *   POST /oos-followup/answer             { ids, reason?, note? } - an item's stores chase_oos | view_my_oos (own lines)
  *   GET  /oos-followup/cases/:id/events   the line's answers and notes             chase_oos | view_my_oos (own line)
  */
 const cell = Joi.alternatives().try(Joi.string().allow(""), Joi.number()).allow(null).optional();
@@ -105,6 +106,25 @@ class OosFollowupRoutes {
           res,
           await this.usecase.answer({
             id,
+            reason: v.value.reason || null,
+            note: v.value.note || null,
+            employeeId: employeeOf(req),
+            canChase: await canChase(req),
+          })
+        );
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/answer", need("chase_oos", "view_my_oos"), async (req, res) => {
+      try {
+        const v = Joi.validate(req.body || {}, answerSchema.keys({ ids: Joi.array().items(Joi.number().integer().positive()).min(1).max(50).required() }));
+        if (v.error) return res.status(400).json({ code: 400, msg: v.error.message });
+        send(
+          res,
+          await this.usecase.answerMany({
+            ids: v.value.ids,
             reason: v.value.reason || null,
             note: v.value.note || null,
             employeeId: employeeOf(req),
