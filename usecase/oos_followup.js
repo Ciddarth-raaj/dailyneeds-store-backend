@@ -222,7 +222,7 @@ class OosFollowup {
     }
     return [...rows.values()]
       .map((r) => ({ ...r, value_to_chase: Math.round(r.value_to_chase) }))
-      .sort((a, b) => (a.buyer_id == null) - (b.buyer_id == null) || b.not_updated - a.not_updated || b.value_to_chase - a.value_to_chase);
+      .sort((a, b) => (a.buyer_id == null) - (b.buyer_id == null) || b.value_to_chase - a.value_to_chase);
   }
 
   async _allowed(id, employeeId, canChase) {
