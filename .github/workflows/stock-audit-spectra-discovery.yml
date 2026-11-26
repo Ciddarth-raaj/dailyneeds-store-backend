@@ -1,0 +1,58 @@
+# Stock Audit - RetailPilot SPECTRA / MOSAIC DISCOVERY. Strictly READ-ONLY.
+#
+# Pipes scripts/stock_audit/spectra_discovery.js to `node -` on the production
+# host, inside ~/dailyneeds-store-backend, so it uses that checkout's
+# config/retailpilot.js (.env keys) exactly as the existing syncs do. The
+# script only calls GET /spectra/schema, POST /spectra/query (SELECT) and
+# GET /spectra/reports/{n}. It writes nothing to RetailPilot or to the DNDS
+# database, changes no file on the host, and never prints keys, hosts or
+# request headers; personal sample values are redacted.
+#
+# Same secrets as the backend deploy: SSH_PRIVATE_KEY, SSH_HOST, SSH_USER.
+
+name: Stock Audit SPECTRA Discovery (read-only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full | schema"
+        required: false
+        default: full
+        type: string
+  push:
+    branches: [claude/new-session-71890u]
+    paths:
+      - .github/workflows/stock-audit-spectra-discovery.yml
+      - scripts/stock_audit/spectra_discovery.js
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Discover (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          MODE: ${{ inputs.mode || 'full' }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in full|schema) ;; *) echo "::error::bad mode"; exit 1;; esac
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
+            "${SSH_USER}@${SSH_HOST}" \
+            "cd ~/dailyneeds-store-backend && DISCOVERY_MODE=$MODE node -" \
+            < scripts/stock_audit/spectra_discovery.js
