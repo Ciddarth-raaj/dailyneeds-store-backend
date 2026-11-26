@@ -160,7 +160,7 @@ describe("routes", () => {
     app.use(express.json());
     app.use((req, res, next) => ((req.decoded = { employee_id: 7 }), next()));
     const permissions = { require: (k) => (req, res, next) => (held.includes(k) ? next() : res.status(403).json({ code: 403 })) };
-    const usecase = { addFollowup: async (a) => ({ code: 200, data: a }), list: async () => ({ code: 200, data: {} }) };
+    const usecase = { addFollowup: async (a) => ({ code: 200, data: a }), stopFollowup: async (a) => ({ code: 200, data: a }), list: async () => ({ code: 200, data: {} }) };
     app.use("/po-tracker", routesFactory(usecase, permissions).getRouter());
     return app;
   };
@@ -171,6 +171,7 @@ describe("routes", () => {
     assert.equal(ok.status, 200);
     assert.equal(ok.body.data.employee_id, 7);
     assert.equal((await call(appWith(["add_po_followup"]), "POST", "/po-tracker/p1/followups", { channel: "FAX", remark: "x" })).status, 422);
-    assert.equal((await call(appWith(["add_po_followup"]), "POST", "/po-tracker/p1/stop", { reason: "NOT_NEEDED" })).status, 403);
+    assert.equal((await call(appWith([]), "POST", "/po-tracker/p1/stop", { reason: "NOT_NEEDED" })).status, 403);
+    assert.equal((await call(appWith(["view_po_tracker"]), "POST", "/po-tracker/p1/stop", { reason: "NOT_NEEDED" })).status, 200);
   });
 });

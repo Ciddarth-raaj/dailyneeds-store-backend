@@ -9,8 +9,8 @@ const { CHANNELS, STOP_REASONS } = require("../utils/po_tracker");
  *   GET  /po-tracker?refresh=1        latest POs per store and supplier, with each one's last remark   view_po_tracker
  *   GET  /po-tracker/:slug/followups  one PO's remarks + the supplier's on its other POs              view_po_tracker
  *   POST /po-tracker/:slug/followups  add a remark                                                     add_po_followup
- *   POST /po-tracker/:slug/stop       stop following a PO (reason, note)                               stop_po_followup
- *   POST /po-tracker/:slug/resume     follow it again                                                  stop_po_followup
+ *   POST /po-tracker/:slug/stop       stop following a PO (reason, note)                               view_po_tracker (everyone on the tracker)
+ *   POST /po-tracker/:slug/resume     follow it again                                                  view_po_tracker
  *   POST /po-tracker/daily-summary/send-me   today's follow-up summary so far, to my own Telegram      receive_po_daily_summary
  */
 const day = Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).allow(null, "").optional();
@@ -64,7 +64,7 @@ class PoTrackerRoutes {
     });
 
     const employee = (req) => (req.decoded && req.decoded.employee_id) || null;
-    this.router.post("/:slug/stop", need("stop_po_followup"), async (req, res) => {
+    this.router.post("/:slug/stop", need("view_po_tracker"), async (req, res) => {
       try {
         const { error, value } = stopSchema.validate(req.body || {});
         if (error) return res.status(422).json({ code: 422, msg: error.details[0].message });
@@ -74,7 +74,7 @@ class PoTrackerRoutes {
       }
     });
 
-    this.router.post("/:slug/resume", need("stop_po_followup"), async (req, res) => {
+    this.router.post("/:slug/resume", need("view_po_tracker"), async (req, res) => {
       try {
         const { error, value } = resumeSchema.validate(req.body || {});
         if (error) return res.status(422).json({ code: 422, msg: error.details[0].message });
