@@ -68,10 +68,17 @@ function sanitizeRow(row) {
 
 function tablesOf(schema) {
   if (!schema) return [];
-  if (Array.isArray(schema)) return schema;
-  return schema.tables || schema.data || [];
+  const t = Array.isArray(schema) ? schema : schema.tables || schema.data || [];
+  if (Array.isArray(t)) return t;
+  // SPECTRA returns { tables: { "<schema.table>": { ...definition } } }
+  return Object.entries(t).map(([k, v]) => ({ ...(v && typeof v === "object" ? v : { value: v }), _key: k }));
 }
-function tName(t) { return t.full_name || t.qualified_name || (t.schema ? `${t.schema}.${t.name}` : t.name || t.table); }
+function tName(t) { return t._key || t.full_name || t.qualified_name || (t.schema ? `${t.schema}.${t.name}` : t.name || t.table); }
+function colsOf(t) {
+  const c = t.columns || [];
+  if (Array.isArray(c)) return c;
+  return Object.entries(c).map(([k, v]) => ({ ...(v && typeof v === "object" ? v : { type: v }), name: (v && v.name) || k }));
+}
 
 async function discoverService(svc) {
   if (!svc.baseUrl || !svc.key) { out("SERVICE_SKIPPED", { service: svc.name, reason: "not configured" }); return; }
@@ -84,10 +91,11 @@ async function discoverService(svc) {
   if (full.status !== 200) { out("SCHEMA_ERROR", { service: svc.name, ...errInfo(full) }); return; }
   const tables = tablesOf(full.data);
   out("TABLE_LIST", { service: svc.name, count: tables.length,
-    tables: tables.map((t) => ({ t: tName(t), tags: t.tags || t.scope_tags || null, cols: (t.columns || []).length,
+    tables: tables.map((t) => ({ t: tName(t), tags: t.tags || t.scope_tags || null, cols: colsOf(t).length,
       d: t.description ? String(t.description).slice(0, 160) : null })) });
   if (tables[0]) out("TABLE_SHAPE_EXAMPLE", { service: svc.name, keys: Object.keys(tables[0]),
-    columnKeys: tables[0].columns && tables[0].columns[0] ? Object.keys(tables[0].columns[0]) : null });
+    columnKeys: colsOf(tables[0])[0] ? Object.keys(colsOf(tables[0])[0]) : null,
+    raw: JSON.stringify(tables[0]).slice(0, 2500), cached_at: full.data.cached_at || null });
 
   // 2. Tag scopes (names only)
   for (const tags of ["store", "chain", "store,transactions", "store,staff", "chain,catalog", "store,inventory", "store,audit"]) {
@@ -101,9 +109,9 @@ async function discoverService(svc) {
   const cands = tables.filter((t) => AUDIT_RE.test(tName(t)) || AUDIT_RE.test(String(t.description || "")));
   for (const t of cands) {
     out("TABLE_DETAIL", { service: svc.name, table: tName(t), tags: t.tags || null, description: t.description || null,
-      primary_key: t.primary_key || t.primary_keys || null, relations: t.relations || t.foreign_keys || null,
+      primary_key: t.primary_key || t.primary_keys || null, relations: t.relations || t.foreign_keys || null, other_keys: Object.keys(t).filter((k) => !['columns','description','tags','relations','constraints','primary_key','_key'].includes(k)),
       constraints: t.constraints || null,
-      columns: (t.columns || []).map((c) => ({ n: c.name, ty: c.type || c.data_type, nul: c.nullable, pk: c.primary_key || c.is_primary_key || undefined,
+      columns: colsOf(t).map((c) => ({ n: c.name, ty: c.type || c.data_type, nul: c.nullable, pk: c.primary_key || c.is_primary_key || undefined,
         d: c.description ? String(c.description).slice(0, 200) : undefined })) });
   }
 
@@ -112,8 +120,8 @@ async function discoverService(svc) {
   // 4. Samples + counts (10 rows, stable order on the first PK / id column)
   for (const t of cands.slice(0, 40)) {
     const name = tName(t);
-    const cols = (t.columns || []).map((c) => c.name);
-    const pk = (t.columns || []).filter((c) => c.primary_key || c.is_primary_key).map((c) => c.name);
+    const cols = colsOf(t).map((c) => c.name);
+    const pk = colsOf(t).filter((c) => c.primary_key || c.is_primary_key).map((c) => c.name);
     const order = pk.length ? pk : cols.includes("id") ? ["id"] : cols.slice(0, 1);
     await sleep(600);
     const cnt = await call(svc, "POST", "/spectra/query", { query: `SELECT COUNT(*) AS n FROM ${name}`, page: 1, size: 1 });
