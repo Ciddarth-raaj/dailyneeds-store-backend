@@ -11,7 +11,9 @@ const followupOut = (r) =>
     id: r.po_followup_id,
     po_slug: r.po_slug,
     po_ref: r.po_ref,
-    channel: r.channel,
+    kind: r.kind || "REMARK",
+    stop_reason: r.stop_reason || null,
+    channel: r.channel || null,
     remark: r.remark,
     promised_delivery_date: r.promised_delivery_date || null,
     next_follow_up_date: r.next_follow_up_date || null,
@@ -65,18 +67,23 @@ class PoTracker {
     }
     const today = this.today();
     let latest = new Map();
+    let stopped = new Map();
     let followupsError = null;
     if (this.followupRepo) {
       try {
-        const rows = await this.followupRepo.latestFor(cached.orders.map((o) => o.po_slug));
+        const slugs = cached.orders.map((o) => o.po_slug);
+        const [rows, stops] = await Promise.all([this.followupRepo.latestFor(slugs), this.followupRepo.stopStateFor(slugs)]);
         latest = new Map(rows.map((r) => [r.po_slug, followupOut(r)]));
+        stopped = new Map(stops.filter((r) => r.kind === "STOP").map((r) => [r.po_slug, followupOut(r)]));
       } catch (err) {
         followupsError = "Follow-up remarks could not be read";
       }
     }
     const orders = cached.orders.map((o) => {
       const last = latest.get(o.po_slug) || null;
-      return { ...o, last_followup: last, needs_followup: followupsError ? false : P.needsFollowUp(o, last, today) };
+      const stop = stopped.get(o.po_slug) || null;
+      // A stopped PO is not chased: never due, and left out of the 7 pm summary.
+      return { ...o, last_followup: last, stopped: stop, needs_followup: followupsError || stop ? false : P.needsFollowUp(o, last, today) };
     });
     return {
       code: 200,
@@ -102,6 +109,58 @@ class PoTracker {
     const supplierId = (order && order.supplier_id) || (remarks[0] && remarks[0].supplier_id) || null;
     const supplierRemarks = await this.followupRepo.forSupplier(supplierId, s);
     return { code: 200, data: { po_slug: s, order, remarks: remarks.map(followupOut), supplier_remarks: supplierRemarks.map(followupOut) } };
+  }
+
+  /** Is this PO's following stopped right now? */
+  async _isStopped(slug) {
+    const [state] = await this.followupRepo.stopStateFor([slug]);
+    return Boolean(state && state.kind === "STOP");
+  }
+
+  /** Stop following a PO (stock from another vendor, vendor changed, not needed, other). */
+  async stopFollowup({ slug, reason, note, employee_id }) {
+    const s = P.validSlug(slug);
+    if (!s) return { code: 422, msg: "Invalid purchase order" };
+    if (!employee_id) return { code: 403, msg: "Only an employee login can stop a follow-up" };
+    if (!P.STOP_REASONS.includes(reason)) return { code: 422, msg: "Choose why follow-up is being stopped" };
+    const text = String(note || "").trim();
+    if (reason === "OTHER" && !text) return { code: 422, msg: "Add a note saying why" };
+    const order = await this._order(s);
+    if (!order) return { code: 404, msg: "This PO is not on the PO Tracker. Refresh and try again." };
+    if (await this._isStopped(s)) return { code: 422, msg: "Follow-up on this PO is already stopped" };
+    const saved = await this.followupRepo.add({
+      po_slug: s,
+      po_ref: order.po_ref,
+      supplier_id: order.supplier_id,
+      supplier_name: order.supplier,
+      store_id: order.store_id,
+      kind: "STOP",
+      stop_reason: reason,
+      remark: text,
+      created_by: employee_id,
+    });
+    return { code: 200, data: followupOut(saved) };
+  }
+
+  /** Follow a stopped PO again; the normal follow-up rule applies from now. */
+  async resumeFollowup({ slug, note, employee_id }) {
+    const s = P.validSlug(slug);
+    if (!s) return { code: 422, msg: "Invalid purchase order" };
+    if (!employee_id) return { code: 403, msg: "Only an employee login can resume a follow-up" };
+    const order = await this._order(s);
+    if (!order) return { code: 404, msg: "This PO is not on the PO Tracker. Refresh and try again." };
+    if (!(await this._isStopped(s))) return { code: 422, msg: "Follow-up on this PO is not stopped" };
+    const saved = await this.followupRepo.add({
+      po_slug: s,
+      po_ref: order.po_ref,
+      supplier_id: order.supplier_id,
+      supplier_name: order.supplier,
+      store_id: order.store_id,
+      kind: "RESUME",
+      remark: String(note || "").trim(),
+      created_by: employee_id,
+    });
+    return { code: 200, data: followupOut(saved) };
   }
 
   /** Add one remark. The PO must be on the tracker (the latest PO for its supplier and store). */

@@ -20,10 +20,12 @@ describe("buildSummary", () => {
       po("d", { needs_followup: true, pending_value: 50000 }), // not chased
       po("e", { needs_followup: true, pending_value: 150000, days_past_validity: 4 }), // not chased, expired
       po("f"), // nothing
+      po("g", { needs_followup: false, stopped: { stop_reason: "VENDOR_CHANGED" } }), // stopped: not counted
+      po("h", { stopped: { stop_reason: "NOT_NEEDED" } }), // chased today, then stopped: not counted
     ];
     const s = S.buildSummary({
       orders,
-      chasedToday: ["a", "b", "c", "zzz"],
+      chasedToday: ["a", "b", "c", "h", "zzz"],
       previousBySlug: new Map([["b", { created_day: "2026-11-15" }]]),
       today: TODAY,
     });

@@ -1,6 +1,6 @@
 const Joi = require("@hapi/joi");
 const respondError = require("../utils/http");
-const { CHANNELS } = require("../utils/po_tracker");
+const { CHANNELS, STOP_REASONS } = require("../utils/po_tracker");
 
 /**
  * PO Tracker (/po-tracker): POs live from RetailPilot (read-only) and the
@@ -9,6 +9,8 @@ const { CHANNELS } = require("../utils/po_tracker");
  *   GET  /po-tracker?refresh=1        latest POs per store and supplier, with each one's last remark   view_po_tracker
  *   GET  /po-tracker/:slug/followups  one PO's remarks + the supplier's on its other POs              view_po_tracker
  *   POST /po-tracker/:slug/followups  add a remark                                                     add_po_followup
+ *   POST /po-tracker/:slug/stop       stop following a PO (reason, note)                               stop_po_followup
+ *   POST /po-tracker/:slug/resume     follow it again                                                  stop_po_followup
  *   POST /po-tracker/daily-summary/send-me   today's follow-up summary so far, to my own Telegram      receive_po_daily_summary
  */
 const day = Joi.string().regex(/^\d{4}-\d{2}-\d{2}$/).allow(null, "").optional();
@@ -17,6 +19,14 @@ const followupSchema = Joi.object({
   remark: Joi.string().trim().min(1).max(1000).required(),
   promised_delivery_date: day,
   next_follow_up_date: day,
+});
+
+const stopSchema = Joi.object({
+  reason: Joi.string().valid(...STOP_REASONS).required(),
+  note: Joi.string().trim().max(1000).allow("", null).optional(),
+});
+const resumeSchema = Joi.object({
+  note: Joi.string().trim().max(1000).allow("", null).optional(),
 });
 
 class PoTrackerRoutes {
@@ -48,6 +58,27 @@ class PoTrackerRoutes {
       try {
         if (!this.dailySummary) return res.status(400).json({ code: 400, msg: "Daily summary is not set up" });
         send(res, await this.dailySummary.sendToMe((req.decoded && req.decoded.employee_id) || null));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    const employee = (req) => (req.decoded && req.decoded.employee_id) || null;
+    this.router.post("/:slug/stop", need("stop_po_followup"), async (req, res) => {
+      try {
+        const { error, value } = stopSchema.validate(req.body || {});
+        if (error) return res.status(422).json({ code: 422, msg: error.details[0].message });
+        send(res, await this.usecase.stopFollowup({ slug: req.params.slug, ...value, employee_id: employee(req) }));
+      } catch (err) {
+        respondError(res, err);
+      }
+    });
+
+    this.router.post("/:slug/resume", need("stop_po_followup"), async (req, res) => {
+      try {
+        const { error, value } = resumeSchema.validate(req.body || {});
+        if (error) return res.status(422).json({ code: 422, msg: error.details[0].message });
+        send(res, await this.usecase.resumeFollowup({ slug: req.params.slug, ...value, employee_id: employee(req) }));
       } catch (err) {
         respondError(res, err);
       }

@@ -24,6 +24,7 @@ function buildSummary({ orders, chasedToday, previousBySlug, today }) {
   const prev = previousBySlug || new Map();
   const groups = { awaiting: emptyGroup(), expired: emptyGroup() };
   for (const o of orders || []) {
+    if (o.stopped) continue; // follow-up stopped: not chased, so not counted either way
     const g = groups[groupOf(o)];
     if (chasedSet.has(o.po_slug)) {
       if (needsFollowUp(o, prev.get(o.po_slug) || null, today)) {

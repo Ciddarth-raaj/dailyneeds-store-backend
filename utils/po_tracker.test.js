@@ -77,7 +77,8 @@ describe("follow-ups usecase", () => {
       async add(r) { const row = { ...r, po_followup_id: rows.length + 1, created_at: "2026-11-16T05:00:00Z", created_by_name: "Prashanth" }; rows.push(row); return row; },
       async forPo(slug) { return rows.filter((r) => r.po_slug === slug).reverse(); },
       async forSupplier() { return []; },
-      async latestFor(slugs) { return slugs.map((s) => rows.filter((r) => r.po_slug === s).pop()).filter(Boolean).map((r) => ({ ...r, remark_count: 1 })); },
+      async latestFor(slugs) { return slugs.map((s) => rows.filter((r) => r.po_slug === s && (r.kind || "REMARK") === "REMARK").pop()).filter(Boolean).map((r) => ({ ...r, remark_count: 1 })); },
+      async stopStateFor(slugs) { return slugs.map((s) => rows.filter((r) => r.po_slug === s && ["STOP", "RESUME"].includes(r.kind)).pop()).filter(Boolean); },
     };
   };
   it("lists POs needing follow-up, and a remark clears it", async () => {
@@ -100,6 +101,42 @@ describe("follow-ups usecase", () => {
     assert.equal((await uc.addFollowup({ slug: "po1", channel: "CALL", remark: "x", next_follow_up_date: "2026-11-01", employee_id: 7 })).code, 422);
     assert.equal((await uc.addFollowup({ slug: "zzz", channel: "CALL", remark: "x", employee_id: 7 })).code, 404);
     assert.equal((await uc.addFollowup({ slug: "po1", channel: "CALL", remark: "x" })).code, 403);
+  });
+});
+
+describe("stop / resume following", () => {
+  const spectra = { isConfigured: () => true, queryAll: async () => [{ ...ROW, status: "APPROVED", po_date: "2026-11-10" }] };
+  const memory = () => {
+    const rows = [];
+    return {
+      rows,
+      async add(r) { const row = { ...r, po_followup_id: rows.length + 1, created_at: "2026-11-16T05:00:00Z" }; rows.push(row); return row; },
+      async latestFor(slugs) { return slugs.map((s) => rows.filter((r) => r.po_slug === s && r.kind === "REMARK").pop()).filter(Boolean); },
+      async stopStateFor(slugs) { return slugs.map((s) => rows.filter((r) => r.po_slug === s && ["STOP", "RESUME"].includes(r.kind)).pop()).filter(Boolean); },
+    };
+  };
+  it("a stopped PO is never due; resuming brings the rule back", async () => {
+    const f = memory();
+    const uc = usecaseFactory(spectra, f, () => Date.now(), () => "2026-11-16");
+    assert.equal((await uc.list()).data.orders[0].needs_followup, true);
+    const stop = await uc.stopFollowup({ slug: "po1", reason: "OTHER_VENDOR", note: "Got it from Sri Balaji", employee_id: 7 });
+    assert.equal(stop.code, 200);
+    assert.equal(f.rows[0].kind, "STOP");
+    const after = (await uc.list()).data.orders[0];
+    assert.equal(after.needs_followup, false);
+    assert.equal(after.stopped.stop_reason, "OTHER_VENDOR");
+    assert.equal((await uc.stopFollowup({ slug: "po1", reason: "NOT_NEEDED", employee_id: 7 })).code, 422); // already stopped
+    assert.equal((await uc.resumeFollowup({ slug: "po1", employee_id: 7 })).code, 200);
+    const back = (await uc.list()).data.orders[0];
+    assert.equal(back.stopped, null);
+    assert.equal(back.needs_followup, true);
+    assert.equal((await uc.resumeFollowup({ slug: "po1", employee_id: 7 })).code, 422); // not stopped
+  });
+  it("Other needs a note; reasons are checked", async () => {
+    const uc = usecaseFactory(spectra, memory(), () => Date.now(), () => "2026-11-16");
+    assert.equal((await uc.stopFollowup({ slug: "po1", reason: "OTHER", note: " ", employee_id: 7 })).code, 422);
+    assert.equal((await uc.stopFollowup({ slug: "po1", reason: "LOST", employee_id: 7 })).code, 422);
+    assert.equal((await uc.stopFollowup({ slug: "po1", reason: "OTHER", note: "Rate dispute", employee_id: 7 })).code, 200);
   });
 });
 
@@ -134,5 +171,6 @@ describe("routes", () => {
     assert.equal(ok.status, 200);
     assert.equal(ok.body.data.employee_id, 7);
     assert.equal((await call(appWith(["add_po_followup"]), "POST", "/po-tracker/p1/followups", { channel: "FAX", remark: "x" })).status, 422);
+    assert.equal((await call(appWith(["add_po_followup"]), "POST", "/po-tracker/p1/stop", { reason: "NOT_NEEDED" })).status, 403);
   });
 });

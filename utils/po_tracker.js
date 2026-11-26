@@ -135,6 +135,8 @@ function mapPurchaseOrders(rows) {
 /* ------------------------------------------------------------------ */
 
 const CHANNELS = ["CALL", "WHATSAPP", "EMAIL", "VISIT"];
+/** Why following a PO was stopped. */
+const STOP_REASONS = ["OTHER_VENDOR", "VENDOR_CHANGED", "NOT_NEEDED", "OTHER"];
 /** Days after the PO date before the first chase (PO on 10 Nov -> 13 Nov). */
 const FIRST_FOLLOW_UP_AFTER_DAYS = 3;
 /** Days after a remark with no next follow-up date before the next chase. */
@@ -175,6 +177,7 @@ module.exports = {
   PO_TRACKER_QUERY,
   mapPurchaseOrders,
   CHANNELS,
+  STOP_REASONS,
   FIRST_FOLLOW_UP_AFTER_DAYS,
   FOLLOW_UP_AFTER_DAYS,
   validSlug,

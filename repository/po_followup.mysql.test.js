@@ -24,6 +24,7 @@ describe("po_followup repository", { skip: !URL && "PO_TEST_MYSQL not set" }, ()
     await q("CREATE TABLE new_employee (employee_id INT PRIMARY KEY, employee_name VARCHAR(80)); CREATE TABLE all_permissions (permission_key VARCHAR(100)); CREATE TABLE permissions (designation_id INT, permission_key VARCHAR(100))");
     await q("INSERT INTO new_employee VALUES (7, 'Prashanth')");
     await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20261216140000-po-followup-up.sql"), "utf8"));
+    await q(fs.readFileSync(path.join(__dirname, "../migrations/mysql/migrations/sqls/20270107120000-po-followup-stop-up.sql"), "utf8"));
     repo = require("./po_followup")(pool);
   });
   after(() => pool && pool.end());
@@ -57,5 +58,19 @@ describe("po_followup repository", { skip: !URL && "PO_TEST_MYSQL not set" }, ()
     assert.deepEqual((await repo.chasedBetween(start, end)).sort(), ["p0", "p1"]);
     const before = await repo.latestBefore(["p1", "p0"], start);
     assert.deepEqual(before.map((r) => [r.po_slug, r.remark]), [["p1", "No answer"]]);
+  });
+
+  it("stops and resumes: a STOP is not a remark, and the latest STOP/RESUME wins", async () => {
+    const base = { po_ref: "711", supplier_id: "9", store_id: "wh", created_by: 7 };
+    const stop = await repo.add({ ...base, po_slug: "p1", kind: "STOP", stop_reason: "OTHER_VENDOR" });
+    assert.equal(stop.kind, "STOP");
+    assert.equal(stop.channel, null);
+    assert.equal(stop.remark, "");
+    assert.equal((await repo.latestFor(["p1"]))[0].kind, "REMARK");
+    assert.equal((await repo.stopStateFor(["p1"]))[0].kind, "STOP");
+    await repo.add({ ...base, po_slug: "p1", kind: "RESUME" });
+    assert.equal((await repo.stopStateFor(["p1"]))[0].kind, "RESUME");
+    assert.deepEqual(await repo.stopStateFor(["p0"]), []);
+    assert.equal((await repo.forPo("p1"))[0].kind, "RESUME");
   });
 });

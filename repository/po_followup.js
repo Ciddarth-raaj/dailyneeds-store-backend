@@ -4,10 +4,14 @@ const logger = require("../utils/logger");
  * Storage for PO Tracker follow-ups (po_followups): append-only - nothing
  * here UPDATEs or DELETEs a row. Dates come back as YYYY-MM-DD text and
  * created_at as an ISO string, so no server time zone shifts them.
+ *
+ * kind: REMARK (a chase), STOP or RESUME (following the PO stopped /
+ * resumed). Chase figures read REMARKs only; the latest STOP or RESUME on a
+ * PO says whether it is still being followed.
  */
 const COLUMNS = `
   f.po_followup_id, f.po_slug, f.po_ref, f.supplier_id, f.supplier_name, f.store_id,
-  f.channel, f.remark,
+  f.kind, f.stop_reason, f.channel, f.remark,
   DATE_FORMAT(f.promised_delivery_date, '%Y-%m-%d') AS promised_delivery_date,
   DATE_FORMAT(f.next_follow_up_date, '%Y-%m-%d')    AS next_follow_up_date,
   f.created_by, e.employee_name AS created_by_name, f.created_at`;
@@ -47,17 +51,19 @@ class PoFollowupRepository {
     const result = await this.run(
       "ADD",
       `INSERT INTO po_followups
-         (po_slug, po_ref, supplier_id, supplier_name, store_id, channel, remark,
+         (po_slug, po_ref, supplier_id, supplier_name, store_id, kind, stop_reason, channel, remark,
           promised_delivery_date, next_follow_up_date, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         row.po_slug,
         row.po_ref || null,
         row.supplier_id || null,
         row.supplier_name || null,
         row.store_id || null,
-        row.channel,
-        row.remark,
+        row.kind || "REMARK",
+        row.stop_reason || null,
+        row.channel || null,
+        row.remark || "",
         row.promised_delivery_date || null,
         row.next_follow_up_date || null,
         row.created_by,
@@ -67,7 +73,7 @@ class PoFollowupRepository {
     return saved;
   }
 
-  /** Every remark on one PO, newest first. */
+  /** Every remark, stop and resume on one PO, newest first. */
   forPo(slug) {
     return this.run("FOR_PO", `SELECT ${SELECT} WHERE f.po_slug = ? ORDER BY f.po_followup_id DESC`, [slug]);
   }
@@ -86,7 +92,7 @@ class PoFollowupRepository {
   async chasedBetween(from, to) {
     const rows = await this.run(
       "CHASED_BETWEEN",
-      "SELECT DISTINCT po_slug FROM po_followups WHERE created_at >= ? AND created_at < ?",
+      "SELECT DISTINCT po_slug FROM po_followups WHERE kind = 'REMARK' AND created_at >= ? AND created_at < ?",
       [from, to]
     );
     return rows.map((r) => r.po_slug);
@@ -99,7 +105,7 @@ class PoFollowupRepository {
       "LATEST_BEFORE",
       `SELECT ${COLUMNS}${FROM}
        JOIN (SELECT po_slug, MAX(po_followup_id) AS last_id
-               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) AND created_at < ? GROUP BY po_slug) c
+               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) AND kind = 'REMARK' AND created_at < ? GROUP BY po_slug) c
          ON c.last_id = f.po_followup_id`,
       [...slugs, before]
     );
@@ -112,7 +118,20 @@ class PoFollowupRepository {
       "LATEST",
       `SELECT ${COLUMNS}, c.remark_count${FROM}
        JOIN (SELECT po_slug, MAX(po_followup_id) AS last_id, COUNT(*) AS remark_count
-               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) GROUP BY po_slug) c
+               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) AND kind = 'REMARK' GROUP BY po_slug) c
+         ON c.last_id = f.po_followup_id`,
+      slugs
+    );
+  }
+
+  /** The latest STOP or RESUME on each of `slugs` (a PO with a STOP last is not being followed). */
+  async stopStateFor(slugs) {
+    if (!slugs || !slugs.length) return [];
+    return this.run(
+      "STOP_STATE",
+      `SELECT ${COLUMNS}${FROM}
+       JOIN (SELECT po_slug, MAX(po_followup_id) AS last_id
+               FROM po_followups WHERE po_slug IN (${placeholders(slugs)}) AND kind IN ('STOP','RESUME') GROUP BY po_slug) c
          ON c.last_id = f.po_followup_id`,
       slugs
     );
