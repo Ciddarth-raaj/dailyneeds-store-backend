@@ -1366,6 +1366,13 @@ class Server {
       require("./services/retailpilot_spectra")(retailPilotConfig),
       this.poFollowupRepo
     );
+    // Out-of-stock follow-up: the morning upload of RetailPilot's out-of-stock
+    // report, routed to buyers; PO status from the PO Tracker above.
+    this.oosFollowupUsecase = require("./usecase/oos_followup")(
+      require("./repository/oos_followup")(this.mysql.connection),
+      this.poTrackerUsecase,
+      { warehouseOutletId: retailPilotConfig.grnOutletId }
+    );
     // The 7 pm PO follow-up summary on Telegram (cron below) and its
     // "send me now" button on the PO Tracker.
     this.poDailySummary = require("./usecase/po_daily_summary")({
@@ -2295,6 +2302,7 @@ class Server {
       this.openReturnsReportUsecase
     );
     const poTrackerRouter = require("./routes/po_tracker")(this.poTrackerUsecase, this.permissions, this.poDailySummary);
+    const oosFollowupRouter = require("./routes/oos_followup")(this.oosFollowupUsecase, this.permissions);
     const whDailyReportsRouter = require("./routes/wh_daily_reports")(this.whDailyReportsUsecase, this.permissions);
     const warehouseHealthRouter = require("./routes/warehouse_health")(this.warehouseHealth, this.permissions);
     const transfersRouter = require("./routes/transfers")(this.transfersUsecase, this.dashboardScope);
@@ -2470,6 +2478,7 @@ class Server {
     app.use("/warehouse-flow", warehouseFlowRouter.getRouter());
     app.use("/transfers", transfersRouter.getRouter());
     app.use("/po-tracker", poTrackerRouter.getRouter());
+    app.use("/oos-followup", oosFollowupRouter.getRouter());
     app.use("/wh-daily-reports", whDailyReportsRouter.getRouter());
     app.use("/warehouse-health", warehouseHealthRouter.getRouter());
     app.use("/dead-stock-items", deadStockItemsRouter.getRouter());
