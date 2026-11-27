@@ -36,13 +36,13 @@ jobs:
         run: |
           set -euo pipefail
           MODE="$(head -1 .github/stage4-mode | tr -d '[:space:]')"
-          case "$MODE" in DRYRUN|IMPORT|VALIDATE) ;; *) echo "unknown mode $MODE"; exit 1;; esac
+          case "$MODE" in DRYRUN|IMPORT|VALIDATE|REVIEW) ;; *) echo "unknown mode $MODE"; exit 1;; esac
           echo "mode=$MODE"
-          scp -q -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes scripts/stock_audit/stage4_sync.js scripts/stock_audit/stage4_validate.js "${SSH_USER}@${SSH_HOST}:/tmp/"
+          scp -q -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes scripts/stock_audit/stage4_sync.js scripts/stock_audit/stage4_validate.js scripts/stock_audit/stage5_review.js "${SSH_USER}@${SSH_HOST}:/tmp/"
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "MODE=$MODE bash -s" <<'REMOTE'
           set -uo pipefail
           cd ~/dailyneeds-store-backend || exit 1
-          trap 'rm -f /tmp/stage4_sync.js /tmp/stage4_validate.js' EXIT
+          trap 'rm -f /tmp/stage4_sync.js /tmp/stage4_validate.js /tmp/stage5_review.js' EXIT
           E="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; export NODE_ENV="${E:-production}"
           echo "@@SWITCH_BEFORE $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
           case "$MODE" in
@@ -64,6 +64,13 @@ jobs:
               fi ;;
             VALIDATE)
               node /tmp/stage4_validate.js full ;;
+            REVIEW)
+              node /tmp/stage5_review.js
+              # account 197 in settings / schedules: KEY NAMES only, never values
+              echo "@@ENV_KEYS_WITH_197 $(grep -E '=(.*[^0-9])?197([^0-9].*)?$' .env 2>/dev/null | cut -d= -f1 | tr '\n' ' ')"
+              echo "@@CONFIG_PATHS_WITH_197 $(node -e "const c=require('./config.json');const o=[];const w=(v,p)=>{if(v&&typeof v==='object')for(const k of Object.keys(v))w(v[k],p+'.'+k);else if(String(v)==='197')o.push(p)};w(c,'');console.log(o.join(' '))")"
+              echo "@@CRON_LINES_WITH_197 $(crontab -l 2>/dev/null | grep -cE '(^|[^0-9])197([^0-9]|$)')"
+              echo "@@CODE_REFS_197 $(grep -rlE '(user_id|userId|USER_ID)[^0-9]{0,6}197([^0-9]|$)' --include=*.js . 2>/dev/null | grep -v node_modules | head -5 | tr '\n' ' ')" ;;
           esac
           echo "@@SWITCH_AFTER $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
           echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status).join(' | '))}catch(e){console.log('n/a')}})")"
