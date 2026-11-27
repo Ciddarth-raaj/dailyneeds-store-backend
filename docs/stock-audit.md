@@ -9,7 +9,9 @@ any scheduled sync (manual runs only), Telegram.
 
 | Part | File |
 | --- | --- |
-| Migrations (new tables only, nothing altered) | `migrations/mysql/migrations/20270108120000-stock-audit-foundation` (15 tables, 20 permissions), `20270108120100-stock-audit-allotment-sapl` (8 tables) |
+| Migrations (new tables only, nothing altered) | `migrations/mysql/migrations/20270108120000-stock-audit-foundation` (15 tables, 20 permissions), `20270108120100-stock-audit-allotment-sapl` (8 tables), `20270108120200-stock-audit-participation-roles` (6 tables, 2 permissions) |
+| Activation | `STOCK_AUDIT_ENABLED=true` (whole module) and `STOCK_AUDIT_SYNC_ENABLED=true` (RetailPilot sync button); both OFF by default: every endpoint answers 503 |
+| Read-only production checks | `scripts/stock_audit/phase2_readiness.js` (bundled and run by the agent branch's workflow) |
 | Permission keys (one per decision) | `constants/stock_audit_permissions.js` |
 | Rules (pure) | `utils/stock_audit_policy.js` (confirmed amounts), `_eligibility`, `_verification`, `_incentive`, `_progress`, `_sapl`, `_allotment`, `_mirror`, `_queries`, `_status` |
 | SQL | `repository/stock_audit.js` |
@@ -52,6 +54,30 @@ any scheduled sync (manual runs only), Telegram.
    (individual incentive fields are removed server-side); the browser draws
    the PDF. A past date is rebuilt from audits and recounts up to the end of
    that day (allotment = current revision).
+
+## Participation and responsible persons
+
+- **Participation** = eligible staff who counted at least one article in the
+  store cycle / ALL eligible active staff of the store x 100; Premier League
+  points = participation % x 5 / 100. Eligible = `new_employee.status = 1`,
+  `store_id` = the store, `designation_id` in the setting
+  `eligible_designation_ids` (default 2 Customer Service Associate,
+  4 Cashier). An employee counts as participating through any RetailPilot
+  user mapped to them.
+- **Snapshot** (`POST /eligibility/:outlet/snapshot`): freezes the headcount
+  for the store cycle (`sa_cycle_employee`). Until taken, the live headcount
+  is used and participation is marked provisional. Later additions are
+  explicit, with a note (`POST /eligibility/:outlet/employees`).
+- **Exclusions**: request with a mandatory reason; approved or rejected by
+  someone else (never the requester, never the employee); one open or
+  approved request per employee per cycle (database key); all history kept.
+- **Responsible persons** (`GET/PUT /roles`): per audit period, from
+  `role_designation_ids` (default Supervisor 9, Store Manager 3, Operations
+  Manager 27), the employee's Branch Master store and active status. Where
+  several qualify, a person with `manage_stock_audit_roles` chooses. No
+  assignment -> that incentive is Pending. Database keys: one active holder
+  per role per store per period; one active management role per person per
+  period (no double management incentive). Replacements kept as history.
 
 ## Confirmed amounts (27 Nov 2026)
 
@@ -97,5 +123,4 @@ Management KPI thresholds are in the policy's draft scoring layer.
   real recounts are inspected; until then accuracy stays Pending.
 - RetailPilot to confirm the audit tables are officially supported before any
   scheduled sync.
-- Store role holders are found by designation name (`ROLE_DESIGNATIONS` in
-  `usecase/stock_audit.js`): confirm with HR.
+- Confirm the default designation ids with HR (`GET/PUT /settings`).
