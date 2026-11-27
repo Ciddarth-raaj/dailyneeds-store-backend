@@ -24,9 +24,10 @@ const CONFIRMED = Object.freeze({
   employeeBelowRate: 0,
   minSamplePct: 5,
   supervisor: { max: 1000, components: { completion_within_deadline: 200, employee_counting_accuracy: 300, independent_recount_verification: 500 } },
+  // Revised 27 Nov 2026: variance closure removed (RetailPilot has no closure data).
   storeManager: {
     max: 1500,
-    components: { completion_within_deadline: 500, employee_counting_accuracy: 400, verification_quality_control: 200, stock_variance_investigation_closure: 400 },
+    components: { completion_within_deadline: 600, employee_counting_accuracy: 500, verification_quality_control: 400 },
   },
   operationsManager: {
     max: 2000,
@@ -39,6 +40,9 @@ const CONFIRMED = Object.freeze({
     belowAmount: 0,
     noIndependentVerificationAmount: 0,
   },
+  // DNDS Stock Audit Premier League, confirmed 27 Nov 2026: 100 points.
+  // Shortage / excess values never score.
+  sapl: { prize: 10000, weights: { completion: 35, accuracy: 40, recount: 20, participation: 5 } },
 });
 
 /** Outlets in the programme: the five retail stores. The warehouse (outlet 2) is excluded. */
@@ -98,10 +102,9 @@ const DEFAULT_POLICY = Object.freeze({
     STORE_MANAGER: {
       max: CONFIRMED.storeManager.max,
       components: [
-        { key: "completion_within_deadline", max: 500, measure: "completion_within_deadline", scoring: { type: "threshold", minPct: 100 } },
-        { key: "employee_counting_accuracy", max: 400, measure: "store_counting_accuracy", scoring: { type: "threshold", minPct: 97 } },
-        { key: "verification_quality_control", max: 200, measure: "verification_resolved", scoring: { type: "threshold", minPct: 95 } },
-        { key: "stock_variance_investigation_closure", max: 400, measure: "variance_closed_in_time", params: { closeWithinDays: 7, minAbsValue: 0 }, scoring: { type: "threshold", minPct: 100 } },
+        { key: "completion_within_deadline", max: 600, measure: "completion_within_deadline", scoring: { type: "threshold", minPct: 100 } },
+        { key: "employee_counting_accuracy", max: 500, measure: "store_counting_accuracy", scoring: { type: "threshold", minPct: 97 } },
+        { key: "verification_quality_control", max: 400, measure: "verification_resolved", scoring: { type: "threshold", minPct: 95 } },
       ],
     },
     OPERATIONS_MANAGER: {
@@ -112,6 +115,7 @@ const DEFAULT_POLICY = Object.freeze({
       belowAmount: CONFIRMED.operationsManager.belowAmount,
     },
   },
+  sapl: { prize: CONFIRMED.sapl.prize, weights: { ...CONFIRMED.sapl.weights } },
 });
 
 const isNum = (v) => typeof v === "number" && Number.isFinite(v);
@@ -183,6 +187,10 @@ function validatePolicy(p) {
     if (JSON.stringify(om.slabs) !== JSON.stringify(c.slabs) || om.belowAmount !== c.belowAmount) errors.push("Operations Manager slabs must stay 98% 400 / 95% 300 / 90% 200 / below nil");
     if (om.basis !== "STORE_MANAGER_WEIGHTED_SCORE") errors.push("Operations Manager basis must be STORE_MANAGER_WEIGHTED_SCORE");
   }
+  const sapl = p.sapl || {};
+  const w = sapl.weights || {};
+  if (JSON.stringify(w) !== JSON.stringify(CONFIRMED.sapl.weights)) errors.push("SAPL weights must stay completion 35 / accuracy 40 / recount 20 / participation 5");
+  if (sapl.prize !== CONFIRMED.sapl.prize) errors.push("SAPL prize must stay Rs 10,000");
   return errors;
 }
 

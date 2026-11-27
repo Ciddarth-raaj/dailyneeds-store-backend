@@ -2,8 +2,9 @@
 -- counting and recounts all happen there. DNDS only MIRRORS what RetailPilot
 -- recorded (sa_rp_*, read-only copies keyed by RetailPilot's own slugs, so a
 -- re-read is an idempotent upsert) and keeps its OWN records of audit cycles,
--- verification results read from RetailPilot, incentives, KPI scores,
--- variance closure and approvals. Nothing here posts to payroll.
+-- verification results read from RetailPilot, incentives, KPI scores and
+-- approvals. Shortage / excess is read for review only: nothing is tracked
+-- or scored on it (RetailPilot has no variance closure data). Nothing here posts to payroll.
 --
 -- Source tables (runway SPECTRA): public.stock_audit_count_session,
 -- public.stock_audit_count_line, public.stock_ledgers (STK_ADJ rows).
@@ -280,18 +281,6 @@ CREATE TABLE IF NOT EXISTS `sa_management_incentive` (
   UNIQUE KEY `uq_sa_management_incentive` (`period_code`, `outlet_id`, `role`, `employee_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
-CREATE TABLE IF NOT EXISTS `sa_variance_closure` (
-  `session_slug` VARCHAR(64)  NOT NULL,
-  `outlet_id`    INT          NOT NULL,
-  `status`       ENUM('OPEN','INVESTIGATING','CLOSED') NOT NULL DEFAULT 'OPEN',
-  `reason`       VARCHAR(64)  NULL,
-  `notes`        TEXT         NULL,
-  `closed_by`    INT          NULL,
-  `closed_at`    TIMESTAMP    NULL,
-  `updated_at`   TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`session_slug`)
-) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
-
 CREATE TABLE IF NOT EXISTS `sa_approval` (
   `id`          BIGINT       NOT NULL AUTO_INCREMENT,
   `entity`      VARCHAR(32)  NOT NULL COMMENT 'employee_incentive / management_incentive / rule_set',
@@ -345,8 +334,6 @@ INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'approve_stock_audit_allotment_import' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'approve_stock_audit_allotment_import');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'review_stock_audit_verification' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_verification');
-INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'review_stock_audit_variance' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_variance');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'review_stock_audit_eligibility' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_eligibility');
 INSERT INTO `all_permissions` (`permission_key`)

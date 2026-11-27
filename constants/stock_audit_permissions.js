@@ -17,7 +17,6 @@ module.exports = Object.freeze({
   IMPORT_ALLOTMENT: "import_stock_audit_allotment",
   APPROVE_ALLOTMENT_IMPORT: "approve_stock_audit_allotment_import",
   REVIEW_VERIFICATION: "review_stock_audit_verification",
-  REVIEW_VARIANCE: "review_stock_audit_variance",
   REVIEW_ELIGIBILITY: "review_stock_audit_eligibility",
   CALCULATE_INCENTIVES: "calculate_stock_audit_incentives",
   APPROVE_INCENTIVES: "approve_stock_audit_incentives", // never one's own

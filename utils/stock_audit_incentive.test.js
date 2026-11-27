@@ -60,22 +60,18 @@ describe("employee incentive (confirmed rates)", () => {
 });
 
 describe("KPI measures never invent a value", () => {
-  it("completion is unavailable without allotment", () => {
+  it("completion is unavailable without allotment, pending before the deadline, measured after it", () => {
     assert.equal(I.measureCompletion(null).status, S.STATUS.UNAVAILABLE);
     assert.equal(I.measureCompletion(null).reason, S.REASON.ALLOTMENT_UNAVAILABLE);
+    const mid = I.measureCompletion({ completedByDeadlinePct: 58, deadline: "2026-12-05T23:59:59+05:30", asOf: "2026-11-27T10:00:00+05:30" });
+    assert.equal(mid.status, S.STATUS.PENDING);
+    assert.equal(mid.reason, S.REASON.BEFORE_DEADLINE);
+    assert.equal(I.measureCompletion({ completedByDeadlinePct: 100, deadline: "2026-12-05T23:59:59+05:30", asOf: "2026-12-06T00:00:01+05:30" }).value, 100);
   });
   it("accuracy, sample and resolution are pending without recounts", () => {
     assert.equal(I.measureStoreAccuracy([]).status, S.STATUS.PENDING);
     assert.equal(I.measureSampleMet([{ audited: 10, verified: 0, met: false }]).status, S.STATUS.PENDING);
     assert.equal(I.measureVerificationResolved([]).status, S.STATUS.PENDING);
-  });
-  it("variance closure: not applicable without variances, pending while one is open before its deadline", () => {
-    assert.equal(I.measureVarianceClosure([], {}, "2026-11-30T00:00:00Z").status, S.STATUS.NOT_APPLICABLE);
-    const v = [{ abs_value: 50, finalized_at: "2026-11-26T10:00:00+05:30", closed_at: null }];
-    assert.equal(I.measureVarianceClosure(v, { closeWithinDays: 7 }, "2026-11-28T00:00:00Z").status, S.STATUS.PENDING);
-    assert.equal(I.measureVarianceClosure(v, { closeWithinDays: 7 }, "2026-12-10T00:00:00Z").value, 0);
-    const closed = [{ abs_value: 50, finalized_at: "2026-11-26T10:00:00+05:30", closed_at: "2026-11-30T10:00:00+05:30" }];
-    assert.equal(I.measureVarianceClosure(closed, { closeWithinDays: 7 }, "2026-12-10T00:00:00Z").value, 100);
   });
   it("store accuracy and resolution from verdicts", () => {
     assert.equal(I.measureStoreAccuracy(verdicts(97, 3)).value, 97);
@@ -96,10 +92,20 @@ describe("management incentives (confirmed allocations)", () => {
     assert.equal(r.decided_amount, 300);
     assert.equal(r.components[0].amount.status, S.STATUS.UNAVAILABLE);
   });
-  it("store manager: allocation 500 / 400 / 200 / 400 and weighted score", () => {
-    const r = I.roleIncentive("STORE_MANAGER", { completion_within_deadline: A(100), employee_counting_accuracy: A(97), verification_quality_control: A(90), stock_variance_investigation_closure: A(100) });
-    assert.equal(r.amount.value, 1300);
-    assert.equal(Math.round(r.weighted_score.value * 100) / 100, 86.67);
+  it("store manager: allocation 600 / 500 / 400, max Rs 1,500, weighted score", () => {
+    const all = I.roleIncentive("STORE_MANAGER", { completion_within_deadline: A(100), employee_counting_accuracy: A(98), verification_quality_control: A(96) });
+    assert.equal(all.amount.value, 1500);
+    const r = I.roleIncentive("STORE_MANAGER", { completion_within_deadline: A(100), employee_counting_accuracy: A(97), verification_quality_control: A(90) });
+    assert.equal(r.amount.value, 1100);
+    assert.equal(Math.round(r.weighted_score.value * 100) / 100, 73.33);
+    assert.deepEqual(r.components.map((c) => c.key), ["completion_within_deadline", "employee_counting_accuracy", "verification_quality_control"]);
+  });
+  it("store manager: an unmeasurable KPI keeps the total pending, never zero or full", () => {
+    const r = I.roleIncentive("STORE_MANAGER", { completion_within_deadline: I.measureCompletion(null), employee_counting_accuracy: A(99), verification_quality_control: A(99) });
+    assert.equal(r.amount.status, S.STATUS.PENDING);
+    assert.equal(r.weighted_score.status, S.STATUS.PENDING);
+    assert.equal(r.decided_amount, 900);
+    assert.equal(r.final, false);
   });
   it("operations manager: 400 / 300 / 200 / nil per store, nil without independent verification, pending when unknown, max 2,000", () => {
     const r = I.operationsManagerIncentive([

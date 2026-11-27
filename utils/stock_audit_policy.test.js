@@ -12,8 +12,19 @@ describe("stock audit policy", () => {
     assert.deepEqual(P.validatePolicy(P.DEFAULT_POLICY), []);
     const m = P.DEFAULT_POLICY.management;
     assert.deepEqual(m.SUPERVISOR.components.map((c) => [c.key, c.max]), [["completion_within_deadline", 200], ["employee_counting_accuracy", 300], ["independent_recount_verification", 500]]);
-    assert.deepEqual(m.STORE_MANAGER.components.map((c) => [c.key, c.max]), [["completion_within_deadline", 500], ["employee_counting_accuracy", 400], ["verification_quality_control", 200], ["stock_variance_investigation_closure", 400]]);
+    assert.deepEqual(m.STORE_MANAGER.components.map((c) => [c.key, c.max]), [["completion_within_deadline", 600], ["employee_counting_accuracy", 500], ["verification_quality_control", 400]]);
+    assert.equal(m.STORE_MANAGER.components.reduce((t, c) => t + c.max, 0), 1500);
+    assert.equal(m.SUPERVISOR.components.reduce((t, c) => t + c.max, 0), 1000);
+    assert.equal(m.OPERATIONS_MANAGER.max, 2000);
+    assert.ok(!JSON.stringify(P.DEFAULT_POLICY).includes("variance"), "no variance closure anywhere in the policy");
     assert.deepEqual(m.OPERATIONS_MANAGER.slabs, [{ minScorePct: 98, amount: 400 }, { minScorePct: 95, amount: 300 }, { minScorePct: 90, amount: 200 }]);
+  });
+  it("SAPL is 35 / 40 / 20 / 5 = 100 points, prize Rs 10,000, and locked", () => {
+    const w = P.DEFAULT_POLICY.sapl.weights;
+    assert.deepEqual(w, { completion: 35, accuracy: 40, recount: 20, participation: 5 });
+    assert.equal(Object.values(w).reduce((a, b) => a + b, 0), 100);
+    assert.ok(tweak((p) => { p.sapl.weights.accuracy = 45; }).length);
+    assert.ok(tweak((p) => { p.sapl.weights.variance = 10; }).length);
   });
   it("the five retail stores are in; the warehouse is out", () => {
     assert.deepEqual(P.DEFAULT_POLICY.programme.outletIds, [3, 4, 5, 6, 7]);
@@ -27,6 +38,7 @@ describe("stock audit policy", () => {
     assert.ok(tweak((p) => { p.management.STORE_MANAGER.max = 2000; }).length);
     assert.ok(tweak((p) => { p.management.OPERATIONS_MANAGER.slabs[0].amount = 500; }).length);
     assert.ok(tweak((p) => { p.management.STORE_MANAGER.components.pop(); }).length);
+    assert.ok(tweak((p) => { p.management.STORE_MANAGER.components.push({ key: "stock_variance_investigation_closure", max: 0, measure: "x", scoring: { type: "threshold", minPct: 100 } }); }).length);
   });
   it("lets the scoring layer change, within valid shapes", () => {
     assert.deepEqual(tweak((p) => { p.management.SUPERVISOR.components[1].scoring = { type: "slabs", slabs: [{ minPct: 99, payPct: 100 }, { minPct: 97, payPct: 50 }] }; }), []);

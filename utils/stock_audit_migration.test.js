@@ -13,7 +13,7 @@ const up = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-up.sql`), "utf8
 const down = strip(fs.readFileSync(path.join(dir, "sqls", `${NAME}-down.sql`), "utf8"));
 const TABLES = ["sa_rp_session", "sa_rp_line", "sa_rp_adjustment", "sa_sync_state", "sa_sync_run", "sa_sync_issue", "sa_cycle",
   "sa_verification", "sa_eligibility", "sa_incentive_article", "sa_rule_set", "sa_employee_incentive", "sa_management_incentive",
-  "sa_variance_closure", "sa_approval", "sa_payroll_posting"];
+  "sa_approval", "sa_payroll_posting"];
 const PERMS = Object.values(require("../constants/stock_audit_permissions"));
 
 describe(`migration ${NAME}`, () => {
@@ -23,7 +23,7 @@ describe(`migration ${NAME}`, () => {
     const js = fs.readFileSync(path.join(dir, `${NAME}.js`), "utf8");
     assert.ok(js.includes(`${NAME}-up.sql`) && js.includes(`${NAME}-down.sql`));
   });
-  it("creates the 16 stock audit tables, only new ones, and down drops each", () => {
+  it("creates the 15 stock audit tables, only new ones, and down drops each", () => {
     const created = [...up.matchAll(/CREATE TABLE IF NOT EXISTS `([a-z_]+)`/g)].map((m) => m[1]);
     assert.deepEqual(created.sort(), [...TABLES].sort());
     for (const t of TABLES) assert.match(down, new RegExp("DROP TABLE IF EXISTS `" + t + "`"));
@@ -52,8 +52,9 @@ describe(`migration ${NAME}`, () => {
     assert.match(up, /UNIQUE KEY `uq_sa_payroll_posting_source` \(`source_type`, `source_id`\)/);
     assert.match(up, /UNIQUE KEY `uq_sa_approval_level` \(`entity`, `entity_id`, `level`, `round`\)/);
   });
-  it("adds the 21 granular permissions idempotently (fit VARCHAR(45)) and removes them on down; no broad keys", () => {
-    assert.equal(PERMS.length, 21);
+  it("adds the 20 granular permissions idempotently (fit VARCHAR(45)) and removes them on down; no broad keys", () => {
+    assert.equal(PERMS.length, 20);
+    assert.doesNotMatch(up, /variance_closure|review_stock_audit_variance/);
     assert.doesNotMatch(up, /'manage_stock_audit'|'approve_stock_audit_incentive'/);
     for (const k of PERMS) {
       assert.ok(k.length <= 45, k);

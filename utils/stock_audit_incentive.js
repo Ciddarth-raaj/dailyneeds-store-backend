@@ -69,10 +69,17 @@ function employeeIncentive({ auditedArticles = 0, eligibleArticles = 0, pendingE
 
 // ------------------------------------------------------------------ KPI measures
 
-/** Allotment-based completion. Unavailable until RetailPilot allotment is readable. */
-function measureCompletion(completion /* null | { completedPct, byDeadline: bool } */) {
+/**
+ * Completion WITHIN DEADLINE, from imported allotment.
+ * Unavailable without allotment; PENDING until the deadline has passed (a
+ * cycle half-way through is not a missed deadline); then the share of
+ * allotted articles completed by the deadline.
+ * @param completion null | { completedByDeadlinePct, deadline, asOf }
+ */
+function measureCompletion(completion) {
   if (!completion) return S.unavailable(S.REASON.ALLOTMENT_UNAVAILABLE);
-  return S.available(completion.byDeadline ? completion.completedPct : 0);
+  if (completion.deadline && completion.asOf && compareTs(completion.asOf, completion.deadline) <= 0) return S.pending(S.REASON.BEFORE_DEADLINE);
+  return S.available(completion.completedByDeadlinePct);
 }
 
 /** Store accuracy: matched / verified unique articles across the store's employees. */
@@ -96,28 +103,6 @@ function measureVerificationResolved(recountVerdicts = []) {
   if (!independent.length) return S.pending(S.REASON.PENDING_VERIFICATION);
   const resolved = independent.filter((r) => r.verdict === VERDICT.MATCH || r.verdict === VERDICT.MISMATCH).length;
   return S.available((resolved * 100) / independent.length);
-}
-
-/**
- * Variance closure: share of variances closed within closeWithinDays of the count.
- * An open variance whose deadline has not passed yet keeps the measure PENDING.
- * @param variances [{ abs_value, finalized_at, closed_at | null }]
- */
-function measureVarianceClosure(variances = [], params = {}, asOf) {
-  const days = params.closeWithinDays == null ? 7 : params.closeWithinDays;
-  const minAbs = params.minAbsValue || 0;
-  const list = variances.filter((v) => Math.abs(Number(v.abs_value || 0)) >= minAbs);
-  if (!list.length) return S.notApplicable(S.REASON.NO_VARIANCES);
-  let inTime = 0;
-  for (const v of list) {
-    const due = new Date(Date.parse(toUtc(v.finalized_at).iso.slice(0, 23) + "Z") + days * 86400000).toISOString();
-    if (v.closed_at) {
-      if (compareTs(v.closed_at, due) <= 0) inTime += 1;
-    } else if (compareTs(asOf, due) <= 0) {
-      return S.pending(S.REASON.NO_DATA);
-    }
-  }
-  return S.available((inTime * 100) / list.length);
 }
 
 // ------------------------------------------------------------------ scoring
@@ -198,7 +183,6 @@ module.exports = {
   measureStoreAccuracy,
   measureSampleMet,
   measureVerificationResolved,
-  measureVarianceClosure,
   scoreComponent,
   roleIncentive,
   operationsManagerIncentive,
