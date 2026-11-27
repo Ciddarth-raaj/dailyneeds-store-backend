@@ -11,6 +11,9 @@ name: Stock Audit Stage 1 check (read-only)
         description: "Report sync runs and errors after this UTC time (YYYY-MM-DD HH:MM:SS)"
         required: false
         default: ""
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-stage1-check.yml, .github/stage1-check-trigger]
 
 jobs:
   check:
@@ -31,7 +34,7 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SINCE: ${{ inputs.since_utc }}
+          SINCE: ${{ inputs.since_utc || '2026-11-27 00:00:00' }}
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "SINCE='${SINCE}' bash -s" <<'REMOTE'
