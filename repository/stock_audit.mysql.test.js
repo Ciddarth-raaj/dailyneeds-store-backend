@@ -246,7 +246,7 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
       const m = (await U.management({ outlets: [7] }))[0];
       assert.equal(m.storeManager.components[0].measure.reason, S.REASON.BEFORE_DEADLINE);
       // never guessed from a designation: nobody is responsible until assigned
-      assert.equal(m.supervisor.name, "Not assigned");
+      assert.equal(m.supervisor.name, "Unassigned");
       assert.equal(m.storeManager.amount.reason, S.REASON.ROLE_NOT_ASSIGNED);
     });
     it("stores without an allotment import show Unavailable, never 0 or 100%", async () => {
@@ -291,34 +291,42 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
   });
 
   describe("participation on the full eligible headcount, snapshot and exclusions", () => {
-    it("denominator = active eligible staff of the store (designation 2, 4), not just those with audits", async () => {
+    it("denominator = EVERY active employee of the store, whatever the designation (policy: all participate)", async () => {
       U.invalidate();
       const st = await U.store({ outletId: 7 });
-      // eligible at ECR: 501 (Cashier), 502, 507 (CSA); 508 resigned; 504/505/506 are management
-      assert.equal(st.eligible_employees, 3);
-      // 501 = uA and 502 = uB counted; 507 did not
-      assert.equal(st.participating, 2);
-      assert.equal(Math.round(st.participation.value * 100) / 100, 66.67);
+      // active at ECR: 501 Cashier, 502 CSA, 504 Supervisor, 505 / 506 Store Managers, 507 CSA; 508 resigned
+      assert.equal(st.eligible_employees, 6);
+      // 501 = uA, 502 = uB and 504 = uX (mapped in the test above) counted
+      assert.equal(st.participating, 3);
+      assert.equal(st.participation.value, 50);
       assert.equal(st.participation.provisional, true); // no snapshot yet
-      assert.deepEqual(st.participation_detail.not_participated.map((e) => e.employee_id), [507]);
+      assert.deepEqual(st.participation_detail.not_participated.map((e) => e.employee_id).sort(), [505, 506, 507]);
       const sapl = (await U.standings({})).find((r) => r.outlet_id === 7);
-      assert.equal(sapl.rows.find((r) => r.key === "participation").points, 3.3); // 66.67% x 5 / 100
+      assert.equal(sapl.rows.find((r) => r.key === "participation").points, 2.5); // 50% x 5 / 100
+    });
+    it("HR can narrow the eligible designations (a setting with history), and widen them back", async () => {
+      await U.updateSettings({ eligible_designation_ids: [2, 4] }, 900);
+      U.invalidate();
+      assert.equal((await U.store({ outletId: 7 })).eligible_employees, 3);
+      await U.updateSettings({ eligible_designation_ids: "ALL" }, 900);
+      U.invalidate();
+      assert.equal((await U.store({ outletId: 7 })).eligible_employees, 6);
     });
     it("a frozen snapshot is not changed by a later resignation or a new joiner", async () => {
       const r = await U.takeSnapshot({ outletId: 7, by: 900 });
-      assert.equal(r.employees, 3);
+      assert.equal(r.employees, 6);
       await assert.rejects(U.takeSnapshot({ outletId: 7, by: 900 }), (e) => e.status === 409);
       await db.q(`UPDATE new_employee SET status = 0 WHERE employee_id = 507`); // resigns after the snapshot
       await db.q(`INSERT INTO new_employee VALUES (509,'New Joiner',7,2,1)`); // joins after it
       U.invalidate();
       const st = await U.store({ outletId: 7 });
-      assert.equal(st.eligible_employees, 3);
-      assert.equal(st.participation.provisional, false);
+      assert.equal(st.eligible_employees, 6);
+      assert.equal(st.participation_detail.snapshot, true);
       // an explicit, recorded addition is the only way in
       await assert.rejects(U.addToSnapshot({ outletId: 7, employeeId: 509, note: "", by: 900 }), (e) => e.status === 400);
       await U.addToSnapshot({ outletId: 7, employeeId: 509, note: "Joined 28 Nov, counting from day one", by: 900 });
       U.invalidate();
-      assert.equal((await U.store({ outletId: 7 })).eligible_employees, 4);
+      assert.equal((await U.store({ outletId: 7 })).eligible_employees, 7);
     });
     it("exclusion: mandatory reason; decided by someone else; never one's own; history kept", async () => {
       await assert.rejects(U.requestExclusion({ outletId: 7, employeeId: 509, reason: "", by: 900 }), (e) => e.status === 400);
@@ -331,7 +339,7 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
       const rows = await db.q(`SELECT status, decided_by FROM sa_employee_exclusion WHERE id = ?`, [id]);
       U.invalidate();
       const st = await U.store({ outletId: 7 });
-      assert.equal(st.eligible_employees, rows[0].status === "APPROVED" ? 3 : 4);
+      assert.equal(st.eligible_employees, rows[0].status === "APPROVED" ? 6 : 7);
       const el = await U.eligibility({ outlets: [7] });
       assert.equal(el.stores[0].exclusions.length, 1);
       assert.ok(el.stores[0].exclusions[0].requested_by_name && el.stores[0].exclusions[0].decided_by_name);
@@ -380,9 +388,9 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
     it("designation ids are settings with history", async () => {
       const v = await U.updateSettings({ eligible_designation_ids: [2, 4, 1] }, 900);
       assert.deepEqual(v.values.eligible_designation_ids, [2, 4, 1]);
-      assert.equal(v.history.eligible_designation_ids.length, 1);
+      assert.equal(v.history.eligible_designation_ids.length, 3);
       await assert.rejects(U.updateSettings({ role_designation_ids: { SUPERVISOR: [] } }, 900), (e) => e.status === 400);
-      await U.updateSettings({ eligible_designation_ids: [2, 4] }, 900);
+      await U.updateSettings({ eligible_designation_ids: "ALL" }, 900);
     });
   });
 

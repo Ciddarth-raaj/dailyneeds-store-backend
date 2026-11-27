@@ -2490,9 +2490,8 @@ class Server {
         usecase: this.stockAuditUsecase,
         permissions: this.permissions,
         branchScope: this.employeeBranchScope,
-        // both OFF unless explicitly switched on in the server's environment
-        enabled: process.env.STOCK_AUDIT_ENABLED === "true",
-        syncEnabled: process.env.STOCK_AUDIT_SYNC_ENABLED === "true",
+        // all OFF / restricted unless explicitly switched in the server's .env (config/stock_audit.js)
+        ...require("./config/stock_audit"),
       }).getRouter()
     );
     app.use("/sales-report", salesDashboardRouter.getRouter());

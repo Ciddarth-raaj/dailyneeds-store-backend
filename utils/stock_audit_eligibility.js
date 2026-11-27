@@ -92,7 +92,8 @@ function evaluateArticle(group, { employeeOf, isRecount = () => null }, policy =
   if (employeeId == null) reasons.push(WHY.EMPLOYEE_UNMAPPED);
   if (finalized.length > 1 && classified.some((c) => c.recount === null)) reasons.push(WHY.RECOUNT_CLASSIFICATION_PENDING);
   if (originals.length > 1) reasons.push(WHY.MULTIPLE_FINALIZED_COUNTS);
-  const counters = new Set(originals.map(counterOf).filter(Boolean));
+  // counters are PEOPLE: two RetailPilot ids mapped to one employee are one counter
+  const counters = new Set(originals.map(counterOf).filter(Boolean).map((u) => (employeeOf(u) != null ? `e${employeeOf(u)}` : `r${u}`)));
   if (counters.size > 1) reasons.push(WHY.MULTIPLE_COUNTERS);
   const otherCancels = sessions.filter((s) => s.status === "CANCELLED" && counterOf(s) && counterOf(s) !== rpUser);
   const anyCancels = sessions.filter((s) => s.status === "CANCELLED");
@@ -104,7 +105,9 @@ function evaluateArticle(group, { employeeOf, isRecount = () => null }, policy =
     const allottedTo = allotment.rp_user_id;
     const reassignedTo = (allotment.reassignments || []).filter((r) => r.authorized === true).map((r) => r.to_rp_user_id);
     const entitled = reassignedTo.length ? reassignedTo[reassignedTo.length - 1] : allottedTo;
-    if (rpUser !== entitled) return { ...found, employee_id: null, status: ELIGIBILITY.NOT_ELIGIBLE, reasons: [WHY.COUNTED_BY_NON_ALLOTTED_EMPLOYEE] };
+    // the same EMPLOYEE under another RetailPilot user id is the allotted auditor
+    const sameEmployee = rpUser === entitled || (employeeId != null && entitled != null && employeeOf(entitled) === employeeId);
+    if (!sameEmployee) return { ...found, employee_id: null, status: ELIGIBILITY.NOT_ELIGIBLE, reasons: [WHY.COUNTED_BY_NON_ALLOTTED_EMPLOYEE] };
   }
 
   if (reasons.length) return { ...found, status: ELIGIBILITY.PENDING_ELIGIBILITY_REVIEW, reasons };

@@ -52,6 +52,16 @@ class StockAuditRoutes {
     // ACTIVATION SWITCH: off unless STOCK_AUDIT_ENABLED=true on the server. A
     // deployment therefore exposes nothing until the module is switched on.
     router.use((req, res, next) => (this.deps.enabled === false ? res.status(503).json({ code: 503, msg: "Stock Audit is not enabled on this server" }) : next()));
+    // STAGED ACCESS: while restricted, only administrators and the listed
+    // designations (HR) get in - before any permission key is even looked at.
+    router.use((req, res, next) => {
+      const a = this.deps.access;
+      if (!a || a.mode === "all") return next();
+      const d = req.decoded || {};
+      const admin = Number(d.user_type) === Number(permissions.ADMIN_USER_TYPE);
+      if (admin || (a.designationIds || []).includes(Number(d.designation_id))) return next();
+      return res.status(503).json({ code: 503, msg: "Stock Audit is not open to you yet (staged rollout)" });
+    });
     const need = (...keys) => permissions.require(...keys);
     const by = (req) => (req.auth ? req.auth.employeeId : req.decoded && req.decoded.employee_id) ?? null;
     const handle = (fn) => async (req, res) => {

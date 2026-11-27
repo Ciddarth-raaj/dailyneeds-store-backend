@@ -570,17 +570,18 @@ class StockAuditRepository {
   }
 
   // ---------------------------------------------------------------- eligible headcount
-  /** Active employees of these stores holding one of these designations (live). */
+  /** Active employees of these stores (live): every designation for "ALL", else those designations. */
   async activeStaff(outletIds, designationIds) {
-    if (!outletIds.length || !designationIds.length) return [];
+    const all = designationIds === "ALL";
+    if (!outletIds.length || (!all && !(designationIds || []).length)) return [];
     const rows = await this.q(
       `SELECT e.employee_id, e.employee_name, e.store_id, e.designation_id, d.designation_name
          FROM new_employee e LEFT JOIN designation d ON d.designation_id = e.designation_id
-        WHERE e.status = 1 AND e.store_id IN (${marks(outletIds.length)}) AND e.designation_id IN (${marks(designationIds.length)})
+        WHERE e.status = 1 AND e.store_id IN (${marks(outletIds.length)}) ${all ? "" : `AND e.designation_id IN (${marks(designationIds.length)})`}
         ORDER BY e.store_id, e.employee_name, e.employee_id`,
-      [...outletIds, ...designationIds]
+      all ? outletIds : [...outletIds, ...designationIds]
     );
-    return rows.map((r) => ({ employee_id: Number(r.employee_id), name: r.employee_name, outlet_id: Number(r.store_id), designation_id: Number(r.designation_id), designation: r.designation_name }));
+    return rows.map((r) => ({ employee_id: Number(r.employee_id), name: r.employee_name, outlet_id: Number(r.store_id), designation_id: r.designation_id == null ? null : Number(r.designation_id), designation: r.designation_name }));
   }
 
   /** Active employees with these designations, any store (Operations Manager candidates). */

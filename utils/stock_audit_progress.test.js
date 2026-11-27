@@ -173,3 +173,49 @@ describe("progress: 75,000 articles (performance)", () => {
     assert.ok(ms < 5000, `took ${ms} ms`);
   });
 });
+
+describe("mapping: unmapped auditors, later reconciliation, no double credit", () => {
+  const allotment = Array.from({ length: 40 }, (_, i) => ({ cycle_id: 11, rp_user_id: "uOld", article_id: 500 + i, effective: "Y" }));
+  const sessions = [
+    ...Array.from({ length: 20 }, (_, i) => sess("uOld", 500 + i, "2026-11-26T05:00:00Z")), // 500-519
+    ...Array.from({ length: 10 }, (_, i) => sess("uNew", i < 5 ? 510 + i : 515 + i, "2026-11-26T06:00:00Z")), // 510-514 again, 520-524 new
+  ];
+  const verifications = sessions.slice(0, 2).map((s, i) => ({ cycle_id: 11, outlet_id: 7, article_id: s.article_id, original_session_slug: s.rp_slug, recount_ref: `m${i}`, recount_user: "uB", verdict: "MATCH", recount_at: "2026-11-27T05:00:00Z" }));
+  const base2 = (people2) => computePeriod(base({ sessions, allotment, allotmentCycles: new Set([11]), verifications, people: people2 }));
+  it("unmapped: shown as its own provisional row, never an estimate or an amount", () => {
+    const r = base2(new Map());
+    const u = r.employees.filter((e) => !e.mapped);
+    assert.equal(u.length, 2);
+    for (const e of u) {
+      assert.equal(e.mapping_status, "UNMAPPED");
+      assert.equal(e.estimated.reason, S.REASON.EMPLOYEE_UNMAPPED);
+      assert.equal(e.est.estimate.reason, S.REASON.EMPLOYEE_UNMAPPED);
+    }
+  });
+  it("after mapping BOTH RetailPilot users to one employee: one row, articles counted once, allotment honoured", () => {
+    const r = base2(new Map([["uOld", { employee_id: 77, name: "Same Person" }], ["uNew", { employee_id: 77, name: "Same Person" }]]));
+    const rows = r.employees.filter((e) => e.employee_id === 77);
+    assert.equal(rows.length, 1);
+    assert.deepEqual(rows[0].rp_user_ids.sort(), ["uNew", "uOld"]);
+    assert.equal(rows[0].audited, 25); // 20 + 5 new (the overlapping 5 counted once)
+    assert.equal(rows[0].audited_own, 25); // uNew's counts of uOld's allotment are the same person's
+    // the 5 articles counted twice stay in review (a second count may be a recount), but NOT as "two counters"
+    assert.equal(r.eligibility.filter((x) => x.status === "ELIGIBLE").length, 20);
+    const twice = r.eligibility.filter((x) => x.status === "PENDING_ELIGIBILITY_REVIEW");
+    assert.equal(twice.length, 5);
+    assert.ok(twice.every((x) => !x.reasons.includes("MULTIPLE_COUNTERS")));
+    assert.equal(r.eligibility.filter((x) => x.status === "NOT_ELIGIBLE").length, 0);
+    // credited now that the person is known: the estimate shows; the payable amount waits for the 5 in review
+    assert.equal(rows[0].est.estimate.status, S.STATUS.AVAILABLE);
+    assert.equal(rows[0].estimated.reason, S.REASON.PENDING_ELIGIBILITY_REVIEW);
+  });
+  it("participation is provisional while counters are unmapped", () => {
+    const hc = new Map([[7, { snapshot: true, eligible: [{ employee_id: 77, name: "Same Person" }, { employee_id: 78, name: "Other" }], excluded: [] }]]);
+    const r = computePeriod(base({ sessions, allotment, allotmentCycles: new Set([11]), people: new Map([["uOld", { employee_id: 77, name: "Same Person" }]]), headcount: hc }));
+    const st = r.stores[0];
+    assert.equal(st.participation.value, 50);
+    assert.equal(st.participation.provisional, true);
+    assert.deepEqual(st.participation.provisional_reasons, ["UNMAPPED_COUNTERS"]);
+    assert.equal(st.participation_detail.unmapped_counters, 1);
+  });
+});

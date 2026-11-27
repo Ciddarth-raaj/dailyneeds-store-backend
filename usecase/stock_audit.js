@@ -23,13 +23,16 @@ const MAX_FILES = 400;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
 /**
- * Designation IDS (DNDS designation table, read in production 27 Nov 2026).
  * Defaults only: HR changes them in the module settings (with history).
- *   eligible counting staff: 2 Customer Service Associate, 4 Cashier
- *   roles: 9 Supervisor, 3 Store Manager, 27 Operations Manager
+ *   eligible headcount: "ALL" - every active employee of the store, whatever
+ *     the designation (the policy: everybody counts); or a list of
+ *     designation ids to narrow it. Individuals leave only by an approved
+ *     exclusion.
+ *   roles: designation IDS (DNDS designation table, read in production
+ *     27 Nov 2026): 9 Supervisor, 3 Store Manager, 27 Operations Manager
  */
 const DEFAULT_SETTINGS = Object.freeze({
-  eligible_designation_ids: [2, 4],
+  eligible_designation_ids: "ALL",
   role_designation_ids: { SUPERVISOR: [9], STORE_MANAGER: [3], OPERATIONS_MANAGER: [27] },
 });
 const ROLES = ["SUPERVISOR", "STORE_MANAGER", "OPERATIONS_MANAGER"];
@@ -172,7 +175,7 @@ class StockAuditUsecase {
   async updateSettings(values, by) {
     const ids = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => Number.isInteger(x) && x > 0);
     if (values.eligible_designation_ids !== undefined) {
-      if (!ids(values.eligible_designation_ids)) throw codeError(400, "eligible_designation_ids: a list of designation ids");
+      if (values.eligible_designation_ids !== "ALL" && !ids(values.eligible_designation_ids)) throw codeError(400, 'eligible_designation_ids: "ALL" or a list of designation ids');
       await this.repo.setSetting("eligible_designation_ids", values.eligible_designation_ids, by);
     }
     if (values.role_designation_ids !== undefined) {
@@ -264,7 +267,7 @@ class StockAuditUsecase {
     const settings = await this.settings();
     if (!e || !e.active) throw codeError(400, "Employee not found or not active");
     if (e.outlet_id !== c.outlet_id) throw codeError(400, "The employee is not assigned to this store");
-    if (!settings.eligible_designation_ids.includes(e.designation_id)) throw codeError(400, "The employee's designation is not an eligible counting designation");
+    if (settings.eligible_designation_ids !== "ALL" && !settings.eligible_designation_ids.includes(e.designation_id)) throw codeError(400, "The employee's designation is not in the eligible designations");
     try {
       await this.repo.addToSnapshot(c.cycle_id, e, by, String(note).slice(0, 255));
     } catch (err) {

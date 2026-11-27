@@ -177,3 +177,25 @@ describe("headcount, exclusions and responsible persons", () => {
     assert.equal((await call("PUT", "/stock-audit/settings", { keys: P.MANAGE_POLICY, body: { eligible_designation_ids: [2] } })).status, 200);
   });
 });
+
+describe("staged access (STOCK_AUDIT_ACCESS=restricted)", () => {
+  let srv;
+  let port;
+  before(async () => {
+    const app = express();
+    app.use((req, res, next) => { req.keys = "*"; req.decoded = { employee_id: 1, user_type: Number(req.headers["x-type"] || 1), designation_id: Number(req.headers["x-desig"] || 0) }; next(); });
+    const perms = { ...permissions, ADMIN_USER_TYPE: 2 };
+    app.use("/stock-audit", routesFactory({ usecase, permissions: perms, branchScope, enabled: true, access: { mode: "restricted", designationIds: [11] } }).getRouter());
+    srv = app.listen(0);
+    await new Promise((r) => srv.once("listening", r));
+    port = srv.address().port;
+  });
+  after(() => srv.close());
+  const get = (headers) => new Promise((resolve) => http.get({ host: "127.0.0.1", port, path: "/stock-audit/stores", headers }, (res) => { res.resume(); res.on("end", () => resolve(res.statusCode)); }));
+  it("administrators and HR (designation 11) get in; a store employee or manager does not, whatever keys they hold", async () => {
+    assert.equal(await get({ "x-type": "2" }), 200);
+    assert.equal(await get({ "x-desig": "11" }), 200);
+    assert.equal(await get({ "x-desig": "3" }), 503);
+    assert.equal(await get({ "x-desig": "2" }), 503);
+  });
+});

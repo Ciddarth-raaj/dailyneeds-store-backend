@@ -131,15 +131,23 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
     recountsByOriginal.get(v.original_session_slug).push({ at: v.recount_at, verdict: v.verdict, ref: v.recount_ref });
   }
 
-  // ---- per employee (store, RetailPilot user)
+  // ---- per employee and store. A MAPPED employee is one row however many
+  // RetailPilot users map to them (their articles are a union, so nothing is
+  // counted twice); an UNMAPPED RetailPilot user is a row of its own, marked
+  // provisional, and is never credited. Mapping later re-attributes the
+  // history on the next calculation - once.
   const emp = new Map();
+  const keyOf = (outletId, user) => (people.get(user) ? `${outletId}|e${people.get(user).employee_id}` : `${outletId}|r${user}`);
+  const sameEmployee = (a, b) => a === b || (people.get(a) && people.get(b) && people.get(a).employee_id === people.get(b).employee_id);
   const touch = (outletId, user) => {
-    const k = `${outletId}|${user}`;
+    const k = keyOf(outletId, user);
     if (!emp.has(k)) {
-      emp.set(k, { outlet_id: outletId, rp_user_id: user, counted: new Set(), today: new Set(), ownAllotted: new Set(), ownByDeadline: new Set(),
+      emp.set(k, { outlet_id: outletId, rp_user_id: user, rp_user_ids: new Set(), counted: new Set(), today: new Set(), ownAllotted: new Set(), ownByDeadline: new Set(),
         eligible: 0, hardPending: 0, pendingEligibility: 0, notEligible: 0, verdicts: [], allRecounts: [] });
     }
-    return emp.get(k);
+    const e = emp.get(k);
+    e.rp_user_ids.add(user);
+    return e;
   };
   for (const [k] of allotByUser) {
     const [outletId, user] = k.split("|");
@@ -168,7 +176,7 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
     if (owner) {
       st.allottedAudited.add(article);
       if (day <= cycle.deadline) st.allottedByDeadline.add(article);
-      if (owner === user) { e.ownAllotted.add(article); if (day <= cycle.deadline) e.ownByDeadline.add(article); }
+      if (sameEmployee(owner, user)) { e.ownAllotted.add(article); if (day <= cycle.deadline) e.ownByDeadline.add(article); }
     }
     if (r.status === ELIGIBILITY.ELIGIBLE) e.eligible += 1;
     else if (r.status === ELIGIBILITY.PENDING_ELIGIBILITY_REVIEW) {
@@ -196,18 +204,29 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
     const cycle = cycleByOutlet.get(e.outlet_id);
     const person = people.get(e.rp_user_id) || null;
     const withAllot = hasAllotment(e.outlet_id);
-    const al = allotByUser.get(`${e.outlet_id}|${e.rp_user_id}`) || { auditable: new Set(), notAuditable: 0 };
+    const al = { auditable: new Set(), notAuditable: 0 };
+    for (const u of e.rp_user_ids) {
+      const x = allotByUser.get(`${e.outlet_id}|${u}`);
+      if (x) { x.auditable.forEach((a) => al.auditable.add(a)); al.notAuditable += x.notAuditable; }
+    }
     const allottedN = al.auditable.size;
     const audited = e.counted.size;
     const inc = I.employeeIncentive({ auditedArticles: audited, eligibleArticles: e.eligible, pendingEligibility: e.pendingEligibility, verdicts: e.verdicts }, policy);
     // Estimate base: the articles that can still earn - allotted to them (when allotment is imported), less hard review cases.
     const estBase = Math.max(0, (withAllot ? e.ownAllotted.size : audited) - e.hardPending);
-    const est = I.estimateEmployeeIncentive({ auditedArticles: audited, pendingEligibility: audited - estBase, allottedArticles: withAllot ? allottedN : null, verdicts: e.verdicts }, policy);
+    const estRaw = I.estimateEmployeeIncentive({ auditedArticles: audited, pendingEligibility: audited - estBase, allottedArticles: withAllot ? allottedN : null, verdicts: e.verdicts }, policy);
+    // never an estimate for an unmapped RetailPilot user: nobody to credit yet
+    const unm = S.pending(S.REASON.EMPLOYEE_UNMAPPED);
+    const est = person ? estRaw : { ...estRaw, basis: "UNMAPPED", accuracy: estRaw.accuracy, rate: unm, estimate: unm, projected: unm, max_so_far: unm };
     const unavailable = S.unavailable(S.REASON.ALLOTMENT_UNAVAILABLE);
     employees.push({
       employee_id: person ? person.employee_id : null,
       code: person ? String(person.employee_id) : null,
       rp_user_id: e.rp_user_id,
+      rp_user_ids: [...e.rp_user_ids],
+      mapped: Boolean(person),
+      // figures of an unmapped RetailPilot user are provisional: who they belong to is not known yet
+      mapping_status: person ? "MAPPED" : "UNMAPPED",
       name: person ? person.name : null,
       rp_name: rpNames.get(e.rp_user_id) || e.rp_user_id,
       designation: person ? person.designation || null : null,
@@ -234,8 +253,8 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
       within_deadline_c: withAllot ? S.available(e.ownByDeadline.size) : unavailable,
       accuracy: inc.accuracy,
       rate: inc.rate,
-      estimated: inc.amount,
-      provisional: inc.provisional_amount,
+      estimated: person ? inc.amount : unm,
+      provisional: person ? inc.provisional_amount : null,
       calc_status: inc.status,
       sample: inc.sample,
       est: estimateView(est),
@@ -309,7 +328,7 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
         role,
         title: ROLE_TITLE[role],
         employee_id: h ? h.employee_id : null,
-        name: h ? h.name : "Not assigned",
+        name: h ? h.name : "Unassigned",
         assigned: Boolean(h),
         components: r.components.map((c) => ({ ...c, label: LABELS[c.key] || c.key })),
         // nobody responsible -> nobody is paid: the KPIs still show, the amount waits for an assignment
@@ -326,7 +345,7 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
   );
   for (const m of management) m.om = (om.perStore.find((p) => p.outlet_id === m.store.outlet_id) || {}).amount || S.pending(S.REASON.COMPONENT_PENDING);
   om.employee_id = omHolder ? omHolder.employee_id : null;
-  om.name = omHolder ? omHolder.name : "Not assigned";
+  om.name = omHolder ? omHolder.name : "Unassigned";
   om.assigned = Boolean(omHolder);
   if (!omHolder) {
     om.decided_amount = 0;
@@ -368,7 +387,9 @@ function participationOf(outletId, list, hc) {
   const participated = hc.eligible.filter((e) => counted.has(e.employee_id));
   const notYet = hc.eligible.filter((e) => !counted.has(e.employee_id));
   const n = hc.eligible.length;
-  const cell = n ? { ...S.available((participated.length * 100) / n), provisional: !hc.snapshot } : S.notApplicable(S.REASON.NO_DATA);
+  const unmappedCounters = list.filter((e) => e.audited > 0 && e.employee_id == null).length;
+  // provisional while the headcount is not frozen, or while some counters are not mapped (their counts may raise it)
+  const cell = n ? { ...S.available((participated.length * 100) / n), provisional: !hc.snapshot || unmappedCounters > 0, provisional_reasons: [...(!hc.snapshot ? ["SNAPSHOT_NOT_TAKEN"] : []), ...(unmappedCounters ? ["UNMAPPED_COUNTERS"] : [])] } : S.notApplicable(S.REASON.NO_DATA);
   return {
     eligible_employees: n,
     participating: participated.length,
@@ -381,7 +402,8 @@ function participationOf(outletId, list, hc) {
       excluded: hc.excluded || [],
       // mapped people who counted here but are not in the store's eligible headcount (another store, a manager)
       counted_outside_headcount: [...counted].filter((id) => !eligibleIds.has(id)).length,
-      unmapped_counters: list.filter((e) => e.audited > 0 && e.employee_id == null).length,
+      unmapped_counters: unmappedCounters,
+      unmapped_articles: list.filter((e) => e.employee_id == null).reduce((t, e) => t + e.audited, 0),
     },
   };
 }
