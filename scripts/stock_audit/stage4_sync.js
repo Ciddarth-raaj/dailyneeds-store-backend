@@ -10,7 +10,7 @@ const R = (p) => require(cwd + p);
   const db = await R("/drivers/mysql")().connect();
   try {
     const repo = R("/repository/stock_audit")(db.connection);
-    const running = await new Promise((res) => db.connection.query("SELECT COUNT(*) AS n FROM sa_sync_run WHERE status = 'RUNNING'", (e, r) => res(e ? -1 : r[0].n)));
+    const running = await new Promise((res) => db.connection.query("SELECT COUNT(*) AS n FROM sa_sync_run WHERE status = 'RUNNING'", (e, r) => res(e ? -1 : Number(r[0].n))));
     if (running !== 0) { console.log("@@STOP a sync run is already RUNNING (" + running + ")"); process.exitCode = 1; return; }
     const F = R("/services/retailpilot_spectra");
     const sync = R("/usecase/stock_audit_sync")(F({ ...R("/config/retailpilot"), retry: F.DEFAULT_RETRY }), repo);
