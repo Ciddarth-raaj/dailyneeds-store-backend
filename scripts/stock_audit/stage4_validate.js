@@ -5,6 +5,7 @@
 // Also: schema check of the three source streams, and the administrator
 // account review. Prints counts and ids only - no names.
 // Usage: node stage4_validate.js <source|full>
+global.env = process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV;
 const cwd = process.cwd(); const R = (p) => require(cwd + p);
 const out = (k, v) => console.log(`@@${k} ${JSON.stringify(v)}`);
 const PROGRAMME = [3, 4, 5, 6, 7];

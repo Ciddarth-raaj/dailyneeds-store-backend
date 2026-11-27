@@ -1,6 +1,7 @@
 // Stock Audit Stage 4 - one manual sync run ON THE SERVER, from the backend
 // directory, with the application's own code (built exactly as server.js
 // builds it). READ-ONLY towards RetailPilot. Usage: node stage4_sync.js DRY_RUN|HISTORICAL
+global.env = process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV;
 const cwd = process.cwd();
 const R = (p) => require(cwd + p);
 (async () => {
