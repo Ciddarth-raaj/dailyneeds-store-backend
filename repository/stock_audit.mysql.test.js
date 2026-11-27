@@ -394,6 +394,87 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
     });
   });
 
+  describe("seasons: the one user-facing record (internal cycles created with it)", () => {
+    const cyclesOf = async (code) => db.q(`SELECT outlet_id, DATE_FORMAT(start_date,'%Y-%m-%d') AS s, DATE_FORMAT(end_date,'%Y-%m-%d') AS e, DATE_FORMAT(deadline,'%Y-%m-%d') AS d, name FROM sa_cycle WHERE period_code = ? ORDER BY outlet_id`, [code]);
+    const counts = async () => (await db.q(`SELECT (SELECT COUNT(*) FROM sa_cycle) AS c, (SELECT COUNT(*) FROM sa_sapl_season) AS s`))[0];
+    let before;
+    let next;
+    it("a new season creates its five store cycles in the same transaction, with the same dates", async () => {
+      before = await cyclesOf("2026-Q4");
+      next = await U.createSeason({ name: "Season 2", start_date: "2026-12-11", end_date: "2026-12-31", deadline: "2026-12-31", prize_amount: 10000, by: 900 });
+      assert.match(next.period_code, /^SEASON-\d+$/);
+      assert.equal(next.stores, 5);
+      const c = await cyclesOf(next.period_code);
+      assert.deepEqual(c.map((x) => x.outlet_id), [3, 4, 5, 6, 7]); // warehouse excluded
+      assert.ok(c.every((x) => x.s === "2026-12-11" && x.e === "2026-12-31" && x.d === "2026-12-31" && x.name === "Season 2"));
+      const s = (await U.seasons()).find((x) => x.season_id === next.season_id);
+      assert.equal(s.start, "2026-12-11");
+      assert.equal(s.end, "2026-12-31");
+      assert.equal(s.deadline, "2026-12-31");
+      assert.equal(Number(s.prize), 10000);
+      assert.deepEqual(s.rules.weights, { completion: 35, accuracy: 40, recount: 20, participation: 5 });
+    });
+    it("overlapping or duplicate seasons are refused and leave nothing behind", async () => {
+      const n = await counts();
+      await assert.rejects(U.createSeason({ start_date: "2026-12-05", end_date: "2026-12-20", deadline: "2026-12-20", by: 900 }), (e) => e.status === 409 && /overlap/.test(e.message));
+      await assert.rejects(U.createSeason({ start_date: "2026-12-31", end_date: "2027-01-31", deadline: "2027-01-31", by: 900 }), (e) => e.status === 409);
+      await assert.rejects(U.createSeason({ period_code: next.period_code, by: 900 }), (e) => e.status === 409); // a second season on the same period
+      assert.deepEqual(await counts(), n);
+    });
+    it("two admins creating the same season at once: exactly one succeeds", async () => {
+      const n = await counts();
+      const r = await Promise.allSettled([1, 2].map(() => U.createSeason({ start_date: "2027-01-01", end_date: "2027-01-31", deadline: "2027-01-31", by: 900 })));
+      assert.equal(r.filter((x) => x.status === "fulfilled").length, 1);
+      assert.equal(r.filter((x) => x.status === "rejected" && x.reason.status === 409).length, 1);
+      const m = await counts();
+      assert.equal(Number(m.c), Number(n.c) + 5);
+      assert.equal(Number(m.s), Number(n.s) + 1);
+    });
+    it("checks the inputs: date order, programme start, warehouse, prize", async () => {
+      await assert.rejects(U.createSeason({ start_date: "2027-02-01", end_date: "2027-02-10", deadline: "2027-02-20", by: 900 }), (e) => e.status === 400);
+      await assert.rejects(U.createSeason({ start_date: "2026-11-01", end_date: "2026-11-10", deadline: "2026-11-10", by: 900 }), /programme starts/);
+      await assert.rejects(U.createSeason({ start_date: "2027-02-01", end_date: "2027-02-10", deadline: "2027-02-10", outlet_ids: [2, 3], by: 900 }), /warehouse/);
+      await assert.rejects(U.createSeason({ start_date: "2027-02-01", end_date: "2027-02-10", deadline: "2027-02-10", prize_amount: -5, by: 900 }), (e) => e.status === 400);
+    });
+    it("date changes never silently rewrite results", async () => {
+      const id = next.season_id;
+      // a start that has passed cannot move (NOW is 27 Nov 2026) - the running season's start is 25 Nov
+      const q4 = (await U.seasons()).find((x) => x.period_code === "2026-Q4");
+      await assert.rejects(U.updateSeason(q4.season_id, { start_date: "2026-11-26" }), (e) => e.status === 409 && /has passed/.test(e.message));
+      await assert.rejects(U.updateSeason(id, { end_date: "2026-11-26", deadline: "2026-11-26", start_date: "2026-11-26" }), (e) => e.status === 409);
+      // extending into the next season overlaps it
+      await assert.rejects(U.updateSeason(id, { end_date: "2027-01-05", deadline: "2027-01-05" }), (e) => e.status === 409 && /overlap/.test(e.message));
+      // a valid change moves the season and its five cycles together
+      const s = await U.updateSeason(id, { name: "Season 2 (Dec)", deadline: "2026-12-30", prize_amount: 12000 });
+      assert.equal(s.deadline, "2026-12-30");
+      assert.equal(Number(s.prize_amount), 12000);
+      const c = await cyclesOf(next.period_code);
+      assert.ok(c.every((x) => x.d === "2026-12-30" && x.e === "2026-12-31" && x.name === "Season 2 (Dec)"));
+      // nothing moves once the season is in verification, or incentives are approved
+      await db.q(`UPDATE sa_sapl_season SET status = 'AWAITING_VERIFICATION' WHERE season_id = ?`, [id]);
+      await assert.rejects(U.updateSeason(id, { deadline: "2026-12-29" }), (e) => e.status === 409);
+      await db.q(`UPDATE sa_sapl_season SET status = 'OPEN' WHERE season_id = ?`, [id]);
+      const [cy] = await db.q(`SELECT cycle_id FROM sa_cycle WHERE period_code = ? AND outlet_id = 7`, [next.period_code]);
+      await db.q(`INSERT INTO sa_employee_incentive (cycle_id, outlet_id, employee_id, calc_status, rule_set_version, status) VALUES (?, 7, 501, 'CALCULATED', 1, 'APPROVED')`, [cy.cycle_id]);
+      await assert.rejects(U.updateSeason(id, { deadline: "2026-12-29" }), (e) => e.status === 409 && /approved/.test(e.message));
+      await db.q(`DELETE FROM sa_employee_incentive WHERE cycle_id = ?`, [cy.cycle_id]);
+    });
+    it("the existing season and its cycles are untouched by all of this", async () => {
+      assert.deepEqual(await cyclesOf("2026-Q4"), before);
+    });
+    it("an original audit after a season's end is not credited to it; the next season gets it", async () => {
+      U.invalidate();
+      const q4 = await U.store({ outletId: 7, period: "2026-Q4" });
+      await db.q(`INSERT INTO sa_rp_session (rp_slug, rp_store_id, outlet_id, article_id, stock_location, status, initiated_by, finalized_by, started_at, finalized_at, rp_updated_at, row_hash)
+                  VALUES ('late1', 'kKFom', 7, 7777, 'main', 'FINALIZED', 'uA', 'uA', '2026-12-12 05:00:00.000000', '2026-12-12 05:01:00.000000', '2026-12-12 05:01:00.000000', 'h')`);
+      U.invalidate();
+      assert.equal((await U.store({ outletId: 7, period: "2026-Q4" })).audited, q4.audited);
+      assert.equal((await U.store({ outletId: 7, period: next.period_code })).audited, 1);
+      await db.q(`DELETE FROM sa_rp_session WHERE rp_slug = 'late1'`);
+      U.invalidate();
+    });
+  });
+
   describe("performance: 75,000-article allotment", () => {
     it("validates, confirms and computes 75,000 articles across five stores in bounded time", async () => {
       const stores = [["huABy", 3], ["FuUGY", 4], ["sooWy", 5], ["rnMT1", 6], ["kKFom", 7]];

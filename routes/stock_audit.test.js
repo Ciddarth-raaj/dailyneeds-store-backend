@@ -199,3 +199,57 @@ describe("staged access (STOCK_AUDIT_ACCESS=restricted)", () => {
     assert.equal(await get({ "x-desig": "2" }), 503);
   });
 });
+
+describe("seasons: created and changed by administrators only; cycles are read-only", () => {
+  let srv;
+  let port;
+  before(async () => {
+    const app = express();
+    app.use(express.json());
+    // HR holds every Stock Audit key here (x-keys "*"); only user_type decides
+    app.use((req, res, next) => { req.keys = "*"; req.decoded = { employee_id: 7, user_type: Number(req.headers["x-type"] || 1), designation_id: 11 }; req.auth = { employeeId: 7 }; next(); });
+    const perms = { ...permissions, ADMIN_USER_TYPE: 2 };
+    app.use("/stock-audit", routesFactory({ usecase, permissions: perms, branchScope, enabled: true }).getRouter());
+    srv = app.listen(0);
+    await new Promise((r) => srv.once("listening", r));
+    port = srv.address().port;
+  });
+  after(() => srv.close());
+  const send = (method, path, type, body = {}) => new Promise((resolve, reject) => {
+    const data = JSON.stringify(body);
+    const req = http.request({ host: "127.0.0.1", port, path, method, headers: { "x-type": String(type), "content-type": "application/json", "content-length": Buffer.byteLength(data) } }, (res) => {
+      let b = "";
+      res.on("data", (c) => (b += c));
+      res.on("end", () => resolve({ status: res.statusCode, body: b ? JSON.parse(b) : null }));
+    });
+    req.on("error", reject);
+    req.end(data);
+  });
+  it("HR (even with every key) cannot create, change, verify or finalise a season; nothing reaches the usecase", async () => {
+    calls.length = 0;
+    for (const [m, p] of [["POST", "/stock-audit/sapl/seasons"], ["PUT", "/stock-audit/sapl/seasons/1"], ["POST", "/stock-audit/sapl/seasons/1/verify"], ["POST", "/stock-audit/sapl/seasons/1/finalize"]]) {
+      assert.equal((await send(m, p, 1)).status, 403, `${m} ${p}`);
+    }
+    assert.equal(calls.length, 0);
+  });
+  it("an administrator creates a season (dates and prize passed through) and records who acted", async () => {
+    const r = await send("POST", "/stock-audit/sapl/seasons", 2, { name: "Season 2", start_date: "2027-01-01", end_date: "2027-01-31", deadline: "2027-01-31", prize_amount: 10000 });
+    assert.equal(r.status, 200);
+    assert.deepEqual(last("createSeason").args, { name: "Season 2", start_date: "2027-01-01", end_date: "2027-01-31", deadline: "2027-01-31", prize_amount: 10000, by: 7 });
+    assert.equal((await send("PUT", "/stock-audit/sapl/seasons/3", 2, { deadline: "2027-01-30" })).status, 200);
+    assert.equal(last("updateSeason").args, 3);
+  });
+  it("audit cycles cannot be created or changed directly (410), by anyone", async () => {
+    calls.length = 0;
+    assert.equal((await send("POST", "/stock-audit/cycles", 2)).status, 410);
+    assert.equal((await send("PUT", "/stock-audit/cycles/SEASON-1", 2)).status, 410);
+    assert.equal((await send("POST", "/stock-audit/cycles", 1)).status, 403);
+    assert.equal(calls.length, 0);
+  });
+  it("meta tells the screens whether the caller may manage seasons", async () => {
+    await new Promise((resolve) => http.get({ host: "127.0.0.1", port, path: "/stock-audit/meta", headers: { "x-type": "2" } }, (res) => { res.resume(); res.on("end", resolve); }));
+    assert.equal(last("meta").args.canManageSeasons, true);
+    await new Promise((resolve) => http.get({ host: "127.0.0.1", port, path: "/stock-audit/meta", headers: { "x-type": "1" } }, (res) => { res.resume(); res.on("end", resolve); }));
+    assert.equal(last("meta").args.canManageSeasons, false);
+  });
+});

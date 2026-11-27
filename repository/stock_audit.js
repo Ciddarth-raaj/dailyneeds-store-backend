@@ -508,6 +508,62 @@ class StockAuditRepository {
     return r.affectedRows;
   }
 
+  /**
+   * Seasons are the user-facing record; each still owns one internal audit
+   * cycle per participating store. Every season write runs in ONE
+   * transaction that first takes a locking read of all seasons and of the
+   * stores' cycles, so two admins can never create overlapping seasons
+   * (an article counted on a day covered twice could earn credit twice).
+   */
+  async _lockAndCheckOverlap(q, { outletIds, start_date, end_date, exceptPeriod = null }) {
+    await q(`SELECT season_id FROM sa_sapl_season FOR UPDATE`);
+    const clash = await q(
+      `SELECT period_code, outlet_id, DATE_FORMAT(start_date, '%Y-%m-%d') AS start_date, DATE_FORMAT(end_date, '%Y-%m-%d') AS end_date
+         FROM sa_cycle
+        WHERE outlet_id IN (${marks(outletIds.length)}) AND start_date <= ? AND end_date >= ? ${exceptPeriod ? "AND period_code <> ?" : ""}
+        FOR UPDATE`,
+      [...outletIds, end_date, start_date, ...(exceptPeriod ? [exceptPeriod] : [])]
+    );
+    if (clash.length) {
+      const c = clash[0];
+      throw codeError(409, `These dates overlap ${c.period_code} (${c.start_date} to ${c.end_date}): one day can belong to one season only`);
+    }
+  }
+
+  async createSeasonWithCycles({ period_code, name, start_date, end_date, deadline, outletIds, prize_amount, rules, created_by }) {
+    return this.tx(async (q) => {
+      await this._lockAndCheckOverlap(q, { outletIds, start_date, end_date });
+      for (const o of outletIds) {
+        await q(`INSERT INTO sa_cycle (outlet_id, name, period_code, start_date, end_date, deadline, status, created_by) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)`,
+          [o, name, period_code, start_date, end_date, deadline, created_by]);
+      }
+      const r = await q(`INSERT INTO sa_sapl_season (name, period_code, start_date, deadline, prize_amount, rules_json, status, created_by) VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?)`,
+        [name, period_code, start_date, deadline, prize_amount, JSON.stringify(rules), created_by]);
+      return r.insertId;
+    });
+  }
+
+  /** Season and its internal cycles change together, or not at all. */
+  async updateSeasonDates(periodCode, seasonId, { start_date, end_date, deadline, outletIds }) {
+    return this.tx(async (q) => {
+      await this._lockAndCheckOverlap(q, { outletIds, start_date, end_date, exceptPeriod: periodCode });
+      await q(`UPDATE sa_cycle SET start_date = ?, end_date = ?, deadline = ? WHERE period_code = ?`, [start_date, end_date, deadline, periodCode]);
+      if (seasonId != null) await q(`UPDATE sa_sapl_season SET start_date = ?, deadline = ? WHERE season_id = ?`, [start_date, deadline, seasonId]);
+    });
+  }
+
+  /** What a date change could invalidate: approved / posted incentives and confirmed allotments of the period. */
+  async periodCommitments(periodCode) {
+    const r = await this.q(
+      `SELECT (SELECT COUNT(*) FROM sa_employee_incentive i JOIN sa_cycle c ON c.cycle_id = i.cycle_id WHERE c.period_code = ? AND i.status IN ('APPROVED','POSTED')) AS approved_employee,
+              (SELECT COUNT(*) FROM sa_management_incentive WHERE period_code = ? AND status IN ('APPROVED','POSTED')) AS approved_management,
+              (SELECT COUNT(*) FROM sa_allotment a JOIN sa_cycle c ON c.cycle_id = a.cycle_id WHERE c.period_code = ?) AS allotted`,
+      [periodCode, periodCode, periodCode]
+    );
+    const x = r[0] || {};
+    return { approved: Number(x.approved_employee || 0) + Number(x.approved_management || 0), allotted: Number(x.allotted || 0) };
+  }
+
   async saveStandings(seasonId, date, rows, isFinal) {
     await this.tx(async (q) => {
       for (const r of rows) {

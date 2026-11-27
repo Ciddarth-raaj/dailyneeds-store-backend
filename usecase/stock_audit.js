@@ -73,11 +73,12 @@ class StockAuditUsecase {
   async currentPeriod(requested) {
     const periods = await this.repo.periods();
     if (requested) {
-      if (!periods.find((p) => p.period_code === requested)) throw codeError(404, `Audit period ${requested} not found`);
+      if (!periods.find((p) => p.period_code === requested)) throw codeError(404, `Season ${requested} not found`);
       return requested;
     }
+    // the season running today; else the latest one already started; else the next one
     const today = this.today();
-    const open = periods.find((p) => p.start_date <= today && p.end_date >= today) || periods[0];
+    const open = periods.find((p) => p.start_date <= today && p.end_date >= today) || periods.find((p) => p.start_date <= today) || periods[periods.length - 1];
     return open ? open.period_code : null;
   }
 
@@ -218,7 +219,7 @@ class StockAuditUsecase {
   async _cycleFor(period, outletId) {
     const code = await this.currentPeriod(period);
     const c = (await this.repo.cycles(code)).find((x) => x.outlet_id === Number(outletId));
-    if (!c) throw codeError(404, "No cycle for this store in the audit period");
+    if (!c) throw codeError(404, "This store is not in the season");
     return c;
   }
 
@@ -295,7 +296,7 @@ class StockAuditUsecase {
       const id = await this.repo.requestExclusion(c.cycle_id, Number(employeeId), String(reason).trim().slice(0, 500), by);
       return { id, status: "REQUESTED" };
     } catch (err) {
-      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This employee already has an open or approved exclusion for the cycle");
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This employee already has an open or approved exclusion for the season");
       throw err;
     }
   }
@@ -375,7 +376,7 @@ class StockAuditUsecase {
       this.invalidate();
       return { id, period_code: code, role, outlet_id: outlet, employee_id: e.employee_id };
     } catch (err) {
-      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This person already holds a management role in this audit period: one management incentive per person");
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This person already holds a management role in this season: one management incentive per person");
       throw err;
     }
   }
@@ -385,16 +386,24 @@ class StockAuditUsecase {
   }
 
   // ---------------------------------------------------------------- screens
-  async meta({ outlets }) {
-    const [stores, periods, last] = await Promise.all([this.repo.rpOutlets(), this.repo.periods(), this.repo.lastSuccess()]);
+  async meta({ outlets, canManageSeasons = false }) {
+    const [stores, periods, last, seasonRows, current] = await Promise.all([this.repo.rpOutlets(), this.repo.periods(), this.repo.lastSuccess(), this.repo.seasons(), this.currentPeriod(null)]);
     const programme = stores.filter((s) => this.policy.programme.outletIds.includes(s.outlet_id));
     const cycles = await this.repo.cycles();
+    const seasonOf = new Map(seasonRows.map((x) => [x.period_code, x]));
     return {
       source: "LIVE",
       today: this.today(),
       last_sync: last ? last.finished_at : null,
       periods,
       cycles: periods.map((p) => ({ ...p, cycle_id: p.period_code, stores: cycles.filter((c) => c.period_code === p.period_code).map((c) => c.outlet_id) })),
+      // the ONE user-facing record: a season (its internal cycles stay behind it)
+      seasons: periods.map((p) => {
+        const x = seasonOf.get(p.period_code);
+        return { period_code: p.period_code, season_id: x ? x.season_id : null, name: x ? x.name : p.name, start_date: p.start_date, end_date: p.end_date, deadline: x ? x.deadline : p.deadline, status: x ? x.status : "OPEN", current: p.period_code === current, stores: cycles.filter((c) => c.period_code === p.period_code).map((c) => c.outlet_id) };
+      }),
+      current_period: current,
+      can_manage_seasons: Boolean(canManageSeasons),
       stores: this._scope(programme, outlets).map((s) => ({ ...s, short: s.name })),
       warehouse: stores.find((s) => this.policy.programme.excludedOutletIds.includes(s.outlet_id)) || null,
       approvals_enabled: false,
@@ -569,7 +578,7 @@ class StockAuditUsecase {
   /** Store today's provisional standing (idempotent per day). Final ones only after verification. */
   async snapshotStandings({ period }) {
     const { season } = await this._season(period);
-    if (!season) throw codeError(404, "No Premier League season for this audit period");
+    if (!season) throw codeError(404, "No Premier League season for this period");
     const rows = await this.standings({ period });
     const final = ["VERIFIED", "FINAL", "CLOSED"].includes(season.status);
     await this.repo.saveStandings(season.season_id, this.today(), rows, final);
@@ -577,8 +586,8 @@ class StockAuditUsecase {
   }
 
   async seasons() {
-    const list = await this.repo.seasons();
-    const cycles = await this.repo.cycles();
+    const [list, cycles, current] = await Promise.all([this.repo.seasons(), this.repo.cycles(), this.currentPeriod(null)]);
+    const endOf = (code) => cycles.filter((c) => c.period_code === code).map((c) => c.end_date).sort().pop() || null;
     return list.map((s, i) => ({
       season_id: s.season_id,
       season_no: list.length - i,
@@ -586,7 +595,8 @@ class StockAuditUsecase {
       period_code: s.period_code,
       start: s.start_date,
       deadline: s.deadline,
-      end: null,
+      end: endOf(s.period_code),
+      current: s.period_code === current,
       cycles: [s.period_code],
       stores: cycles.filter((c) => c.period_code === s.period_code).map((c) => c.outlet_id),
       prize: s.prize_amount,
@@ -600,43 +610,128 @@ class StockAuditUsecase {
     }));
   }
 
-  async createSeason({ name, period_code, deadline, prize_amount, by }) {
-    const cycles = await this.repo.cycles(period_code);
-    if (!cycles.length) throw codeError(400, "Create the audit period first: a season is one audit period");
-    if (deadline != null && !DATE_RE.test(deadline)) throw codeError(400, "deadline must be YYYY-MM-DD");
-    const start = cycles.map((c) => c.start_date).sort()[0];
+  /** Dates of a season: start <= completion deadline <= end, never before the programme start. */
+  _seasonDates({ start_date, end_date, deadline }) {
+    for (const [k, v] of Object.entries({ start_date, end_date, deadline })) if (!DATE_RE.test(String(v || ""))) throw codeError(400, `${k} must be YYYY-MM-DD`);
+    if (!(start_date <= deadline && deadline <= end_date)) throw codeError(400, "Start date <= completion deadline <= end date");
+    if (start_date < istDate(this.policy.effectiveFrom)) throw codeError(400, "The programme starts 25 Nov 2026");
+  }
+
+  _seasonOutlets(outletIds) {
+    const ids = (outletIds && outletIds.length ? outletIds : this.policy.programme.outletIds).map(Number);
+    const bad = ids.filter((o) => !this.policy.programme.outletIds.includes(o));
+    if (bad.length) throw codeError(400, `Not a programme store: ${bad.join(", ")} (the warehouse is excluded)`);
+    return [...new Set(ids)];
+  }
+
+  /**
+   * A season is the ONE record people create. Its internal audit cycles (one
+   * per participating store) are created with it, in the same transaction,
+   * and no two seasons may cover the same day for a store.
+   * (With an existing period_code and no dates it links a season to that
+   * period instead - how Season 1 was created on 27 Nov 2026.)
+   */
+  async createSeason({ name, period_code, start_date, end_date, deadline, prize_amount, outlet_ids, by }) {
     const rules = L.defaultRules(this.policy);
-    if (prize_amount != null) rules.prize.amount = Number(prize_amount);
+    if (prize_amount != null && prize_amount !== "") {
+      const prize = Number(prize_amount);
+      if (!Number.isFinite(prize) || prize <= 0) throw codeError(400, "Prize must be a positive amount");
+      rules.prize.amount = prize;
+    }
     const v = L.validateRules(rules, this.policy);
     if (!v.ok) throw codeError(400, v.errors.join("; "));
+
+    if (period_code && !start_date) {
+      const cycles = await this.repo.cycles(period_code);
+      if (!cycles.length) throw codeError(400, "No such season period");
+      if (deadline != null && !DATE_RE.test(deadline)) throw codeError(400, "deadline must be YYYY-MM-DD");
+      const start = cycles.map((c) => c.start_date).sort()[0];
+      try {
+        const id = await this.repo.createSeason({ name: name || `SAPL ${period_code}`, period_code, start_date: start, deadline: deadline || cycles[0].deadline, prize_amount: rules.prize.amount, rules, created_by: by });
+        this.invalidate();
+        return { season_id: id, period_code };
+      } catch (err) {
+        if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This period already has a season");
+        throw err;
+      }
+    }
+
+    this._seasonDates({ start_date, end_date, deadline });
+    const outletIds = this._seasonOutlets(outlet_ids);
+    const [seasons, periods] = await Promise.all([this.repo.seasons(), this.repo.periods()]);
+    const taken = new Set([...seasons.map((x) => x.period_code), ...periods.map((x) => x.period_code)]);
+    let n = seasons.length + 1;
+    while (taken.has(`SEASON-${n}`)) n += 1;
+    const code = `SEASON-${n}`;
+    const label = String(name || `Season ${n}`).trim().slice(0, 120) || `Season ${n}`;
     try {
-      const id = await this.repo.createSeason({ name: name || `SAPL ${period_code}`, period_code, start_date: start, deadline: deadline || cycles[0].deadline, prize_amount: rules.prize.amount, rules, created_by: by });
-      return { season_id: id };
+      const id = await this.repo.createSeasonWithCycles({ period_code: code, name: label, start_date, end_date, deadline, outletIds, prize_amount: rules.prize.amount, rules, created_by: by });
+      this.invalidate();
+      return { season_id: id, period_code: code, stores: outletIds.length };
     } catch (err) {
-      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This audit period already has a season");
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "A season already starts on this date for one of these stores");
       throw err;
     }
   }
 
-  /** Configurable rules (qualification, tie-breakers, prize method), the common deadline and prize. Weights stay locked. */
-  async updateSeason(seasonId, { deadline, rules, name }) {
+  /**
+   * Date changes never silently rewrite results: a date that has already
+   * passed cannot move, nothing can move into the past, the start cannot
+   * move once allotments are imported, and nothing moves once incentives are
+   * approved or the season is in verification / final. The season and its
+   * internal cycles change together (one transaction, overlap re-checked).
+   */
+  async _changeSeasonDates(periodCode, season, req) {
+    const cycles = await this.repo.cycles(periodCode);
+    if (!cycles.length) throw codeError(404, "Season not found");
+    const cur = {
+      start_date: cycles.map((c) => c.start_date).sort()[0],
+      end_date: cycles.map((c) => c.end_date).sort().pop(),
+      deadline: season ? season.deadline : cycles[0].deadline,
+    };
+    const next = { ...cur };
+    for (const k of Object.keys(cur)) if (req[k] != null && req[k] !== "") next[k] = String(req[k]);
+    const changed = Object.keys(cur).filter((k) => next[k] !== cur[k]);
+    if (!changed.length) return false;
+    this._seasonDates(next);
+    if (season && !["DRAFT", "OPEN"].includes(season.status)) throw codeError(409, `Season dates are fixed once the season is ${season.status.toLowerCase()}`);
+    const c = await this.repo.periodCommitments(periodCode);
+    if (c.approved > 0) throw codeError(409, "Incentives of this season are approved: its dates cannot change");
+    const today = this.today();
+    const label = { start_date: "The start date", end_date: "The end date", deadline: "The completion deadline" };
+    for (const k of changed) {
+      if (cur[k] < today) throw codeError(409, `${label[k]} (${cur[k]}) has passed and cannot change`);
+      if (next[k] < today) throw codeError(409, `${label[k]} cannot be moved into the past`);
+    }
+    if (changed.includes("start_date") && c.allotted > 0) throw codeError(409, "Allotments are imported: the start date cannot change");
+    await this.repo.updateSeasonDates(periodCode, season ? season.season_id : null, { ...next, outletIds: cycles.map((x) => x.outlet_id) });
+    return true;
+  }
+
+  /** Name, prize, dates (guarded, see _changeSeasonDates) and the configurable rules. Weights stay locked. */
+  async updateSeason(seasonId, { deadline, start_date, end_date, rules, name, prize_amount }) {
     const s = await this.repo.season(seasonId);
     if (!s) throw codeError(404, "Season not found");
     if (["FINAL", "CLOSED"].includes(s.status)) throw codeError(409, "A final season cannot change");
     const fields = {};
-    if (name) fields.name = String(name).slice(0, 120);
-    if (deadline != null) {
-      if (!DATE_RE.test(deadline)) throw codeError(400, "deadline must be YYYY-MM-DD");
-      fields.deadline = deadline;
+    let label = null;
+    if (name != null && String(name).trim()) { label = String(name).trim().slice(0, 120); fields.name = label; }
+    let next = rules ? { ...s.rules, ...rules, weights: s.rules.weights } : null;
+    if (prize_amount != null && prize_amount !== "") {
+      const prize = Number(prize_amount);
+      if (!Number.isFinite(prize) || prize <= 0) throw codeError(400, "Prize must be a positive amount");
+      next = next || { ...s.rules };
+      next.prize = { ...(next.prize || {}), amount: prize };
     }
-    if (rules) {
-      const next = { ...s.rules, ...rules, weights: s.rules.weights };
+    if (next) {
       const v = L.validateRules(next, this.policy);
       if (!v.ok) throw codeError(400, v.errors.join("; "));
       fields.rules_json = JSON.stringify(next);
       fields.prize_amount = Number(next.prize.amount);
     }
-    await this.repo.updateSeason(seasonId, fields);
+    await this._changeSeasonDates(s.period_code, s, { start_date, end_date, deadline });
+    if (Object.keys(fields).length) await this.repo.updateSeason(seasonId, fields);
+    if (label) await this.repo.updatePeriod(s.period_code, { name: label });
     this.invalidate();
     return this.repo.season(seasonId);
   }
@@ -688,7 +783,7 @@ class StockAuditUsecase {
   // ---------------------------------------------------------------- allotment import
   async _validationContext(periodCode) {
     const cycles = (await this.repo.cycles(periodCode)).filter((c) => this.policy.programme.outletIds.includes(c.outlet_id));
-    if (!cycles.length) throw codeError(400, "This audit period has no store cycles");
+    if (!cycles.length) throw codeError(400, "This season has no participating stores");
     const outlets = await this.repo.rpOutlets();
     const byRp = new Map(outlets.map((o) => [o.rp_id, o]));
     const cycleByOutlet = new Map(cycles.map((c) => [c.outlet_id, c]));
@@ -725,7 +820,7 @@ class StockAuditUsecase {
    * @param files [{ name, text }]
    */
   async validateUpload({ period_code, files, by }) {
-    if (!PERIOD_RE.test(String(period_code || ""))) throw codeError(400, "Select the audit cycle first");
+    if (!PERIOD_RE.test(String(period_code || ""))) throw codeError(400, "Select the season first");
     if (!Array.isArray(files) || !files.length) throw codeError(400, "No files");
     if (files.length > MAX_FILES) throw codeError(400, `At most ${MAX_FILES} files per upload`);
     for (const f of files) {
@@ -886,7 +981,7 @@ class StockAuditUsecase {
   async recordStoreVerification({ period, outletId, done, comment, by, byOutletId }) {
     const cycles = await this.repo.cycles(await this.currentPeriod(period));
     const c = cycles.find((x) => x.outlet_id === outletId);
-    if (!c) throw codeError(404, "No cycle for this store in the period");
+    if (!c) throw codeError(404, "This store is not in the season");
     if (byOutletId != null && Number(byOutletId) === Number(outletId)) throw codeError(403, "Verification must be independent of the store's own staff");
     await this.repo.recordStoreVerification(c.cycle_id, by, Boolean(done), comment);
     this.invalidate();
@@ -904,7 +999,7 @@ class StockAuditUsecase {
     if (!DATE_RE.test(d)) throw codeError(400, "date must be YYYY-MM-DD");
     if (d > today) throw codeError(400, "A report cannot be for a future date");
     const code = await this.currentPeriod(period);
-    if (!code) throw codeError(404, "No audit period yet");
+    if (!code) throw codeError(404, "No season yet");
     const p = d === today ? await this.period(code) : await this._compute(code, { asOfDate: d });
     const strip = ({ estimated, provisional, rate, est, approved_c, payment, eligible, not_eligible, ...keep }) => keep;
     const stores = p.stores.map(({ estimated_employee, estimated_employee_pending, estimate_employee, estimate_employee_none, ...s }) => ({ ...s, employees: s.employees.map(strip), source: "LIVE" }));

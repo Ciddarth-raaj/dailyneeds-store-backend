@@ -63,6 +63,9 @@ class StockAuditRoutes {
       return res.status(503).json({ code: 503, msg: "Stock Audit is not open to you yet (staged rollout)" });
     });
     const need = (...keys) => permissions.require(...keys);
+    const isAdmin = (req) => Number((req.decoded || {}).user_type) === Number(permissions.ADMIN_USER_TYPE);
+    // seasons (and the internal audit cycles behind them) are created and changed by administrators only
+    const adminOnly = (req, res, next) => (isAdmin(req) ? next() : res.status(403).json({ code: 403, msg: "Only an administrator can create or change a season" }));
     const by = (req) => (req.auth ? req.auth.employeeId : req.decoded && req.decoded.employee_id) ?? null;
     const handle = (fn) => async (req, res) => {
       try {
@@ -88,7 +91,7 @@ class StockAuditRoutes {
     router.get("/meta", need(P.VIEW_STORE, P.VIEW_ALL_STORES, P.VIEW_OWN_PERFORMANCE, P.VIEW_SAPL, P.DOWNLOAD_HR_PDF, P.IMPORT_ALLOTMENT),
       handle(async (req) => {
         const s = await this.scope(req, null).catch(() => ({ ok: false }));
-        return U.meta({ outlets: s.ok ? s.outlets : [] });
+        return U.meta({ outlets: s.ok ? s.outlets : [], canManageSeasons: isAdmin(req) });
       }));
     router.get("/stores", need(P.VIEW_STORE, P.VIEW_ALL_STORES), scoped((req, outlets) => U.stores({ period: period(req), outlets })));
     router.get("/stores/:outlet_id", need(P.VIEW_STORE, P.VIEW_ALL_STORES),
@@ -150,8 +153,10 @@ class StockAuditRoutes {
     router.put("/mapping/:rp_user_id", need(P.MANAGE_EMPLOYEE_MAPPING),
       handle((req) => U.setMapping({ rp_user_id: req.params.rp_user_id, employee_id: req.body.employee_id == null ? null : Number(req.body.employee_id), note: req.body.note, by: by(req) })));
     router.get("/cycles", need(P.MANAGE_CYCLES, P.VIEW_STORE, P.VIEW_ALL_STORES, P.IMPORT_ALLOTMENT), handle(() => U.cycles()));
-    router.post("/cycles", need(P.MANAGE_CYCLES), handle((req) => U.createPeriod({ ...req.body, by: by(req) })));
-    router.put("/cycles/:period_code", need(P.MANAGE_CYCLES), handle((req) => U.updatePeriod(String(req.params.period_code), req.body || {})));
+    // read-only technical reference: a season creates and changes its own internal cycles
+    const seasonOnly = (req, res) => res.status(410).json({ code: 410, msg: "Audit cycles are created and changed with their season (Season Master)" });
+    router.post("/cycles", adminOnly, seasonOnly);
+    router.put("/cycles/:period_code", adminOnly, seasonOnly);
     router.get("/sync", need(P.RUN_SYNC, P.VIEW_ALL_STORES), handle(() => U.syncRuns()));
     router.post("/sync", need(P.RUN_SYNC),
       handle(async (req, res) => {
@@ -191,14 +196,14 @@ class StockAuditRoutes {
     // ---------------------------------------------------------------- Premier League
     router.get("/sapl/standings", need(P.VIEW_SAPL), handle((req) => U.standings({ period: period(req) })));
     router.get("/sapl/seasons", need(P.VIEW_SAPL), handle(() => U.seasons()));
-    router.post("/sapl/seasons", need(P.MANAGE_SAPL), handle((req) => U.createSeason({ ...req.body, by: by(req) })));
-    router.put("/sapl/seasons/:season_id", need(P.MANAGE_SAPL), handle((req) => U.updateSeason(Number(req.params.season_id), req.body || {})));
+    router.post("/sapl/seasons", adminOnly, handle((req) => U.createSeason({ ...req.body, by: by(req) })));
+    router.put("/sapl/seasons/:season_id", adminOnly, handle((req) => U.updateSeason(Number(req.params.season_id), req.body || {})));
     router.post("/sapl/seasons/:season_id/snapshot", need(P.MANAGE_SAPL), handle(async (req) => {
       const s = (await U.seasons()).find((x) => x.season_id === Number(req.params.season_id));
       return U.snapshotStandings({ period: s ? s.period_code : null });
     }));
-    router.post("/sapl/seasons/:season_id/verify", need(P.MANAGE_SAPL), handle((req) => U.verifySeason(Number(req.params.season_id), by(req))));
-    router.post("/sapl/seasons/:season_id/finalize", need(P.MANAGE_SAPL), handle((req) => U.finalizeSeason(Number(req.params.season_id), by(req))));
+    router.post("/sapl/seasons/:season_id/verify", adminOnly, handle((req) => U.verifySeason(Number(req.params.season_id), by(req))));
+    router.post("/sapl/seasons/:season_id/finalize", adminOnly, handle((req) => U.finalizeSeason(Number(req.params.season_id), by(req))));
     router.post("/sapl/seasons/:season_id/prize/draft", need(P.MANAGE_SAPL_PRIZE), handle((req) => U.draftPrize(Number(req.params.season_id), by(req))));
     router.get("/sapl/seasons/:season_id/prize", need(P.MANAGE_SAPL_PRIZE), handle((req) => U.prizeShares(Number(req.params.season_id))));
 

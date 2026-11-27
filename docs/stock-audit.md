@@ -21,8 +21,23 @@ any scheduled sync (manual runs only), Telegram.
 
 ## Data flow
 
-1. **Audit period** (`POST /stock-audit/cycles`): one cycle per programme store
-   (outlets 3-7; the warehouse, outlet 2, is refused) with a common deadline.
+1. **Season** (`POST /stock-audit/sapl/seasons`, administrators only): the ONE
+   record people create - name, start, end, completion deadline, prize, the
+   five programme stores (the warehouse, outlet 2, is refused). It creates its
+   internal audit cycles (one `sa_cycle` row per store, same dates, code
+   `SEASON-n`) in the same transaction; a locking read refuses any season
+   whose dates overlap another for a store, so one day of audits belongs to
+   one season only. `POST/PUT /cycles` answer 410: cycles change with their
+   season. Date changes (`PUT /sapl/seasons/:id`, admin) move the season and
+   its cycles together and are refused when they would rewrite results: a
+   date that has passed, a date moved into the past, the start once
+   allotments exist, anything once incentives are approved or the season is
+   in verification / final. Every screen works on the selected season
+   (`?period=<code>`, default: the season running today, else the latest
+   started). Original audits after a season's end never count for it;
+   independent recounts / verifications are linked to the season, not to a
+   date, so they may be recorded after the deadline (subject to the
+   verification rules, Stage 7).
 2. **Allotment**: HR uploads every auditor's RetailPilot
    `assortment-effective` CSV, unmodified (`POST /allotment/validate`), reviews
    the validation, then confirms (`POST /allotment/uploads/:id/confirm`).
@@ -98,7 +113,7 @@ any scheduled sync (manual runs only), Telegram.
 
 ## Configurable until management decides
 
-Per season (`PUT /stock-audit/sapl/seasons/:id`, `rules_json`, each marked
+Per season (`PUT /stock-audit/sapl/seasons/:id`, administrators only, `rules_json`, each marked
 `confirmed: false`): qualification, tie-breaker order, prize distribution
 method (equal / by articles audited / manual). The weights cannot be changed.
 Management KPI thresholds are in the policy's draft scoring layer.
