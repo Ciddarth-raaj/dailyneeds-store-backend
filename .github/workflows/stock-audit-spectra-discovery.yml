@@ -16,7 +16,7 @@ name: Stock Audit SPECTRA Discovery (read-only)
   workflow_dispatch:
     inputs:
       mode:
-        description: "full | schema | phase2 | phase3"
+        description: "full | schema | phase2 | phase3 | phase4"
         required: false
         default: phase3
         type: string
@@ -27,6 +27,7 @@ name: Stock Audit SPECTRA Discovery (read-only)
       - scripts/stock_audit/spectra_discovery.js
       - scripts/stock_audit/spectra_discovery_phase2.js
       - scripts/stock_audit/spectra_discovery_phase3.js
+      - scripts/stock_audit/spectra_discovery_phase4.js
 
 jobs:
   discover:
@@ -50,10 +51,10 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          MODE: ${{ inputs.mode || 'phase3' }}
+          MODE: ${{ inputs.mode || 'phase4' }}
         run: |
           set -euo pipefail
-          case "$MODE" in full|schema) SCRIPT=scripts/stock_audit/spectra_discovery.js;; phase2) SCRIPT=scripts/stock_audit/spectra_discovery_phase2.js;; phase3) SCRIPT=scripts/stock_audit/spectra_discovery_phase3.js;; *) echo "::error::bad mode"; exit 1;; esac
+          case "$MODE" in full|schema) SCRIPT=scripts/stock_audit/spectra_discovery.js;; phase2) SCRIPT=scripts/stock_audit/spectra_discovery_phase2.js;; phase3) SCRIPT=scripts/stock_audit/spectra_discovery_phase3.js;; phase4) SCRIPT=scripts/stock_audit/spectra_discovery_phase4.js;; *) echo "::error::bad mode"; exit 1;; esac
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
             "${SSH_USER}@${SSH_HOST}" \
             "cd ~/dailyneeds-store-backend && API_ENV=\$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]') DISCOVERY_MODE=$MODE node -" \
