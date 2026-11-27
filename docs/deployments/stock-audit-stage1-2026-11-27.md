@@ -76,3 +76,13 @@ Runs 45971714666 (REVIEW) and 45972169620 (VARIANCE). Nothing written.
 - Season 1 created at 09:29:47 UTC with the application's own functions (run 45974132648; data only, no code):
   period SEASON-1 = cycles 1-5 (outlets 3-7), 25 Nov - 31 Dec 2026, deadline 31 Dec 2026, OPEN;
   SAPL season 1 "Season 1", prize Rs 10,000, weights completion 35 / accuracy 40 / recount 20 / participation 5 (locked).
+
+# Season simplification - deployed 27 Nov 2026, 21:10-21:17 IST (management-approved)
+- Backend main-autodeploy b6bb022 -> 19f2dce (fast-forward: 410af00, 19f2dce); Deploy Backend #433 success; no migrations.
+- Frontend main-autodeploy c0e236e -> 47b927d (fast-forward: eb97299, 47b927d); Deploy #437 success.
+  47b927d (added after approval, 2 lines): Season Master / Scoring Settings readable with view_sapl_leaderboard,
+  so HR keeps read-only Season Master once the season key is removed.
+- Hr Executive (11): manage_sapl_competition removed (1 row; permissions 448 -> 447); the other 10 keys unchanged.
+- Season 1 unchanged: sa_cycle / sa_sapl_season fingerprints identical before and after (5 cycles, 1 season);
+  current season SEASON-1; mirror 11,461 sessions / 6,872 lines / 16,587 ledger rows; 25 mappings; 0 allotments.
+- Switches unchanged (enabled, sync admin-only, restricted to admins + designation 11). Health OK, no new errors.
