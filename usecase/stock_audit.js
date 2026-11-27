@@ -228,11 +228,13 @@ class StockAuditUsecase {
     if (!code) return { period_code: null, stores: [] };
     const settings = await this.settings();
     const cycles = this._scope((await this.repo.cycles(code)).filter((c) => this.policy.programme.outletIds.includes(c.outlet_id)), outlets);
-    const [hc, snaps, excl, stores] = await Promise.all([this.headcount(cycles, settings), this.repo.snapshots(cycles.map((c) => c.cycle_id)), this.repo.exclusions(cycles.map((c) => c.cycle_id)), this.programmeStores()]);
+    const [hc, snaps, excl, stores, designations] = await Promise.all([this.headcount(cycles, settings), this.repo.snapshots(cycles.map((c) => c.cycle_id)), this.repo.exclusions(cycles.map((c) => c.cycle_id)), this.programmeStores(), this.repo.designations()]);
     const p = await this.period(code);
+    const dName = new Map(designations.map((d) => [Number(d.designation_id), d.designation_name]));
     return {
       period_code: code,
       eligible_designation_ids: settings.eligible_designation_ids,
+      designations,
       stores: cycles.map((c) => {
         const h = hc.get(c.outlet_id);
         const st = p ? p.stores.find((x) => x.outlet_id === c.outlet_id) : null;
@@ -241,7 +243,12 @@ class StockAuditUsecase {
           name: (stores.find((x) => x.outlet_id === c.outlet_id) || {}).name,
           cycle_id: c.cycle_id,
           snapshot: snaps.find((x) => x.cycle_id === c.cycle_id) || null,
-          eligible: h.eligible,
+          // every eligible employee, for HR review: designation and whether they have counted
+          eligible: h.eligible.map((e) => ({
+            ...e,
+            designation: dName.get(Number(e.designation_id)) || null,
+            participated: st && st.participation_detail ? !st.participation_detail.not_participated.some((x) => x.employee_id === e.employee_id) : false,
+          })),
           participation: st ? st.participation : null,
           participation_detail: st ? st.participation_detail : null,
           exclusions: excl.filter((x) => x.cycle_id === c.cycle_id),
@@ -408,9 +415,12 @@ class StockAuditUsecase {
     return s ? { ...s, source: "LIVE" } : null;
   }
 
-  async employees({ period, outlets, search = "", page: pg = 1, size = 20, sort = "audited" }) {
+  /** @param mapped true = mapped employees only, false = unmapped RetailPilot auditors only (provisional), null = both */
+  async employees({ period, outlets, search = "", page: pg = 1, size = 20, sort = "audited", mapped = null }) {
     const p = await this.period(period);
     let list = p ? this._scope(p.employees, outlets) : [];
+    if (mapped === true) list = list.filter((e) => e.mapped);
+    if (mapped === false) list = list.filter((e) => !e.mapped);
     const needle = String(search || "").trim().toLowerCase();
     if (needle) list = list.filter((e) => `${e.name || ""} ${e.rp_name || ""} ${e.code || ""} ${e.rp_user_id}`.toLowerCase().includes(needle));
     const by = ["audited", "today", "recount_done", "allotted"].includes(sort) ? sort : "audited";

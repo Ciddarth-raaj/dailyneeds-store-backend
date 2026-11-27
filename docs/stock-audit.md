@@ -10,7 +10,8 @@ any scheduled sync (manual runs only), Telegram.
 | Part | File |
 | --- | --- |
 | Migrations (new tables only, nothing altered) | `migrations/mysql/migrations/20270108120000-stock-audit-foundation` (15 tables, 20 permissions), `20270108120100-stock-audit-allotment-sapl` (8 tables), `20270108120200-stock-audit-participation-roles` (6 tables, 2 permissions) |
-| Activation | `STOCK_AUDIT_ENABLED=true` (whole module) and `STOCK_AUDIT_SYNC_ENABLED=true` (RetailPilot sync button); both OFF by default: every endpoint answers 503 |
+| Activation (`config/stock_audit.js`, server `.env`) | `STOCK_AUDIT_ENABLED=true` (module; else 503), `STOCK_AUDIT_ACCESS=restricted` (default: administrators + `STOCK_AUDIT_ACCESS_DESIGNATIONS`, e.g. `11` Hr Executive) or `all`, `STOCK_AUDIT_SYNC_ENABLED=true` (sync button). All OFF / restricted by default |
+| MySQL 8.4 compatibility | agent branch workflow `stock-audit-mysql84.yml`: MySQL 8.4.9 container with production settings; migrations up/down/up + integration + unit tests |
 | Read-only production checks | `scripts/stock_audit/phase2_readiness.js` (bundled and run by the agent branch's workflow) |
 | Permission keys (one per decision) | `constants/stock_audit_permissions.js` |
 | Rules (pure) | `utils/stock_audit_policy.js` (confirmed amounts), `_eligibility`, `_verification`, `_incentive`, `_progress`, `_sapl`, `_allotment`, `_mirror`, `_queries`, `_status` |
@@ -59,11 +60,16 @@ any scheduled sync (manual runs only), Telegram.
 
 - **Participation** = eligible staff who counted at least one article in the
   store cycle / ALL eligible active staff of the store x 100; Premier League
-  points = participation % x 5 / 100. Eligible = `new_employee.status = 1`,
-  `store_id` = the store, `designation_id` in the setting
-  `eligible_designation_ids` (default 2 Customer Service Associate,
-  4 Cashier). An employee counts as participating through any RetailPilot
-  user mapped to them.
+  points = participation % x 5 / 100. Eligible = `new_employee.status = 1`
+  and `store_id` = the store, EVERY designation by default (policy: all
+  employees participate; setting `eligible_designation_ids` = `"ALL"`, or a
+  list to narrow it). An employee counts as participating through any
+  RetailPilot user mapped to them.
+- **Unmapped RetailPilot users** have their own rows (`mapping_status:
+  UNMAPPED`), are never credited (no estimate, no amount) and make the
+  store's participation provisional. Mapping re-attributes their history on
+  the next calculation. Several RetailPilot ids of one employee are one row
+  and one counter, so nothing is credited twice.
 - **Snapshot** (`POST /eligibility/:outlet/snapshot`): freezes the headcount
   for the store cycle (`sa_cycle_employee`). Until taken, the live headcount
   is used and participation is marked provisional. Later additions are

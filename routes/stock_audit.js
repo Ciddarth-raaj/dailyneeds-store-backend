@@ -98,7 +98,7 @@ class StockAuditRoutes {
         return U.store({ period: period(req), outletId: Number(req.params.outlet_id), outlets: s.outlets });
       }));
     router.get("/employees", need(P.VIEW_STORE, P.VIEW_ALL_STORES),
-      scoped((req, outlets) => U.employees({ period: period(req), outlets, search: req.query.search, page: req.query.page, size: req.query.size, sort: req.query.sort })));
+      scoped((req, outlets) => U.employees({ period: period(req), outlets, search: req.query.search, page: req.query.page, size: req.query.size, sort: req.query.sort, mapped: req.query.mapped === "true" ? true : req.query.mapped === "false" ? false : null })));
     router.get("/employees/:rp_user_id", need(P.VIEW_STORE, P.VIEW_ALL_STORES), scoped((req, outlets) => U.employee({ period: period(req), rpUserId: req.params.rp_user_id, outlets })));
     router.get("/employees/:rp_user_id/articles", need(P.VIEW_STORE, P.VIEW_ALL_STORES),
       scoped((req, outlets) => U.articles({ period: period(req), rpUserId: req.params.rp_user_id, outlets, page: req.query.page, size: req.query.size })));
