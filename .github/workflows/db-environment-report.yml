@@ -1,0 +1,53 @@
+# Production MySQL ENVIRONMENT report, read-only: server version, sql_mode,
+# character set, and the structure (no rows) of the few existing tables the
+# Stock Audit migration relies on or reads. No data is read or printed.
+# Same secrets as the backend deploy: SSH_PRIVATE_KEY, SSH_HOST, SSH_USER.
+name: DB Environment Report (read-only)
+"on":
+  workflow_dispatch:
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/db-environment-report.yml]
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Environment (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          cd ~/dailyneeds-store-backend || exit 1
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; [ -n "$API_ENV" ] || API_ENV=development
+          node - "$API_ENV" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql");
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[process.argv[2]];
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database });
+          const q = (sql) => new Promise((res) => c.query(sql, (e, r) => res(e ? { error: e.code } : r)));
+          (async () => {
+            const out = {};
+            out.server = await q("SELECT VERSION() AS version, @@sql_mode AS sql_mode, @@character_set_server AS charset, @@collation_server AS collation, @@innodb_default_row_format AS row_format, @@lower_case_table_names AS lctn");
+            for (const t of ["all_permissions", "permissions", "wh_rp_staff_map", "outlets", "payrun_period", "migrations"]) {
+              const r = await q("SHOW CREATE TABLE `" + t + "`");
+              out[t] = Array.isArray(r) ? r[0]["Create Table"] : r;
+            }
+            out.last_migrations = await q("SELECT name FROM migrations ORDER BY id DESC LIMIT 3");
+            out.sa_tables_present = await q("SELECT COUNT(*) AS n FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'sa\\_%'");
+            console.log("DBENV_BEGIN"); console.log(JSON.stringify(out)); console.log("DBENV_END"); c.end();
+          })();
+          NODE
+          REMOTE
