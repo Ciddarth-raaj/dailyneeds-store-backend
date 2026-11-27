@@ -14549,7 +14549,9 @@ var require_stock_audit_status = __commonJS({
       INDEPENDENT_VERIFICATION_NOT_DONE: "INDEPENDENT_VERIFICATION_NOT_DONE",
       OUTSIDE_PROGRAMME: "OUTSIDE_PROGRAMME",
       BEFORE_DEADLINE: "BEFORE_DEADLINE",
-      NOT_APPROVED: "NOT_APPROVED"
+      NOT_APPROVED: "NOT_APPROVED",
+      HEADCOUNT_UNAVAILABLE: "HEADCOUNT_UNAVAILABLE",
+      ROLE_NOT_ASSIGNED: "ROLE_NOT_ASSIGNED"
     });
     var available = (value) => ({ status: STATUS.AVAILABLE, value });
     var pending = (reason) => ({ status: STATUS.PENDING, value: null, reason });
@@ -15163,7 +15165,6 @@ var require_stock_audit_progress = __commonJS({
     };
     var ROLE_TITLE = { SUPERVISOR: "Supervisor", STORE_MANAGER: "Store Manager" };
     var pct = (a, b) => b > 0 ? a * 100 / b : null;
-    var cellPct = (a, b, reasonIfNone) => b > 0 ? S.available(pct(a, b)) : S.notApplicable(reasonIfNone);
     var sum = (list, f) => list.reduce((t, x) => t + f(x), 0);
     var at = (s) => s.finalized_at || s.started_at;
     var endOfIstDay = (date) => new Date(Date.parse(`${date}T23:59:59.999+05:30`)).toISOString();
@@ -15183,6 +15184,8 @@ var require_stock_audit_progress = __commonJS({
         verifications = [],
         reviews = /* @__PURE__ */ new Map(),
         roleHolders = /* @__PURE__ */ new Map(),
+        omHolder = null,
+        headcount = /* @__PURE__ */ new Map(),
         independentVerification = /* @__PURE__ */ new Map(),
         today,
         asOf
@@ -15392,8 +15395,7 @@ var require_stock_audit_progress = __commonJS({
           rp_id: store.rp_id,
           cycle,
           employees: list,
-          eligible_employees: list.length,
-          participating: list.filter((e) => e.audited > 0).length,
+          ...participationOf(store.outlet_id, list, headcount.get(store.outlet_id)),
           allotment_imported: withAllot,
           allotted: withAllot ? S.available(allottedN) : unavailable,
           audited_today: st.today.size,
@@ -15437,9 +15439,11 @@ var require_stock_audit_progress = __commonJS({
             title: ROLE_TITLE[role],
             employee_id: h ? h.employee_id : null,
             name: h ? h.name : "Not assigned",
+            assigned: Boolean(h),
             components: r.components.map((c) => ({ ...c, label: LABELS[c.key] || c.key })),
-            decidedAmount: r.decided_amount,
-            amount: r.amount,
+            // nobody responsible -> nobody is paid: the KPIs still show, the amount waits for an assignment
+            decidedAmount: h ? r.decided_amount : 0,
+            amount: h ? r.amount : S.pending(S.REASON.ROLE_NOT_ASSIGNED),
             weightedScore: r.weighted_score
           };
         };
@@ -15450,6 +15454,13 @@ var require_stock_audit_progress = __commonJS({
         policy
       );
       for (const m of management) m.om = (om.perStore.find((p) => p.outlet_id === m.store.outlet_id) || {}).amount || S.pending(S.REASON.COMPONENT_PENDING);
+      om.employee_id = omHolder ? omHolder.employee_id : null;
+      om.name = omHolder ? omHolder.name : "Not assigned";
+      om.assigned = Boolean(omHolder);
+      if (!omHolder) {
+        om.decided_amount = 0;
+        om.amount = S.pending(S.REASON.ROLE_NOT_ASSIGNED);
+      }
       const saplKpis = storeRows.map((s) => ({
         outlet_id: s.outlet_id,
         name: s.name,
@@ -15457,7 +15468,7 @@ var require_stock_audit_progress = __commonJS({
           completion: s.completion,
           accuracy: s.accuracy,
           recount: s.recount_progress,
-          participation: cellPct(s.participating, s.eligible_employees, S.REASON.NO_DATA)
+          participation: s.participation
         }
       }));
       const issues = {
@@ -15467,7 +15478,33 @@ var require_stock_audit_progress = __commonJS({
       };
       return { employees, stores: storeRows, management, operationsManager: om, saplKpis, eligibility: results, issues };
     }
-    module2.exports = { computePeriod: computePeriod2, endOfIstDay };
+    function participationOf(outletId, list, hc) {
+      if (!hc) {
+        return { eligible_employees: null, participating: null, participation: S.pending(S.REASON.HEADCOUNT_UNAVAILABLE), participation_detail: null };
+      }
+      const counted = new Set(list.filter((e) => e.audited > 0 && e.employee_id != null).map((e) => e.employee_id));
+      const eligibleIds = new Set(hc.eligible.map((e) => e.employee_id));
+      const participated = hc.eligible.filter((e) => counted.has(e.employee_id));
+      const notYet = hc.eligible.filter((e) => !counted.has(e.employee_id));
+      const n = hc.eligible.length;
+      const cell = n ? { ...S.available(participated.length * 100 / n), provisional: !hc.snapshot } : S.notApplicable(S.REASON.NO_DATA);
+      return {
+        eligible_employees: n,
+        participating: participated.length,
+        participation: cell,
+        participation_detail: {
+          snapshot: Boolean(hc.snapshot),
+          eligible: n,
+          participated: participated.length,
+          not_participated: notYet.map((e) => ({ employee_id: e.employee_id, name: e.name, designation_id: e.designation_id })),
+          excluded: hc.excluded || [],
+          // mapped people who counted here but are not in the store's eligible headcount (another store, a manager)
+          counted_outside_headcount: [...counted].filter((id) => !eligibleIds.has(id)).length,
+          unmapped_counters: list.filter((e) => e.audited > 0 && e.employee_id == null).length
+        }
+      };
+    }
+    module2.exports = { computePeriod: computePeriod2, endOfIstDay, participationOf };
   }
 });
 
@@ -15582,7 +15619,7 @@ var sh = (cmd) => {
     today,
     sessions_read: rows.length,
     stores: p.stores.map((s) => ({ outlet_id: s.outlet_id, rp: s.rp_id, audited_unique: s.audited, audited_today: s.audited_today, counters: s.employees.filter((e) => e.audited > 0).length, unmapped_counters: s.employees.filter((e) => e.audited > 0 && e.employee_id == null).length, shortage_qty: s.shortage_qty, excess_qty: s.excess_qty })),
-    users: p.employees.filter((e) => e.audited > 0).map((e) => ({ outlet_id: e.outlet_id, rp_user_id: e.rp_user_id, audited_unique: e.audited, today: e.today, mapped: e.employee_id != null })),
+    users_n: p.employees.filter((e) => e.audited > 0).length,
     eligibility: Object.entries(p.eligibility.reduce((t, r) => (t[`${r.status}:${r.reasons.join("+")}`] = (t[`${r.status}:${r.reasons.join("+")}`] || 0) + 1, t), {})),
     warehouse_and_other_excluded: p.issues.outside_programme,
     before_effective_date: p.issues.before_effective_date
@@ -15590,9 +15627,81 @@ var sh = (cmd) => {
   const counted = new Set(p.employees.filter((e) => e.audited > 0 && e.employee_id != null).map((e) => `${e.outlet_id}|${e.employee_id}`));
   out("PARTICIPATION_INPUT", PROGRAMME.map((o) => ({ outlet_id: o, mapped_employees_who_counted: [...counted].filter((k) => k.startsWith(`${o}|`)).length })));
   const mine = rows.filter((r) => r.store_id === CSV_AUDITOR.rp_store_id && (r.finalized_by || r.initiated_by) === CSV_AUDITOR.rp_user_id && r.status === "FINALIZED");
-  out("CSV_AUDITOR", { sessions: mine.length, articles: [...new Set(mine.map((r) => Number(r.article_id)))].sort((a, b) => a - b), days: Object.entries(mine.reduce((t, r) => (t[istDate(r.finalized_at)] = (t[istDate(r.finalized_at)] || 0) + 1, t), {})) });
+  out("CSV_AUDITOR", { sessions: mine.length, distinct_articles: new Set(mine.map((r) => Number(r.article_id))).size, days: Object.entries(mine.reduce((t, r) => (t[istDate(r.finalized_at)] = (t[istDate(r.finalized_at)] || 0) + 1, t), {})) });
+  const dayBounds = [];
+  for (let t = Date.parse("2026-11-25T00:00:00+05:30"); t <= now.getTime(); t += 864e5) dayBounds.push([new Date(t).toISOString(), new Date(t + 864e5).toISOString(), istDate(new Date(t + 36e5).toISOString())]);
+  const perDay = [];
+  for (const [from, to, day] of dayBounds) {
+    const r = await agg(`day_${day}`, `SELECT store_id, COUNT(DISTINCT article_id) AS distinct_articles FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${from}' AND finalized_at < '${to}' GROUP BY store_id ORDER BY store_id`);
+    perDay.push({ day, spectra: r });
+  }
+  const dndsDays = {};
+  for (const s of sessions.filter((x) => x.status === "FINALIZED" && x.finalized_at)) {
+    const k = `${istDate(s.finalized_at)}|${s.rp_store_id}`;
+    if (!dndsDays[k]) dndsDays[k] = /* @__PURE__ */ new Set();
+    dndsDays[k].add(s.article_id);
+  }
+  out("DNDS_DAYS", Object.entries(dndsDays).map(([k, v2]) => ({ key: k, distinct_articles: v2.size })).sort((x, y) => x.key.localeCompare(y.key)));
+  const { adjustmentRow } = require_stock_audit_mirror();
+  const ledger = [];
+  await spectra.queryKeyset((c, s2) => STREAMS.adjustment.build(c, s2), startCursor(null, { since: SINCE }), STREAMS.adjustment.cursorOf, async (page) => {
+    ledger.push(...page);
+  }, { size: 2e3 });
+  const markers = ledger.map(adjustmentRow).filter((a) => a.is_marker);
+  const finalizedSlugs = new Map(sessions.filter((x) => x.status === "FINALIZED").map((x) => [x.rp_slug, x.rp_store_id]));
+  const varBy = {};
+  for (const m of markers) {
+    const st = finalizedSlugs.get(m.session_slug);
+    if (!st || m.var_qty == null) continue;
+    varBy[st] = varBy[st] || { short_qty: 0, excess_qty: 0, short_value: 0, excess_value: 0, markers: 0 };
+    varBy[st].markers += 1;
+    if (m.var_qty < 0) {
+      varBy[st].short_qty += -m.var_qty;
+      varBy[st].short_value += -(m.var_value || 0);
+    } else {
+      varBy[st].excess_qty += m.var_qty;
+      varBy[st].excess_value += m.var_value || 0;
+    }
+  }
+  out("DNDS_VARIANCE", { ledger_rows: ledger.length, markers: markers.length, by_store: varBy });
+  await agg("stkadj_nonmarker_by_store", `SELECT store_id, SUM(CASE WHEN quantity < 0 THEN -quantity ELSE 0 END) AS short_qty, SUM(CASE WHEN quantity > 0 THEN quantity ELSE 0 END) AS excess_qty, COUNT(*) AS rows_n FROM public.stock_ledgers WHERE action = 'STK_ADJ' AND quantity <> 0 AND ts >= '${since}' GROUP BY store_id ORDER BY store_id`);
+  if (/\.rds\.amazonaws\.com$/i.test(host)) {
+    const raw = sh("aws rds describe-db-instances --output json 2>&1");
+    let rds = { available: false, note: raw ? String(raw).slice(0, 160).replace(/arn:[^\s"]+/g, "<arn>") : "no output" };
+    try {
+      const inst = JSON.parse(raw).DBInstances.find((d) => d.Endpoint && d.Endpoint.Address === host);
+      if (inst) {
+        const snaps = sh(`aws rds describe-db-snapshots --db-instance-identifier ${JSON.stringify(inst.DBInstanceIdentifier)} --output json 2>&1`);
+        let snap = null;
+        try {
+          const list = JSON.parse(snaps).DBSnapshots || [];
+          const by = (t) => list.filter((x) => x.SnapshotType === t);
+          const latest = (l) => l.map((x) => x.SnapshotCreateTime).sort().pop() || null;
+          snap = { automated: by("automated").length, manual: by("manual").length, latest_automated: latest(by("automated")), latest_manual: latest(by("manual")) };
+        } catch (e) {
+          snap = { note: String(snaps).slice(0, 160).replace(/arn:[^\s"]+/g, "<arn>") };
+        }
+        rds = {
+          available: true,
+          engine: inst.Engine,
+          engine_version: inst.EngineVersion,
+          instance_class: inst.DBInstanceClass,
+          multi_az: inst.MultiAZ,
+          storage_type: inst.StorageType,
+          allocated_gb: inst.AllocatedStorage,
+          backup_retention_days: inst.BackupRetentionPeriod,
+          backup_window_utc: inst.PreferredBackupWindow,
+          latest_restorable_time: inst.LatestRestorableTime,
+          deletion_protection: inst.DeletionProtection,
+          storage_encrypted: inst.StorageEncrypted,
+          snapshots: snap
+        };
+      } else rds = { available: false, note: "no instance matched the configured endpoint" };
+    } catch (e) {
+    }
+    out("RDS", rds);
+  }
   await agg("recount_links", `SELECT COUNT(*) AS sessions, COUNT(recount_slug) AS with_recount_slug, MAX(updated_at) AS latest FROM ${S}`);
-  await agg("session_columns", `SELECT * FROM ${S} ORDER BY updated_at DESC, slug ASC LIMIT 1`);
   out("DONE", {});
   conn.end();
 })().catch((e) => {
