@@ -1,0 +1,72 @@
+# Stock Audit - Stage 2 pre-activation facts. Strictly READ-ONLY (SELECTs and
+# the app's own IP-policy rules evaluated in memory). Prints ids, counts and
+# permission keys only - never names, usernames, IPs, tokens or hosts.
+name: Stock Audit Stage 2 facts (read-only)
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-stage2-facts.yml]
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Facts (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "bash -s" <<'REMOTE'
+          set -uo pipefail
+          cd ~/dailyneeds-store-backend || exit 1
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; [ -n "$API_ENV" ] || API_ENV=production
+          node - "$API_ENV" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql");
+          const ip = require("./utils/ip");
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[process.argv[2]];
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database });
+          const q = (sql, p = []) => new Promise((res) => c.query(sql, p, (e, r) => res(e ? { error: e.code, msg: String(e.sqlMessage || "").slice(0, 120) } : r)));
+          const pol = (row) => { const r = ip.resolveIpPolicy(row); return { exempt: !!r.exempt, source: r.source, loopback_ok: ip.isAccessAllowed(r, "127.0.0.1"), public_ok: ip.isAccessAllowed(r, "20.1.2.3") }; };
+          (async () => {
+            const out = {};
+            out.user_cols = (await q("SHOW COLUMNS FROM `user`")).map((r) => r.Field);
+            out.perm_cols = (await q("SHOW COLUMNS FROM permissions")).map((r) => r.Field + ":" + r.Type);
+            out.perm_indexes = (await q("SHOW INDEX FROM permissions")).map((r) => r.Key_name + ":" + r.Column_name);
+            const base = `SELECT u.user_id, u.user_type, u.employee_id, u.is_service_account, u.ip_policy, u.allowed_ips,
+                ne.designation_id, ne.store_id, ne.status AS emp_status, o.ip_restriction_enabled AS branch_enabled, o.allowed_ips AS branch_ips
+              FROM \`user\` u LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id AND u.is_service_account = 0
+              LEFT JOIN outlets o ON o.outlet_id = ne.store_id`;
+            const hr = await q(base + " WHERE ne.designation_id = 11 ORDER BY u.user_id");
+            out.hr_executive_accounts = Array.isArray(hr) ? hr.map((r) => ({ user_id: r.user_id, user_type: r.user_type, emp_status: r.emp_status, store_id: r.store_id, ip: pol(r) })) : hr;
+            out.hr_executive_employees = await q("SELECT store_id, status, COUNT(*) AS n FROM new_employee WHERE designation_id = 11 GROUP BY store_id, status");
+            const ad = await q(base + " WHERE u.user_type = 2 ORDER BY u.user_id");
+            out.admin_accounts = Array.isArray(ad) ? ad.map((r) => ({ user_id: r.user_id, svc: r.is_service_account, emp_status: r.emp_status, designation_id: r.designation_id, store_id: r.store_id, ip: pol(r) })) : ad;
+            const other = await q(base + " WHERE u.user_type <> 2 AND u.is_service_account = 0 AND ne.status = 1 AND ne.designation_id IN (4, 2, 3) ORDER BY u.user_id LIMIT 40");
+            out.unauthorized_candidates = Array.isArray(other) ? other.map((r) => ({ user_id: r.user_id, user_type: r.user_type, designation_id: r.designation_id, store_id: r.store_id, ip: pol(r) })) : other;
+            out.designation_11_keys = (await q("SELECT permission_key, is_active FROM permissions WHERE designation_id = 11 ORDER BY permission_key")).map ? (await q("SELECT permission_key, is_active FROM permissions WHERE designation_id = 11 ORDER BY permission_key")).map((r) => r.permission_key + (r.is_active ? "" : "(inactive)")) : null;
+            out.stock_audit_grants = await q("SELECT designation_id, permission_key FROM permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%'");
+            out.sa_all_permissions = await q("SELECT * FROM all_permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%' LIMIT 3");
+            out.all_permissions_cols = (await q("SHOW COLUMNS FROM all_permissions")).map((r) => r.Field);
+            out.sa_row_counts = await q("SELECT TABLE_NAME, TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'sa\\_%' ORDER BY TABLE_NAME");
+            const tabs = Array.isArray(out.sa_row_counts) ? out.sa_row_counts.map((r) => r.TABLE_NAME) : [];
+            out.sa_exact = {}; for (const t of tabs) { const r = await q("SELECT COUNT(*) AS n FROM `" + t + "`"); out.sa_exact[t] = Array.isArray(r) ? r[0].n : r; }
+            out.designations = await q("SELECT designation_id, designation_name FROM designation WHERE designation_id IN (2,3,4,9,11,27)");
+            console.log("@@FACTS " + JSON.stringify(out));
+            c.end();
+          })();
+          NODE
+          REMOTE
