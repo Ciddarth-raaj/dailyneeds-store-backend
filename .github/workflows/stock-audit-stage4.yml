@@ -35,7 +35,7 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           set -euo pipefail
-          MODE="$(tr -d '[:space:]' < .github/stage4-mode)"
+          MODE="$(head -1 .github/stage4-mode | tr -d '[:space:]')"
           case "$MODE" in DRYRUN|IMPORT|VALIDATE) ;; *) echo "unknown mode $MODE"; exit 1;; esac
           echo "mode=$MODE"
           scp -q -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes scripts/stock_audit/stage4_sync.js scripts/stock_audit/stage4_validate.js "${SSH_USER}@${SSH_HOST}:/tmp/"
