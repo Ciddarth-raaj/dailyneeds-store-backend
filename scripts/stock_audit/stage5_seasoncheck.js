@@ -1,7 +1,7 @@
 // READ-ONLY: the feature branch's season code (extracted to /tmp/sa_season, not deployed) reading
 // production's existing Season 1. Nothing is written; the season rows are fingerprinted before and after.
 global.env = process.env.NODE_ENV === undefined ? "development" : process.env.NODE_ENV;
-const cwd = process.cwd(); const NEW = "/tmp/sa_season";
+const cwd = process.cwd(); const NEW = process.env.SA_CODE || "/tmp/sa_season";
 const out = (k, v) => console.log(`@@${k} ${JSON.stringify(v)}`);
 (async () => {
   const db = await require(cwd + "/drivers/mysql")().connect();
@@ -19,6 +19,10 @@ const out = (k, v) => console.log(`@@${k} ${JSON.stringify(v)}`);
     out("SEASONS", (await U.seasons()).map((s) => ({ season_id: s.season_id, name: s.name, period_code: s.period_code, start: s.start, end: s.end, deadline: s.deadline, prize: s.prize, weights: s.rules && s.rules.weights, status: s.status, current: s.current })));
     const stores = await U.stores({ period: null, outlets: null });
     out("STORES_DEFAULT_SEASON", stores.map((s) => ({ outlet_id: s.outlet_id, cycle: s.cycle && s.cycle.period_code, audited: s.audited, completion: s.completion && s.completion.status })));
+    out("DATA_COUNTS", (await q(`SELECT (SELECT COUNT(*) FROM sa_rp_session) AS sessions, (SELECT COUNT(*) FROM sa_rp_line) AS lines_n, (SELECT COUNT(*) FROM sa_rp_adjustment) AS adjustments,
+      (SELECT COUNT(*) FROM sa_rp_user) AS rp_users, (SELECT COUNT(*) FROM wh_rp_staff_map WHERE employee_id IS NOT NULL) AS mapped, (SELECT COUNT(*) FROM sa_allotment) AS allotted,
+      (SELECT COUNT(*) FROM sa_allotment_batch) AS upload_batches, (SELECT COUNT(*) FROM sa_sync_run) AS sync_runs, (SELECT MAX(run_id) FROM sa_sync_run) AS last_run`))[0]);
+    out("CODE", { path: NEW === cwd ? "deployed checkout" : NEW });
     const after = await fp();
     out("UNCHANGED", { before, after, same: JSON.stringify(before) === JSON.stringify(after) });
   } finally { db.close(); }

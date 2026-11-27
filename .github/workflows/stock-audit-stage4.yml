@@ -36,7 +36,7 @@ jobs:
         run: |
           set -euo pipefail
           MODE="$(head -1 .github/stage4-mode | tr -d '[:space:]')"
-          case "$MODE" in DRYRUN|IMPORT|VALIDATE|REVIEW|VARIANCE|SEASON1|SEASONCHECK) ;; *) echo "unknown mode $MODE"; exit 1;; esac
+          case "$MODE" in DRYRUN|IMPORT|VALIDATE|REVIEW|VARIANCE|SEASON1|SEASONCHECK|POSTSEASON) ;; *) echo "unknown mode $MODE"; exit 1;; esac
           echo "mode=$MODE"
           scp -q -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes scripts/stock_audit/stage4_sync.js scripts/stock_audit/stage4_validate.js scripts/stock_audit/stage5_review.js scripts/stock_audit/stage5_variance.js scripts/stock_audit/stage5_season1.js scripts/stock_audit/stage5_seasoncheck.js "${SSH_USER}@${SSH_HOST}:/tmp/"
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "MODE=$MODE bash -s" <<'REMOTE'
@@ -64,6 +64,14 @@ jobs:
               fi ;;
             VALIDATE)
               node /tmp/stage4_validate.js full ;;
+            POSTSEASON)
+              # the DEPLOYED code, read-only
+              echo "@@DEPLOYED $(git rev-parse --short HEAD)"
+              SA_CODE="$PWD" node /tmp/stage5_seasoncheck.js
+              for p in /stock-audit/meta /stock-audit/cycles /stock-audit/sapl/seasons; do printf "@@HTTP_NOAUTH %s %s\n" "$p" "$(curl -s -m 10 http://127.0.0.1:8080$p | cut -c1-60)"; done
+              printf "@@HTTP_NOAUTH POST /stock-audit/sapl/seasons %s\n" "$(curl -s -m 10 -X POST -H 'content-type: application/json' -d '{}' http://127.0.0.1:8080/stock-audit/sapl/seasons | cut -c1-60)"
+              printf "@@FE /stock-audit/cycles %s\n" "$(curl -s -o /dev/null -m 15 -w '%{http_code}' http://127.0.0.1:3000/stock-audit/cycles)"
+              grep -c "Only an administrator can create or change a season" routes/stock_audit.js | sed 's/^/@@ADMIN_ONLY_IN_DEPLOYED_ROUTES /' ;;
             SEASONCHECK)
               # the feature branch's code, extracted to /tmp only (the checkout and the running app are untouched)
               git fetch -q origin feat/stock-audit-season && rm -rf /tmp/sa_season && mkdir -p /tmp/sa_season && git archive FETCH_HEAD usecase repository utils constants config services | tar -x -C /tmp/sa_season
