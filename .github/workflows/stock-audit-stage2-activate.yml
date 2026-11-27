@@ -1,0 +1,78 @@
+# Stock Audit - Stage 2 activation (management-approved 27 Nov 2026). ONE-TIME.
+#   1. backs up .env (copy, mode 600)            2. grants 11 setup/reporting keys
+#   to designation 11 (Hr Executive), additive and duplicate-safe, one transaction
+#   3. appends the four STOCK_AUDIT_* switches  4. reloads with scripts/deploy/pm2-reload.js
+# Stops before changing anything if the switches already exist. Touches no other
+# permission, table or setting. Prints counts and switch values only.
+name: Stock Audit Stage 2 activate (one-time)
+
+"on":
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-stage2-activate.yml]
+
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Activate
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/dailyneeds-store-backend
+          if grep -qE '^STOCK_AUDIT_' .env; then echo "@@STOP STOCK_AUDIT_ switches already present - nothing changed"; exit 1; fi
+          TS=$(date -u +%Y%m%dT%H%M%SZ)
+          mkdir -p ~/env-backups && chmod 700 ~/env-backups
+          cp -p .env ~/env-backups/.env.stage2-$TS && chmod 600 ~/env-backups/.env.stage2-$TS
+          echo "@@BACKUP ~/env-backups/.env.stage2-$TS lines=$(wc -l < ~/env-backups/.env.stage2-$TS) identical=$(cmp -s .env ~/env-backups/.env.stage2-$TS && echo yes || echo no)"
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; [ -n "$API_ENV" ] || API_ENV=production
+          node - "$API_ENV" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql");
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[process.argv[2]];
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database });
+          const q = (sql, p = []) => new Promise((res, rej) => c.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
+          const KEYS = ["view_stock_audit", "view_stock_audit_all_stores", "manage_stock_audit_cycles", "manage_stock_audit_employee_mapping",
+            "import_stock_audit_allotment", "manage_stock_audit_roles", "manage_stock_audit_policy", "view_sapl_leaderboard",
+            "manage_sapl_competition", "view_stock_audit_hr_reports", "download_stock_audit_hr_pdf"];
+          (async () => {
+            const before = (await q("SELECT COUNT(*) AS n FROM permissions"))[0].n;
+            const before11 = (await q("SELECT COUNT(*) AS n FROM permissions WHERE designation_id = 11"))[0].n;
+            const known = (await q("SELECT permission_key FROM all_permissions WHERE permission_key IN (?)", [KEYS])).map((r) => r.permission_key);
+            const missing = KEYS.filter((k) => !known.includes(k));
+            if (missing.length) { console.log("@@STOP unknown keys " + missing.join(",")); process.exit(1); }
+            await q("START TRANSACTION");
+            let inserted = 0;
+            for (const k of KEYS) {
+              const r = await q("INSERT INTO permissions (permission_key, designation_id, is_active) SELECT ?, 11, 1 FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM permissions WHERE permission_key = ? AND designation_id = 11)", [k, k]);
+              inserted += r.affectedRows;
+            }
+            await q("COMMIT");
+            const after = (await q("SELECT COUNT(*) AS n FROM permissions"))[0].n;
+            const sa = (await q("SELECT designation_id, permission_key, is_active FROM permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%' ORDER BY designation_id, permission_key")).map((r) => r.designation_id + ":" + r.permission_key + (r.is_active ? "" : "(inactive)"));
+            console.log("@@GRANTS " + JSON.stringify({ inserted, permissions_before: before, permissions_after: after, designation11_before: before11, stock_audit_rows: sa }));
+            c.end();
+          })().catch((e) => { console.log("@@STOP grant failed: " + e.code + " (rolled back)"); try { c.query("ROLLBACK"); } catch (x) {} process.exit(1); });
+          NODE
+          printf '\n# Stock Audit Stage 2 (%s, management-approved): administrators + Hr Executive (11) only; RetailPilot sync OFF\nSTOCK_AUDIT_ENABLED=true\nSTOCK_AUDIT_SYNC_ENABLED=false\nSTOCK_AUDIT_ACCESS=restricted\nSTOCK_AUDIT_ACCESS_DESIGNATIONS=11\n' "$TS" >> .env
+          echo "@@ENV_LINES $(grep -E '^STOCK_AUDIT_' .env | tr '\n' ' ')"
+          echo "@@ENV_DIFF $(diff ~/env-backups/.env.stage2-$TS .env | grep -c '^>') lines added, $(diff ~/env-backups/.env.stage2-$TS .env | grep -c '^<') removed"
+          node scripts/deploy/pm2-reload.js
+          sleep 5
+          echo "@@SWITCH_EFFECTIVE $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
+          echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status+':up_since='+new Date(p.pm2_env.pm_uptime).toISOString()).join(' | '))}catch(e){console.log('n/a')}})")"
+          REMOTE
