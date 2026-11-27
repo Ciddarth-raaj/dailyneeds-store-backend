@@ -105,12 +105,15 @@ const EXPECTED = {
     const U = R("/usecase/stock_audit")(view, {});
     const strip = (v) => JSON.parse(JSON.stringify(v, (k, x) => (/name|^employee$|label/i.test(k) && typeof x === "string" ? undefined : x)));
     const stores = await U.stores({ period: "S4CHECK", outlets: PROGRAMME });
-    out("SCREEN_STORES", strip(stores));
+    // one compact line per store: each figure's status (and value), arrays as lengths
+    const brief = (o) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => !/cycle|name|detail|employees$|rp_id/.test(k)).map(([k, v]) => [k, Array.isArray(v) ? `[${v.length}]` : v && typeof v === "object" ? (v.status !== undefined ? `${v.status}${v.value !== undefined && v.value !== null ? ":" + (typeof v.value === "object" ? JSON.stringify(v.value).slice(0, 60) : v.value) : ""}${v.provisional ? "(provisional)" : ""}${v.reason ? "(" + String(v.reason).slice(0, 40) + ")" : ""}` : JSON.stringify(v).slice(0, 80)) : v]));
+    for (const st of stores) out("SCREEN_STORE", { outlet_id: st.outlet_id, ...brief(st), counters: (st.employees || []).filter((e) => e.audited > 0).length, unmapped_counters_rows: (st.employees || []).filter((e) => e.mapped === false).length });
     const emps = await U.employees({ period: "S4CHECK", outlets: PROGRAMME, size: 500 });
     const list = emps.rows || emps.items || emps.data || emps.list || (Array.isArray(emps) ? emps : []);
     out("SCREEN_EMPLOYEES", { keys: Object.keys(emps || {}), total: emps.total ?? list.length, mapped: list.filter((e) => e.mapped).length, unmapped: list.filter((e) => e.mapped === false).length, statuses: list.reduce((t, e) => { for (const f of ["completion_status", "accuracy_status", "incentive_status", "status", "estimated_status"]) if (e[f] != null && typeof e[f] !== "object") t[`${f}=${e[f]}`] = (t[`${f}=${e[f]}`] || 0) + 1; return t; }, {}), sample_fields: list[0] ? Object.keys(list[0]) : [] });
     const hr = await U.hrReport({ period: "S4CHECK", date: today });
-    out("SCREEN_HR_REPORT", strip(hr));
+    out("SCREEN_HR_TOP", Object.fromEntries(Object.entries(hr || {}).filter(([k]) => k !== "stores").map(([k, v]) => [k, Array.isArray(v) ? `[${v.length}]` : v && typeof v === "object" ? brief(v) : v])));
+    for (const st of (hr && hr.stores) || []) out("SCREEN_HR_STORE", { outlet_id: st.outlet_id, ...brief(st), employee_rows: (st.employees || []).length, incentive_fields_present: (st.employees || []).some((e) => Object.keys(e).some((k) => /incentive|amount|estimate|payable/i.test(k))) });
   } finally {
     // ---- 5. administrator accounts (read-only)
     const admins = await q("SELECT u.user_id, u.status AS account_status, u.is_service_account, u.is_system_account, u.employee_id IS NOT NULL AS has_employee, ne.status AS employee_status, DATE_FORMAT(u.last_login_at, '%Y-%m-%d %H:%i') AS last_login_utc, DATE_FORMAT(u.locked_until, '%Y-%m-%d %H:%i') AS locked_until, u.ip_policy, DATE_FORMAT(u.created_at, '%Y-%m-%d') AS created FROM `user` u LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id WHERE u.user_type = 2 ORDER BY u.user_id");
