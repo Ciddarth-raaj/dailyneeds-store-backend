@@ -45,11 +45,19 @@ describe("SPECTRA client with the opt-in retry policy", () => {
     assert.deepEqual(waits, [7000]);
     assert.equal(calls.length, 2);
   });
-  it("caps a long Retry-After", async () => {
+  it("never shortens a Retry-After above the maximum: defers instead of retrying early", async () => {
+    const { http, calls } = scripted([httpErr(429, {}, { "retry-after": "9999" }), ok([])]);
+    await assert.rejects(
+      makeClient(cfg, http, async () => assert.fail("must not sleep")).queryAll("SELECT 1"),
+      (e) => e.status === 429 && e.deferred === true && e.retryAfterSec === 9999 && e.retryable === false
+    );
+    assert.equal(calls.length, 1);
+  });
+  it("a missing Retry-After waits 30 s", async () => {
     const waits = [];
-    const { http } = scripted([httpErr(429, {}, { "retry-after": "9999" }), ok([])]);
+    const { http } = scripted([httpErr(429, {}), ok([])]);
     await makeClient(cfg, http, async (ms) => waits.push(ms)).queryAll("SELECT 1");
-    assert.deepEqual(waits, [120000]);
+    assert.deepEqual(waits, [30000]);
   });
   it("backs off on 5xx and timeouts, and gives up after the attempts", async () => {
     const waits = [];

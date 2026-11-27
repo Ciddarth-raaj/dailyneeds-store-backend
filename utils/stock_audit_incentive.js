@@ -1,246 +1,205 @@
 /**
- * Stock Audit incentives - the rules as DATA and the arithmetic as pure
- * functions. Nothing here reads a database, calls RetailPilot or posts to
- * payroll.
+ * Stock Audit incentive CALCULATIONS. Pure: no database, no RetailPilot,
+ * no payroll. Amounts and allocations come from the confirmed policy
+ * (utils/stock_audit_policy.js); thresholds from its versioned scoring layer.
  *
- * Confirmed by management on 27 Nov 2026:
- *   Employee, per unique article audited, by counting accuracy:
- *     99% and above -> Rs 1.10 | 97% to < 99% -> Rs 1.00 | 95% to < 97% -> Rs 0.50 | below 95% -> nil
- *   Minimum independent random recount: 5% of each employee's audited articles.
- *   Supervisor max Rs 1,000 per store, Store Manager max Rs 1,500 per store,
- *   Operations Manager max Rs 2,000 across the five stores (Rs 400 a store).
- *
- * The KPI split and scoring below are DEFAULTS. They stay configurable, and
- * results are `final` only when the rule set carries `approved: true` (set
- * from an approved sa_rule_set row) - until then every figure is a draft.
- *
- * Accuracy is ONLY independent physical verification: a recount by someone
- * other than the original counter, compared with the ORIGINAL PHYSICAL COUNT.
- * System (book) stock never enters it, so a genuine shortage or excess -
- * where the original count and the recount agree - never lowers an
- * employee's incentive. No function here accepts a book quantity.
+ * Every figure is a status cell (utils/stock_audit_status.js). Anything not
+ * decided - pending recounts, missing allotment, a KPI that cannot be
+ * measured yet - is PENDING / UNAVAILABLE / NOT_APPLICABLE with a reason,
+ * never 0 and never 100%. A role's total is AVAILABLE only when every one of
+ * its components is decided. Nothing is `final` unless the policy version is
+ * approved AND nothing is pending.
  *
  * Money is computed in paise (integers) and returned in rupees.
  */
 
-const DEFAULT_RULES = Object.freeze({
-  approved: false,
-  employee: {
-    slabs: [
-      { minAccuracyPct: 99, ratePerArticle: 1.1 },
-      { minAccuracyPct: 97, ratePerArticle: 1.0 },
-      { minAccuracyPct: 95, ratePerArticle: 0.5 },
-    ],
-    belowRatePerArticle: 0,
-    minSamplePct: 5,
-    minSampleArticles: 1,
-    requireIndependentRecount: true,
-    // A recount matches the original count when they differ by at most this.
-    match: { absQty: 0 },
-  },
-  management: {
-    SUPERVISOR: {
-      scope: "store",
-      max: 1000,
-      components: [
-        { key: "completion_within_deadline", max: 200, scoring: { type: "binary" } },
-        { key: "employee_counting_accuracy", max: 300, scoring: { type: "binary" } },
-        { key: "independent_recount_verification", max: 500, scoring: { type: "binary" } },
-      ],
-    },
-    STORE_MANAGER: {
-      scope: "store",
-      max: 1500,
-      components: [
-        { key: "completion_within_deadline", max: 500, scoring: { type: "binary" } },
-        { key: "overall_counting_accuracy", max: 400, scoring: { type: "binary" } },
-        { key: "verification_quality_control", max: 200, scoring: { type: "binary" } },
-        { key: "variance_investigation_closure", max: 400, scoring: { type: "binary" } },
-      ],
-    },
-    OPERATIONS_MANAGER: {
-      scope: "chain",
-      max: 2000,
-      perStoreMax: 400,
-      basis: "STORE_MANAGER_WEIGHTED_SCORE",
-      requireIndependentStoreVerification: true,
-      slabs: [
-        { minScorePct: 98, amount: 400 },
-        { minScorePct: 95, amount: 300 },
-        { minScorePct: 90, amount: 200 },
-      ],
-      belowAmount: 0,
-    },
-  },
-});
+const S = require("./stock_audit_status");
+const { DEFAULT_POLICY } = require("./stock_audit_policy");
+const { sampleOf, VERDICT } = require("./stock_audit_verification");
+const { compareTs, toUtc } = require("./stock_audit_queries");
 
-const toPaise = (rupees) => Math.round(Number(rupees) * 100);
-const toRupees = (paise) => paise / 100;
-const isNum = (v) => typeof v === "number" && Number.isFinite(v);
+const paise = (rupees) => Math.round(Number(rupees) * 100);
+const rupees = (p) => p / 100;
 
-/** Problems with a rule set, as strings. Empty = usable. */
-function validateRules(rules) {
-  const errors = [];
-  const e = rules && rules.employee;
-  if (!e || !Array.isArray(e.slabs) || !e.slabs.length) errors.push("employee.slabs is required");
-  else {
-    e.slabs.forEach((s, i) => {
-      if (!isNum(s.minAccuracyPct) || s.minAccuracyPct < 0 || s.minAccuracyPct > 100) errors.push(`employee.slabs[${i}].minAccuracyPct must be 0-100`);
-      if (!isNum(s.ratePerArticle) || s.ratePerArticle < 0) errors.push(`employee.slabs[${i}].ratePerArticle must be >= 0`);
-      if (i > 0 && !(s.minAccuracyPct < e.slabs[i - 1].minAccuracyPct)) errors.push("employee.slabs must be in descending minAccuracyPct order");
-    });
+/** The slab rate for an exact accuracy (matched / verified), never rounded up into a slab. */
+function rateFor(matched, verified, policy = DEFAULT_POLICY) {
+  const slab = policy.employee.slabs.find((s) => matched * 100 * 1000 >= Math.round(s.minAccuracyPct * 1000) * verified);
+  return slab ? slab.ratePerArticle : policy.employee.belowRatePerArticle;
+}
+
+/**
+ * One employee, one cycle.
+ * @param auditedArticles    unique articles they counted in the cycle (programme stores only) - the 5% base
+ * @param eligibleArticles   of those, ELIGIBLE for their incentive
+ * @param pendingEligibility of those, PENDING_ELIGIBILITY_REVIEW
+ * @param verdicts           one per UNIQUE recounted article: { verdict } (utils/stock_audit_verification)
+ */
+function employeeIncentive({ auditedArticles = 0, eligibleArticles = 0, pendingEligibility = 0, verdicts = [] }, policy = DEFAULT_POLICY, { approved = false } = {}) {
+  const sample = sampleOf(auditedArticles, verdicts, policy);
+  const base = { audited: auditedArticles, eligible: eligibleArticles, pending_eligibility: pendingEligibility, sample, final: false, provisional_amount: null };
+
+  if (!auditedArticles) {
+    const na = S.notApplicable(S.REASON.NO_ARTICLES);
+    return { ...base, status: "NOT_APPLICABLE", reason: S.REASON.NO_ARTICLES, accuracy: na, rate: na, amount: na };
   }
-  if (e && (!isNum(e.minSamplePct) || e.minSamplePct <= 0 || e.minSamplePct > 100)) errors.push("employee.minSamplePct must be > 0 and <= 100");
-  if (e && (!e.match || !isNum(e.match.absQty) || e.match.absQty < 0)) errors.push("employee.match.absQty must be >= 0");
+  if (sample.verified === 0) {
+    const p = S.pending(S.REASON.PENDING_VERIFICATION);
+    return { ...base, status: "PENDING_VERIFICATION", reason: S.REASON.PENDING_VERIFICATION, accuracy: p, rate: p, amount: p };
+  }
+  const accuracyPct = (sample.matched * 100) / sample.verified;
+  if (!sample.met) {
+    const p = S.pending(S.REASON.INSUFFICIENT_SAMPLE);
+    return { ...base, status: "INSUFFICIENT_SAMPLE", reason: S.REASON.INSUFFICIENT_SAMPLE, accuracy: { ...S.available(accuracyPct), provisional: true }, rate: p, amount: p };
+  }
+  const rate = rateFor(sample.matched, sample.verified, policy);
+  const amount = rupees(paise(rate) * eligibleArticles);
+  if (pendingEligibility > 0) {
+    return {
+      ...base,
+      status: "PENDING_ELIGIBILITY_REVIEW",
+      reason: S.REASON.PENDING_ELIGIBILITY_REVIEW,
+      accuracy: S.available(accuracyPct),
+      rate: S.available(rate),
+      amount: S.pending(S.REASON.PENDING_ELIGIBILITY_REVIEW),
+      provisional_amount: amount,
+    };
+  }
+  return { ...base, status: "CALCULATED", accuracy: S.available(accuracyPct), rate: S.available(rate), amount: S.available(amount), final: approved === true };
+}
 
-  const m = (rules && rules.management) || {};
-  for (const role of ["SUPERVISOR", "STORE_MANAGER"]) {
-    const r = m[role];
-    if (!r) { errors.push(`management.${role} is required`); continue; }
-    const keys = new Set();
-    let sum = 0;
-    for (const c of r.components || []) {
-      if (!c.key || keys.has(c.key)) errors.push(`management.${role}: component keys must be present and unique`);
-      keys.add(c.key);
-      if (!isNum(c.max) || c.max < 0) errors.push(`management.${role}.${c.key}: max must be >= 0`);
-      sum += c.max || 0;
-      const t = c.scoring && c.scoring.type;
-      if (!["binary", "linear", "slabs"].includes(t)) errors.push(`management.${role}.${c.key}: scoring.type must be binary, linear or slabs`);
-      if (t === "slabs") {
-        const sl = c.scoring.slabs || [];
-        if (!sl.length) errors.push(`management.${role}.${c.key}: slabs scoring needs slabs`);
-        sl.forEach((s, i) => {
-          if (!isNum(s.minPct) || !isNum(s.payPct) || s.payPct < 0 || s.payPct > 100) errors.push(`management.${role}.${c.key}.slabs[${i}] needs minPct and payPct 0-100`);
-          if (i > 0 && !(s.minPct < sl[i - 1].minPct)) errors.push(`management.${role}.${c.key}: slabs must be in descending minPct order`);
-        });
-      }
+// ------------------------------------------------------------------ KPI measures
+
+/** Allotment-based completion. Unavailable until RetailPilot allotment is readable. */
+function measureCompletion(completion /* null | { completedPct, byDeadline: bool } */) {
+  if (!completion) return S.unavailable(S.REASON.ALLOTMENT_UNAVAILABLE);
+  return S.available(completion.byDeadline ? completion.completedPct : 0);
+}
+
+/** Store accuracy: matched / verified unique articles across the store's employees. */
+function measureStoreAccuracy(verdicts = []) {
+  const v = verdicts.filter((x) => x.verdict === VERDICT.MATCH || x.verdict === VERDICT.MISMATCH);
+  if (!v.length) return S.pending(S.REASON.PENDING_VERIFICATION);
+  return S.available((v.filter((x) => x.verdict === VERDICT.MATCH).length * 100) / v.length);
+}
+
+/** Share of the store's employees (with audited articles) whose 5% independent sample is met. */
+function measureSampleMet(samples = []) {
+  const withArticles = samples.filter((s) => s.audited > 0);
+  if (!withArticles.length) return S.notApplicable(S.REASON.NO_ARTICLES);
+  if (withArticles.every((s) => s.verified === 0)) return S.pending(S.REASON.PENDING_VERIFICATION);
+  return S.available((withArticles.filter((s) => s.met).length * 100) / withArticles.length);
+}
+
+/** Verification quality control: share of the store's independent recounts that could be resolved. */
+function measureVerificationResolved(recountVerdicts = []) {
+  const independent = recountVerdicts.filter((r) => r.verdict !== VERDICT.NOT_INDEPENDENT);
+  if (!independent.length) return S.pending(S.REASON.PENDING_VERIFICATION);
+  const resolved = independent.filter((r) => r.verdict === VERDICT.MATCH || r.verdict === VERDICT.MISMATCH).length;
+  return S.available((resolved * 100) / independent.length);
+}
+
+/**
+ * Variance closure: share of variances closed within closeWithinDays of the count.
+ * An open variance whose deadline has not passed yet keeps the measure PENDING.
+ * @param variances [{ abs_value, finalized_at, closed_at | null }]
+ */
+function measureVarianceClosure(variances = [], params = {}, asOf) {
+  const days = params.closeWithinDays == null ? 7 : params.closeWithinDays;
+  const minAbs = params.minAbsValue || 0;
+  const list = variances.filter((v) => Math.abs(Number(v.abs_value || 0)) >= minAbs);
+  if (!list.length) return S.notApplicable(S.REASON.NO_VARIANCES);
+  let inTime = 0;
+  for (const v of list) {
+    const due = new Date(Date.parse(toUtc(v.finalized_at).iso.slice(0, 23) + "Z") + days * 86400000).toISOString();
+    if (v.closed_at) {
+      if (compareTs(v.closed_at, due) <= 0) inTime += 1;
+    } else if (compareTs(asOf, due) <= 0) {
+      return S.pending(S.REASON.NO_DATA);
     }
-    if (sum > r.max) errors.push(`management.${role}: components add up to ${sum}, above the maximum ${r.max}`);
   }
-  const om = m.OPERATIONS_MANAGER;
-  if (!om) errors.push("management.OPERATIONS_MANAGER is required");
-  else {
-    (om.slabs || []).forEach((s, i, a) => {
-      if (!isNum(s.minScorePct) || !isNum(s.amount) || s.amount < 0) errors.push(`OPERATIONS_MANAGER.slabs[${i}] needs minScorePct and amount >= 0`);
-      if (s.amount > om.perStoreMax) errors.push(`OPERATIONS_MANAGER.slabs[${i}].amount is above perStoreMax`);
-      if (i > 0 && !(s.minScorePct < a[i - 1].minScorePct)) errors.push("OPERATIONS_MANAGER.slabs must be in descending minScorePct order");
-    });
+  return S.available((inTime * 100) / list.length);
+}
+
+// ------------------------------------------------------------------ scoring
+
+/** Pay share of one component from its measure cell. A measure that is not AVAILABLE pays nothing YET: pending, not zero. */
+function scoreComponent(component, measure) {
+  if (!S.isKnown(measure)) {
+    return { key: component.key, max: component.max, measure, payPct: null, amount: { ...measure } };
   }
-  return errors;
-}
-
-/**
- * Does a recount agree with the ORIGINAL PHYSICAL COUNT?
- * null when either quantity is missing: not decidable, not a mismatch.
- */
-function isMatch(originalCountedQty, recountQty, match = DEFAULT_RULES.employee.match) {
-  if (originalCountedQty == null || recountQty == null) return null;
-  const a = Number(originalCountedQty);
-  const b = Number(recountQty);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  // Compare in thousandths (quantities have 3 decimals) so 0.1 + 0.2 issues never decide a match.
-  return Math.abs(Math.round(a * 1000) - Math.round(b * 1000)) <= Math.round(match.absQty * 1000);
-}
-
-/** Recount sample the employee needs: at least minSamplePct of credited articles, rounded up. */
-function requiredSample(creditedArticles, rules = DEFAULT_RULES) {
-  const e = rules.employee;
-  if (!creditedArticles) return 0;
-  return Math.max(e.minSampleArticles || 1, Math.ceil((creditedArticles * e.minSamplePct) / 100));
-}
-
-/**
- * One employee's incentive for one cycle.
- *
- * @param creditedArticles unique articles credited to them (after the duplicate guard)
- * @param verifications    [{ isMatch: true|false|null, independent: true|false }]
- *                         one per recounted article of theirs
- * @returns { status, creditedArticles, rechecked, matched, requiredSample,
- *            accuracyPct, ratePerArticle, amount, final }
- *   status: NO_ARTICLES | PENDING_VERIFICATION | INSUFFICIENT_SAMPLE | CALCULATED
- *   amount is null unless CALCULATED (or 0 for NO_ARTICLES).
- */
-function employeeIncentive({ creditedArticles, verifications = [] }, rules = DEFAULT_RULES) {
-  const e = rules.employee;
-  const credited = Number(creditedArticles) || 0;
-  const usable = verifications.filter((v) => v && (v.isMatch === true || v.isMatch === false) && (!e.requireIndependentRecount || v.independent === true));
-  const rechecked = usable.length;
-  const matched = usable.filter((v) => v.isMatch === true).length;
-  const need = requiredSample(credited, rules);
-  const base = { creditedArticles: credited, rechecked, matched, requiredSample: need, final: rules.approved === true };
-
-  if (credited === 0) return { ...base, status: "NO_ARTICLES", accuracyPct: null, ratePerArticle: 0, amount: 0 };
-  if (rechecked === 0) return { ...base, status: "PENDING_VERIFICATION", accuracyPct: null, ratePerArticle: null, amount: null };
-  const accuracyPct = (matched * 100) / rechecked;
-  if (rechecked < need) return { ...base, status: "INSUFFICIENT_SAMPLE", accuracyPct, ratePerArticle: null, amount: null };
-
-  // Exact slab test in integers: matched/rechecked >= min/100  <=>  matched*100 >= min*rechecked.
-  const slab = e.slabs.find((s) => matched * 100 * 1000 >= Math.round(s.minAccuracyPct * 1000) * rechecked);
-  const ratePerArticle = slab ? slab.ratePerArticle : e.belowRatePerArticle;
-  const amount = toRupees(toPaise(ratePerArticle) * credited);
-  return { ...base, status: "CALCULATED", accuracyPct, ratePerArticle, amount };
-}
-
-/** Pay share (0-100) of one component from its measured result. */
-function componentPayPct(component, result) {
-  const sc = component.scoring || { type: "binary" };
-  if (!result) return 0;
-  const pct = isNum(result.achievedPct) ? Math.max(0, Math.min(100, result.achievedPct)) : null;
-  if (sc.type === "binary") {
-    if (typeof result.achieved === "boolean") return result.achieved ? 100 : 0;
-    return pct != null && pct >= (isNum(sc.thresholdPct) ? sc.thresholdPct : 100) ? 100 : 0;
+  const pct = Math.max(0, Math.min(100, measure.value));
+  const sc = component.scoring;
+  let payPct = 0;
+  if (sc.type === "threshold") payPct = pct >= sc.minPct ? 100 : 0;
+  else if (sc.type === "linear") payPct = pct;
+  else if (sc.type === "slabs") {
+    const slab = sc.slabs.find((s) => pct >= s.minPct);
+    payPct = slab ? slab.payPct : 0;
   }
-  if (pct == null) return 0;
-  if (sc.type === "linear") return pct;
-  const slab = (sc.slabs || []).find((s) => pct >= s.minPct);
-  return slab ? slab.payPct : 0;
+  return { key: component.key, max: component.max, measure, payPct, amount: S.available(rupees(Math.round((paise(component.max) * payPct) / 100))) };
 }
 
 /**
- * Supervisor or Store Manager incentive for one store and cycle.
- * @param results { [componentKey]: { achieved?: boolean, achievedPct?: number } }
- * @returns { role, components: [{ key, max, payPct, amount }], amount, weightedScorePct, missing, final }
+ * Supervisor or Store Manager, one store, one cycle.
+ * @param measures { [componentKey]: cell }
  */
-function managementIncentive(role, results = {}, rules = DEFAULT_RULES) {
-  const r = rules.management[role];
-  if (!r || r.scope !== "store") throw new Error(`Not a store-level role: ${role}`);
-  const components = r.components.map((c) => {
-    const payPct = componentPayPct(c, results[c.key]);
-    return { key: c.key, max: c.max, payPct, amount: toRupees(Math.round((toPaise(c.max) * payPct) / 100)) };
-  });
-  const totalMax = components.reduce((s, c) => s + c.max, 0);
-  const paise = Math.min(components.reduce((s, c) => s + toPaise(c.amount), 0), toPaise(r.max));
-  const weightedScorePct = totalMax ? components.reduce((s, c) => s + c.payPct * c.max, 0) / totalMax : 0;
-  const missing = r.components.filter((c) => !results[c.key]).map((c) => c.key);
-  return { role, components, amount: toRupees(paise), weightedScorePct, missing, final: rules.approved === true };
+function roleIncentive(role, measures = {}, policy = DEFAULT_POLICY, { approved = false } = {}) {
+  const r = policy.management[role];
+  if (!r || !r.components) throw new Error(`Not a store-level role: ${role}`);
+  const components = r.components.map((c) => scoreComponent(c, measures[c.key] || S.pending(S.REASON.NO_DATA)));
+  const decided = components.filter((c) => S.isKnown(c.amount));
+  const decidedPaise = Math.min(decided.reduce((t, c) => t + paise(c.amount.value), 0), paise(r.max));
+  const complete = decided.length === components.length;
+  const totalMax = components.reduce((t, c) => t + c.max, 0);
+  const weighted = complete ? components.reduce((t, c) => t + c.payPct * c.max, 0) / totalMax : null;
+  return {
+    role,
+    components,
+    decided_amount: rupees(decidedPaise),
+    amount: complete ? S.available(rupees(decidedPaise)) : S.pending(S.REASON.COMPONENT_PENDING),
+    weighted_score: complete ? S.available(weighted) : S.pending(S.REASON.COMPONENT_PENDING),
+    final: complete && approved === true,
+  };
 }
 
 /**
- * Operations Manager: per store, a slab on the Store Manager's weighted KPI
- * score, paid only where the store's independent verification was done.
- * @param stores [{ outletId, storeManagerScorePct, independentVerification: boolean }]
+ * Operations Manager across the programme stores.
+ * @param stores [{ outlet_id, storeManagerScore: cell, independentVerification: true | false | null }]
  */
-function operationsManagerIncentive(stores = [], rules = DEFAULT_RULES) {
-  const om = rules.management.OPERATIONS_MANAGER;
+function operationsManagerIncentive(stores = [], policy = DEFAULT_POLICY, { approved = false } = {}) {
+  const om = policy.management.OPERATIONS_MANAGER;
   const perStore = stores.map((s) => {
-    if (om.requireIndependentStoreVerification && s.independentVerification !== true) {
-      return { outletId: s.outletId, scorePct: s.storeManagerScorePct, amount: 0, reason: "no independent store verification" };
+    if (s.independentVerification === false) {
+      return { outlet_id: s.outlet_id, score: s.storeManagerScore, amount: S.available(0), reason: S.REASON.INDEPENDENT_VERIFICATION_NOT_DONE };
     }
-    if (!isNum(s.storeManagerScorePct)) return { outletId: s.outletId, scorePct: null, amount: 0, reason: "no Store Manager score" };
-    const slab = om.slabs.find((x) => s.storeManagerScorePct >= x.minScorePct);
-    return { outletId: s.outletId, scorePct: s.storeManagerScorePct, amount: Math.min(slab ? slab.amount : om.belowAmount, om.perStoreMax) };
+    if (s.independentVerification !== true) {
+      return { outlet_id: s.outlet_id, score: s.storeManagerScore, amount: S.pending(S.REASON.INDEPENDENT_VERIFICATION_PENDING) };
+    }
+    if (!S.isKnown(s.storeManagerScore)) return { outlet_id: s.outlet_id, score: s.storeManagerScore, amount: S.pending(S.REASON.COMPONENT_PENDING) };
+    const slab = om.slabs.find((x) => s.storeManagerScore.value >= x.minScorePct);
+    return { outlet_id: s.outlet_id, score: s.storeManagerScore, amount: S.available(Math.min(slab ? slab.amount : om.belowAmount, om.perStoreMax)) };
   });
-  const amount = Math.min(perStore.reduce((t, s) => t + s.amount, 0), om.max);
-  return { role: "OPERATIONS_MANAGER", perStore, amount, final: rules.approved === true };
+  const decided = perStore.filter((p) => S.isKnown(p.amount));
+  const sum = Math.min(decided.reduce((t, p) => t + p.amount.value, 0), om.max);
+  const complete = perStore.length > 0 && decided.length === perStore.length;
+  return {
+    role: "OPERATIONS_MANAGER",
+    perStore,
+    decided_amount: sum,
+    amount: complete ? S.available(sum) : S.pending(perStore.length ? S.REASON.COMPONENT_PENDING : S.REASON.NO_DATA),
+    final: complete && approved === true,
+  };
 }
 
 module.exports = {
-  DEFAULT_RULES,
-  validateRules,
-  isMatch,
-  requiredSample,
+  rateFor,
   employeeIncentive,
-  managementIncentive,
+  measureCompletion,
+  measureStoreAccuracy,
+  measureSampleMet,
+  measureVerificationResolved,
+  measureVarianceClosure,
+  scoreComponent,
+  roleIncentive,
   operationsManagerIncentive,
-  componentPayPct,
 };

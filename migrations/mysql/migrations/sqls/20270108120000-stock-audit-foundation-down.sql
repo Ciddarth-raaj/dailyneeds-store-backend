@@ -1,11 +1,13 @@
-DELETE FROM `permissions` WHERE `permission_key` IN ('manage_stock_audit', 'approve_stock_audit_incentive');
-DELETE FROM `all_permissions` WHERE `permission_key` IN ('manage_stock_audit', 'approve_stock_audit_incentive');
+DELETE FROM `permissions` WHERE `permission_key` IN ('view_stock_audit', 'view_own_stock_audit_performance', 'stock_audit_all_branches', 'manage_stock_audit_cycles', 'manage_stock_audit_employee_mapping', 'run_stock_audit_sync', 'manage_stock_audit_policy', 'review_stock_audit_verification', 'review_stock_audit_eligibility', 'calculate_stock_audit_incentives', 'approve_stock_audit_incentives', 'revoke_stock_audit_incentives', 'process_stock_audit_payroll');
+DELETE FROM `all_permissions` WHERE `permission_key` IN ('view_stock_audit', 'view_own_stock_audit_performance', 'stock_audit_all_branches', 'manage_stock_audit_cycles', 'manage_stock_audit_employee_mapping', 'run_stock_audit_sync', 'manage_stock_audit_policy', 'review_stock_audit_verification', 'review_stock_audit_eligibility', 'calculate_stock_audit_incentives', 'approve_stock_audit_incentives', 'revoke_stock_audit_incentives', 'process_stock_audit_payroll');
+DROP TABLE IF EXISTS `sa_payroll_posting`;
 DROP TABLE IF EXISTS `sa_approval`;
 DROP TABLE IF EXISTS `sa_variance_closure`;
-DROP TABLE IF EXISTS `sa_management_kpi`;
+DROP TABLE IF EXISTS `sa_management_incentive`;
 DROP TABLE IF EXISTS `sa_employee_incentive`;
 DROP TABLE IF EXISTS `sa_rule_set`;
 DROP TABLE IF EXISTS `sa_incentive_article`;
+DROP TABLE IF EXISTS `sa_eligibility`;
 DROP TABLE IF EXISTS `sa_verification`;
 DROP TABLE IF EXISTS `sa_cycle`;
 DROP TABLE IF EXISTS `sa_sync_issue`;

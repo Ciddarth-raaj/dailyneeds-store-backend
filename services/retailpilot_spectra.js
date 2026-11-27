@@ -9,7 +9,9 @@ const axios = require("axios");
  *
  * Retries are OPT-IN (config.retry), so the syncs that predate them behave
  * exactly as before: one attempt, the same error messages. With config.retry:
- *   - HTTP 429 waits Retry-After seconds (capped at maxRetryAfterSec) and retries
+ *   - HTTP 429 waits Retry-After seconds and retries; a Retry-After above
+ *     maxRetryAfterSec is NOT shortened: the error is thrown with
+ *     .deferred = true and .retryAfterSec, so the caller defers the run
  *   - HTTP 5xx, timeouts and connection errors retry with backoffMs
  *   - HTTP 4xx other than 429 (parse_error, validation_error,
  *     whitelist_violation, auth) is never retried: the query itself is wrong
@@ -43,7 +45,16 @@ class RetailPilotSpectra {
         let waitMs;
         if (err.status === 429) {
           const sec = Number(err.retryAfter);
-          waitMs = Math.min(Number.isFinite(sec) && sec >= 0 ? sec : 30, policy.maxRetryAfterSec) * 1000;
+          const wait = Number.isFinite(sec) && sec >= 0 ? sec : 30;
+          // RetailPilot asked for longer than we may wait: never retry early.
+          // The caller defers the run (watermarks untouched) until then.
+          if (wait > policy.maxRetryAfterSec) {
+            err.deferred = true;
+            err.retryAfterSec = wait;
+            err.retryable = false;
+            throw err;
+          }
+          waitMs = wait * 1000;
         } else {
           const b = policy.backoffMs;
           waitMs = b[Math.min(attempt - 1, b.length - 1)];
