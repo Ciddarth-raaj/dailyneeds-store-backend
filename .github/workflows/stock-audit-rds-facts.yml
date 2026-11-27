@@ -55,6 +55,25 @@ jobs:
               aws_describe_instance: id ? sh(`aws rds describe-db-instances --db-instance-identifier ${id} --query "DBInstances[0].{retention:BackupRetentionPeriod,window:PreferredBackupWindow,latestRestorable:LatestRestorableTime,multiAZ:MultiAZ,deletionProtection:DeletionProtection}" --output json --region ${region}`) : null,
               aws_describe_snapshots: id ? sh(`aws rds describe-db-snapshots --db-instance-identifier ${id} --query "length(DBSnapshots)" --output json --region ${region}`) : null,
             };
+            // an "ls-" identifier is an Amazon LIGHTSAIL managed database: its own API (read-only get calls)
+            if (id && id.startsWith("ls-")) {
+              const raw = sh(`aws lightsail get-relational-databases --region ${region} --output json`);
+              try {
+                const db = (JSON.parse(raw).relationalDatabases || []).find((d) => d.masterEndpoint && d.masterEndpoint.address === host);
+                out.lightsail = db ? {
+                  name: db.name, engine: db.engine, engineVersion: db.engineVersion, bundle: db.relationalDatabaseBundleId, state: db.state,
+                  backupRetentionEnabled: db.backupRetentionEnabled, preferredBackupWindow: db.preferredBackupWindow, latestRestorableTime: db.latestRestorableTime,
+                  earliestRestorableTime: db.earliestRestorableTime || null, publiclyAccessible: db.publiclyAccessible, hardware: db.hardware,
+                } : { note: "no Lightsail database matched the endpoint" };
+                if (db) {
+                  const sraw = sh(`aws lightsail get-relational-database-snapshots --region ${region} --output json`);
+                  try {
+                    const list = (JSON.parse(sraw).relationalDatabaseSnapshots || []).filter((x) => x.fromRelationalDatabaseName === db.name);
+                    out.lightsail.snapshots = { count: list.length, latest: list.map((x) => x.createdAt).sort().pop() || null };
+                  } catch (e) { out.lightsail.snapshots = String(sraw).slice(0, 200); }
+                }
+              } catch (e) { out.lightsail = String(raw).slice(0, 300); }
+            }
             console.log("RDSFACTS " + JSON.stringify(out));
             c.end();
           })();
