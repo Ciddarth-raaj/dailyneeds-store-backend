@@ -34,17 +34,17 @@ const EXPECTED = {
     out("WINDOW", { since_ist: "2026-11-25 00:00", as_of_utc: AS_OF, last_run: lastRun });
 
     // ---- 1. source schema: each stream's columns and the session statuses seen
+    const one = async (sql) => { try { const d = await spectra._page(sql, 1, 1); return { cols: (d.data[0] ? Object.keys(d.data[0]) : (d.meta && d.meta.columns || []).map((c) => c.name || c)).join(","), rows: d.data.length }; } catch (e) { return { error: String(e.message).slice(0, 160) }; } };
     for (const s of ["session", "line"]) {
-      const rows = await agg(STREAMS[s].build(startCursor(null, { since: SINCE_ISO }), 1));
-      const got = Array.isArray(rows) && rows[0] ? Object.keys(rows[0]).join(",") : (rows && rows.error) || "no rows";
-      out("SCHEMA", { stream: s, ok: got === EXPECTED[s], got: got === EXPECTED[s] ? "as expected" : got });
+      const r = await one(STREAMS[s].build(startCursor(null, { since: SINCE_ISO }), 1));
+      out("SCHEMA", { stream: s, ok: r.cols === EXPECTED[s], got: r.cols === EXPECTED[s] ? "as expected" : r });
     }
-    const adj = await agg(STREAMS.adjustment.build(startCursor(null, { since: SINCE_ISO }), 1));
-    out("SCHEMA", { stream: "adjustment", columns: Array.isArray(adj) && adj[0] ? Object.keys(adj[0]).join(",") : adj });
-
+    out("SCHEMA", { stream: "adjustment", got: await one(STREAMS.adjustment.build(startCursor(null, { since: SINCE_ISO }), 1)) });
     // ---- 2. source aggregates (RetailPilot's own database)
     const S = "public.stock_audit_count_session"; const L = "public.stock_audit_count_line";
     const src = {};
+    src.status_values = await agg(`SELECT status, COUNT(*) AS n FROM ${S} WHERE updated_at >= '${SINCE_ISO}' GROUP BY status ORDER BY status`);
+    out("SRC_STATUS_VALUES", src.status_values);
     src.by_store_status = await agg(`SELECT store_id, status, COUNT(*) AS n FROM ${S} WHERE updated_at >= '${SINCE_ISO}' AND updated_at < '${AS_OF}' GROUP BY store_id, status ORDER BY store_id, status`);
     src.finalized = await agg(`SELECT store_id, COUNT(*) AS sessions, COUNT(DISTINCT article_id) AS articles, COUNT(DISTINCT finalized_by) AS counters FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${SINCE_ISO}' AND finalized_at < '${AS_OF}' GROUP BY store_id ORDER BY store_id`);
     src.recounts = await agg(`SELECT store_id, COUNT(*) AS n FROM ${S} WHERE updated_at >= '${SINCE_ISO}' AND updated_at < '${AS_OF}' AND recount_slug IS NOT NULL AND recount_slug <> '' GROUP BY store_id ORDER BY store_id`);
@@ -65,6 +65,7 @@ const EXPECTED = {
       srcDays[istDate(new Date(t + 3600000).toISOString())] = Array.isArray(r) ? Object.fromEntries(r.map((x) => [rpOf.get(String(x.store_id)) ?? x.store_id, Number(x.articles)])) : r;
     }
     out("SRC_DAYS", srcDays);
+    out("LAST_RUN_ISSUES", await q("SELECT run_id, kind, COUNT(*) AS n, COUNT(DISTINCT rp_ref) AS refs FROM sa_sync_issue WHERE run_id = (SELECT MAX(run_id) FROM sa_sync_run) GROUP BY run_id, kind"));
     if (mode !== "full") return;
 
     // ---- 3. the DNDS mirror, same window
@@ -77,7 +78,7 @@ const EXPECTED = {
     M.variance = await q("SELECT outlet_id, SUM(var_qty < 0) AS short_sessions, SUM(var_qty > 0) AS excess_sessions, SUM(var_qty = 0) AS nil_sessions, SUM(var_qty IS NULL) AS no_booked_difference, ROUND(SUM(CASE WHEN var_qty < 0 THEN var_qty END), 3) AS short_qty, ROUND(SUM(CASE WHEN var_qty > 0 THEN var_qty END), 3) AS excess_qty, ROUND(SUM(CASE WHEN var_value < 0 THEN var_value END), 2) AS short_value, ROUND(SUM(CASE WHEN var_value > 0 THEN var_value END), 2) AS excess_value FROM sa_rp_session WHERE status = 'FINALIZED' AND finalized_at >= ? AND finalized_at < ? GROUP BY outlet_id ORDER BY outlet_id", [SINCE_SQL, AS_OF_SQL]);
     M.unmapped = await q("SELECT u.last_rp_store_id AS store_id, COUNT(*) AS rp_users, SUM(m.employee_id IS NULL) AS unmapped FROM sa_rp_user u LEFT JOIN wh_rp_staff_map m ON m.rp_user_id = u.rp_user_id GROUP BY u.last_rp_store_id ORDER BY u.last_rp_store_id");
     M.unmapped_work = await q("SELECT s.outlet_id, COUNT(*) AS sessions, COUNT(DISTINCT s.article_id) AS articles, COUNT(DISTINCT s.finalized_by) AS counters FROM sa_rp_session s LEFT JOIN wh_rp_staff_map m ON m.rp_user_id = s.finalized_by WHERE s.status = 'FINALIZED' AND s.finalized_at >= ? AND s.finalized_at < ? AND m.employee_id IS NULL GROUP BY s.outlet_id ORDER BY s.outlet_id", [SINCE_SQL, AS_OF_SQL]);
-    M.issues = await q("SELECT i.kind, COUNT(*) AS n FROM sa_sync_issue i WHERE i.run_id = (SELECT MAX(run_id) FROM sa_sync_run WHERE kind = 'HISTORICAL') GROUP BY i.kind");
+    M.issues = await q("SELECT i.kind, COUNT(*) AS n FROM sa_sync_issue i WHERE i.run_id = (SELECT MAX(run_id) FROM sa_sync_run) GROUP BY i.kind");
     for (const [k, v] of Object.entries(M)) if (k !== "per_user") out("MIRROR_" + k.toUpperCase(), v);
     // per-user comparison (ids only)
     const key = (r) => `${r.store_id}|${r.finalized_by}`;

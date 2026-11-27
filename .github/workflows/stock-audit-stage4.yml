@@ -67,5 +67,5 @@ jobs:
           esac
           echo "@@SWITCH_AFTER $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
           echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status).join(' | '))}catch(e){console.log('n/a')}})")"
-          ERR=$(pm2 logs 0 --err --lines 200 --nostream --raw 2>/dev/null); echo "$ERR" | grep -iE "error|exception|ER_" | grep -i "stock" | tail -5 | cut -c1-160 | sed 's/^/@@ERR /'
+          ERR=$(pm2 logs 0 --err --lines 200 --nostream --raw 2>/dev/null); echo "$ERR" | grep -iE "error|exception|ER_" | grep -i "stock" | tail -5 | cut -c1-160 | sed 's/^/@@ERR /' || true
           REMOTE
