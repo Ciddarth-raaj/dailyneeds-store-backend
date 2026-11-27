@@ -1,52 +1,101 @@
-# Stock Audit (foundation)
+# Stock Audit & Premier League (SAPL)
 
-RetailPilot runs the audit: article allotment, physical counting and recounts
-all happen there. DNDS Connect reads what RetailPilot recorded (read-only,
-over SPECTRA), maps it to branches and employees, and keeps its own records
-of audit cycles, verification results, incentives, KPIs and approvals.
-DNDS has no counting, allotment or recount entry screen, and will not get one.
+RetailPilot does allotment, counting, recounts and stock adjustments. DNDS
+imports, mirrors, measures and reports. **Not enabled in this phase:**
+incentive approval, revocation and payroll posting (the endpoints answer 501),
+any scheduled sync (manual runs only), Telegram.
 
-Discovery report (live findings, 26-27 Nov 2026): the "Stock Audit API
-Discovery Report" doc.
+## Code map
 
-## What this branch adds (no API calls, nothing scheduled, no routes)
-
-| File | What |
+| Part | File |
 | --- | --- |
-| `migrations/mysql/migrations/20270108120000-stock-audit-foundation.js` + `sqls/` | 14 `sa_*` tables and the `manage_stock_audit` / `approve_stock_audit_incentive` permissions. No existing table is changed |
-| `services/retailpilot_spectra.js` | Opt-in retry (`config.retry`): 429 honours Retry-After (max 120 s), 5xx and timeouts back off 2 s / 8 s / 30 s, 4xx never retried; errors carry `status`, `spectraError`, `retryable`. `queryKeyset` for watermark reads. Without `config.retry` the client behaves exactly as before |
-| `utils/stock_audit_queries.js` | Keyset SQL for the session, line and STK_ADJ ledger streams; microsecond-exact UTC timestamps; 30-minute overlap; every literal validated |
-| `utils/stock_audit_incentive.js` | The confirmed incentive rules as data, and pure calculations |
-| `utils/stock_audit_credit.js` | One credit per (cycle, store, article): first finalized count wins; duplicates, unmapped stores/users and unfinished counts are reported, never credited |
+| Migrations (new tables only, nothing altered) | `migrations/mysql/migrations/20270108120000-stock-audit-foundation` (15 tables, 20 permissions), `20270108120100-stock-audit-allotment-sapl` (8 tables) |
+| Permission keys (one per decision) | `constants/stock_audit_permissions.js` |
+| Rules (pure) | `utils/stock_audit_policy.js` (confirmed amounts), `_eligibility`, `_verification`, `_incentive`, `_progress`, `_sapl`, `_allotment`, `_mirror`, `_queries`, `_status` |
+| SQL | `repository/stock_audit.js` |
+| Screens' API | `usecase/stock_audit.js`, `routes/stock_audit.js` (mounted at `/stock-audit` in `server.js`) |
+| RetailPilot sync | `usecase/stock_audit_sync.js` (SPECTRA, read-only) |
 
-Run the tests: `node --test utils/stock_audit_*.test.js services/retailpilot_spectra.test.js`
+## Data flow
 
-## Confirmed incentive structure (27 Nov 2026)
+1. **Audit period** (`POST /stock-audit/cycles`): one cycle per programme store
+   (outlets 3-7; the warehouse, outlet 2, is refused) with a common deadline.
+2. **Allotment**: HR uploads every auditor's RetailPilot
+   `assortment-effective` CSV, unmodified (`POST /allotment/validate`), reviews
+   the validation, then confirms (`POST /allotment/uploads/:id/confirm`).
+   - store and auditor come from the file's contents; `Effective = Y` is
+     allotted, `N` is not auditable
+   - rejected: not a RetailPilot file, several stores / auditors in one file,
+     store outside the cycle or Branch Master, same content twice, two files
+     for one auditor
+   - an auditable article allotted to two auditors in one store blocks the
+     confirm (validation, then the unique key `uq_sa_allotment_auditable`)
+   - a file identical to the auditor's current revision is "already
+     imported"; a changed one becomes the next revision (old ones kept)
+   - confirm is one transaction; it is refused if the allotment changed since
+     validation (two people confirming at once)
+3. **Sync** (`POST /stock-audit/sync` `{kind}`): HISTORICAL from 25 Nov 2026
+   00:00 IST, INCREMENTAL from the watermark minus 30 min, or DRY_RUN.
+   Streams: `stock_audit_count_session`, `stock_audit_count_line`,
+   `stock_ledgers` (STK_ADJ). Keyset paging, microsecond timestamps, upserts by
+   RetailPilot slug + row hash. Watermarks move only when the whole run
+   succeeds; Retry-After above the limit records a DEFERRED run. The booked
+   difference of a count is read from its finalize marker's traceability.
+4. **Figures** (`utils/stock_audit_progress.js`, recomputed on read, cached
+   60 s and cleared after every write): per employee and store - allotted,
+   audited (original count, Store + Auditor + Article), today, pending,
+   completion, within deadline, recount sample (5% of unique articles,
+   rounded up), accuracy (independent recounts only), calculated and estimated
+   incentive; Supervisor / Store Manager / Operations Manager KPIs; SAPL KPIs.
+   No allotment -> Unavailable; no recounts -> Pending; never 0 or 100%.
+5. **HR PDFs**: `GET /stock-audit/hr/report?date=` returns team figures only
+   (individual incentive fields are removed server-side); the browser draws
+   the PDF. A past date is rebuilt from audits and recounts up to the end of
+   that day (allotment = current revision).
 
-Employee, per unique article audited, by counting accuracy from independent
-recounts (at least 5% of the employee's audited articles):
-99% and above Rs 1.10 · 97% to below 99% Rs 1.00 · 95% to below 97% Rs 0.50 · below 95% nil.
+## Confirmed amounts (27 Nov 2026)
 
-Management maximums: Supervisor Rs 1,000 per store, Store Manager Rs 1,500
-per store, Operations Manager Rs 2,000 across the five stores.
+- Employee: ₹1.10 / ₹1.00 / ₹0.50 per eligible unique article at 99 / 97 / 95%
+  accuracy, nil below; exact slab, never rounded up.
+- Supervisor ₹200 / ₹300 / ₹500 (max ₹1,000). Store Manager ₹600 completion
+  within deadline / ₹500 counting accuracy / ₹400 verification quality
+  (max ₹1,500). Operations Manager ₹400 a store, max ₹2,000, on the Store
+  Manager score; nil without independent verification.
+- SAPL: completion 35 + accuracy 40 + recount 20 + participation 5 = 100.
+  Shortage / excess never score. Prize ₹10,000. One season = one audit period.
 
-The KPI split inside those maximums is a configurable default and needs
-management approval: results are `final` only from an approved rule set.
+## Configurable until management decides
 
-Accuracy compares the recount with the ORIGINAL PHYSICAL COUNT, never with
-book stock, so a genuine shortage or excess never lowers an incentive.
-While an employee has no independent recount the result is
-`PENDING_VERIFICATION` (amount not decided), not nil.
+Per season (`PUT /stock-audit/sapl/seasons/:id`, `rules_json`, each marked
+`confirmed: false`): qualification, tie-breaker order, prize distribution
+method (equal / by articles audited / manual). The weights cannot be changed.
+Management KPI thresholds are in the policy's draft scoring layer.
 
-## Pending
+## Safety
 
-- **Recount integration.** No recounts had been performed by 27 Nov 2026, so
-  the empty `recount_slug` is expected. Once real recounts exist, the same
-  three tables are re-read to establish where recount quantities live,
-  whether the original count is kept, whether the original and recount users
-  are separate, both timestamps, multiple recounts, new record vs update,
-  stock movement between the two counts, and visibility in SPECTRA and
-  MOSAIC report 6. `creditArticles({ isRecount })` is the hook.
-- **Sync, cron, routes and screens**: after RetailPilot confirms the audit
-  tables are a supported part of our SPECTRA access. The cron ships disabled.
-- **Payroll posting**: separate approval; off by default.
+- Every route: permission key first, then the caller's branch scope;
+  `view_stock_audit_all_stores` for company-wide. A request naming another
+  store is refused.
+- Nobody maps a RetailPilot user to themself; independent store verification
+  cannot come from that store; the season verifier cannot also finalise it.
+- Nothing writes to RetailPilot or payroll.
+
+## Tests
+
+- `node --test utils/stock_audit_*.test.js routes/stock_audit.test.js`
+- `SA_TEST_MYSQL=mysql://user:pass@host:port/SCRATCH_DB node --test repository/stock_audit.mysql.test.js`
+  (drops and creates its tables: scratch databases only) - import, revisions,
+  conflicts, concurrent confirms, sync (idempotent, failure, deferral), figures,
+  HR data, SAPL, 75,000-article run.
+- `SA_REAL_CSV=<path>` additionally checks a real RetailPilot export (not kept
+  in the repository).
+
+## Still open
+
+- How RetailPilot records recounts: none existed on 27 Nov 2026
+  (`recount_slug` empty on every session). `sa_verification` is filled once
+  real recounts are inspected; until then accuracy stays Pending.
+- RetailPilot to confirm the audit tables are officially supported before any
+  scheduled sync.
+- Store role holders are found by designation name (`ROLE_DESIGNATIONS` in
+  `usecase/stock_audit.js`): confirm with HR.

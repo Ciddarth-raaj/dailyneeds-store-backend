@@ -35,7 +35,9 @@ class StockAuditRoutes {
     if (want != null && !programme.includes(want)) return { ok: false, code: 400, msg: "Not a programme store (the warehouse is excluded)" };
     if (await permissions.has(req, P.VIEW_ALL_STORES)) return { ok: true, outlets: want != null ? [want] : null };
     const r = await branchScope.resolve(req);
-    if (!r || !r.store_ids) {
+    const NONE = (branchScope.EMPLOYEE_BRANCH_SCOPE && branchScope.EMPLOYEE_BRANCH_SCOPE.NONE) || "NONE";
+    if (!r || r.kind === NONE) return { ok: false, code: 403, msg: "You have no branch assignment" };
+    if (!r.store_ids) {
       // an HR-wide branch scope is not a Stock Audit company-wide key
       return { ok: false, code: 403, msg: "Company-wide Stock Audit needs view_stock_audit_all_stores" };
     }
