@@ -1605,6 +1605,17 @@ class Server {
     // SPECTRA address, same key), stock from runway.
     // Suppliers from RetailPilot (masterhub vendors) replace the old DNDS /
     // GoFrugal distributor list; each product's supplier follows RetailPilot.
+    // Stock Audit & Premier League (routes/stock_audit.js). The RetailPilot
+    // sync is MANUAL ONLY: no cron is registered for it here or anywhere.
+    this.stockAuditRepo = require("./repository/stock_audit")(this.mysql.connection);
+    this.stockAuditSyncUsecase = require("./usecase/stock_audit_sync")(
+      require("./services/retailpilot_spectra")({
+        ...require("./config/retailpilot"),
+        retry: require("./services/retailpilot_spectra").DEFAULT_RETRY,
+      }),
+      this.stockAuditRepo
+    );
+    this.stockAuditUsecase = require("./usecase/stock_audit")(this.stockAuditRepo, { sync: this.stockAuditSyncUsecase });
     const retailPilotSuppliersRepo = require("./repository/retailpilot_suppliers")(this.mysql.connection);
     this.retailPilotSupplierSyncUsecase = require("./usecase/retailpilot_supplier_sync")(
       require("./services/retailpilot_spectra")({
@@ -2473,6 +2484,14 @@ class Server {
     );
     app.use("/offers-v3", offersV3Router.getRouter());
     app.use("/retailpilot", retailPilotRouter.getRouter());
+    app.use(
+      "/stock-audit",
+      require("./routes/stock_audit")({
+        usecase: this.stockAuditUsecase,
+        permissions: this.permissions,
+        branchScope: this.employeeBranchScope,
+      }).getRouter()
+    );
     app.use("/sales-report", salesDashboardRouter.getRouter());
     app.use("/business-dashboard", businessDashboardRouter.getRouter());
     app.use("/warehouse-flow", warehouseFlowRouter.getRouter());
