@@ -67,3 +67,12 @@ Runs 45971714666 (REVIEW) and 45972169620 (VARIANCE). Nothing written.
 - Retrospective mapping (in memory): store total unchanged, one row per employee, two ids of one employee = one
   row with the union of articles, no duplicate credit; estimate stays Pending.
 - HR setup not started (0 cycles). No recounts. Account 197: no dependency found (details in the chat report).
+
+# Audit-cycle discovery and Season 1 (27 Nov 2026)
+- Read-only discovery (runs 45972954942, 45973674546): RetailPilot exposes NO audit cycle - not in the published
+  schema of runway / masterhub / Mandapam, not as a column of stock_audit_count_session or _line, not in the
+  MOSAIC Stock Audit reports (6, 13: from/to date window only), not in the allotment CSV; 128 likely table names
+  all refused ("not available for querying"; SPECTRA does not distinguish missing from not whitelisted).
+- Season 1 created at 09:29:47 UTC with the application's own functions (run 45974132648; data only, no code):
+  period SEASON-1 = cycles 1-5 (outlets 3-7), 25 Nov - 31 Dec 2026, deadline 31 Dec 2026, OPEN;
+  SAPL season 1 "Season 1", prize Rs 10,000, weights completion 35 / accuracy 40 / recount 20 / participation 5 (locked).
