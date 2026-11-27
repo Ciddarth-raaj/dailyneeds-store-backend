@@ -1,0 +1,71 @@
+# Stock Audit - Stage 4 controlled RetailPilot sync (management-approved 27 Nov 2026).
+# Mode comes from .github/stage4-mode:
+#   DRYRUN    sync DRY_RUN (reads RetailPilot, counts, writes no mirror rows) + source checks
+#   IMPORT    HISTORICAL sync from 25 Nov 2026 + full validation, then (only if both succeed)
+#             STOCK_AUDIT_SYNC_ENABLED=true (.env backed up first) so administrators can run
+#             later syncs by hand. No schedule is ever registered.
+#   VALIDATE  read-only validation only
+# READ-ONLY towards RetailPilot. Prints counts and ids only.
+name: Stock Audit Stage 4 sync (controlled)
+
+"on":
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/stage4-mode]
+
+jobs:
+  stage4:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Run
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          MODE="$(tr -d '[:space:]' < .github/stage4-mode)"
+          case "$MODE" in DRYRUN|IMPORT|VALIDATE) ;; *) echo "unknown mode $MODE"; exit 1;; esac
+          echo "mode=$MODE"
+          scp -q -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes scripts/stock_audit/stage4_sync.js scripts/stock_audit/stage4_validate.js "${SSH_USER}@${SSH_HOST}:/tmp/"
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "MODE=$MODE bash -s" <<'REMOTE'
+          set -uo pipefail
+          cd ~/dailyneeds-store-backend || exit 1
+          trap 'rm -f /tmp/stage4_sync.js /tmp/stage4_validate.js' EXIT
+          E="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; export NODE_ENV="${E:-production}"
+          echo "@@SWITCH_BEFORE $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
+          case "$MODE" in
+            DRYRUN)
+              node /tmp/stage4_sync.js DRY_RUN || { echo "@@STOP dry run failed - nothing imported"; exit 1; }
+              node /tmp/stage4_validate.js source ;;
+            IMPORT)
+              node /tmp/stage4_sync.js HISTORICAL || { echo "@@STOP historical sync failed - watermarks unchanged; sync switch NOT enabled"; exit 1; }
+              node /tmp/stage4_validate.js full || { echo "@@STOP validation failed - sync switch NOT enabled"; exit 1; }
+              if grep -qx 'STOCK_AUDIT_SYNC_ENABLED=false' .env; then
+                TS=$(date -u +%Y%m%dT%H%M%SZ)
+                cp -p .env ~/env-backups/.env.stage4-$TS && chmod 600 ~/env-backups/.env.stage4-$TS
+                sed -i 's/^STOCK_AUDIT_SYNC_ENABLED=false$/STOCK_AUDIT_SYNC_ENABLED=true/' .env
+                echo "@@ENV_DIFF $(diff ~/env-backups/.env.stage4-$TS .env | grep -c '^>') changed (backup .env.stage4-$TS)"
+                node scripts/deploy/pm2-reload.js
+                sleep 5
+              else
+                echo "@@ENV sync switch line not found as expected - left unchanged"
+              fi ;;
+            VALIDATE)
+              node /tmp/stage4_validate.js full ;;
+          esac
+          echo "@@SWITCH_AFTER $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"
+          echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status).join(' | '))}catch(e){console.log('n/a')}})")"
+          ERR=$(pm2 logs 0 --err --lines 200 --nostream --raw 2>/dev/null); echo "$ERR" | grep -iE "error|exception|ER_" | grep -i "stock" | tail -5 | cut -c1-160 | sed 's/^/@@ERR /'
+          REMOTE
