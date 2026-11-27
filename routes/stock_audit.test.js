@@ -244,7 +244,9 @@ describe("seasons: created and changed by administrators only; cycles are read-o
     assert.equal((await send("POST", "/stock-audit/cycles", 2)).status, 410);
     assert.equal((await send("PUT", "/stock-audit/cycles/SEASON-1", 2)).status, 410);
     assert.equal((await send("POST", "/stock-audit/cycles", 1)).status, 403);
+    assert.equal((await send("GET", "/stock-audit/cycles", 1)).status, 403); // the technical list is administrators' only
     assert.equal(calls.length, 0);
+    assert.equal((await send("GET", "/stock-audit/cycles", 2)).status, 200);
   });
   it("meta tells the screens whether the caller may manage seasons", async () => {
     await new Promise((resolve) => http.get({ host: "127.0.0.1", port, path: "/stock-audit/meta", headers: { "x-type": "2" } }, (res) => { res.resume(); res.on("end", resolve); }));

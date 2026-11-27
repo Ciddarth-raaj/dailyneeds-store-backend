@@ -152,7 +152,8 @@ class StockAuditRoutes {
     router.get("/mapping/employees", need(P.MANAGE_EMPLOYEE_MAPPING), scoped((req, outlets) => U.employeeChoices({ outlets })));
     router.put("/mapping/:rp_user_id", need(P.MANAGE_EMPLOYEE_MAPPING),
       handle((req) => U.setMapping({ rp_user_id: req.params.rp_user_id, employee_id: req.body.employee_id == null ? null : Number(req.body.employee_id), note: req.body.note, by: by(req) })));
-    router.get("/cycles", need(P.MANAGE_CYCLES, P.VIEW_STORE, P.VIEW_ALL_STORES, P.IMPORT_ALLOTMENT), handle(() => U.cycles()));
+    // the internal cycles behind each season: an administrators' technical reference (screens use /meta seasons)
+    router.get("/cycles", adminOnly, handle(() => U.cycles()));
     // read-only technical reference: a season creates and changes its own internal cycles
     const seasonOnly = (req, res) => res.status(410).json({ code: 410, msg: "Audit cycles are created and changed with their season (Season Master)" });
     router.post("/cycles", adminOnly, seasonOnly);

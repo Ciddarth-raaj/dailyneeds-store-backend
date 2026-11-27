@@ -128,7 +128,7 @@ function validateBatch(files, ctx) {
     const store = ctx.storeOf(f.store_id);
     f.outlet = store;
     if (!store) f.issues.push(`Store ${f.store_id} is not in Branch Master`);
-    else if (!ctx.cycleStores.has(f.store_id)) f.issues.push(`${store.name} is not taking part in this audit cycle`);
+    else if (!ctx.cycleStores.has(f.store_id)) f.issues.push(`${store.name} is not taking part in this season`);
     if (fpSeen.has(f.fp)) f.issues.push(`Same content as ${fpSeen.get(f.fp)} in this upload`);
     else fpSeen.set(f.fp, f.name);
     if (auditorSeen.has(key(f))) {
