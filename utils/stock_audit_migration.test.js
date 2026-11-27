@@ -63,3 +63,32 @@ describe(`migration ${NAME}`, () => {
     }
   });
 });
+
+describe("migration 20270108120100-stock-audit-allotment-sapl", () => {
+  const N2 = "20270108120100-stock-audit-allotment-sapl";
+  const up2 = strip(fs.readFileSync(path.join(dir, "sqls", `${N2}-up.sql`), "utf8"));
+  const down2 = strip(fs.readFileSync(path.join(dir, "sqls", `${N2}-down.sql`), "utf8"));
+  const T2 = ["sa_rp_user", "sa_allotment_batch", "sa_allotment_file", "sa_allotment_line", "sa_allotment", "sa_sapl_season", "sa_sapl_standing", "sa_sapl_prize_share"];
+  const code = (s) => s.replace(/COMMENT '[^']*'/g, "").replace(/ON UPDATE CURRENT_TIMESTAMP/g, "");
+  it("runs after the foundation and reads its own files", () => {
+    const all = fs.readdirSync(dir).filter((f) => f.endsWith(".js")).sort();
+    assert.ok(all.indexOf(`${N2}.js`) > all.indexOf(`${NAME}.js`));
+    const js = fs.readFileSync(path.join(dir, `${N2}.js`), "utf8");
+    assert.ok(js.includes(`${N2}-up.sql`) && js.includes(`${N2}-down.sql`));
+  });
+  it("creates the 8 new tables only; down drops each", () => {
+    const created = [...up2.matchAll(/CREATE TABLE IF NOT EXISTS `([a-z_]+)`/g)].map((m) => m[1]);
+    assert.deepEqual(created.sort(), [...T2].sort());
+    for (const t of T2) assert.match(down2, new RegExp("DROP TABLE IF EXISTS `" + t + "`"));
+    assert.doesNotMatch(code(up2), /\b(ALTER|UPDATE|DELETE|DROP|TRUNCATE|INSERT)\b/i);
+  });
+  it("guards one auditor per auditable article per store cycle, and one revision number per auditor", () => {
+    assert.match(up2, /UNIQUE KEY `uq_sa_allotment_auditable` \(`cycle_id`, `auditable_article_id`\)/);
+    assert.match(up2, /IF\(`effective` = 'Y', `article_id`, NULL\)/);
+    assert.match(up2, /UNIQUE KEY `uq_sa_allotment_file_revision` \(`cycle_id`, `rp_user_id`, `revision`\)/);
+  });
+  it("one season per audit period; prize shares stay drafts outside payroll", () => {
+    assert.match(up2, /UNIQUE KEY `uq_sa_sapl_season_period` \(`period_code`\)/);
+    assert.doesNotMatch(code(up2), /payrun|payroll_posting/i);
+  });
+});
