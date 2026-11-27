@@ -1,0 +1,73 @@
+# Stock Audit - MySQL 8.4.9 COMPATIBILITY (CI only). Never touches production:
+# a throw-away MySQL 8.4.9 container on the GitHub runner, configured like the
+# production RDS instance (sql_mode, utf8mb4_0900_ai_ci, mysql_native_password
+# for the app's `mysql` driver). Runs, against feat/stock-audit-foundation:
+#   1. the three stock audit migrations up / down / up with db-migrate
+#   2. the database integration tests (production table definitions)
+#   3. the module's unit and route tests
+name: Stock Audit MySQL 8.4 compatibility (CI only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or commit of dailyneeds-store-backend to test"
+        required: false
+        default: feat/stock-audit-foundation
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-mysql84.yml]
+
+jobs:
+  mysql84:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'feat/stock-audit-foundation' }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Start MySQL 8.4.9 (production-like settings)
+        run: |
+          set -euo pipefail
+          docker run -d --name my84 -p 3306:3306 -e MYSQL_ROOT_PASSWORD=root mysql:8.4.9 \
+            --mysql-native-password=ON --sql-mode="IGNORE_SPACE,NO_ENGINE_SUBSTITUTION" \
+            --character-set-server=utf8mb4 --collation-server=utf8mb4_0900_ai_ci --lower-case-table-names=0 --log-bin=binlog
+          for i in $(seq 1 60); do docker exec my84 mysqladmin -uroot -proot ping >/dev/null 2>&1 && break; sleep 2; done
+          docker exec my84 mysql -uroot -proot -e "
+            CREATE DATABASE sa_scratch; CREATE DATABASE sa_migrate;
+            CREATE USER 'dnds'@'%' IDENTIFIED WITH mysql_native_password BY 'dnds';
+            GRANT ALL ON sa_scratch.* TO 'dnds'@'%'; GRANT ALL ON sa_migrate.* TO 'dnds'@'%';"
+          docker exec my84 mysql -uroot -proot -N -e "SELECT VERSION(), @@sql_mode, @@collation_server, @@log_bin"
+      - name: Install dependencies
+        env:
+          PUPPETEER_SKIP_DOWNLOAD: "true"
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Migrations up / down / up (db-migrate)
+        run: |
+          set -euo pipefail
+          npm i --no-save --ignore-scripts db-migrate@0.11.14 >/dev/null
+          M=$(mktemp -d); mkdir -p $M/migrations/sqls
+          for n in 20210824180623-permissions-table 20220105095614-adds-all-permission 20270108120000-stock-audit-foundation 20270108120100-stock-audit-allotment-sapl 20270108120200-stock-audit-participation-roles; do
+            cp migrations/mysql/migrations/$n.js $M/migrations/; cp migrations/mysql/migrations/sqls/$n-*.sql $M/migrations/sqls/ 2>/dev/null || true
+          done
+          echo '{"ci":{"host":"127.0.0.1","port":"3306","user":"dnds","password":"dnds","database":"sa_migrate","driver":"mysql","multipleStatements":true}}' > $M/database.json
+          DBM="$PWD/node_modules/.bin/db-migrate"
+          T() { docker exec my84 mysql -uroot -proot -N -e "SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='sa_migrate' AND TABLE_NAME LIKE 'sa\_%'; SELECT COUNT(*) FROM sa_migrate.all_permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%'" | tr '\n' ' '; }
+          cd $M
+          $DBM up -e ci --migrations-dir migrations
+          echo "after up:   sa tables + keys = $(T)"
+          for i in 1 2 3; do $DBM down -e ci --migrations-dir migrations; done
+          echo "after down: sa tables + keys = $(T)"
+          $DBM up -e ci --migrations-dir migrations
+          echo "after up:   sa tables + keys = $(T)"
+          [ "$(T)" = "29 22 " ] || { echo "::error::expected 29 tables and 22 keys"; exit 1; }
+          docker exec my84 mysql -uroot -proot -N -e "SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA='sa_migrate' AND TABLE_NAME LIKE 'sa\_%' ORDER BY 1" | head -40
+      - name: Database integration tests on MySQL 8.4.9
+        env:
+          SA_TEST_MYSQL: mysql://dnds:dnds@127.0.0.1:3306/sa_scratch
+        run: node --test --test-timeout=120000 repository/stock_audit.mysql.test.js
+      - name: Module unit and route tests
+        run: node --test utils/stock_audit_*.test.js routes/stock_audit.test.js services/retailpilot_spectra.test.js
