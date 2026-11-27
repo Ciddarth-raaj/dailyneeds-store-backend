@@ -41,3 +41,16 @@ Management-approved. Run: "Stock Audit Stage 2 activate" 45950419837 (agent bran
 - Check run 45950585692: pm2 online, DB OK, no new errors, all 29 sa_ tables empty, unauthenticated / bad-token
   requests refused (Access Denied) on every Stock Audit endpoint. No tokens were generated for any user.
 - Undo (only on approval): restore the .env backup (or delete the 6 lines) and reload; delete the 11 designation-11 rows.
+
+# Stage 4 - controlled RetailPilot sync (27 Nov 2026, management-approved)
+Official RetailPilot confirmation of the audit tables waived temporarily by management. Read-only SPECTRA access.
+- No audit cycle is needed for the sync (it mirrors RetailPilot; figures attach to cycles when read). None was created.
+- Run 1 DRY_RUN (08:55 UTC): 11,459 sessions / 6,871 lines / 16,584 ledger rows read, nothing written to the mirror;
+  matched RetailPilot's own totals; schema of all three streams as expected.
+- Run 2 HISTORICAL (09:01:22-09:02:31 UTC) from 25 Nov 2026 00:00 IST: mirror 11,461 sessions, 6,872 lines,
+  16,587 ledger rows, 50 RetailPilot users; 0 duplicates (primary keys on RetailPilot slugs).
+- Validation vs RetailPilot at the run's start: all five stores identical (finalized sessions, unique articles,
+  counters), 47/47 auditors identical, every IST day identical. No recounts exist in RetailPilot.
+- Warehouse: 9 in-progress sessions mirrored with outlet 2; excluded from every figure, screen and PDF.
+- `.env`: STOCK_AUDIT_SYNC_ENABLED false -> true (backup ~/env-backups/.env.stage4-20261127T090235Z); API reloaded.
+  Manual runs by administrators only (no key granted to HR); no schedule registered.
