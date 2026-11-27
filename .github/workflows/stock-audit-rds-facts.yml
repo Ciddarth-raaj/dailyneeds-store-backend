@@ -1,0 +1,62 @@
+# Stock Audit - RDS backup facts. Strictly READ-ONLY: a SELECT / CALL
+# mysql.rds_show_configuration on the production database, and AWS CLI
+# describe calls with the server's own role (refused today: printed as such).
+# Prints the RDS instance IDENTIFIER (the first label of the endpoint) at the
+# owner's request - never the full endpoint, user or password.
+name: Stock Audit RDS backup facts (read-only)
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-rds-facts.yml]
+
+jobs:
+  facts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: RDS facts (read-only)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'REMOTE'
+          set -uo pipefail
+          cd ~/dailyneeds-store-backend || exit 1
+          API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; [ -n "$API_ENV" ] || API_ENV=production
+          node - "$API_ENV" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql"); const { execSync } = require("child_process");
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[process.argv[2]];
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database });
+          const q = (sql) => new Promise((res) => c.query(sql, (e, r) => res(e ? { error: e.code } : r)));
+          const sh = (cmd) => { try { return execSync(cmd + " 2>&1 || true", { encoding: "utf8", timeout: 20000 }).trim().replace(/arn:[^\s"]+/g, "<arn>"); } catch (e) { return null; } };
+          (async () => {
+            const host = String(cfg.host || "");
+            const id = /\.rds\.amazonaws\.com$/i.test(host) ? host.split(".")[0] : null;
+            const region = (host.match(/\.([a-z]{2}-[a-z]+-\d)\.rds\.amazonaws\.com$/i) || [])[1] || null;
+            const out = {
+              rds_instance_identifier: id,
+              region,
+              mysql: await q("SELECT VERSION() AS version, @@log_bin AS log_bin, @@binlog_format AS binlog_format, @@binlog_expire_logs_seconds AS binlog_expire_seconds, @@innodb_flush_log_at_trx_commit AS flush_at_commit, @@sync_binlog AS sync_binlog"),
+              rds_configuration: await q("CALL mysql.rds_show_configuration"),
+              server_time_utc: await q("SELECT UTC_TIMESTAMP(6) AS now"),
+              aws_describe_instance: id ? sh(`aws rds describe-db-instances --db-instance-identifier ${id} --query "DBInstances[0].{retention:BackupRetentionPeriod,window:PreferredBackupWindow,latestRestorable:LatestRestorableTime,multiAZ:MultiAZ,deletionProtection:DeletionProtection}" --output json --region ${region}`) : null,
+              aws_describe_snapshots: id ? sh(`aws rds describe-db-snapshots --db-instance-identifier ${id} --query "length(DBSnapshots)" --output json --region ${region}`) : null,
+            };
+            console.log("RDSFACTS " + JSON.stringify(out));
+            c.end();
+          })();
+          NODE
+          REMOTE
