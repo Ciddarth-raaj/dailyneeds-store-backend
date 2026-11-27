@@ -330,21 +330,23 @@ CREATE TABLE IF NOT EXISTS `sa_payroll_posting` (
 
 -- Granular permissions (constants/stock_audit_permissions.js).
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'view_stock_audit' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_stock_audit');
-INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'view_own_stock_audit_performance' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_own_stock_audit_performance');
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'stock_audit_all_branches' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'stock_audit_all_branches');
+  SELECT 'view_stock_audit' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_stock_audit');
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'manage_stock_audit_cycles' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_stock_audit_cycles');
+  SELECT 'view_stock_audit_all_stores' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_stock_audit_all_stores');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'manage_stock_audit_employee_mapping' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_stock_audit_employee_mapping');
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'run_stock_audit_sync' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'run_stock_audit_sync');
+  SELECT 'manage_stock_audit_cycles' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_stock_audit_cycles');
 INSERT INTO `all_permissions` (`permission_key`)
-  SELECT 'manage_stock_audit_policy' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_stock_audit_policy');
+  SELECT 'import_stock_audit_allotment' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'import_stock_audit_allotment');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'approve_stock_audit_allotment_import' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'approve_stock_audit_allotment_import');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'review_stock_audit_verification' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_verification');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'review_stock_audit_variance' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_variance');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'review_stock_audit_eligibility' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'review_stock_audit_eligibility');
 INSERT INTO `all_permissions` (`permission_key`)
@@ -353,5 +355,19 @@ INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'approve_stock_audit_incentives' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'approve_stock_audit_incentives');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'revoke_stock_audit_incentives' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'revoke_stock_audit_incentives');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'manage_stock_audit_policy' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_stock_audit_policy');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'run_stock_audit_sync' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'run_stock_audit_sync');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'view_sapl_leaderboard' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_sapl_leaderboard');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'manage_sapl_competition' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_sapl_competition');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'manage_sapl_prize_distribution' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'manage_sapl_prize_distribution');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'view_stock_audit_hr_reports' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'view_stock_audit_hr_reports');
+INSERT INTO `all_permissions` (`permission_key`)
+  SELECT 'download_stock_audit_hr_pdf' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'download_stock_audit_hr_pdf');
 INSERT INTO `all_permissions` (`permission_key`)
   SELECT 'process_stock_audit_payroll' FROM DUAL WHERE NOT EXISTS (SELECT 1 FROM `all_permissions` WHERE `permission_key` = 'process_stock_audit_payroll');

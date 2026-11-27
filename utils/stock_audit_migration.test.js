@@ -52,8 +52,8 @@ describe(`migration ${NAME}`, () => {
     assert.match(up, /UNIQUE KEY `uq_sa_payroll_posting_source` \(`source_type`, `source_id`\)/);
     assert.match(up, /UNIQUE KEY `uq_sa_approval_level` \(`entity`, `entity_id`, `level`, `round`\)/);
   });
-  it("adds the 13 granular permissions idempotently (fit VARCHAR(45)) and removes them on down; no broad keys", () => {
-    assert.equal(PERMS.length, 13);
+  it("adds the 21 granular permissions idempotently (fit VARCHAR(45)) and removes them on down; no broad keys", () => {
+    assert.equal(PERMS.length, 21);
     assert.doesNotMatch(up, /'manage_stock_audit'|'approve_stock_audit_incentive'/);
     for (const k of PERMS) {
       assert.ok(k.length <= 45, k);
