@@ -54,3 +54,16 @@ Official RetailPilot confirmation of the audit tables waived temporarily by mana
 - Warehouse: 9 in-progress sessions mirrored with outlet 2; excluded from every figure, screen and PDF.
 - `.env`: STOCK_AUDIT_SYNC_ENABLED false -> true (backup ~/env-backups/.env.stage4-20261127T090235Z); API reloaded.
   Manual runs by administrators only (no key granted to HR); no schedule registered.
+
+# Stage 5 preparation - read-only review (27 Nov 2026, 14:42-14:45 IST)
+Runs 45971714666 (REVIEW) and 45972169620 (VARIANCE). Nothing written.
+- Shortage / excess quantity: screen = each article's ORIGINAL count exactly; plain sum = original + 159 repeat
+  finalizations (59 reverse the first count, 84 book nothing, 6 same direction, 10 after a nil first count).
+  Net per article (all counts netted) equals the matched RetailPilot STK_ADJ ledger quantity; every one of the
+  5,607 non-marker ledger rows lines up with a finalized count. Screen VALUE is filed by the quantity's sign:
+  zero-quantity counts with a value change and opposite-sign counts are dropped or misfiled (code fix proposed,
+  not made).
+- Warehouse: absent from store, employee, HR PDF and standings outputs.
+- Retrospective mapping (in memory): store total unchanged, one row per employee, two ids of one employee = one
+  row with the union of articles, no duplicate credit; estimate stays Pending.
+- HR setup not started (0 cycles). No recounts. Account 197: no dependency found (details in the chat report).
