@@ -15580,10 +15580,13 @@ var sh = (cmd) => {
   const mapRows = await q("SELECT m.rp_user_id, m.employee_id, e.store_id, e.status FROM wh_rp_staff_map m LEFT JOIN new_employee e ON e.employee_id = m.employee_id WHERE m.employee_id IS NOT NULL");
   out("STAFF", { outlets: outlets.map((o) => ({ outlet_id: o.outlet_id, name: o.outlet_name, rp: o.retailpilot_id })), designations: desig, active_by_store_designation: staff, staff_map: map[0] || map });
   const spectra = spectraFactory({ ...rpConfig, retry: spectraFactory.DEFAULT_RETRY });
-  const rows = [];
+  const AS_OF = new Date(Date.now() - 6e4).toISOString();
+  out("AS_OF", { utc: AS_OF });
+  const all = [];
   await spectra.queryKeyset((c, s) => STREAMS.session.build(c, s), startCursor(null, { since: SINCE }), STREAMS.session.cursorOf, async (page) => {
-    rows.push(...page);
+    all.push(...page);
   }, { size: 2e3 });
+  const rows = all.filter((r) => r.status !== "FINALIZED" || r.finalized_at && toUtc(r.finalized_at).iso < toUtc(AS_OF).iso);
   const agg = async (label, sql) => {
     try {
       const r = await spectra.queryAll(sql, 20);
@@ -15596,11 +15599,10 @@ var sh = (cmd) => {
   };
   const S = "public.stock_audit_count_session";
   const since = toUtc(SINCE).iso;
-  await agg("store_finalized", `SELECT store_id, COUNT(*) AS finalized_sessions, COUNT(DISTINCT article_id) AS distinct_articles, COUNT(DISTINCT finalized_by) AS counters FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' GROUP BY store_id ORDER BY store_id`);
+  await agg("store_finalized", `SELECT store_id, COUNT(*) AS finalized_sessions, COUNT(DISTINCT article_id) AS distinct_articles, COUNT(DISTINCT finalized_by) AS counters FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' AND finalized_at < '${AS_OF}' GROUP BY store_id ORDER BY store_id`);
   await agg("store_status", `SELECT store_id, status, COUNT(*) AS n FROM ${S} WHERE updated_at >= '${since}' GROUP BY store_id, status ORDER BY store_id, status`);
-  await agg("store_user_articles", `SELECT store_id, finalized_by, COUNT(DISTINCT article_id) AS distinct_articles, COUNT(*) AS sessions FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' GROUP BY store_id, finalized_by ORDER BY store_id, finalized_by`);
-  await agg("store_day_articles", `SELECT store_id, DATE(finalized_at AT TIME ZONE 'Asia/Kolkata') AS ist_day, COUNT(DISTINCT article_id) AS distinct_articles FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' GROUP BY store_id, DATE(finalized_at AT TIME ZONE 'Asia/Kolkata') ORDER BY store_id, ist_day`);
-  await agg("repeat_finalized", `WITH d AS (SELECT store_id, article_id, COUNT(*) AS c, COUNT(DISTINCT finalized_by) AS users FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' GROUP BY store_id, article_id) SELECT c AS finalized_per_article, users, COUNT(*) AS articles FROM d WHERE c > 1 GROUP BY c, users ORDER BY c, users`);
+  await agg("store_user_articles", `SELECT store_id, finalized_by, COUNT(DISTINCT article_id) AS distinct_articles, COUNT(*) AS sessions FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' AND finalized_at < '${AS_OF}' GROUP BY store_id, finalized_by ORDER BY store_id, finalized_by`);
+  await agg("repeat_finalized", `WITH d AS (SELECT store_id, article_id, COUNT(*) AS c, COUNT(DISTINCT finalized_by) AS users FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${since}' AND finalized_at < '${AS_OF}' GROUP BY store_id, article_id) SELECT c AS finalized_per_article, users, COUNT(*) AS articles FROM d WHERE c > 1 GROUP BY c, users ORDER BY c, users`);
   const byRp = new Map(outlets.map((o) => [o.retailpilot_id, Number(o.outlet_id)]));
   const sessions = rows.map((r) => sessionRow(r, (rp) => byRp.has(rp) ? byRp.get(rp) : null)).map((s) => ({
     ...s,
@@ -15632,7 +15634,7 @@ var sh = (cmd) => {
   for (let t = Date.parse("2026-11-25T00:00:00+05:30"); t <= now.getTime(); t += 864e5) dayBounds.push([new Date(t).toISOString(), new Date(t + 864e5).toISOString(), istDate(new Date(t + 36e5).toISOString())]);
   const perDay = [];
   for (const [from, to, day] of dayBounds) {
-    const r = await agg(`day_${day}`, `SELECT store_id, COUNT(DISTINCT article_id) AS distinct_articles FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${from}' AND finalized_at < '${to}' GROUP BY store_id ORDER BY store_id`);
+    const r = await agg(`day_${day}`, `SELECT store_id, COUNT(DISTINCT article_id) AS distinct_articles FROM ${S} WHERE status = 'FINALIZED' AND finalized_at >= '${from}' AND finalized_at < '${to < AS_OF ? to : AS_OF}' GROUP BY store_id ORDER BY store_id`);
     perDay.push({ day, spectra: r });
   }
   const dndsDays = {};
@@ -15666,12 +15668,12 @@ var sh = (cmd) => {
   out("DNDS_VARIANCE", { ledger_rows: ledger.length, markers: markers.length, by_store: varBy });
   await agg("stkadj_nonmarker_by_store", `SELECT store_id, SUM(CASE WHEN quantity < 0 THEN -quantity ELSE 0 END) AS short_qty, SUM(CASE WHEN quantity > 0 THEN quantity ELSE 0 END) AS excess_qty, COUNT(*) AS rows_n FROM public.stock_ledgers WHERE action = 'STK_ADJ' AND quantity <> 0 AND ts >= '${since}' GROUP BY store_id ORDER BY store_id`);
   if (/\.rds\.amazonaws\.com$/i.test(host)) {
-    const raw = sh("aws rds describe-db-instances --output json 2>&1");
+    const raw = sh("aws rds describe-db-instances --output json 2>&1 || true");
     let rds = { available: false, note: raw ? String(raw).slice(0, 160).replace(/arn:[^\s"]+/g, "<arn>") : "no output" };
     try {
       const inst = JSON.parse(raw).DBInstances.find((d) => d.Endpoint && d.Endpoint.Address === host);
       if (inst) {
-        const snaps = sh(`aws rds describe-db-snapshots --db-instance-identifier ${JSON.stringify(inst.DBInstanceIdentifier)} --output json 2>&1`);
+        const snaps = sh(`aws rds describe-db-snapshots --db-instance-identifier ${JSON.stringify(inst.DBInstanceIdentifier)} --output json 2>&1 || true`);
         let snap = null;
         try {
           const list = JSON.parse(snaps).DBSnapshots || [];
