@@ -1,0 +1,57 @@
+# Stock Audit - season simplification (management-approved): remove the season-management
+# key (manage_sapl_competition) from Hr Executive (designation 11). ONE row, one transaction;
+# stops, changing nothing, unless exactly that one row is found. Prints keys and counts only.
+name: Stock Audit season - HR permission (one-time)
+
+"on":
+  push:
+    branches: [claude/new-session-71890u]
+    paths: [.github/workflows/stock-audit-season-hr-permission.yml]
+
+jobs:
+  revoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Configure SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/dnds_gha_deploy
+          chmod 600 ~/.ssh/dnds_gha_deploy
+          ssh-keyscan -H "$SSH_HOST" >> ~/.ssh/known_hosts
+      - name: Remove manage_sapl_competition from designation 11
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "bash -s" <<'REMOTE'
+          set -euo pipefail
+          cd ~/dailyneeds-store-backend
+          E="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"
+          node - "${E:-production}" <<'NODE'
+          const fs = require("fs"); const mysql = require("mysql");
+          const cfg = JSON.parse(fs.readFileSync("config.json", "utf8")).db.mysql[process.argv[2]];
+          const c = mysql.createConnection({ host: cfg.host, port: cfg.port, user: cfg.username, password: cfg.password, database: cfg.database });
+          const q = (sql, p = []) => new Promise((res, rej) => c.query(sql, p, (e, r) => (e ? rej(e) : res(r))));
+          const grants = async () => (await q("SELECT designation_id, permission_key FROM permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%' ORDER BY designation_id, permission_key")).map((r) => r.designation_id + ":" + r.permission_key);
+          (async () => {
+            const before = { total: (await q("SELECT COUNT(*) AS n FROM permissions"))[0].n, d11: (await q("SELECT COUNT(*) AS n FROM permissions WHERE designation_id = 11"))[0].n, stock_audit: await grants() };
+            console.log("@@BEFORE " + JSON.stringify(before));
+            await q("START TRANSACTION");
+            const target = await q("SELECT COUNT(*) AS n FROM permissions WHERE designation_id = 11 AND permission_key = 'manage_sapl_competition' FOR UPDATE");
+            if (Number(target[0].n) !== 1) { await q("ROLLBACK"); console.log("@@STOP expected exactly 1 row, found " + target[0].n + " - nothing changed"); process.exitCode = 1; c.end(); return; }
+            const r = await q("DELETE FROM permissions WHERE designation_id = 11 AND permission_key = 'manage_sapl_competition'");
+            if (r.affectedRows !== 1) { await q("ROLLBACK"); console.log("@@STOP deleted " + r.affectedRows + " - rolled back"); process.exitCode = 1; c.end(); return; }
+            await q("COMMIT");
+            const after = { total: (await q("SELECT COUNT(*) AS n FROM permissions"))[0].n, d11: (await q("SELECT COUNT(*) AS n FROM permissions WHERE designation_id = 11"))[0].n, stock_audit: await grants() };
+            console.log("@@AFTER " + JSON.stringify(after));
+            console.log("@@REMOVED " + JSON.stringify(before.stock_audit.filter((k) => !after.stock_audit.includes(k))));
+            c.end();
+          })().catch((e) => { console.log("@@STOP " + e.code + " (rolled back)"); try { c.query("ROLLBACK"); } catch (x) {} process.exitCode = 1; });
+          NODE
+          REMOTE
