@@ -34,7 +34,7 @@ jobs:
         env:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
-          SINCE: ${{ inputs.since_utc || '2026-11-27 05:28:00' }}
+          SINCE: ${{ inputs.since_utc || '2026-11-27 06:13:00' }}
         run: |
           set -euo pipefail
           ssh -i ~/.ssh/dnds_gha_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes "${SSH_USER}@${SSH_HOST}" "SINCE='${SINCE}' bash -s" <<'REMOTE'
@@ -45,7 +45,8 @@ jobs:
           echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status+':restarts='+p.pm2_env.restart_time+':up_since='+new Date(p.pm2_env.pm_uptime).toISOString()).join(' | '))}catch(e){console.log('n/a')}})")"
           echo "@@SWITCH_ENV $(grep -E '^STOCK_AUDIT_' .env 2>/dev/null | tr '\n' ' ' || true)"
           if [ -f config/stock_audit.js ]; then echo "@@SWITCH_EFFECTIVE $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"; else echo "@@SWITCH_EFFECTIVE module not deployed"; fi
-          for p in /login /employee /attendance /payroll /purchase /grn /sales-reconciliation /retailpilot/status /stock-audit/meta; do printf "@@HTTP_API %s %s\n" "$p" "$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://127.0.0.1:8080$p")"; done
+          for p in /login /employee /attendance /payroll /purchase /grn /sales-reconciliation /retailpilot/status /stock-audit/meta /stock-audit/stores /stock-audit/cycles /stock-audit/mapping /stock-audit/eligibility /stock-audit/roles /stock-audit/hr/report /stock-audit/settings /stock-audit/sync; do B=$(curl -s -m 10 -w ' HTTP%{http_code}' "http://127.0.0.1:8080$p"); printf "@@HTTP_API %s %s body_code=%s\n" "$p" "${B##* }" "$(printf '%s' "${B% *}" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const j=JSON.parse(s);console.log((j.code??'-')+' '+String(j.msg||'').slice(0,40))}catch(e){console.log('non-json')}})")"; done
+          B=$(curl -s -m 10 -H 'x-access-token: not-a-token' http://127.0.0.1:8080/stock-audit/meta); echo "@@HTTP_BADTOKEN /stock-audit/meta $B" | cut -c1-120
           for p in / /login /stock-audit; do printf "@@HTTP_FE %s %s\n" "$p" "$(curl -s -o /dev/null -m 15 -w '%{http_code}' "http://127.0.0.1:3000$p")"; done
           API_ENV="$(pm2 env 0 2>/dev/null | sed -n 's/^NODE_ENV: //p' | head -1 | tr -d '[:space:]')"; [ -n "$API_ENV" ] || API_ENV=production
           node - "$API_ENV" <<'NODE'
@@ -63,6 +64,10 @@ jobs:
             out.sa_rows = await q("SELECT (SELECT COUNT(*) FROM sa_cycle) AS cycles, (SELECT COUNT(*) FROM sa_rp_session) AS mirrored_sessions, (SELECT COUNT(*) FROM sa_sync_run) AS sync_runs");
             out.keys = await q(`SELECT COUNT(*) AS n FROM all_permissions WHERE permission_key IN ('view_own_stock_audit_performance','view_stock_audit','view_stock_audit_all_stores','manage_stock_audit_employee_mapping','manage_stock_audit_cycles','import_stock_audit_allotment','approve_stock_audit_allotment_import','review_stock_audit_verification','review_stock_audit_eligibility','calculate_stock_audit_incentives','approve_stock_audit_incentives','revoke_stock_audit_incentives','manage_stock_audit_policy','run_stock_audit_sync','view_sapl_leaderboard','manage_sapl_competition','manage_sapl_prize_distribution','view_stock_audit_hr_reports','download_stock_audit_hr_pdf','process_stock_audit_payroll','manage_stock_audit_roles','approve_stock_audit_exclusions')`);
             out.keys_granted = await q("SELECT COUNT(*) AS n FROM permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%'");
+            out.grants_by_designation = await q("SELECT designation_id, COUNT(*) AS n, GROUP_CONCAT(permission_key ORDER BY permission_key) AS ks FROM permissions WHERE permission_key LIKE '%stock_audit%' OR permission_key LIKE '%sapl%' GROUP BY designation_id");
+            out.permissions_total = await q("SELECT COUNT(*) AS n, SUM(designation_id = 11) AS d11 FROM permissions");
+            out.can_enter = await q("SELECT SUM(u.user_type = 2 AND COALESCE(u.status,1) = 1) AS admins, SUM(u.user_type <> 2 AND ne.designation_id = 11 AND ne.status = 1) AS hr_executive FROM `user` u LEFT JOIN new_employee ne ON ne.employee_id = u.employee_id");
+            out.sa_nonempty = await q("SELECT COALESCE(SUM(TABLE_ROWS),0) AS approx_rows FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME LIKE 'sa\\_%'");
             if (since) {
               out.sync_since = await q("SELECT log_type, status, source, COUNT(*) AS n, MAX(created_at) AS last FROM api_sync_log WHERE created_at >= ? GROUP BY log_type, status, source ORDER BY log_type", [since]);
               out.attendance_rows_since = await q("SELECT COUNT(*) AS n FROM biomax_raw_request WHERE created_at >= ?", [since]);
