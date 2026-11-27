@@ -67,6 +67,48 @@ function employeeIncentive({ auditedArticles = 0, eligibleArticles = 0, pendingE
   return { ...base, status: "CALCULATED", accuracy: S.available(accuracyPct), rate: S.available(rate), amount: S.available(amount), final: approved === true };
 }
 
+/**
+ * ESTIMATED incentive for one employee, shown while the cycle is running so
+ * people can see where they stand. It is NEVER payable: approval and payroll
+ * read `employeeIncentive().amount` only.
+ *
+ * - Needs at least one resolved recount: with none, the estimate is PENDING
+ *   (accuracy is never assumed). Only the maximum possible is shown.
+ * - Uses the slab of the accuracy measured SO FAR (exact, never rounded up).
+ * - Base = unique articles audited so far, less those under eligibility review.
+ * - `projected` = the same rate over the full allotment, when the allotment is imported.
+ * - `max_so_far` = base at the top slab: a ceiling, not an estimate.
+ * @param allottedArticles null when the allotment is not imported
+ */
+function estimateEmployeeIncentive({ auditedArticles = 0, pendingEligibility = 0, allottedArticles = null, verdicts = [] }, policy = DEFAULT_POLICY) {
+  const sample = sampleOf(auditedArticles, verdicts, policy);
+  const out = { estimate_only: true, payable: false, sample, base_articles: 0 };
+  if (!auditedArticles) {
+    const na = S.notApplicable(S.REASON.NO_ARTICLES);
+    return { ...out, basis: "NO_ARTICLES", accuracy: na, rate: na, estimate: na, projected: na, max_so_far: na };
+  }
+  const baseArticles = Math.max(0, auditedArticles - pendingEligibility);
+  const topRate = Math.max(...policy.employee.slabs.map((x) => x.ratePerArticle));
+  const maxSoFar = S.available(rupees(paise(topRate) * baseArticles));
+  const allotKnown = allottedArticles != null && allottedArticles >= 0;
+  if (sample.verified === 0) {
+    const p = S.pending(S.REASON.PENDING_VERIFICATION);
+    return { ...out, base_articles: baseArticles, basis: "NO_RECOUNTS", accuracy: p, rate: p, estimate: p, projected: allotKnown ? p : S.unavailable(S.REASON.ALLOTMENT_UNAVAILABLE), max_so_far: maxSoFar };
+  }
+  const rate = rateFor(sample.matched, sample.verified, policy);
+  const projectedArticles = allotKnown ? Math.max(0, allottedArticles - pendingEligibility) : null;
+  return {
+    ...out,
+    base_articles: baseArticles,
+    basis: sample.met ? "SAMPLE_MET" : "PARTIAL_SAMPLE",
+    accuracy: S.available((sample.matched * 100) / sample.verified),
+    rate: S.available(rate),
+    estimate: S.available(rupees(paise(rate) * baseArticles)),
+    projected: allotKnown ? S.available(rupees(paise(rate) * projectedArticles)) : S.unavailable(S.REASON.ALLOTMENT_UNAVAILABLE),
+    max_so_far: maxSoFar,
+  };
+}
+
 // ------------------------------------------------------------------ KPI measures
 
 /**
@@ -179,6 +221,7 @@ function operationsManagerIncentive(stores = [], policy = DEFAULT_POLICY, { appr
 module.exports = {
   rateFor,
   employeeIncentive,
+  estimateEmployeeIncentive,
   measureCompletion,
   measureStoreAccuracy,
   measureSampleMet,

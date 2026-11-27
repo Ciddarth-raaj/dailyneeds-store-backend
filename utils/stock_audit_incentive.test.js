@@ -123,3 +123,43 @@ describe("management incentives (confirmed allocations)", () => {
     assert.equal(all.amount.value, 2000);
   });
 });
+
+describe("estimated employee incentive (never payable)", () => {
+  const est = (x) => I.estimateEmployeeIncentive(x);
+  it("no recounts: estimate pending, accuracy never assumed, ceiling shown", () => {
+    const r = est({ auditedArticles: 400, verdicts: [] });
+    assert.equal(r.estimate.status, S.STATUS.PENDING);
+    assert.equal(r.accuracy.status, S.STATUS.PENDING);
+    assert.equal(r.max_so_far.value, 440);
+    assert.equal(r.payable, false);
+  });
+  it("partial sample uses the accuracy measured so far, labelled partial", () => {
+    const r = est({ auditedArticles: 400, allottedArticles: 800, verdicts: verdicts(10, 0) });
+    assert.equal(r.basis, "PARTIAL_SAMPLE");
+    assert.equal(r.estimate.value, 440);
+    assert.equal(r.projected.value, 880);
+  });
+  it("exact slab, never rounded up (96.9% -> 0.50)", () => {
+    const r = est({ auditedArticles: 1000, verdicts: verdicts(969, 31) });
+    assert.equal(r.rate.value, 0.5);
+    assert.equal(r.estimate.value, 500);
+  });
+  it("below 95% estimates a real nil, not pending", () => {
+    const r = est({ auditedArticles: 100, verdicts: verdicts(9, 1) });
+    assert.equal(r.estimate.status, S.STATUS.AVAILABLE);
+    assert.equal(r.estimate.value, 0);
+  });
+  it("articles under eligibility review are left out; no allotment -> projection unavailable", () => {
+    const r = est({ auditedArticles: 300, pendingEligibility: 20, verdicts: verdicts(15, 0) });
+    assert.equal(r.base_articles, 280);
+    assert.equal(r.estimate.value, 308);
+    assert.equal(r.projected.status, S.STATUS.UNAVAILABLE);
+  });
+  it("does not change the payable calculation", () => {
+    const r = I.employeeIncentive({ auditedArticles: 400, eligibleArticles: 400, verdicts: verdicts(10, 0) });
+    assert.equal(r.amount.status, S.STATUS.PENDING);
+  });
+  it("no articles -> not applicable", () => {
+    assert.equal(est({ auditedArticles: 0 }).estimate.status, S.STATUS.NOT_APPLICABLE);
+  });
+});
