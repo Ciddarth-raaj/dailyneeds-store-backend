@@ -547,6 +547,150 @@ class StockAuditRepository {
     return this.q(`SELECT p.employee_id, e.employee_name, p.outlet_id, p.method, p.amount, p.status FROM sa_sapl_prize_share p LEFT JOIN new_employee e ON e.employee_id = p.employee_id WHERE p.season_id = ? ORDER BY p.amount DESC, p.employee_id`, [seasonId]);
   }
 
+  // ---------------------------------------------------------------- settings (with history)
+  async getSetting(key) {
+    const r = await this.q(`SELECT value_json, updated_by, updated_at FROM sa_setting WHERE setting_key = ?`, [key]);
+    return r.length ? { value: parse(r[0].value_json), updated_by: r[0].updated_by, updated_at: r[0].updated_at } : null;
+  }
+
+  async setSetting(key, value, by) {
+    await this.tx(async (q) => {
+      await q(`INSERT INTO sa_setting (setting_key, value_json, updated_by) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE value_json = VALUES(value_json), updated_by = VALUES(updated_by)`, [key, JSON.stringify(value), by]);
+      await q(`INSERT INTO sa_setting_history (setting_key, value_json, changed_by) VALUES (?, ?, ?)`, [key, JSON.stringify(value), by]);
+    });
+  }
+
+  async settingHistory(key) {
+    const rows = await this.q(`SELECT h.value_json, h.changed_by, e.employee_name AS changed_by_name, h.changed_at FROM sa_setting_history h LEFT JOIN new_employee e ON e.employee_id = h.changed_by WHERE h.setting_key = ? ORDER BY h.id DESC LIMIT 50`, [key]);
+    return rows.map((r) => ({ ...r, value: parse(r.value_json) }));
+  }
+
+  async designations() {
+    return this.q(`SELECT designation_id, designation_name FROM designation ORDER BY designation_id`);
+  }
+
+  // ---------------------------------------------------------------- eligible headcount
+  /** Active employees of these stores holding one of these designations (live). */
+  async activeStaff(outletIds, designationIds) {
+    if (!outletIds.length || !designationIds.length) return [];
+    const rows = await this.q(
+      `SELECT e.employee_id, e.employee_name, e.store_id, e.designation_id, d.designation_name
+         FROM new_employee e LEFT JOIN designation d ON d.designation_id = e.designation_id
+        WHERE e.status = 1 AND e.store_id IN (${marks(outletIds.length)}) AND e.designation_id IN (${marks(designationIds.length)})
+        ORDER BY e.store_id, e.employee_name, e.employee_id`,
+      [...outletIds, ...designationIds]
+    );
+    return rows.map((r) => ({ employee_id: Number(r.employee_id), name: r.employee_name, outlet_id: Number(r.store_id), designation_id: Number(r.designation_id), designation: r.designation_name }));
+  }
+
+  /** Active employees with these designations, any store (Operations Manager candidates). */
+  async activeByDesignation(designationIds) {
+    if (!designationIds.length) return [];
+    const rows = await this.q(
+      `SELECT e.employee_id, e.employee_name, e.store_id, e.designation_id, d.designation_name
+         FROM new_employee e LEFT JOIN designation d ON d.designation_id = e.designation_id
+        WHERE e.status = 1 AND e.designation_id IN (${marks(designationIds.length)}) ORDER BY e.employee_name, e.employee_id`,
+      designationIds
+    );
+    return rows.map((r) => ({ employee_id: Number(r.employee_id), name: r.employee_name, outlet_id: r.store_id == null ? null : Number(r.store_id), designation_id: Number(r.designation_id), designation: r.designation_name }));
+  }
+
+  async employee(employeeId) {
+    const r = await this.q(`SELECT e.employee_id, e.employee_name, e.store_id, e.designation_id, e.status FROM new_employee e WHERE e.employee_id = ?`, [employeeId]);
+    return r.length ? { employee_id: Number(r[0].employee_id), name: r[0].employee_name, outlet_id: r[0].store_id == null ? null : Number(r[0].store_id), designation_id: r[0].designation_id == null ? null : Number(r[0].designation_id), active: Number(r[0].status) === 1 } : null;
+  }
+
+  async snapshots(cycleIds) {
+    if (!cycleIds.length) return [];
+    return this.q(`SELECT s.cycle_id, s.employee_count, s.designation_ids, s.taken_by, e.employee_name AS taken_by_name, s.taken_at FROM sa_cycle_snapshot s LEFT JOIN new_employee e ON e.employee_id = s.taken_by WHERE s.cycle_id IN (${marks(cycleIds.length)})`, cycleIds)
+      .then((rows) => rows.map((r) => ({ ...r, cycle_id: Number(r.cycle_id), designation_ids: parse(r.designation_ids) })));
+  }
+
+  async snapshotEmployees(cycleIds) {
+    if (!cycleIds.length) return [];
+    const rows = await this.q(`SELECT cycle_id, employee_id, outlet_id, employee_name, designation_id, source, added_by, note, created_at FROM sa_cycle_employee WHERE cycle_id IN (${marks(cycleIds.length)}) ORDER BY outlet_id, employee_name`, cycleIds);
+    return rows.map((r) => ({ ...r, cycle_id: Number(r.cycle_id), employee_id: Number(r.employee_id), outlet_id: Number(r.outlet_id), designation_id: r.designation_id == null ? null : Number(r.designation_id), name: r.employee_name }));
+  }
+
+  /** Freeze a store cycle's eligible headcount (once). */
+  async takeSnapshot(cycleId, employees, designationIds, by) {
+    return this.tx(async (q) => {
+      const have = await q(`SELECT cycle_id FROM sa_cycle_snapshot WHERE cycle_id = ? FOR UPDATE`, [cycleId]);
+      if (have.length) throw codeError(409, "This cycle's eligibility snapshot is already taken");
+      await q(`INSERT INTO sa_cycle_snapshot (cycle_id, employee_count, designation_ids, taken_by) VALUES (?, ?, ?, ?)`, [cycleId, employees.length, JSON.stringify(designationIds), by]);
+      for (const part of chunks(employees, 500)) {
+        await q(`INSERT INTO sa_cycle_employee (cycle_id, employee_id, outlet_id, employee_name, designation_id, source) VALUES ${part.map(() => "(?, ?, ?, ?, ?, 'SNAPSHOT')").join(",")}`,
+          part.flatMap((e) => [cycleId, e.employee_id, e.outlet_id, e.name, e.designation_id]));
+      }
+      return employees.length;
+    });
+  }
+
+  async addToSnapshot(cycleId, e, by, note) {
+    return this.tx(async (q) => {
+      const have = await q(`SELECT cycle_id FROM sa_cycle_snapshot WHERE cycle_id = ? FOR UPDATE`, [cycleId]);
+      if (!have.length) throw codeError(409, "Take the snapshot first");
+      await q(`INSERT INTO sa_cycle_employee (cycle_id, employee_id, outlet_id, employee_name, designation_id, source, added_by, note) VALUES (?, ?, ?, ?, ?, 'ADDED', ?, ?)`, [cycleId, e.employee_id, e.outlet_id, e.name, e.designation_id, by, note]);
+      await q(`UPDATE sa_cycle_snapshot SET employee_count = employee_count + 1 WHERE cycle_id = ?`, [cycleId]);
+    });
+  }
+
+  // ---------------------------------------------------------------- exclusions (request -> decision by someone else)
+  async exclusions(cycleIds) {
+    if (!cycleIds.length) return [];
+    const rows = await this.q(
+      `SELECT x.id, x.cycle_id, x.employee_id, e.employee_name, x.reason, x.status, x.requested_by, rq.employee_name AS requested_by_name, x.requested_at,
+              x.decided_by, dc.employee_name AS decided_by_name, x.decided_at, x.decision_note
+         FROM sa_employee_exclusion x
+         LEFT JOIN new_employee e ON e.employee_id = x.employee_id
+         LEFT JOIN new_employee rq ON rq.employee_id = x.requested_by
+         LEFT JOIN new_employee dc ON dc.employee_id = x.decided_by
+        WHERE x.cycle_id IN (${marks(cycleIds.length)}) ORDER BY x.id DESC`,
+      cycleIds
+    );
+    return rows.map((r) => ({ ...r, id: Number(r.id), cycle_id: Number(r.cycle_id), employee_id: Number(r.employee_id) }));
+  }
+
+  async exclusion(id) {
+    const r = await this.q(`SELECT id, cycle_id, employee_id, reason, status, requested_by FROM sa_employee_exclusion WHERE id = ?`, [id]);
+    return r.length ? { ...r[0], id: Number(r[0].id), cycle_id: Number(r[0].cycle_id), employee_id: Number(r[0].employee_id), requested_by: Number(r[0].requested_by) } : null;
+  }
+
+  async requestExclusion(cycleId, employeeId, reason, by) {
+    const r = await this.q(`INSERT INTO sa_employee_exclusion (cycle_id, employee_id, reason, requested_by) VALUES (?, ?, ?, ?)`, [cycleId, employeeId, reason, by]);
+    return r.insertId;
+  }
+
+  /** Decide an open request; the WHERE keeps it to one decision even when two people press at once. */
+  async decideExclusion(id, status, by, note) {
+    const r = await this.q(`UPDATE sa_employee_exclusion SET status = ?, decided_by = ?, decided_at = CURRENT_TIMESTAMP, decision_note = ? WHERE id = ? AND status = 'REQUESTED'`, [status, by, note || null, id]);
+    return r.affectedRows;
+  }
+
+  // ---------------------------------------------------------------- responsible persons
+  async roleAssignments(periodCode, { history = false } = {}) {
+    const rows = await this.q(
+      `SELECT a.id, a.period_code, a.cycle_id, a.outlet_id, a.role, a.employee_id, e.employee_name, a.designation_id, a.status, a.reason,
+              a.assigned_by, ab.employee_name AS assigned_by_name, a.assigned_at, a.replaced_by, a.replaced_at
+         FROM sa_role_assignment a
+         LEFT JOIN new_employee e ON e.employee_id = a.employee_id
+         LEFT JOIN new_employee ab ON ab.employee_id = a.assigned_by
+        WHERE a.period_code = ? ${history ? "" : "AND a.status = 'ACTIVE'"} ORDER BY a.outlet_id, a.role, a.id DESC`,
+      [periodCode]
+    );
+    return rows.map((r) => ({ ...r, id: Number(r.id), outlet_id: Number(r.outlet_id), employee_id: Number(r.employee_id), cycle_id: r.cycle_id == null ? null : Number(r.cycle_id) }));
+  }
+
+  /** Replace the current holder (kept as history) and assign; the unique keys refuse a duplicate. */
+  async assignRole({ period_code, cycle_id, outlet_id, role, employee_id, designation_id, reason, by }) {
+    return this.tx(async (q) => {
+      await q(`UPDATE sa_role_assignment SET status = 'REPLACED', replaced_by = ?, replaced_at = CURRENT_TIMESTAMP WHERE period_code = ? AND outlet_id = ? AND role = ? AND status = 'ACTIVE'`, [by, period_code, outlet_id, role]);
+      const r = await q(`INSERT INTO sa_role_assignment (period_code, cycle_id, outlet_id, role, employee_id, designation_id, reason, assigned_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [period_code, cycle_id, outlet_id, role, employee_id, designation_id, reason || null, by]);
+      return r.insertId;
+    });
+  }
+
   // ---------------------------------------------------------------- policy
   async ruleSets() {
     return this.q(`SELECT version, status, note, supersedes, created_by, approved_by, approved_at, created_at FROM sa_rule_set ORDER BY version DESC`);

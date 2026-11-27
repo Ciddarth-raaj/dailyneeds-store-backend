@@ -22,8 +22,17 @@ const PERIOD_RE = /^[A-Za-z0-9_-]{2,16}$/;
 const MAX_FILES = 400;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
-/** Who holds each store role, by designation name. Confirm these with HR. */
-const ROLE_DESIGNATIONS = { SUPERVISOR: /supervisor/i, STORE_MANAGER: /store\s*manager|branch\s*manager/i };
+/**
+ * Designation IDS (DNDS designation table, read in production 27 Nov 2026).
+ * Defaults only: HR changes them in the module settings (with history).
+ *   eligible counting staff: 2 Customer Service Associate, 4 Cashier
+ *   roles: 9 Supervisor, 3 Store Manager, 27 Operations Manager
+ */
+const DEFAULT_SETTINGS = Object.freeze({
+  eligible_designation_ids: [2, 4],
+  role_designation_ids: { SUPERVISOR: [9], STORE_MANAGER: [3], OPERATIONS_MANAGER: [27] },
+});
+const ROLES = ["SUPERVISOR", "STORE_MANAGER", "OPERATIONS_MANAGER"];
 
 const page = (list, p = 1, size = 20) => {
   const n = Math.min(Math.max(Number(size) || 20, 1), 200);
@@ -92,7 +101,8 @@ class StockAuditUsecase {
     const outletIds = cycles.map((c) => c.outlet_id);
     const from = cycles.length ? istMidnightUtc(cycles.map((c) => c.start_date).sort()[0]) : null;
     const to = cycles.length ? istMidnightUtc(addDays(cycles.map((c) => c.end_date).sort().pop(), 1)) : null;
-    const [sessions, allotment, allotmentCycles, people, rpNames, verifications, reviews, verifiedStores, staff, lastSync] = await Promise.all([
+    const settings = await this.settings();
+    const [sessions, allotment, allotmentCycles, people, rpNames, verifications, reviews, verifiedStores, assignments, headcount, lastSync] = await Promise.all([
       from ? this.repo.sessions(outletIds, from, to) : [],
       this.repo.allotmentRows(cycleIds),
       this.repo.allotmentCycles(cycleIds),
@@ -101,17 +111,21 @@ class StockAuditUsecase {
       this.repo.verifications(cycleIds),
       this.repo.reviews(cycleIds),
       this.repo.storeVerifications(cycleIds),
-      this.repo.storeStaff(outletIds),
+      this.repo.roleAssignments(code),
+      this.headcount(cycles, settings),
       this.repo.lastSuccess(),
     ]);
+    // responsible persons: ONLY the assigned ones (never guessed from a designation name)
     const roleHolders = new Map();
     for (const o of outletIds) {
-      const pick = (re) => {
-        const p = staff.find((s) => s.outlet_id === o && re.test(s.designation));
-        return p ? { employee_id: p.employee_id, name: p.name } : null;
+      const held = (role) => {
+        const a = assignments.find((x) => x.outlet_id === o && x.role === role);
+        return a ? { employee_id: a.employee_id, name: a.employee_name } : null;
       };
-      roleHolders.set(o, { SUPERVISOR: pick(ROLE_DESIGNATIONS.SUPERVISOR), STORE_MANAGER: pick(ROLE_DESIGNATIONS.STORE_MANAGER) });
+      roleHolders.set(o, { SUPERVISOR: held("SUPERVISOR"), STORE_MANAGER: held("STORE_MANAGER") });
     }
+    const omA = assignments.find((x) => x.role === "OPERATIONS_MANAGER");
+    const omHolder = omA ? { employee_id: omA.employee_id, name: omA.employee_name } : null;
     const independentVerification = new Map(cycles.filter((c) => verifiedStores.has(c.cycle_id)).map((c) => [c.outlet_id, verifiedStores.get(c.cycle_id)]));
     const cut = asOfDate ? new Date(Date.parse(`${asOfDate}T23:59:59.999+05:30`)).toISOString() : null;
     const upTo = (t) => !cut || (t != null && String(t) <= cut);
@@ -127,6 +141,8 @@ class StockAuditUsecase {
         verifications: cut ? verifications.filter((v) => upTo(v.recount_at)) : verifications,
         reviews,
         roleHolders,
+        omHolder,
+        headcount,
         independentVerification,
         today: asOfDate || this.today(),
         asOf: cut || this.now().toISOString(),
@@ -134,6 +150,224 @@ class StockAuditUsecase {
       this.policy
     );
     return { period_code: code, cycles, last_sync: lastSync ? lastSync.finished_at : null, sessions, ...result };
+  }
+
+  // ---------------------------------------------------------------- settings, headcount, exclusions, roles
+  async settings() {
+    const out = {};
+    for (const [k, v] of Object.entries(DEFAULT_SETTINGS)) {
+      const row = await this.repo.getSetting(k);
+      out[k] = row ? row.value : v;
+    }
+    return out;
+  }
+
+  async settingsView() {
+    const [values, designations] = await Promise.all([this.settings(), this.repo.designations()]);
+    const history = {};
+    for (const k of Object.keys(DEFAULT_SETTINGS)) history[k] = await this.repo.settingHistory(k);
+    return { values, defaults: DEFAULT_SETTINGS, designations, history };
+  }
+
+  async updateSettings(values, by) {
+    const ids = (v) => Array.isArray(v) && v.length > 0 && v.every((x) => Number.isInteger(x) && x > 0);
+    if (values.eligible_designation_ids !== undefined) {
+      if (!ids(values.eligible_designation_ids)) throw codeError(400, "eligible_designation_ids: a list of designation ids");
+      await this.repo.setSetting("eligible_designation_ids", values.eligible_designation_ids, by);
+    }
+    if (values.role_designation_ids !== undefined) {
+      const r = values.role_designation_ids || {};
+      if (!ROLES.every((k) => ids(r[k]))) throw codeError(400, "role_designation_ids: designation ids for SUPERVISOR, STORE_MANAGER and OPERATIONS_MANAGER");
+      await this.repo.setSetting("role_designation_ids", { SUPERVISOR: r.SUPERVISOR, STORE_MANAGER: r.STORE_MANAGER, OPERATIONS_MANAGER: r.OPERATIONS_MANAGER }, by);
+    }
+    this.invalidate();
+    return this.settingsView();
+  }
+
+  /**
+   * Eligible headcount per store cycle: the frozen snapshot when taken, else
+   * the live active staff with an eligible designation (provisional). Approved
+   * exclusions are removed either way.
+   */
+  async headcount(cycles, settings) {
+    const cycleIds = cycles.map((c) => c.cycle_id);
+    const [snaps, snapRows, excl, live] = await Promise.all([
+      this.repo.snapshots(cycleIds),
+      this.repo.snapshotEmployees(cycleIds),
+      this.repo.exclusions(cycleIds),
+      this.repo.activeStaff(cycles.map((c) => c.outlet_id), settings.eligible_designation_ids),
+    ]);
+    const out = new Map();
+    for (const c of cycles) {
+      const snapped = snaps.some((x) => x.cycle_id === c.cycle_id);
+      const base = snapped ? snapRows.filter((r) => r.cycle_id === c.cycle_id) : live.filter((e) => e.outlet_id === c.outlet_id);
+      const approved = excl.filter((x) => x.cycle_id === c.cycle_id && x.status === "APPROVED");
+      const out_ = new Set(approved.map((x) => x.employee_id));
+      out.set(c.outlet_id, {
+        snapshot: snapped,
+        eligible: base.filter((e) => !out_.has(e.employee_id)).map((e) => ({ employee_id: e.employee_id, name: e.name, designation_id: e.designation_id })),
+        excluded: approved.map((x) => ({ employee_id: x.employee_id, name: x.employee_name, reason: x.reason, decided_by: x.decided_by_name })),
+      });
+    }
+    return out;
+  }
+
+  async _cycleFor(period, outletId) {
+    const code = await this.currentPeriod(period);
+    const c = (await this.repo.cycles(code)).find((x) => x.outlet_id === Number(outletId));
+    if (!c) throw codeError(404, "No cycle for this store in the audit period");
+    return c;
+  }
+
+  /** Headcount screen: per store - snapshot state, eligible list, exclusions with history. */
+  async eligibility({ period, outlets }) {
+    const code = await this.currentPeriod(period);
+    if (!code) return { period_code: null, stores: [] };
+    const settings = await this.settings();
+    const cycles = this._scope((await this.repo.cycles(code)).filter((c) => this.policy.programme.outletIds.includes(c.outlet_id)), outlets);
+    const [hc, snaps, excl, stores] = await Promise.all([this.headcount(cycles, settings), this.repo.snapshots(cycles.map((c) => c.cycle_id)), this.repo.exclusions(cycles.map((c) => c.cycle_id)), this.programmeStores()]);
+    const p = await this.period(code);
+    return {
+      period_code: code,
+      eligible_designation_ids: settings.eligible_designation_ids,
+      stores: cycles.map((c) => {
+        const h = hc.get(c.outlet_id);
+        const st = p ? p.stores.find((x) => x.outlet_id === c.outlet_id) : null;
+        return {
+          outlet_id: c.outlet_id,
+          name: (stores.find((x) => x.outlet_id === c.outlet_id) || {}).name,
+          cycle_id: c.cycle_id,
+          snapshot: snaps.find((x) => x.cycle_id === c.cycle_id) || null,
+          eligible: h.eligible,
+          participation: st ? st.participation : null,
+          participation_detail: st ? st.participation_detail : null,
+          exclusions: excl.filter((x) => x.cycle_id === c.cycle_id),
+        };
+      }),
+    };
+  }
+
+  async takeSnapshot({ period, outletId, by }) {
+    const c = await this._cycleFor(period, outletId);
+    const settings = await this.settings();
+    const staff = await this.repo.activeStaff([c.outlet_id], settings.eligible_designation_ids);
+    const n = await this.repo.takeSnapshot(c.cycle_id, staff, settings.eligible_designation_ids, by);
+    this.invalidate();
+    return { cycle_id: c.cycle_id, employees: n };
+  }
+
+  /** A new joiner (or a transfer in) added to a frozen snapshot: explicit, recorded. */
+  async addToSnapshot({ period, outletId, employeeId, note, by }) {
+    if (!note || String(note).trim().length < 3) throw codeError(400, "A note is required");
+    const c = await this._cycleFor(period, outletId);
+    const e = await this.repo.employee(employeeId);
+    const settings = await this.settings();
+    if (!e || !e.active) throw codeError(400, "Employee not found or not active");
+    if (e.outlet_id !== c.outlet_id) throw codeError(400, "The employee is not assigned to this store");
+    if (!settings.eligible_designation_ids.includes(e.designation_id)) throw codeError(400, "The employee's designation is not an eligible counting designation");
+    try {
+      await this.repo.addToSnapshot(c.cycle_id, e, by, String(note).slice(0, 255));
+    } catch (err) {
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "Already in the snapshot");
+      throw err;
+    }
+    this.invalidate();
+    return { cycle_id: c.cycle_id, employee_id: e.employee_id };
+  }
+
+  async requestExclusion({ period, outletId, employeeId, reason, by }) {
+    if (!reason || String(reason).trim().length < 5) throw codeError(400, "A reason is required (at least 5 characters)");
+    const c = await this._cycleFor(period, outletId);
+    const settings = await this.settings();
+    const hc = (await this.headcount([c], settings)).get(c.outlet_id);
+    if (!hc.eligible.some((e) => e.employee_id === Number(employeeId))) throw codeError(400, "Only an employee in this store's eligible headcount can be excluded");
+    try {
+      const id = await this.repo.requestExclusion(c.cycle_id, Number(employeeId), String(reason).trim().slice(0, 500), by);
+      return { id, status: "REQUESTED" };
+    } catch (err) {
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This employee already has an open or approved exclusion for the cycle");
+      throw err;
+    }
+  }
+
+  /** Approve / reject: never by the requester, never by the employee concerned. */
+  async decideExclusion({ id, approve, note, by }) {
+    const x = await this.repo.exclusion(id);
+    if (!x) throw codeError(404, "Exclusion request not found");
+    if (Number(by) === x.requested_by) throw codeError(403, "The person who requested an exclusion cannot decide it");
+    if (Number(by) === x.employee_id) throw codeError(403, "Nobody decides their own exclusion");
+    const n = await this.repo.decideExclusion(id, approve ? "APPROVED" : "REJECTED", by, note);
+    if (!n) throw codeError(409, "This request is already decided");
+    this.invalidate();
+    return { id, status: approve ? "APPROVED" : "REJECTED" };
+  }
+
+  async withdrawExclusion({ id, by }) {
+    const x = await this.repo.exclusion(id);
+    if (!x) throw codeError(404, "Exclusion request not found");
+    if (Number(by) !== x.requested_by) throw codeError(403, "Only the requester can withdraw a request");
+    const n = await this.repo.decideExclusion(id, "WITHDRAWN", by, "withdrawn");
+    if (!n) throw codeError(409, "Only an open request can be withdrawn");
+    return { id, status: "WITHDRAWN" };
+  }
+
+  /** Who qualifies for each role (designation id + store + active) and who is assigned. */
+  async roles({ period, outlets }) {
+    const code = await this.currentPeriod(period);
+    if (!code) return { period_code: null, stores: [], operations_manager: null };
+    const settings = await this.settings();
+    const ids = settings.role_designation_ids;
+    const cycles = this._scope((await this.repo.cycles(code)).filter((c) => this.policy.programme.outletIds.includes(c.outlet_id)), outlets);
+    const [storeStaff, omCandidates, active, history, stores] = await Promise.all([
+      this.repo.activeStaff(cycles.map((c) => c.outlet_id), [...new Set([...ids.SUPERVISOR, ...ids.STORE_MANAGER])]),
+      this.repo.activeByDesignation(ids.OPERATIONS_MANAGER),
+      this.repo.roleAssignments(code),
+      this.repo.roleAssignments(code, { history: true }),
+      this.programmeStores(),
+    ]);
+    const slot = (outletId, role) => {
+      const candidates = role === "OPERATIONS_MANAGER" ? omCandidates : storeStaff.filter((e) => e.outlet_id === outletId && ids[role].includes(e.designation_id));
+      const a = active.find((x) => x.outlet_id === outletId && x.role === role) || null;
+      return {
+        role,
+        candidates,
+        assigned: a,
+        // one qualifying person -> suggested; several -> HR / management must choose; none -> nobody qualifies
+        state: a ? "ASSIGNED" : candidates.length === 1 ? "ONE_CANDIDATE" : candidates.length > 1 ? "CHOOSE" : "NO_CANDIDATE",
+        history: history.filter((x) => x.outlet_id === outletId && x.role === role),
+      };
+    };
+    return {
+      period_code: code,
+      role_designation_ids: ids,
+      stores: cycles.map((c) => ({ outlet_id: c.outlet_id, name: (stores.find((x) => x.outlet_id === c.outlet_id) || {}).name, cycle_id: c.cycle_id, supervisor: slot(c.outlet_id, "SUPERVISOR"), store_manager: slot(c.outlet_id, "STORE_MANAGER") })),
+      operations_manager: outlets ? null : slot(0, "OPERATIONS_MANAGER"),
+    };
+  }
+
+  async assignRole({ period, outletId, role, employeeId, reason, by }) {
+    if (!ROLES.includes(role)) throw codeError(400, `role: ${ROLES.join(", ")}`);
+    if (Number(employeeId) === Number(by)) throw codeError(403, "Nobody assigns themself as a responsible person");
+    const code = await this.currentPeriod(period);
+    const settings = await this.settings();
+    const e = await this.repo.employee(employeeId);
+    if (!e || !e.active) throw codeError(400, "Employee not found or not active");
+    if (!settings.role_designation_ids[role].includes(e.designation_id)) throw codeError(400, "The employee's designation does not qualify for this role");
+    let cycle = null;
+    let outlet = 0;
+    if (role !== "OPERATIONS_MANAGER") {
+      cycle = await this._cycleFor(code, outletId);
+      outlet = cycle.outlet_id;
+      if (e.outlet_id !== outlet) throw codeError(400, "The employee is not assigned to this store (Branch Master)");
+    }
+    try {
+      const id = await this.repo.assignRole({ period_code: code, cycle_id: cycle ? cycle.cycle_id : null, outlet_id: outlet, role, employee_id: e.employee_id, designation_id: e.designation_id, reason: reason ? String(reason).slice(0, 500) : null, by });
+      this.invalidate();
+      return { id, period_code: code, role, outlet_id: outlet, employee_id: e.employee_id };
+    } catch (err) {
+      if (err && err.code === "ER_DUP_ENTRY") throw codeError(409, "This person already holds a management role in this audit period: one management incentive per person");
+      throw err;
+    }
   }
 
   _scope(list, outlets, key = "outlet_id") {
@@ -708,4 +942,4 @@ class StockAuditUsecase {
 }
 
 module.exports = (repo, opts) => new StockAuditUsecase(repo, opts);
-module.exports.ROLE_DESIGNATIONS = ROLE_DESIGNATIONS;
+module.exports.DEFAULT_SETTINGS = DEFAULT_SETTINGS;

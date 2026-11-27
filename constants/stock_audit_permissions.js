@@ -29,4 +29,6 @@ module.exports = Object.freeze({
   VIEW_HR_REPORTS: "view_stock_audit_hr_reports",
   DOWNLOAD_HR_PDF: "download_stock_audit_hr_pdf",
   PROCESS_PAYROLL: "process_stock_audit_payroll",
+  MANAGE_ROLES: "manage_stock_audit_roles", // responsible Supervisor / Store Manager / Operations Manager per cycle
+  APPROVE_EXCLUSIONS: "approve_stock_audit_exclusions", // never one's own request
 });

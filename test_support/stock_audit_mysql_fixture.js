@@ -10,8 +10,8 @@ const path = require("path");
 const mysql = require("mysql");
 
 const MIG = path.join(__dirname, "..", "migrations", "mysql", "migrations", "sqls");
-const UPS = ["20270108120000-stock-audit-foundation-up.sql", "20270108120100-stock-audit-allotment-sapl-up.sql"];
-const DOWNS = ["20270108120100-stock-audit-allotment-sapl-down.sql", "20270108120000-stock-audit-foundation-down.sql"];
+const UPS = ["20270108120000-stock-audit-foundation-up.sql", "20270108120100-stock-audit-allotment-sapl-up.sql", "20270108120200-stock-audit-participation-roles-up.sql"];
+const DOWNS = ["20270108120200-stock-audit-participation-roles-down.sql", "20270108120100-stock-audit-allotment-sapl-down.sql", "20270108120000-stock-audit-foundation-down.sql"];
 
 const STORES = [
   [2, "Warehouse", "9rJMC"], [3, "Kathirkamam", "huABy"], [4, "Vallalar Salai", "FuUGY"],
@@ -37,7 +37,8 @@ async function setup(url) {
            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP)`);
   await q(`CREATE TABLE all_permissions (permission_id INT AUTO_INCREMENT PRIMARY KEY, permission_key VARCHAR(45) NOT NULL)`);
   await q(`INSERT INTO outlets VALUES ?`, [STORES]);
-  await q(`INSERT INTO designation VALUES (1, 'Cashier'), (2, 'Customer Service Associate'), (3, 'Supervisor'), (4, 'Store Manager')`);
+  // the production designation ids (read 27 Nov 2026)
+  await q(`INSERT INTO designation VALUES (1, 'Customer Service Executive'), (2, 'Customer Service Associate'), (3, 'Store Manager'), (4, 'Cashier'), (9, 'Supervisor'), (27, 'Operations Manager')`);
   for (const f of UPS) await q(fs.readFileSync(path.join(MIG, f), "utf8"));
   return { pool, q, end: () => new Promise((r) => pool.end(r)) };
 }

@@ -57,13 +57,18 @@ function estimateView(e) {
  * @param input.verifications [{ cycle_id, outlet_id, article_id, original_session_slug, recount_user, verdict, recount_at, ... }]
  * @param input.reviews     Map "cycle|outlet|article" -> { decision, employee_id }
  * @param input.roleHolders Map outlet_id -> { SUPERVISOR: {employee_id, name} | null, STORE_MANAGER: ... }
+ *                          the ASSIGNED responsible persons; no holder -> that incentive is Pending
+ * @param input.omHolder    { employee_id, name } | null - the period's Operations Manager
+ * @param input.headcount   Map outlet_id -> { eligible: [{ employee_id, name, designation_id }], excluded: [...], snapshot: bool }
+ *                          the store's eligible active employees (frozen snapshot, or live until it is
+ *                          taken), approved exclusions already removed. Missing -> participation Pending.
  * @param input.independentVerification Map outlet_id -> true | false | null
  * @param input.today       IST date YYYY-MM-DD
  * @param input.asOf        ISO timestamp (now)
  */
 function computePeriod(input, policy = DEFAULT_POLICY) {
   const { cycles, stores, sessions = [], allotment = [], allotmentCycles = new Set(), people = new Map(), rpNames = new Map(),
-    verifications = [], reviews = new Map(), roleHolders = new Map(), independentVerification = new Map(), today, asOf } = input;
+    verifications = [], reviews = new Map(), roleHolders = new Map(), omHolder = null, headcount = new Map(), independentVerification = new Map(), today, asOf } = input;
 
   const storeById = new Map(stores.map((s) => [s.outlet_id, s]));
   const cycleByOutlet = new Map(cycles.map((c) => [c.outlet_id, c]));
@@ -257,8 +262,7 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
       rp_id: store.rp_id,
       cycle,
       employees: list,
-      eligible_employees: list.length,
-      participating: list.filter((e) => e.audited > 0).length,
+      ...participationOf(store.outlet_id, list, headcount.get(store.outlet_id)),
       allotment_imported: withAllot,
       allotted: withAllot ? S.available(allottedN) : unavailable,
       audited_today: st.today.size,
@@ -306,9 +310,11 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
         title: ROLE_TITLE[role],
         employee_id: h ? h.employee_id : null,
         name: h ? h.name : "Not assigned",
+        assigned: Boolean(h),
         components: r.components.map((c) => ({ ...c, label: LABELS[c.key] || c.key })),
-        decidedAmount: r.decided_amount,
-        amount: r.amount,
+        // nobody responsible -> nobody is paid: the KPIs still show, the amount waits for an assignment
+        decidedAmount: h ? r.decided_amount : 0,
+        amount: h ? r.amount : S.pending(S.REASON.ROLE_NOT_ASSIGNED),
         weightedScore: r.weighted_score,
       };
     };
@@ -319,6 +325,13 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
     policy
   );
   for (const m of management) m.om = (om.perStore.find((p) => p.outlet_id === m.store.outlet_id) || {}).amount || S.pending(S.REASON.COMPONENT_PENDING);
+  om.employee_id = omHolder ? omHolder.employee_id : null;
+  om.name = omHolder ? omHolder.name : "Not assigned";
+  om.assigned = Boolean(omHolder);
+  if (!omHolder) {
+    om.decided_amount = 0;
+    om.amount = S.pending(S.REASON.ROLE_NOT_ASSIGNED);
+  }
 
   // ---- Premier League KPIs (shortage / excess deliberately absent)
   const saplKpis = storeRows.map((s) => ({
@@ -328,7 +341,7 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
       completion: s.completion,
       accuracy: s.accuracy,
       recount: s.recount_progress,
-      participation: cellPct(s.participating, s.eligible_employees, S.REASON.NO_DATA),
+      participation: s.participation,
     },
   }));
 
@@ -340,4 +353,37 @@ function computePeriod(input, policy = DEFAULT_POLICY) {
   return { employees, stores: storeRows, management, operationsManager: om, saplKpis, eligibility: results, issues };
 }
 
-module.exports = { computePeriod, endOfIstDay };
+/**
+ * Participation = eligible employees who counted at least one article in this
+ * store cycle / ALL eligible active employees of the store (the frozen
+ * snapshot once taken), approved exclusions removed. Never just the people
+ * who happen to have an allotment or an audit.
+ */
+function participationOf(outletId, list, hc) {
+  if (!hc) {
+    return { eligible_employees: null, participating: null, participation: S.pending(S.REASON.HEADCOUNT_UNAVAILABLE), participation_detail: null };
+  }
+  const counted = new Set(list.filter((e) => e.audited > 0 && e.employee_id != null).map((e) => e.employee_id));
+  const eligibleIds = new Set(hc.eligible.map((e) => e.employee_id));
+  const participated = hc.eligible.filter((e) => counted.has(e.employee_id));
+  const notYet = hc.eligible.filter((e) => !counted.has(e.employee_id));
+  const n = hc.eligible.length;
+  const cell = n ? { ...S.available((participated.length * 100) / n), provisional: !hc.snapshot } : S.notApplicable(S.REASON.NO_DATA);
+  return {
+    eligible_employees: n,
+    participating: participated.length,
+    participation: cell,
+    participation_detail: {
+      snapshot: Boolean(hc.snapshot),
+      eligible: n,
+      participated: participated.length,
+      not_participated: notYet.map((e) => ({ employee_id: e.employee_id, name: e.name, designation_id: e.designation_id })),
+      excluded: hc.excluded || [],
+      // mapped people who counted here but are not in the store's eligible headcount (another store, a manager)
+      counted_outside_headcount: [...counted].filter((id) => !eligibleIds.has(id)).length,
+      unmapped_counters: list.filter((e) => e.audited > 0 && e.employee_id == null).length,
+    },
+  };
+}
+
+module.exports = { computePeriod, endOfIstDay, participationOf };

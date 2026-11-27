@@ -49,6 +49,9 @@ class StockAuditRoutes {
   init() {
     const { usecase: U, permissions } = this.deps;
     const router = this.router;
+    // ACTIVATION SWITCH: off unless STOCK_AUDIT_ENABLED=true on the server. A
+    // deployment therefore exposes nothing until the module is switched on.
+    router.use((req, res, next) => (this.deps.enabled === false ? res.status(503).json({ code: 503, msg: "Stock Audit is not enabled on this server" }) : next()));
     const need = (...keys) => permissions.require(...keys);
     const by = (req) => (req.auth ? req.auth.employeeId : req.decoded && req.decoded.employee_id) ?? null;
     const handle = (fn) => async (req, res) => {
@@ -140,7 +143,40 @@ class StockAuditRoutes {
     router.post("/cycles", need(P.MANAGE_CYCLES), handle((req) => U.createPeriod({ ...req.body, by: by(req) })));
     router.put("/cycles/:period_code", need(P.MANAGE_CYCLES), handle((req) => U.updatePeriod(String(req.params.period_code), req.body || {})));
     router.get("/sync", need(P.RUN_SYNC, P.VIEW_ALL_STORES), handle(() => U.syncRuns()));
-    router.post("/sync", need(P.RUN_SYNC), handle((req) => U.startSync({ kind: String(req.body.kind || "INCREMENTAL"), by: by(req) })));
+    router.post("/sync", need(P.RUN_SYNC),
+      handle(async (req, res) => {
+        // a second switch for the RetailPilot sync (STOCK_AUDIT_SYNC_ENABLED=true); never scheduled from here
+        if (this.deps.syncEnabled === false) return void res.status(503).json({ code: 503, msg: "The RetailPilot stock audit sync is not enabled on this server" });
+        return U.startSync({ kind: String(req.body.kind || "INCREMENTAL"), by: by(req) });
+      }));
+
+    // ---------------------------------------------------------------- eligible headcount, exclusions, responsible persons
+    const inStore = (fn) =>
+      handle(async (req, res) => {
+        const s = await this.scope(req, req.params.outlet_id);
+        if (!s.ok) return void res.status(s.code).json({ code: s.code, msg: s.msg });
+        return fn(req, Number(req.params.outlet_id));
+      });
+    router.get("/eligibility", need(P.MANAGE_CYCLES, P.APPROVE_EXCLUSIONS, P.VIEW_STORE, P.VIEW_ALL_STORES), scoped((req, outlets) => U.eligibility({ period: period(req), outlets })));
+    router.post("/eligibility/:outlet_id/snapshot", need(P.MANAGE_CYCLES), inStore((req, outletId) => U.takeSnapshot({ period: period(req), outletId, by: by(req) })));
+    router.post("/eligibility/:outlet_id/employees", need(P.MANAGE_CYCLES),
+      inStore((req, outletId) => U.addToSnapshot({ period: period(req), outletId, employeeId: Number(req.body.employee_id), note: req.body.note, by: by(req) })));
+    router.post("/eligibility/:outlet_id/exclusions", need(P.MANAGE_CYCLES),
+      inStore((req, outletId) => U.requestExclusion({ period: period(req), outletId, employeeId: Number(req.body.employee_id), reason: req.body.reason, by: by(req) })));
+    router.post("/exclusions/:id/approve", need(P.APPROVE_EXCLUSIONS), handle((req) => U.decideExclusion({ id: Number(req.params.id), approve: true, note: req.body.note, by: by(req) })));
+    router.post("/exclusions/:id/reject", need(P.APPROVE_EXCLUSIONS), handle((req) => U.decideExclusion({ id: Number(req.params.id), approve: false, note: req.body.note, by: by(req) })));
+    router.post("/exclusions/:id/withdraw", need(P.MANAGE_CYCLES), handle((req) => U.withdrawExclusion({ id: Number(req.params.id), by: by(req) })));
+    router.get("/roles", need(P.MANAGE_ROLES, P.VIEW_STORE, P.VIEW_ALL_STORES), scoped((req, outlets) => U.roles({ period: period(req), outlets })));
+    router.put("/roles", need(P.MANAGE_ROLES),
+      handle(async (req, res) => {
+        const role = String(req.body.role || "");
+        // the period's Operations Manager is a company-wide choice
+        const s = role === "OPERATIONS_MANAGER" ? (await permissions.has(req, P.VIEW_ALL_STORES) ? { ok: true } : { ok: false, code: 403, msg: "Assigning the Operations Manager needs view_stock_audit_all_stores" }) : await this.scope(req, req.body.outlet_id);
+        if (!s.ok) return void res.status(s.code).json({ code: s.code, msg: s.msg });
+        return U.assignRole({ period: period(req), outletId: req.body.outlet_id, role, employeeId: Number(req.body.employee_id), reason: req.body.reason, by: by(req) });
+      }));
+    router.get("/settings", need(P.MANAGE_POLICY, P.MANAGE_ROLES, P.MANAGE_CYCLES), handle(() => U.settingsView()));
+    router.put("/settings", need(P.MANAGE_POLICY), handle((req) => U.updateSettings(req.body || {}, by(req))));
 
     // ---------------------------------------------------------------- Premier League
     router.get("/sapl/standings", need(P.VIEW_SAPL), handle((req) => U.standings({ period: period(req) })));

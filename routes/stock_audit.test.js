@@ -27,6 +27,7 @@ const usecase = new Proxy({}, {
 });
 
 let server;
+let offServer;
 let base;
 before(async () => {
   const app = express();
@@ -38,12 +39,17 @@ before(async () => {
     req.auth = { employeeId: Number(req.headers["x-employee"] || 1), storeId: Number(req.headers["x-store"] || 0) || null };
     next();
   });
-  app.use("/stock-audit", routesFactory({ usecase, permissions, branchScope }).getRouter());
+  app.use("/stock-audit", routesFactory({ usecase, permissions, branchScope, enabled: true, syncEnabled: true }).getRouter());
+  const off = express();
+  off.use((req, res, next) => { req.keys = "*"; req.decoded = { employee_id: 1 }; next(); });
+  off.use("/stock-audit", routesFactory({ usecase, permissions, branchScope, enabled: false }).getRouter());
+  offServer = off.listen(0);
+  await new Promise((r) => offServer.once("listening", r));
   server = app.listen(0);
   await new Promise((r) => server.once("listening", r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
-after(() => server.close());
+after(() => { server.close(); offServer.close(); });
 
 function call(method, path, { keys = "", branches = "", employee = 1, store = null, body } = {}) {
   return new Promise((resolve, reject) => {
@@ -132,5 +138,42 @@ describe("actions record who acted", () => {
   it("a sync can only be started with the sync key", async () => {
     assert.equal((await call("POST", "/stock-audit/sync", { keys: P.VIEW_ALL_STORES, body: { kind: "HISTORICAL" } })).status, 403);
     assert.equal((await call("POST", "/stock-audit/sync", { keys: P.RUN_SYNC, body: { kind: "HISTORICAL" } })).status, 200);
+  });
+});
+
+describe("activation switch", () => {
+  it("with STOCK_AUDIT_ENABLED off every endpoint answers 503, even for an administrator, and nothing is read", async () => {
+    calls.length = 0;
+    const port = offServer.address().port;
+    const r = await new Promise((resolve) => http.get(`http://127.0.0.1:${port}/stock-audit/stores`, (res) => { let b = ""; res.on("data", (c) => (b += c)); res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(b) })); }));
+    assert.equal(r.status, 503);
+    assert.equal(calls.length, 0);
+  });
+});
+
+describe("headcount, exclusions and responsible persons", () => {
+  it("snapshot / exclusion requests need the cycle key and the caller's own store", async () => {
+    assert.equal((await call("POST", "/stock-audit/eligibility/7/snapshot", { keys: P.VIEW_STORE, branches: "7" })).status, 403);
+    assert.equal((await call("POST", "/stock-audit/eligibility/5/snapshot", { keys: P.MANAGE_CYCLES, branches: "7" })).status, 403);
+    assert.equal((await call("POST", "/stock-audit/eligibility/7/snapshot", { keys: P.MANAGE_CYCLES, branches: "7", employee: 33 })).status, 200);
+    assert.equal(last("takeSnapshot").args.by, 33);
+    await call("POST", "/stock-audit/eligibility/7/exclusions", { keys: P.MANAGE_CYCLES, branches: "7", body: { employee_id: 9, reason: "Long leave" } });
+    assert.deepEqual([last("requestExclusion").args.employeeId, last("requestExclusion").args.reason], [9, "Long leave"]);
+  });
+  it("deciding an exclusion needs its own key", async () => {
+    assert.equal((await call("POST", "/stock-audit/exclusions/4/approve", { keys: P.MANAGE_CYCLES })).status, 403);
+    assert.equal((await call("POST", "/stock-audit/exclusions/4/approve", { keys: P.APPROVE_EXCLUSIONS, employee: 8 })).status, 200);
+    assert.deepEqual([last("decideExclusion").args.id, last("decideExclusion").args.approve, last("decideExclusion").args.by], [4, true, 8]);
+  });
+  it("assigning a store role needs the roles key and the store in scope; the Operations Manager needs company-wide access", async () => {
+    assert.equal((await call("PUT", "/stock-audit/roles", { keys: P.VIEW_ALL_STORES, body: { role: "STORE_MANAGER", outlet_id: 7, employee_id: 5 } })).status, 403);
+    assert.equal((await call("PUT", "/stock-audit/roles", { keys: P.MANAGE_ROLES, branches: "5", body: { role: "STORE_MANAGER", outlet_id: 7, employee_id: 5 } })).status, 403);
+    assert.equal((await call("PUT", "/stock-audit/roles", { keys: P.MANAGE_ROLES, branches: "7", body: { role: "STORE_MANAGER", outlet_id: 7, employee_id: 5 } })).status, 200);
+    assert.equal((await call("PUT", "/stock-audit/roles", { keys: P.MANAGE_ROLES, branches: "7", body: { role: "OPERATIONS_MANAGER", employee_id: 6 } })).status, 403);
+    assert.equal((await call("PUT", "/stock-audit/roles", { keys: `${P.MANAGE_ROLES},${P.VIEW_ALL_STORES}`, body: { role: "OPERATIONS_MANAGER", employee_id: 6 } })).status, 200);
+  });
+  it("designation settings: policy key only", async () => {
+    assert.equal((await call("PUT", "/stock-audit/settings", { keys: P.MANAGE_ROLES, body: { eligible_designation_ids: [2] } })).status, 403);
+    assert.equal((await call("PUT", "/stock-audit/settings", { keys: P.MANAGE_POLICY, body: { eligible_designation_ids: [2] } })).status, 200);
   });
 });

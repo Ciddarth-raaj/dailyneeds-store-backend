@@ -32,7 +32,8 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
     db = await setup(URL);
     repo = repoFactory(db.pool);
     U = usecaseFactory(repo, { now: () => NOW });
-    await db.q(`INSERT INTO new_employee VALUES (501,'Anbu',7,1,1),(502,'Bala',7,2,1),(503,'Chitra',5,2,1),(504,'Deepa',7,3,1),(505,'Elango',7,4,1),(900,'HR',3,1,1)`);
+    // ECR (7): 3 counting staff (CSA / Cashier), one resigned, two Store Managers, one Supervisor; an Operations Manager
+    await db.q(`INSERT INTO new_employee VALUES (501,'Anbu',7,4,1),(502,'Bala',7,2,1),(503,'Chitra',5,2,1),(504,'Deepa',7,9,1),(505,'Elango',7,3,1),(506,'Fathima',7,3,1),(507,'Gopi',7,2,1),(508,'Hema',7,2,0),(510,'Om Kumar',3,27,1),(511,'Supervisor MLK',5,9,1),(900,'HR',3,1,1),(901,'HR Two',3,1,1)`);
     await db.q(`INSERT INTO wh_rp_staff_map (rp_user_id, employee_id) VALUES ('uA',501),('uB',502),('uC',503)`);
   });
   after(async () => db && db.end());
@@ -244,9 +245,9 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
       assert.equal(st.accuracy.status, S.STATUS.PENDING);
       const m = (await U.management({ outlets: [7] }))[0];
       assert.equal(m.storeManager.components[0].measure.reason, S.REASON.BEFORE_DEADLINE);
-      assert.equal(m.supervisor.name, "Deepa");
-      assert.equal(m.storeManager.name, "Elango");
-      assert.equal(m.storeManager.amount.status, S.STATUS.PENDING);
+      // never guessed from a designation: nobody is responsible until assigned
+      assert.equal(m.supervisor.name, "Not assigned");
+      assert.equal(m.storeManager.amount.reason, S.REASON.ROLE_NOT_ASSIGNED);
     });
     it("stores without an allotment import show Unavailable, never 0 or 100%", async () => {
       const st = await U.store({ outletId: 5 });
@@ -255,8 +256,11 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
     });
     it("HR report data carries no individual incentive amount", async () => {
       const r = await U.hrReport({ date: "2026-11-27" });
-      const text = JSON.stringify(r.stores);
-      for (const k of ['"estimated"', '"est"', '"rate"', '"provisional"', '"approved_c"', '"estimate_employee"', '"estimated_employee"']) assert.ok(!text.includes(k), k);
+      for (const st of r.stores) {
+        for (const k of ["estimated_employee", "estimated_employee_pending", "estimate_employee", "estimate_employee_none"]) assert.ok(!(k in st), k);
+        for (const e of st.employees) for (const k of ["estimated", "est", "rate", "provisional", "approved_c", "payment"]) assert.ok(!(k in e), k);
+      }
+      assert.ok(!/"amount"/.test(JSON.stringify(r.stores)));
       assert.equal(r.sample, false);
       const past = await U.hrReport({ date: "2026-11-25" });
       assert.equal(past.stores.find((s) => s.outlet_id === 7).audited, 0);
@@ -283,6 +287,102 @@ describe("Stock Audit on MySQL", { skip: !URL && "SA_TEST_MYSQL is not set" }, (
       await U.setMapping({ rp_user_id: "uX", employee_id: 504, by: 900 });
       const x = await U.employee({ rpUserId: "uX", outlets: [7] });
       assert.equal(x.employee_id, 504);
+    });
+  });
+
+  describe("participation on the full eligible headcount, snapshot and exclusions", () => {
+    it("denominator = active eligible staff of the store (designation 2, 4), not just those with audits", async () => {
+      U.invalidate();
+      const st = await U.store({ outletId: 7 });
+      // eligible at ECR: 501 (Cashier), 502, 507 (CSA); 508 resigned; 504/505/506 are management
+      assert.equal(st.eligible_employees, 3);
+      // 501 = uA and 502 = uB counted; 507 did not
+      assert.equal(st.participating, 2);
+      assert.equal(Math.round(st.participation.value * 100) / 100, 66.67);
+      assert.equal(st.participation.provisional, true); // no snapshot yet
+      assert.deepEqual(st.participation_detail.not_participated.map((e) => e.employee_id), [507]);
+      const sapl = (await U.standings({})).find((r) => r.outlet_id === 7);
+      assert.equal(sapl.rows.find((r) => r.key === "participation").points, 3.3); // 66.67% x 5 / 100
+    });
+    it("a frozen snapshot is not changed by a later resignation or a new joiner", async () => {
+      const r = await U.takeSnapshot({ outletId: 7, by: 900 });
+      assert.equal(r.employees, 3);
+      await assert.rejects(U.takeSnapshot({ outletId: 7, by: 900 }), (e) => e.status === 409);
+      await db.q(`UPDATE new_employee SET status = 0 WHERE employee_id = 507`); // resigns after the snapshot
+      await db.q(`INSERT INTO new_employee VALUES (509,'New Joiner',7,2,1)`); // joins after it
+      U.invalidate();
+      const st = await U.store({ outletId: 7 });
+      assert.equal(st.eligible_employees, 3);
+      assert.equal(st.participation.provisional, false);
+      // an explicit, recorded addition is the only way in
+      await assert.rejects(U.addToSnapshot({ outletId: 7, employeeId: 509, note: "", by: 900 }), (e) => e.status === 400);
+      await U.addToSnapshot({ outletId: 7, employeeId: 509, note: "Joined 28 Nov, counting from day one", by: 900 });
+      U.invalidate();
+      assert.equal((await U.store({ outletId: 7 })).eligible_employees, 4);
+    });
+    it("exclusion: mandatory reason; decided by someone else; never one's own; history kept", async () => {
+      await assert.rejects(U.requestExclusion({ outletId: 7, employeeId: 509, reason: "", by: 900 }), (e) => e.status === 400);
+      const { id } = await U.requestExclusion({ outletId: 7, employeeId: 509, reason: "On long leave for the whole cycle", by: 900 });
+      await assert.rejects(U.requestExclusion({ outletId: 7, employeeId: 509, reason: "Duplicate request", by: 900 }), (e) => e.status === 409);
+      await assert.rejects(U.decideExclusion({ id, approve: true, by: 900 }), (e) => e.status === 403); // requester
+      await assert.rejects(U.decideExclusion({ id, approve: true, by: 509 }), (e) => e.status === 403); // the employee
+      const both = await Promise.allSettled([U.decideExclusion({ id, approve: true, by: 901 }), U.decideExclusion({ id, approve: false, by: 510 })]);
+      assert.equal(both.filter((x) => x.status === "fulfilled").length, 1); // one decision only
+      const rows = await db.q(`SELECT status, decided_by FROM sa_employee_exclusion WHERE id = ?`, [id]);
+      U.invalidate();
+      const st = await U.store({ outletId: 7 });
+      assert.equal(st.eligible_employees, rows[0].status === "APPROVED" ? 3 : 4);
+      const el = await U.eligibility({ outlets: [7] });
+      assert.equal(el.stores[0].exclusions.length, 1);
+      assert.ok(el.stores[0].exclusions[0].requested_by_name && el.stores[0].exclusions[0].decided_by_name);
+    });
+  });
+
+  describe("responsible persons: designation id + store + active, chosen per audit period", () => {
+    it("lists qualifying candidates; two Store Managers at ECR need a choice", async () => {
+      const r = await U.roles({});
+      const ecr = r.stores.find((x) => x.outlet_id === 7);
+      assert.deepEqual(ecr.store_manager.candidates.map((c) => c.employee_id).sort(), [505, 506]);
+      assert.equal(ecr.store_manager.state, "CHOOSE");
+      assert.equal(ecr.supervisor.state, "ONE_CANDIDATE");
+      assert.equal(r.operations_manager.candidates[0].employee_id, 510);
+    });
+    it("refuses a person who does not qualify, works elsewhere, or assigns themself", async () => {
+      await assert.rejects(U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 502, by: 900 }), (e) => e.status === 400); // a CSA
+      await assert.rejects(U.assignRole({ outletId: 7, role: "SUPERVISOR", employeeId: 511, by: 900 }), (e) => e.status === 400); // Moolakulam's
+      await assert.rejects(U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 900, by: 900 }), (e) => e.status === 403);
+    });
+    it("assignment drives the incentive; a replacement keeps history; one management incentive per person", async () => {
+      await U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 505, reason: "Senior of the two", by: 900 });
+      await U.assignRole({ outletId: 7, role: "SUPERVISOR", employeeId: 504, by: 900 });
+      await U.assignRole({ role: "OPERATIONS_MANAGER", employeeId: 510, by: 900 });
+      let m = (await U.management({ outlets: [7] }))[0];
+      assert.equal(m.storeManager.name, "Elango");
+      assert.notEqual(m.storeManager.amount.reason, S.REASON.ROLE_NOT_ASSIGNED);
+      await U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 506, reason: "Elango transferred", by: 901 });
+      m = (await U.management({ outlets: [7] }))[0];
+      assert.equal(m.storeManager.name, "Fathima");
+      const hist = (await U.roles({})).stores.find((x) => x.outlet_id === 7).store_manager.history;
+      assert.deepEqual(hist.map((h) => [h.employee_id, h.status]), [[506, "ACTIVE"], [505, "REPLACED"]]);
+      // the same person cannot take a second management role in the period (database guard)
+      await db.q(`UPDATE new_employee SET designation_id = 9 WHERE employee_id = 505`);
+      await U.assignRole({ outletId: 7, role: "SUPERVISOR", employeeId: 505, by: 900 }); // fine: 505 holds nothing now
+      await db.q(`UPDATE new_employee SET designation_id = 3 WHERE employee_id = 504`);
+      await assert.rejects(U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 505, by: 900 }), (e) => e.status === 400 || e.status === 409);
+      const dup = await db.q(`SELECT COUNT(*) AS n FROM sa_role_assignment WHERE period_code = '2026-Q4' AND employee_id = 505 AND status = 'ACTIVE'`);
+      assert.equal(Number(dup[0].n), 1);
+      // two people racing for one slot: one wins
+      const race = await Promise.allSettled([U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 504, by: 900 }), U.assignRole({ outletId: 7, role: "STORE_MANAGER", employeeId: 506, by: 901 })]);
+      assert.ok(race.some((x) => x.status === "fulfilled"));
+      const active = await db.q(`SELECT COUNT(*) AS n FROM sa_role_assignment WHERE period_code = '2026-Q4' AND outlet_id = 7 AND role = 'STORE_MANAGER' AND status = 'ACTIVE'`);
+      assert.equal(Number(active[0].n), 1);
+    });
+    it("designation ids are settings with history", async () => {
+      const v = await U.updateSettings({ eligible_designation_ids: [2, 4, 1] }, 900);
+      assert.deepEqual(v.values.eligible_designation_ids, [2, 4, 1]);
+      assert.equal(v.history.eligible_designation_ids.length, 1);
+      await assert.rejects(U.updateSettings({ role_designation_ids: { SUPERVISOR: [] } }, 900), (e) => e.status === 400);
+      await U.updateSettings({ eligible_designation_ids: [2, 4] }, 900);
     });
   });
 
