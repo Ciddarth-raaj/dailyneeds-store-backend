@@ -41,6 +41,7 @@ jobs:
           set -uo pipefail
           cd ~/dailyneeds-store-backend || exit 1
           echo "@@GIT $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD) dirty=$(git status --porcelain | grep -v package-lock.json | wc -l)"
+          git status --porcelain | grep -v package-lock.json | cut -c1-120 | sed 's/^/@@DIRTY /'
           echo "@@PM2 $(pm2 jlist 2>/dev/null | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{console.log(JSON.parse(s).map(p=>p.name+':'+p.pm2_env.status+':restarts='+p.pm2_env.restart_time+':up_since='+new Date(p.pm2_env.pm_uptime).toISOString()).join(' | '))}catch(e){console.log('n/a')}})")"
           echo "@@SWITCH_ENV $(grep -E '^STOCK_AUDIT_' .env 2>/dev/null | tr '\n' ' ' || true)"
           if [ -f config/stock_audit.js ]; then echo "@@SWITCH_EFFECTIVE $(node -e "console.log(JSON.stringify(require('./config/stock_audit')))")"; else echo "@@SWITCH_EFFECTIVE module not deployed"; fi
