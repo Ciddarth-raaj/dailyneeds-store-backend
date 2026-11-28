@@ -16,9 +16,9 @@
  *      barcodes are reused on every delivery and loading is often the day
  *      after packing, so the job link is the only exact one;
  *   2. else the same document + article + store, oldest first;
- *   3. else - only for a line with no job link (pulled before links were
- *      kept) - any document of that article + store, oldest first. A linked
- *      line never takes another document's goods.
+ *   3. else any document of that article + store, oldest first - except,
+ *      from picked to packed, for a packing line that names its picking job:
+ *      its extra never takes another document's goods.
  * What the next stage records with nothing waiting for it at all
  * "jumped" a stage. Goods that stay put (from = to store) never move on and
  * are left out. Loaded -> Unloaded is followed by box in utils/wh_box_chain.js.
@@ -50,7 +50,7 @@ const staysPut = (e) => e.from_store && e.to_store && e.from_store === e.to_stor
  * (`before`), and what jumped. Every list is sorted once and read from a
  * moving start, so a long history costs little.
  */
-function follow(ins, outs, cutoff) {
+function follow(ins, outs, cutoff, { strict = false } = {}) {
   const byDate = (a, b) => (a.report_date < b.report_date ? -1 : a.report_date > b.report_date ? 1 : 0);
   const all = [];
   const layers = new Map(); // exact key -> [layer]
@@ -104,20 +104,24 @@ function follow(ins, outs, cutoff) {
     // Any document of the article + store only for lines that carry no job link (pulled before
     // links were kept). A linked line's extra must not eat another document's goods: it took the
     // oldest - the really stuck ones - off the list (gold winner 1l, pCK8q6adQLCt, 10 left 19 days).
+    // `strict` (picked -> packed only, where a packing line's picking_job is exact): a linked line's
+    // extra must not eat another document's goods. Elsewhere links are partial (a carton is unloaded
+    // in several unloading jobs, a verification names one; cartons carry no document), so a linked
+    // line still falls back to the article + store.
     const linked = (o.links || []).length > 0;
-    if (need > 0 && !linked && byLane.has(lane(o))) need = take(byLane.get(lane(o)), o, need);
+    if (need > 0 && !(strict && linked) && byLane.has(lane(o))) need = take(byLane.get(lane(o)), o, need);
     if (need > 0) jumped.push({ ...o, qty: need });
   }
   if (before === null) before = snapshot();
   return { waiting: all.filter((l) => l.left > 0), before, jumped };
 }
 
-function gap({ key, label, unit, ins, outs, lost, date, carried = [] }) {
+function gap({ key, label, unit, ins, outs, lost, date, carried = [], strict = false }) {
   // `carried`: what was still waiting at the end of the day before (stored), so
   // a day is worked out without re-reading every earlier day.
   const I = [...carried, ...ins.filter((e) => !staysPut(e))];
   const O = outs.filter((e) => !staysPut(e));
-  const cur = follow(I, O, date);
+  const cur = follow(I, O, date, { strict });
   const sum = (list, f = "left") => r3(list.reduce((s, x) => s + n(x[f]), 0));
   const fromEarlier = sum(cur.before);
   const arrived = sum(I.filter((e) => e.report_date === date), "qty");
@@ -234,7 +238,7 @@ function buildStageChain({ jobs, boxes, date, carried = null }) {
   const T = (rows) => rows.filter(isNew);
   const C = (k) => (carried && carried[k]) || [];
   const gaps = [
-    gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", ins: T(picked), outs: T([...packing, ...shortOf(packing)]), lost: T(shortOf(packing)), date, carried: C("to_pack") }),
+    gap({ key: "to_pack", label: "Picked, not yet packed", unit: "qty", strict: true, ins: T(picked), outs: T([...packing, ...shortOf(packing)]), lost: T(shortOf(packing)), date, carried: C("to_pack") }),
     gap({ key: "to_load", label: "Packed, not yet loaded", unit: "qty", ins: T([...packing, ...pickPacked]), outs: T([...loaded, ...splitShort, ...writtenOff]), lost: T(splitShort), date, carried: C("to_load") }),
     gap({ key: "to_verify", label: "Unloaded, not yet verified", unit: "qty", ins: T(unloaded), outs: T([...verification, ...shortOf(verification)]), lost: T(shortOf(verification)), date, carried: C("to_verify") }),
   ];

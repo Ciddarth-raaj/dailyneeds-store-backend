@@ -13,7 +13,7 @@ const LIST_CAP = 300;
  * stored under an older version are all redone (in the background) on the
  * next start, so a fix reaches every day, not only new ones.
  */
-const LOGIC = 6; // 6: a linked line never takes another document's goods; 3: the shortages each stage found, line by line; 4: per site, sent and received; 5: boxes written off at loading leave "packed, not yet loaded"
+const LOGIC = 7; // 7: only picked -> packed is strict (6 made unloaded -> verified pile up); 6: a linked line never takes another document's goods; 3: the shortages each stage found, line by line; 4: per site, sent and received; 5: boxes written off at loading leave "packed, not yet loaded"
 
 const n = (v) => Number(v) || 0;
 

@@ -228,3 +228,11 @@ test("gold winner: another document's extra packing does not 'pack' a stuck line
   assert.deepStrictEqual(p.list.map((l) => [l.stage_id, l.qty, l.days]), [["pCK8q6adQLCt", 10, 19]]);
   assert.strictEqual(p.stuck, 1);
 });
+
+test("unloaded -> verified still pairs a verification whose unloading job is not the carton's (a carton has several unloading jobs)", () => {
+  const boxes = [Bx("UNLOADING", "2026-11-20", { stage_id: null, job_id: "u1", qty: 15 })];
+  const jobs = [J("VERIFICATION", "2026-11-20", { stage_id: null, job_id: "v1", unloading_job: "u3", qty: 15 })];
+  const c = S.buildStageChain({ date: "2026-11-20", jobs, boxes });
+  const v = g(c, "to_verify");
+  assert.deepStrictEqual([v.arrived, v.moved_on, v.stands, v.jumped.lines], [15, 15, 0, 0]);
+});
